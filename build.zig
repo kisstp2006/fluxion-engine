@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: BSD-3-Clause
+
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const ecs = b.dependency("fluxion_ecs", .{ .target = target, .optimize = optimize });
+    const rhi = b.dependency("fluxion_rhi", .{ .target = target, .optimize = optimize });
+    const platform = b.dependency("fluxion_platform", .{ .target = target, .optimize = optimize });
+    const image = b.dependency("fluxion_image", .{ .target = target, .optimize = optimize });
+    const shader = b.dependency("fluxion_shader", .{ .target = target, .optimize = optimize });
+    const math = b.dependency("fluxion_math", .{ .target = target, .optimize = optimize });
+    const id = b.dependency("fluxion_id", .{ .target = target, .optimize = optimize });
+
+    // Nothing here is lazy, and that is the difference between an engine and
+    // the libraries under it. A library keeps its window, its file reading
+    // and its renderer behind `lazy` so a consumer never downloads what it
+    // does not use; an engine uses all of it by definition, and a game that
+    // depends on this wants every one of them.
+    const mod = b.addModule("fluxion_engine", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fluxion_ecs", .module = ecs.module("fluxion_ecs") },
+            .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
+            .{ .name = "fluxion_platform", .module = platform.module("fluxion_platform") },
+            .{ .name = "fluxion_image", .module = image.module("fluxion_image") },
+            .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
+            .{ .name = "fluxion_math", .module = math.module("fluxion_math") },
+            .{ .name = "fluxion_id", .module = id.module("fluxion_id") },
+        },
+    });
+
+    // zig build test
+    //
+    // Every one of these runs with no window and no GPU: `App.init` with
+    // `.headless` opens the `none` backend, which accepts every call and
+    // draws none of them, and steps the schedule from a clock the test
+    // supplies. A build server has no display and must still be able to say
+    // whether the frame is right.
+    const tests = b.addTest(.{
+        .name = "fluxion-engine-tests",
+        .root_module = mod,
+    });
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Run the engine test suite");
+    test_step.dependOn(&run_tests.step);
+
+    // zig build docs -> zig-out/docs
+    const docs_lib = b.addLibrary(.{
+        .name = "fluxion-engine",
+        .root_module = mod,
+    });
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs_lib.getEmittedDocs(),
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+    const docs_step = b.step("docs", "Generate API documentation into zig-out/docs");
+    docs_step.dependOn(&install_docs.step);
+
+    // -------------------------------------------------------------------
+    // Examples
+    // -------------------------------------------------------------------
+
+    const examples = [_]struct {
+        name: []const u8,
+        step: []const u8,
+        about: []const u8,
+    }{
+        .{
+            .name = "pong",
+            .step = "example-pong",
+            .about = "A game: two paddles, a ball, and a scoreboard drawn over them",
+        },
+    };
+
+    const example_step = b.step("examples", "Build every example");
+    for (examples) |example| {
+        const exe_mod = b.createModule(.{
+            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example.name})),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "fluxion_engine", .module = mod },
+            },
+        });
+        const exe = b.addExecutable(.{
+            .name = example.name,
+            .root_module = exe_mod,
+        });
+        b.installArtifact(exe);
+        example_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+
+        const run = b.addRunArtifact(exe);
+        run.step.dependOn(b.getInstallStep());
+        if (b.args) |args| run.addArgs(args);
+        b.step(example.step, example.about).dependOn(&run.step);
+    }
+}

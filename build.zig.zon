@@ -1,0 +1,69 @@
+// SPDX-License-Identifier: BSD-3-Clause
+
+.{
+    .name = .fluxion_engine,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .fingerprint = 0x2e5b6a99e50b4a48,
+    .dependencies = .{
+        // The world, and everything in it. An entity is what a Godot node
+        // would be, minus the inheritance and the virtual call.
+        .fluxion_ecs = .{ .path = "../fluxion-ecs" },
+
+        // One way to draw, on whichever API the machine has. Every layer -
+        // the 3D one that is not written yet, the 2D one, the interface -
+        // goes through this and through nothing else.
+        .fluxion_rhi = .{ .path = "../fluxion-rhi" },
+
+        // Windows, input and the event loop. A library may not depend on
+        // this; an engine is exactly the thing that may, because opening the
+        // window is its job.
+        .fluxion_platform = .{ .path = "../fluxion-platform" },
+
+        // Not here yet, and named so the absence is a decision rather than
+        // an oversight: `fluxion-ui` for the layout and `fluxion-font` for
+        // the glyphs come back with the interface layer. See
+        // `docs/in-game-ui.md` for what that layer is waiting on.
+
+        // What a texture is read from. A sprite atlas is a PNG on a disc.
+        .fluxion_image = .{ .path = "../fluxion-image" },
+
+        // The sprite shader, written once and emitted as GLSL and as HLSL.
+        // Without this the same shader would be in this repository twice, in
+        // two languages, drifting apart.
+        .fluxion_shader = .{ .path = "../fluxion-shader" },
+
+        // Projections and matrices, and the one type that knows OpenGL's
+        // clip space from Direct3D's.
+        //
+        // **Pinned rather than a path, and it has to be.** `Device.clip()`
+        // returns a `math.Clip` and `math.orthographic` takes one, so the two
+        // have to be the *same* type - and a package is identified by where it
+        // came from. A path here and a pin inside `fluxion-rhi` would be two
+        // copies of one library, and the compiler would say
+        // "expected type 'proj.Clip', found 'proj.Clip'", which is the most
+        // confusing message in Zig and always means this. Every package below
+        // that names `fluxion-math` names this commit.
+        .fluxion_math = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-math#92afdbddbf930369265d24136402c7eb5dd8f70e",
+            .hash = "fluxion_math-0.1.0-dfpZBeNUBAAwUMriLKaOTRBWGFmfY53_jyYuMUxkPYek",
+        },
+
+        // Generational handles: what the asset tables hand out, and what a
+        // component holds instead of a pointer. Pinned for the same reason as
+        // the maths above - `fluxion-rhi`'s resource handles are this
+        // package's.
+        .fluxion_id = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-id#64a04a156031a5d87ead8ce9d4fdb8c78f21ef30",
+            .hash = "fluxion_id-0.1.0--9Hv-nGFAQAW36SvJvMB6L1nUNErZzh7JC0-nRPlrotw",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "examples",
+        "README.md",
+        "LICENSE",
+    },
+}
