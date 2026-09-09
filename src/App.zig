@@ -375,6 +375,15 @@ pub fn step(self: *App) anyerror!bool {
     try self.schedule.run(.update, self);
     try self.schedule.run(.late, self);
 
+    // The engine's own two passes over the world, after everything a game
+    // does and before anything is drawn. Both are here rather than
+    // registered as systems in `.late` on purpose: a system added at
+    // `create` would run *before* the game's own late systems, and a camera
+    // that follows a parented entity would then read where that entity was
+    // last frame.
+    try self.animate();
+    try self.propagate();
+
     try self.render();
 
     if (self.frames_left) |left| {
@@ -398,6 +407,90 @@ pub fn stop(self: *App) anyerror!void {
 pub fn quit(self: *App) void {
     self.running = false;
     if (self.window) |*w| w.requestClose();
+}
+
+/// Step every `Animation` and write the cell it landed on into its `Sprite`.
+///
+/// On the frame's own delta rather than the fixed step, because an animation
+/// is something a viewer sees and not something the simulation depends on -
+/// so it runs once a frame however many times physics did.
+fn animate(self: *App) !void {
+    const delta = self.time.delta;
+
+    var it = try ecs.Query(.{ components.Sprite, components.Animation }).over(&self.world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(components.Sprite), chunk.slice(components.Animation)) |*drawn, *animation| {
+            drawn.region = animation.advance(delta);
+        }
+    }
+}
+
+/// Work out where every parented entity ended up, and write it into its
+/// `Transform2D`.
+///
+/// Each child walks up its own chain to a root and composes on the way back
+/// down, which costs one lookup per link and touches nothing that is not
+/// parented. The obvious alternative - one pass per depth, over everything -
+/// reads better and is worse: a scene with two hundred sprites and four
+/// parented ones would pay for all two hundred, four times.
+///
+/// **A parent's own `Transform2D` is read, not resolved recursively**, which
+/// is why the walk goes all the way to the root rather than trusting what is
+/// already there: within one frame a parent may not have been resolved yet,
+/// and reading its stale world transform would leave a grandchild a frame
+/// behind its grandparent.
+fn propagate(self: *App) !void {
+    const Parented = ecs.Query(.{ components.Transform2D, components.Parent });
+
+    var it = try Parented.over(&self.world);
+    while (it.next()) |chunk| {
+        const transforms = chunk.slice(components.Transform2D);
+        const parents = chunk.slice(components.Parent);
+
+        for (transforms, parents) |*transform, link| {
+            if (self.resolveChain(link)) |placed| transform.* = placed;
+        }
+    }
+}
+
+/// Follow one chain of parents to a root and compose back down.
+///
+/// Null when the chain leads nowhere - a parent that has died, or one that
+/// has no transform - which leaves the child where the last resolved frame
+/// put it. That is the least surprising thing to do: a bullet whose shooter
+/// died should stay where it was, not fall to the origin.
+fn resolveChain(self: *App, link: components.Parent) ?components.Transform2D {
+    // The links from this child up to the root, nearest first. A fixed array
+    // rather than a list, because `Parent.max_depth` is the point at which a
+    // chain is a mistake and this must not allocate inside a frame.
+    var chain: [components.Parent.max_depth]components.Parent = undefined;
+    var depth: usize = 0;
+
+    var current = link;
+    while (depth < chain.len) {
+        chain[depth] = current;
+        depth += 1;
+
+        if (current.entity.isNone()) return null;
+        const parent_transform = self.world.get(current.entity, components.Transform2D) orelse return null;
+
+        // A parent that is itself a child: keep climbing. Otherwise this is
+        // the root, and its transform is already the world one.
+        if (self.world.getConst(current.entity, components.Parent)) |above| {
+            current = above.*;
+            continue;
+        }
+
+        var placed = parent_transform.*;
+        while (depth > 0) {
+            depth -= 1;
+            placed = chain[depth].resolve(placed);
+        }
+        return placed;
+    }
+
+    // Deeper than anyone means to nest, which in practice means a cycle.
+    return null;
 }
 
 /// Copy every `Transform2D` that has a `Previous2D` beside it into that
@@ -490,6 +583,7 @@ pub fn readFrame(self: *App, gpa: Allocator) ![]u8 {
 // -------------------------------------------------------------------------
 
 const components = @import("components.zig");
+const Region = components.Region;
 
 fn spawnOne(app: *App) anyerror!void {
     _ = try app.world.spawnWith(.{
@@ -543,6 +637,93 @@ test "quitting from a system ends the loop" {
 
     try testing.expect(!app.running);
     try testing.expectEqual(@as(u64, 3), app.time.frame);
+}
+
+test "a child is put where its parent is, after everything else has run" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+
+    const tank = try app.world.spawnWith(.{
+        components.Transform2D.at(100, 50),
+        components.Sprite.solid(.white, 20, 20),
+    });
+    const turret = try app.world.spawnWith(.{
+        components.Transform2D{},
+        components.Sprite.solid(.white, 8, 8),
+        components.Parent{ .entity = tank, .local = .at(0, -12) },
+    });
+
+    try app.run();
+
+    const placed = app.world.get(turret, components.Transform2D).?;
+    try testing.expectApproxEqAbs(@as(f32, 100), placed.x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 38), placed.y, 0.0001);
+}
+
+test "a grandchild is not a frame behind its grandparent" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+
+    const root = try app.world.spawnWith(.{components.Transform2D.at(10, 0)});
+    const middle = try app.world.spawnWith(.{
+        components.Transform2D{},
+        components.Parent{ .entity = root, .local = .at(5, 0) },
+    });
+    const leaf = try app.world.spawnWith(.{
+        components.Transform2D{},
+        components.Parent{ .entity = middle, .local = .at(2, 0) },
+    });
+
+    try app.run();
+
+    // Seventeen, and not seven: the leaf resolved through a middle that had
+    // itself been resolved this frame rather than last.
+    try testing.expectApproxEqAbs(
+        @as(f32, 17),
+        app.world.get(leaf, components.Transform2D).?.x,
+        0.0001,
+    );
+}
+
+test "a child of something that died stays where it was" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+
+    const carrier = try app.world.spawnWith(.{components.Transform2D.at(60, 60)});
+    const held = try app.world.spawnWith(.{
+        components.Transform2D.at(1, 1),
+        components.Parent{ .entity = carrier, .local = .at(4, 0) },
+    });
+
+    app.world.despawn(carrier);
+    try app.run();
+
+    const placed = app.world.get(held, components.Transform2D).?;
+    try testing.expectEqual(@as(f32, 1), placed.x);
+    try testing.expectEqual(@as(f32, 1), placed.y);
+}
+
+test "an animation moves the sprite's region on" {
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 6,
+        // Every frame a tenth of a second, so six frames is six cells at
+        // ten a second: back to the start of a four-cell strip, plus two.
+        .fixed_delta = 0.1,
+    });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 0.1 };
+
+    const walker = try app.world.spawnWith(.{
+        components.Transform2D{},
+        components.Sprite.solid(.white, 8, 8),
+        components.Animation.strip(4, 10),
+    });
+
+    try app.run();
+
+    const showing = app.world.get(walker, components.Sprite).?.region;
+    try testing.expectApproxEqAbs(Region.cell(2, 4, 1).u0, showing.u0, 0.0001);
 }
 
 test "a fixed step runs as many times as the frame is worth" {

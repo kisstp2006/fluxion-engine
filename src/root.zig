@@ -80,6 +80,13 @@ pub const Sprite = components.Sprite;
 /// Which part of a texture a sprite shows. See `components`.
 pub const Region = components.Region;
 
+/// Attaches one entity's transform to another's. See `components`.
+pub const Parent = components.Parent;
+
+/// A sprite that walks through the cells of its own texture. See
+/// `components`.
+pub const Animation = components.Animation;
+
 /// What the 2D pass looks through. See `components`.
 pub const Camera2D = components.Camera2D;
 

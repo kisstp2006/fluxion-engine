@@ -2,7 +2,7 @@
 
 //! The components the engine itself knows about.
 //!
-//! There are five, and the list is deliberately short. A game invents its own
+//! There are seven, and the list is deliberately short. A game invents its own
 //! - `Health`, `Wave`, `PatrolRoute` - and the engine never sees them; these
 //! are only the ones the renderer reads, because something has to agree on
 //! where a thing is before it can be drawn there.
@@ -40,7 +40,11 @@
 const std = @import("std");
 const testing = std.testing;
 
+const ecs = @import("fluxion_ecs");
 const assets = @import("assets.zig");
+
+/// What names a thing in the world. Re-exported because `Parent` holds one.
+pub const Entity = ecs.Entity;
 
 /// A colour, four floats from zero to one. `.hex(0x3AA0FF)` is the spelling
 /// to reach for. See `color`.
@@ -267,6 +271,165 @@ pub const Previous2D = extern struct {
     }
 };
 
+/// Attaches one entity to another, so that moving the parent moves the child.
+///
+/// ```zig
+/// const tank = try world.spawnWith(.{ Transform2D.at(100, 100), Sprite.of(hull) });
+/// _ = try world.spawnWith(.{
+///     Transform2D{},                       // written by the engine, not by you
+///     Sprite.of(turret),
+///     Parent{ .entity = tank, .local = .at(0, -6) },
+/// });
+/// ```
+///
+/// **The local position lives in this component, and `Transform2D` stays the
+/// world one.** That is the opposite way round from Godot and from Bevy,
+/// where the transform is local and a second, derived component holds the
+/// world one - and it is a deliberate trade with a reason on each side.
+///
+/// Their way needs the engine to add a component to every entity that has a
+/// transform, which in an archetype world means moving every one of those
+/// rows into another table. This way a child costs one component, a root
+/// costs nothing at all, the renderer reads one field whether or not anything
+/// is parented, and every system that asks where a thing *is* - collision, a
+/// camera, a spatial index - gets the answer without composing anything.
+///
+/// The cost is the surprise: writing `transform.x` on a child moves it for
+/// one frame and is then overwritten. Move a child by its `local`.
+///
+/// **Cycles are survived, not diagnosed.** Following the chain stops after
+/// `max_depth` links, so an entity accidentally made its own ancestor draws
+/// somewhere wrong instead of hanging the frame.
+pub const Parent = extern struct {
+    /// Who to follow. `.none` - or a handle to something that has died -
+    /// leaves the child where the last resolved frame put it.
+    entity: Entity = .none,
+
+    /// Where this sits in the parent's own space.
+    local: Transform2D = .{},
+
+    /// Whether the child turns with the parent. Off for a health bar over a
+    /// spinning enemy, which should follow it round without tipping over.
+    ///
+    /// The *offset* is turned by the parent either way - that is what being
+    /// attached to something means. This is only about the child's own angle.
+    inherit_rotation: bool = true,
+
+    /// Whether the parent's scale multiplies the child's.
+    inherit_scale: bool = true,
+
+    /// How many links of a chain are followed before giving up. Deep enough
+    /// for a skeleton, shallow enough that a cycle is noticed within a frame.
+    pub const max_depth: u8 = 16;
+
+    /// Where a child ends up, given where its parent ended up.
+    pub fn resolve(self: Parent, parent: Transform2D) Transform2D {
+        const placed = parent.apply(self.local.x, self.local.y);
+        return .{
+            .x = placed.x,
+            .y = placed.y,
+            .rotation = if (self.inherit_rotation)
+                parent.rotation + self.local.rotation
+            else
+                self.local.rotation,
+            .scale_x = if (self.inherit_scale)
+                parent.scale_x * self.local.scale_x
+            else
+                self.local.scale_x,
+            .scale_y = if (self.inherit_scale)
+                parent.scale_y * self.local.scale_y
+            else
+                self.local.scale_y,
+        };
+    }
+};
+
+/// A sprite that walks through the cells of its own texture.
+///
+/// ```zig
+/// _ = try world.spawnWith(.{
+///     Transform2D.at(64, 64),
+///     Sprite.of(hero),
+///     Animation{ .length = 6, .columns = 6, .fps = 10 },
+/// });
+/// ```
+///
+/// The engine advances it once a frame - in `.update` rather than `.fixed`,
+/// because an animation is something a viewer sees and not something the
+/// simulation depends on - and writes the result into `Sprite.region`. A game
+/// that would rather drive the region itself leaves this component off.
+///
+/// **The strip is a grid, counted left to right and then down**, which is how
+/// every sprite sheet an artist hands over is arranged. `first` is where this
+/// animation starts in that grid, so one sheet holds a walk, an idle and an
+/// attack, and swapping between them is writing two numbers.
+pub const Animation = extern struct {
+    /// The cell this animation starts at, counting across the whole sheet.
+    first: u16 = 0,
+    /// How many cells it runs for. One is a still picture.
+    length: u16 = 1,
+
+    /// The shape of the whole sheet, in cells.
+    columns: u16 = 1,
+    rows: u16 = 1,
+
+    /// Cells a second. Twelve is the usual hand-drawn rate.
+    fps: f32 = 12,
+
+    /// How far into the animation it is, in seconds. Kept rather than a frame
+    /// number, so that changing `fps` part way through does not jump.
+    time: f32 = 0,
+
+    playing: bool = true,
+
+    /// Whether it starts again at the end. A one-shot stops on its last cell
+    /// and sets `finished`.
+    looping: bool = true,
+
+    /// True once a non-looping animation has reached its end. A game reads it
+    /// to know when to swap back to the idle, and clears it by writing a new
+    /// animation over the component.
+    finished: bool = false,
+
+    /// The first `length` cells of a single row, which is what most sheets
+    /// are.
+    pub fn strip(length: u16, fps: f32) Animation {
+        return .{ .length = length, .columns = length, .rows = 1, .fps = fps };
+    }
+
+    /// Which cell of the sheet is showing.
+    pub fn frame(self: Animation) u32 {
+        if (self.length <= 1 or self.fps <= 0) return self.first;
+        const step: u32 = @intFromFloat(@max(self.time, 0) * self.fps);
+        const within = if (self.looping)
+            step % self.length
+        else
+            @min(step, self.length - 1);
+        return self.first + within;
+    }
+
+    /// Move it on by `delta` seconds, and say which cell to show.
+    ///
+    /// The clock is wound back by whole loops rather than left to grow, so an
+    /// animation running for an hour is as precise as one that started a
+    /// second ago - an `f32` counting seconds has lost its sixtieths by then.
+    pub fn advance(self: *Animation, delta: f32) Region {
+        if (self.playing and self.length > 1 and self.fps > 0) {
+            self.time += delta;
+
+            const loop = @as(f32, @floatFromInt(self.length)) / self.fps;
+            if (self.looping) {
+                while (self.time >= loop) self.time -= loop;
+            } else if (self.time >= loop) {
+                self.time = loop;
+                self.finished = true;
+                self.playing = false;
+            }
+        }
+        return .cell(self.frame(), self.columns, self.rows);
+    }
+};
+
 /// What the 2D pass looks through.
 ///
 /// The camera's *position* is its entity's `Transform2D`, and its position is
@@ -325,7 +488,6 @@ test "mirroring swaps the horizontal edges and leaves the vertical ones" {
 }
 
 test "every engine component is one the world will accept" {
-    const ecs = @import("fluxion_ecs");
     // This is the check the world would make when the component is first
     // used, brought forward so a field that cannot be a component is a
     // failing test here rather than a compile error in somebody's game.
@@ -333,6 +495,68 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Sprite);
     ecs.component.check(Camera2D);
     ecs.component.check(Previous2D);
+    ecs.component.check(Parent);
+    ecs.component.check(Animation);
+}
+
+test "a child follows its parent round" {
+    const parent: Transform2D = .{ .x = 100, .y = 100, .rotation = std.math.pi / 2.0 };
+    const child: Parent = .{ .local = .at(10, 0) };
+
+    // A quarter turn takes the offset from +x to +y, so the child ends up
+    // below the parent rather than to its right.
+    const placed = child.resolve(parent);
+    try testing.expectApproxEqAbs(@as(f32, 100), placed.x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 110), placed.y, 0.0001);
+    try testing.expectApproxEqAbs(parent.rotation, placed.rotation, 0.0001);
+}
+
+test "a child that does not inherit rotation is still carried round" {
+    const parent: Transform2D = .{ .x = 0, .y = 0, .rotation = std.math.pi / 2.0 };
+    const child: Parent = .{ .local = .at(10, 0), .inherit_rotation = false };
+
+    const placed = child.resolve(parent);
+    try testing.expectApproxEqAbs(@as(f32, 0), placed.x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 10), placed.y, 0.0001);
+    try testing.expectEqual(@as(f32, 0), placed.rotation);
+}
+
+test "scale multiplies down the chain" {
+    const parent: Transform2D = .{ .scale_x = 2, .scale_y = 2 };
+    const child: Parent = .{ .local = .{ .scale_x = 3, .scale_y = 3 } };
+    try testing.expectEqual(@as(f32, 6), child.resolve(parent).scale_x);
+}
+
+test "an animation walks its cells and comes back round" {
+    var animation: Animation = .strip(4, 10);
+
+    try testing.expectEqual(@as(u32, 0), animation.frame());
+    _ = animation.advance(0.1);
+    try testing.expectEqual(@as(u32, 1), animation.frame());
+    _ = animation.advance(0.2);
+    try testing.expectEqual(@as(u32, 3), animation.frame());
+
+    // A whole loop is four tenths of a second, so this is back at the start
+    // rather than off the end of the sheet.
+    _ = animation.advance(0.1);
+    try testing.expectEqual(@as(u32, 0), animation.frame());
+}
+
+test "a one-shot stops on its last cell and says so" {
+    var animation: Animation = .strip(3, 10);
+    animation.looping = false;
+
+    _ = animation.advance(1);
+    try testing.expectEqual(@as(u32, 2), animation.frame());
+    try testing.expect(animation.finished);
+    try testing.expect(!animation.playing);
+}
+
+test "an animation with one cell never moves" {
+    var animation: Animation = .{ .first = 5, .length = 1 };
+    const region = animation.advance(10);
+    try testing.expectEqual(@as(u32, 5), animation.frame());
+    try testing.expectEqual(Region.cell(5, 1, 1).u0, region.u0);
 }
 
 test "a fresh snapshot is not blended from" {

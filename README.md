@@ -125,6 +125,14 @@ _ = try world.spawnWith(.{
   One pipeline, no branch in the shader, no artwork for a health bar.
 - **A sprite with no size is the size of its own artwork**, so most sprites
   need no size at all.
+- **A `Parent` attaches one entity to another**, so a turret rides on a tank
+  and a health bar rides over an enemy. The local offset lives in the `Parent`
+  and `Transform2D` stays the world one, which is the opposite way round from
+  Godot and Bevy and is what keeps a root free and the renderer's loop flat.
+  `inherit_rotation = false` is the shadow that does not tip over.
+- **An `Animation` is a sheet and a rate**, and the engine writes the cell it
+  lands on into `Sprite.region` once a frame. One sheet holds a walk, an idle
+  and an attack; swapping between them is writing two numbers.
 - **The camera is an entity** with a `Transform2D` and a `Camera2D`, and its
   position is the *centre* of the view. With no camera in the world at all,
   the origin is the top left corner and one unit is one pixel - the same
@@ -190,10 +198,25 @@ zig build example-pong -- --backend d3d11
 zig build example-pong -- --frames 420 --capture pong.png
 ```
 
-Two paddles, a ball, and a scoreboard made of the same sprites as everything
-else. It is there to be read as much as played: the game's own components are
-declared in that file and the engine has never heard of them, which is the
-whole point of the arrangement.
+**`pong`** is two paddles, a ball, and a scoreboard made of the same sprites
+as everything else. It is there to be read as much as played: the game's own
+components are declared in that file and the engine has never heard of them,
+which is the whole point of the arrangement.
+
+```bash
+zig build example-creatures
+zig build example-creatures -- --frames 300 --capture creatures.png
+```
+
+**`creatures`** is the renderer's half: one sprite sheet, an `Animation` over
+its cells, and fourteen creatures each made of four entities - a body, two
+eyes and a shadow - where only the body is ever moved. Arrows or WASD steer
+the one with the ring; the camera follows it and stops at the edge of the
+field.
+
+Its sheet is `examples/atlas.png`, and the example is what drew it:
+`-- --write-atlas examples/atlas.png` puts it back, so the one binary file in
+this repository is one the code can account for.
 
 ## What is here, and what is not
 
@@ -206,6 +229,9 @@ Here, and checked by the tests:
 - The 2D pass: transforms, regions, tints, pivots, layers, order within a
   layer, visibility, interpolation between fixed steps, and a camera with
   zoom and rotation.
+- Parenting, one entity to another, resolved after everything a game does and
+  before anything is drawn.
+- Sprite animation over a sheet, looping or one-shot.
 - Headless everything, and `capture` for a picture without a screen.
 
 Not here, in the order it is likely to arrive:
@@ -216,12 +242,21 @@ Not here, in the order it is likely to arrive:
   is marked.
 - **Resources** - a typed store for state that is not a component. A singleton
   entity is the answer today, and it saves and loads with the world for free.
-- **Audio, physics, and animation.** None of them is started.
+- **Audio and physics.** Neither is started. Collision in `pong` is eight
+  lines of arithmetic in the game, which is the honest amount for a game that
+  size and not a plan.
 - **Parallel systems.** Work inside a system already goes on every core
   through `Query.each`; running two whole systems at once needs each to
   declare what it touches, which is a change to what a system *is*.
 - **Hot reload**, which is what [Fluxion VFS](https://github.com/kisstp2006/fluxion-vfs)
   is for and is not wired up.
+
+### Two things that will catch you once
+
+**Writing a texture back out as a PNG drops its alpha.** `fluxion-image`'s
+`Options.keep_alpha` defaults to false, because a screenshot has no alpha
+worth keeping and a texture has nothing but. A sheet written without it draws
+as a row of black squares, which is exactly what it looks like.
 
 ### One thing to know about components
 

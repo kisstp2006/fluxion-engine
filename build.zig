@@ -76,6 +76,11 @@ pub fn build(b: *std.Build) void {
             .step = "example-pong",
             .about = "A game: two paddles, a ball, and a scoreboard drawn over them",
         },
+        .{
+            .name = "creatures",
+            .step = "example-creatures",
+            .about = "A sprite sheet, animation, and things attached to other things",
+        },
     };
 
     const example_step = b.step("examples", "Build every example");
