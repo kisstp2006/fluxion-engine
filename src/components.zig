@@ -2,10 +2,16 @@
 
 //! The components the engine itself knows about.
 //!
-//! There are eight, and the list is deliberately short. A game invents its own
-//! - `Health`, `Wave`, `PatrolRoute` - and the engine never sees them; these
-//! are only the ones the renderer reads, because something has to agree on
-//! where a thing is before it can be drawn there.
+//! There are seven - `Transform2D`, `Sprite`, `Text2D`, `Animation`,
+//! `Parent`, `Previous2D` and `Camera2D` - and the list is deliberately
+//! short. A game invents its own - `Health`, `Wave`, `PatrolRoute` - and the
+//! engine never sees them; these are only the ones the engine itself reads,
+//! because something has to agree on where a thing is before it can be drawn
+//! there.
+//!
+//! `Color` and `Region` are in this file too and are *not* components. They
+//! are values that live inside one - a tint, a rectangle of a sprite sheet -
+//! and putting either on an entity of its own would mean nothing.
 //!
 //! ```zig
 //! _ = try app.world.spawnWith(.{
