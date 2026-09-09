@@ -58,11 +58,11 @@ const typeface = @import("fluxion_font");
 
 const Assets = @import("../assets.zig");
 const components = @import("../components.zig");
+const hierarchy = @import("../hierarchy.zig");
 
 const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
 const Camera2D = components.Camera2D;
-const Previous2D = components.Previous2D;
 const Color = components.Color;
 const Text2D = components.Text2D;
 
@@ -309,13 +309,14 @@ pub const Renderer = struct {
         gpa: Allocator,
         world: *ecs.World,
         assets: *Assets,
+        snapshots: *const hierarchy.Snapshots,
         target: rhi.RenderTarget,
         width: f32,
         height: f32,
         clear: ?Color,
         alpha: f32,
     ) !void {
-        try self.gather(gpa, world, assets, alpha, viewBounds(world, width, height));
+        try self.gather(gpa, world, assets, snapshots, alpha, viewBounds(world, snapshots, width, height));
 
         // Gathering the text may have rasterised a letter nobody had drawn
         // before, which changes an atlas that the draw below is about to
@@ -323,7 +324,7 @@ pub const Renderer = struct {
         // for a frame that saw thirty new letters, not thirty.
         try assets.flushFonts();
 
-        const view_projection = self.viewProjection(world, width, height);
+        const view_projection = self.viewProjection(world, snapshots, width, height);
         try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&Frame{
             .view_projection = view_projection,
         }));
@@ -387,6 +388,7 @@ pub const Renderer = struct {
         gpa: Allocator,
         world: *ecs.World,
         assets: *Assets,
+        snapshots: *const hierarchy.Snapshots,
         alpha: f32,
         bounds: Bounds,
     ) !void {
@@ -395,7 +397,6 @@ pub const Renderer = struct {
 
         const transform_id = try world.idOf(Transform2D);
         const sprite_id = try world.idOf(Sprite);
-        const previous_id = try world.idOf(Previous2D);
         const wanted = [_]ecs.component.Id{ transform_id, sprite_id };
 
         var sequence: u32 = 0;
@@ -410,18 +411,16 @@ pub const Renderer = struct {
             const rows = archetype.len();
             const transforms = column(Transform2D, archetype, transform_id, rows);
             const sprites = column(Sprite, archetype, sprite_id, rows);
+            const entities = archetype.entities.items;
 
-            // The third slice is there or it is not, per archetype rather
-            // than per sprite, so the loop below asks once.
-            const previous: ?[]const Previous2D = if (archetype.columnOf(previous_id) != null)
-                column(Previous2D, archetype, previous_id, rows)
-            else
-                null;
-
-            for (transforms, sprites, 0..) |stepped, sprite, row| {
+            for (transforms, sprites, entities) |local, sprite, entity| {
                 if (!sprite.visible or sprite.tint.a <= 0) continue;
 
-                const transform = if (previous) |p| p[row].blend(stepped, alpha) else stepped;
+                // Interpolated against where it was, then carried up through
+                // whatever it hangs from. A transform with neither a parent
+                // nor a snapshot comes back unchanged, which is nearly
+                // everything in a scene.
+                const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse local;
 
                 // A handle that no longer resolves draws as the white texel
                 // rather than not at all. A missing texture that shows up as
@@ -467,7 +466,7 @@ pub const Renderer = struct {
             }
         }
 
-        try self.gatherText(gpa, world, assets, alpha, bounds, &sequence);
+        try self.gatherText(gpa, world, assets, snapshots, alpha, bounds, &sequence);
 
         std.sort.pdq(Item, self.items.items, {}, Item.before);
     }
@@ -491,13 +490,13 @@ pub const Renderer = struct {
         gpa: Allocator,
         world: *ecs.World,
         assets: *Assets,
+        snapshots: *const hierarchy.Snapshots,
         alpha: f32,
         bounds: Bounds,
         sequence: *u32,
     ) !void {
         const transform_id = try world.idOf(Transform2D);
         const text_id = try world.idOf(Text2D);
-        const previous_id = try world.idOf(Previous2D);
         const wanted = [_]ecs.component.Id{ transform_id, text_id };
 
         for (world.archetypeSlice()) |*archetype| {
@@ -507,15 +506,12 @@ pub const Renderer = struct {
             const rows = archetype.len();
             const transforms = column(Transform2D, archetype, transform_id, rows);
             const labels = column(Text2D, archetype, text_id, rows);
-            const previous: ?[]const Previous2D = if (archetype.columnOf(previous_id) != null)
-                column(Previous2D, archetype, previous_id, rows)
-            else
-                null;
+            const entities = archetype.entities.items;
 
-            for (transforms, labels, 0..) |stepped, label, row| {
+            for (transforms, labels, entities) |local, label, entity| {
                 if (!label.visible or label.len == 0 or label.color.a <= 0) continue;
 
-                const transform = if (previous) |p| p[row].blend(stepped, alpha) else stepped;
+                const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse local;
                 const face = assets.fontOf(label.font) orelse continue;
 
                 try self.layOut(gpa, assets, face, label, transform, bounds, sequence);
@@ -644,8 +640,13 @@ pub const Renderer = struct {
     /// rectangle - which is the right way to be wrong: a sprite wrongly kept
     /// is a few bytes in a buffer, and a sprite wrongly dropped is a hole in
     /// the picture.
-    fn viewBounds(world: *ecs.World, width: f32, height: f32) Bounds {
-        const camera = bestCamera(world) orelse return .{
+    fn viewBounds(
+        world: *ecs.World,
+        snapshots: *const hierarchy.Snapshots,
+        width: f32,
+        height: f32,
+    ) Bounds {
+        const camera = bestCamera(world, snapshots) orelse return .{
             .left = 0,
             .top = 0,
             .right = width,
@@ -680,10 +681,16 @@ pub const Renderer = struct {
     ///
     /// With no camera in the world the view is the window itself: the origin
     /// at the top left corner, one world unit to the pixel. See `Camera2D`.
-    fn viewProjection(self: *Renderer, world: *ecs.World, width: f32, height: f32) math.Mat4 {
+    fn viewProjection(
+        self: *Renderer,
+        world: *ecs.World,
+        snapshots: *const hierarchy.Snapshots,
+        width: f32,
+        height: f32,
+    ) math.Mat4 {
         const clip = self.device.clip();
 
-        const found = bestCamera(world);
+        const found = bestCamera(world, snapshots);
         const camera = found orelse return math.orthographic(.{
             .left = 0,
             .right = width,
@@ -816,7 +823,7 @@ const CameraView = struct {
 };
 
 /// The active camera with the highest priority, or none.
-fn bestCamera(world: *ecs.World) ?CameraView {
+fn bestCamera(world: *ecs.World, snapshots: *const hierarchy.Snapshots) ?CameraView {
     var it = Cameras.over(world) catch return null;
     var best: ?CameraView = null;
     var best_priority: i16 = std.math.minInt(i16);
@@ -824,8 +831,12 @@ fn bestCamera(world: *ecs.World) ?CameraView {
     while (it.next()) |chunk| {
         const transforms = chunk.slice(Transform2D);
         const cameras = chunk.slice(Camera2D);
-        for (transforms, cameras) |transform, camera| {
+        for (transforms, cameras, chunk.entities) |local, camera, entity| {
             if (!camera.active) continue;
+            // A camera may be parented too - to the player it follows, or to
+            // a rig that shakes - so where it is looking from is resolved the
+            // same way everything else is.
+            const transform = hierarchy.resolve(world, snapshots, entity, local, 1) orelse local;
             if (best != null and camera.priority <= best_priority) continue;
             best_priority = camera.priority;
             best = .{

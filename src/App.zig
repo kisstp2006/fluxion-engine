@@ -36,6 +36,12 @@
 //! surface: the first clears, the rest load what the one before it left.
 //! Adding the third is one call in `render`.
 //!
+//! **A transform is local, and nothing caches the world one.** An entity's
+//! parent is a field of its `Transform2D`, the way Unity puts it on
+//! `Transform` and Godot puts it in the tree - and where a child really ends
+//! up is worked out where it is needed rather than written into a second
+//! component every frame. See `hierarchy`.
+//!
 //! **It runs without a window at all.** `.headless` opens the `none` backend,
 //! which accepts every call and draws none of them, and steps a clock that
 //! does not need a machine to read. Every test in this package runs that way,
@@ -53,6 +59,7 @@ const Input = @import("input.zig");
 const Time = @import("time.zig");
 const Window = @import("window.zig");
 const schedule_mod = @import("schedule.zig");
+const hierarchy = @import("hierarchy.zig");
 const sprite = @import("render/sprite.zig");
 
 const Color = @import("color.zig").Color;
@@ -145,6 +152,16 @@ assets: Assets,
 sprites: sprite.Renderer,
 
 time: Time,
+
+/// Where each interpolating transform was before the last fixed step.
+///
+/// Beside the world rather than in it, because it is the engine's own
+/// bookkeeping: a game asks for smooth drawing by setting one flag on a
+/// transform and never sees this. Only entities that asked are in here, so a
+/// scene of static things costs nothing at all. See
+/// `Transform2D.interpolate`.
+snapshots: hierarchy.Snapshots = .empty,
+
 input: Input = .{},
 schedule: Schedule = .empty,
 
@@ -187,6 +204,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .assets = undefined,
         .sprites = undefined,
         .time = .init(if (options.io) |io| .{ .clock = io } else .{ .fixed = options.fixed_delta }),
+        .snapshots = .empty,
         .input = .{},
         .schedule = .empty,
         .background = options.background,
@@ -280,6 +298,7 @@ pub fn destroy(self: *App) void {
     const gpa = self.gpa;
 
     self.schedule.deinit(gpa);
+    self.snapshots.deinit(gpa);
     self.sprites.deinit(gpa);
     self.assets.deinit();
     self.jobs.deinit();
@@ -376,14 +395,16 @@ pub fn step(self: *App) anyerror!bool {
     try self.schedule.run(.update, self);
     try self.schedule.run(.late, self);
 
-    // The engine's own two passes over the world, after everything a game
-    // does and before anything is drawn. Both are here rather than
-    // registered as systems in `.late` on purpose: a system added at
-    // `create` would run *before* the game's own late systems, and a camera
-    // that follows a parented entity would then read where that entity was
-    // last frame.
+    // The engine's own pass over the world, after everything a game does and
+    // before anything is drawn. Here rather than registered as a system in
+    // `.late` on purpose: a system added at `create` would run *before* a
+    // game's own late systems.
+    //
+    // Parented transforms are not resolved here, or anywhere: the renderer
+    // works out where a child ended up when it draws it, and
+    // `worldTransform` answers the same question for a game that asks. See
+    // `hierarchy`.
     try self.animate();
-    try self.propagate();
 
     try self.render();
 
@@ -426,82 +447,31 @@ fn animate(self: *App) !void {
     }
 }
 
-/// Work out where every parented entity ended up, and write it into its
-/// `Transform2D`.
+/// Where an entity really is, with every parent above it applied.
 ///
-/// Each child walks up its own chain to a root and composes on the way back
-/// down, which costs one lookup per link and touches nothing that is not
-/// parented. The obvious alternative - one pass per depth, over everything -
-/// reads better and is worse: a scene with two hundred sprites and four
-/// parented ones would pay for all two hundred, four times.
+/// Godot's `global_position` and Unity's `transform.position`, and it costs
+/// what those cost: a walk up the chain rather than a field read. Null when
+/// the entity has no transform, or when something it hangs from has died.
 ///
-/// **A parent's own `Transform2D` is read, not resolved recursively**, which
-/// is why the walk goes all the way to the root rather than trusting what is
-/// already there: within one frame a parent may not have been resolved yet,
-/// and reading its stale world transform would leave a grandchild a frame
-/// behind its grandparent.
-fn propagate(self: *App) !void {
-    const Parented = ecs.Query(.{ components.Transform2D, components.Parent });
-
-    var it = try Parented.over(&self.world);
-    while (it.next()) |chunk| {
-        const transforms = chunk.slice(components.Transform2D);
-        const parents = chunk.slice(components.Parent);
-
-        for (transforms, parents) |*transform, link| {
-            if (self.resolveChain(link)) |placed| transform.* = placed;
-        }
-    }
+/// A transform with no parent is its own answer, so this is a comparison and
+/// a copy for almost everything in a scene.
+pub fn worldTransform(self: *App, entity: ecs.Entity) ?components.Transform2D {
+    return hierarchy.resolveEntity(&self.world, &self.snapshots, entity, self.time.alpha());
 }
 
-/// Follow one chain of parents to a root and compose back down.
+/// Remember where every interpolating transform is, before a step moves it.
 ///
-/// Null when the chain leads nowhere - a parent that has died, or one that
-/// has no transform - which leaves the child where the last resolved frame
-/// put it. That is the least surprising thing to do: a bullet whose shooter
-/// died should stay where it was, not fall to the origin.
-fn resolveChain(self: *App, link: components.Parent) ?components.Transform2D {
-    // The links from this child up to the root, nearest first. A fixed array
-    // rather than a list, because `Parent.max_depth` is the point at which a
-    // chain is a mistake and this must not allocate inside a frame.
-    var chain: [components.Parent.max_depth]components.Parent = undefined;
-    var depth: usize = 0;
-
-    var current = link;
-    while (depth < chain.len) {
-        chain[depth] = current;
-        depth += 1;
-
-        if (current.entity.isNone()) return null;
-        const parent_transform = self.world.get(current.entity, components.Transform2D) orelse return null;
-
-        // A parent that is itself a child: keep climbing. Otherwise this is
-        // the root, and its transform is already the world one.
-        if (self.world.getConst(current.entity, components.Parent)) |above| {
-            current = above.*;
-            continue;
-        }
-
-        var placed = parent_transform.*;
-        while (depth > 0) {
-            depth -= 1;
-            placed = chain[depth].resolve(placed);
-        }
-        return placed;
-    }
-
-    // Deeper than anyone means to nest, which in practice means a cycle.
-    return null;
-}
-
-/// Copy every `Transform2D` that has a `Previous2D` beside it into that
-/// `Previous2D`. Called before each fixed step, so that after the step the
-/// pair is "where it was" and "where it is".
+/// Cleared and refilled rather than added to, so an entity that died does not
+/// sit in the table for the rest of the session. The capacity is kept, so
+/// after the first step this allocates nothing.
 fn snapshotPrevious(self: *App) !void {
-    var it = try ecs.Query(.{ components.Transform2D, components.Previous2D }).over(&self.world);
+    self.snapshots.clearRetainingCapacity();
+
+    var it = try ecs.Query(.{components.Transform2D}).over(&self.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(components.Transform2D), chunk.slice(components.Previous2D)) |now, *previous| {
-            previous.snapshot(now);
+        for (chunk.slice(components.Transform2D), chunk.entities) |now, entity| {
+            if (!now.interpolate) continue;
+            try self.snapshots.put(self.gpa, entity, .of(now));
         }
     }
 }
@@ -533,6 +503,7 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
         self.gpa,
         &self.world,
         &self.assets,
+        &self.snapshots,
         into,
         width,
         height,
@@ -740,7 +711,7 @@ test "quitting from a system ends the loop" {
     try testing.expectEqual(@as(u64, 3), app.time.frame);
 }
 
-test "a child is put where its parent is, after everything else has run" {
+test "a child is where its parent put it, and its own numbers stay local" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();
 
@@ -749,59 +720,46 @@ test "a child is put where its parent is, after everything else has run" {
         components.Sprite.solid(.white, 20, 20),
     });
     const turret = try app.world.spawnWith(.{
-        components.Transform2D{},
+        components.Transform2D.childOf(tank, 0, -12),
         components.Sprite.solid(.white, 8, 8),
-        components.Parent{ .entity = tank, .local = .at(0, -12) },
     });
 
     try app.run();
 
-    const placed = app.world.get(turret, components.Transform2D).?;
+    const placed = app.worldTransform(turret).?;
     try testing.expectApproxEqAbs(@as(f32, 100), placed.x, 0.0001);
     try testing.expectApproxEqAbs(@as(f32, 38), placed.y, 0.0001);
+
+    // And the component itself still says what was written into it, which is
+    // the difference between this and a pass that resolves in place.
+    const local = app.world.get(turret, components.Transform2D).?;
+    try testing.expectEqual(@as(f32, 0), local.x);
+    try testing.expectEqual(@as(f32, -12), local.y);
 }
 
-test "a grandchild is not a frame behind its grandparent" {
+test "a grandchild is composed through the whole chain" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();
 
     const root = try app.world.spawnWith(.{components.Transform2D.at(10, 0)});
-    const middle = try app.world.spawnWith(.{
-        components.Transform2D{},
-        components.Parent{ .entity = root, .local = .at(5, 0) },
-    });
-    const leaf = try app.world.spawnWith(.{
-        components.Transform2D{},
-        components.Parent{ .entity = middle, .local = .at(2, 0) },
-    });
+    const middle = try app.world.spawnWith(.{components.Transform2D.childOf(root, 5, 0)});
+    const leaf = try app.world.spawnWith(.{components.Transform2D.childOf(middle, 2, 0)});
 
     try app.run();
-
-    // Seventeen, and not seven: the leaf resolved through a middle that had
-    // itself been resolved this frame rather than last.
-    try testing.expectApproxEqAbs(
-        @as(f32, 17),
-        app.world.get(leaf, components.Transform2D).?.x,
-        0.0001,
-    );
+    try testing.expectApproxEqAbs(@as(f32, 17), app.worldTransform(leaf).?.x, 0.0001);
 }
 
-test "a child of something that died stays where it was" {
+test "a child of something that died has no world position" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();
 
     const carrier = try app.world.spawnWith(.{components.Transform2D.at(60, 60)});
-    const held = try app.world.spawnWith(.{
-        components.Transform2D.at(1, 1),
-        components.Parent{ .entity = carrier, .local = .at(4, 0) },
-    });
+    const held = try app.world.spawnWith(.{components.Transform2D.childOf(carrier, 4, 0)});
 
     app.world.despawn(carrier);
     try app.run();
 
-    const placed = app.world.get(held, components.Transform2D).?;
-    try testing.expectEqual(@as(f32, 1), placed.x);
-    try testing.expectEqual(@as(f32, 1), placed.y);
+    try testing.expect(app.worldTransform(held) == null);
 }
 
 test "an animation moves the sprite's region on" {
@@ -853,10 +811,11 @@ test "a fixed step runs as many times as the frame is worth" {
 }
 
 fn spawnInterpolated(app: *App) anyerror!void {
+    var moving: components.Transform2D = .at(0, 0);
+    moving.interpolate = true;
     _ = try app.world.spawnWith(.{
-        components.Transform2D.at(0, 0),
+        moving,
         components.Sprite.solid(.hex(0xFF0000), 8, 8),
-        components.Previous2D{},
     });
 }
 
@@ -882,14 +841,32 @@ test "a previous transform is taken before each fixed step" {
     try app.addSystem(.fixed, slideRight);
     try app.run();
 
-    var it = try ecs.Query(.{ components.Transform2D, components.Previous2D }).over(&app.world);
+    var it = try ecs.Query(.{components.Transform2D}).over(&app.world);
     const chunk = it.next().?;
+    const entity = chunk.entities[0];
     const now = chunk.slice(components.Transform2D)[0];
-    const previous = chunk.slice(components.Previous2D)[0];
 
-    try testing.expect(previous.valid);
-    try testing.expectEqual(@as(f32, 0), previous.x);
+    // Where it is, where it was, and halfway between - which is what the
+    // renderer draws, and what a game asking for a world position gets.
     try testing.expectEqual(@as(f32, 10), now.x);
+    try testing.expectEqual(@as(f32, 0), app.snapshots.get(entity).?.x);
     try testing.expectApproxEqAbs(@as(f32, 0.5), app.time.alpha(), 0.001);
-    try testing.expectApproxEqAbs(@as(f32, 5), previous.blend(now, app.time.alpha()).x, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 5), app.worldTransform(entity).?.x, 0.01);
+}
+
+test "a transform that never asked is not remembered at all" {
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 2,
+        .fixed_delta = 0.01,
+    });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 0.05 };
+
+    _ = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
+    try app.run();
+
+    // Nothing in the table, so a scene of static things pays nothing for a
+    // feature it does not use.
+    try testing.expectEqual(@as(usize, 0), app.snapshots.count());
 }

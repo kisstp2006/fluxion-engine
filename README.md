@@ -14,6 +14,7 @@ A window, a world, and the loop between them. For Zig 0.16.
 | `Window` | The window and the event queue. |
 | `render.sprite` | The 2D layer, in one instanced draw per texture. |
 | `text.Atlas` | Every glyph the game has drawn, in one texture. |
+| `hierarchy` | Where a thing really is, once its parent has had its say. |
 
 ```zig
 const fx = @import("fluxion_engine");
@@ -116,11 +117,11 @@ _ = try world.spawnWith(.{
 - **`Sprite.order` is the sort inside a layer.** Zero by default, which keeps
   the texture grouping. A top-down game writes `transform.y` into it from a
   `.late` system and gets things sorted by their feet.
-- **Add a `Previous2D` to anything moved in `.fixed`** and it is drawn between
-  its last two steps, at `Time.alpha`. The engine fills it in before every
-  fixed step; the game's own systems never touch it. Without it, a sixty-hertz
-  step on a hundred-and-forty-four-hertz screen shows every step twice and
-  some three times.
+- **Set `interpolate` on anything moved in `.fixed`** and it is drawn between
+  its last two steps, at `Time.alpha`. The engine remembers where it was; the
+  game's own systems never touch that. Without it, a sixty-hertz step on a
+  hundred-and-forty-four-hertz screen shows every step twice and some three
+  times.
 - **The whole instance buffer goes up in one call.** Not one per sprite: on
   Direct3D 11 a dynamic buffer is re-sent whole on every map, so a call per
   sprite is quadratic in the number of sprites.
@@ -129,11 +130,13 @@ _ = try world.spawnWith(.{
   One pipeline, no branch in the shader, no artwork for a health bar.
 - **A sprite with no size is the size of its own artwork**, so most sprites
   need no size at all.
-- **A `Parent` attaches one entity to another**, so a turret rides on a tank
-  and a health bar rides over an enemy. The local offset lives in the `Parent`
-  and `Transform2D` stays the world one, which is the opposite way round from
-  Godot and Bevy and is what keeps a root free and the renderer's loop flat.
-  `inherit_rotation = false` is the shadow that does not tip over.
+- **A transform's `parent` attaches one entity to another**, so a turret rides
+  on a tank and a health bar rides over an enemy. The numbers in a transform
+  are *local* - in the parent's space, and in the world's only when there is
+  no parent - which is Unity's `Transform` and Godot's `Node2D`.
+  `app.worldTransform(entity)` is the other one, and it costs a walk up the
+  chain rather than a field read. `inherit_rotation = false` is the shadow
+  that does not tip over.
 - **An `Animation` is a sheet and a rate**, and the engine writes the cell it
   lands on into `Sprite.region` once a frame. One sheet holds a walk, an idle
   and an attack; swapping between them is writing two numbers.
@@ -243,8 +246,8 @@ Here, and checked by the tests:
 - The 2D pass: transforms, regions, tints, pivots, layers, order within a
   layer, visibility, interpolation between fixed steps, and a camera with
   zoom and rotation.
-- Parenting, one entity to another, resolved after everything a game does and
-  before anything is drawn.
+- Parenting, one entity to another, resolved where it is needed rather than
+  cached into a second component.
 - Sprite animation over a sheet, looping or one-shot.
 - Text: a shelf-packed glyph atlas per font, kerning, several lines, three
   alignments, and a label that formats into itself. Not here yet: wrapping, an
@@ -334,6 +337,24 @@ before this package existed - the seam was cut for it deliberately.
 `Options.keep_alpha` defaults to false, because a screenshot has no alpha
 worth keeping and a texture has nothing but. A sheet written without it draws
 as a row of black squares, which is exactly what it looks like.
+
+### What counts as a component
+
+Five: `Transform2D`, `Sprite`, `Text2D`, `Animation` and `Camera2D`. Each one
+is something a person making a game would name, which is the test.
+
+Two things that used to be on that list are not any more, and the reason is
+the same for both. `Parent` was a component holding a link and an offset; it
+is a field of `Transform2D` now, because parenting is what a transform *does*
+- Unity puts it on `Transform`, Godot puts it in the tree - and nobody
+building a scene thinks "I will add a Parent to this". `Previous2D` held where
+something was a step ago; that is the engine's own bookkeeping and a game
+should never have to declare it, so it is a flag on the transform and a table
+beside the world.
+
+The rule that falls out: **a component is a thing, not a mechanism.** If it
+exists so that the engine can do its job rather than so that the game can say
+what something is, it belongs inside another component or beside the world.
 
 ### One thing to know about components
 

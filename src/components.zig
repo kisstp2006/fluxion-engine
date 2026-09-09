@@ -2,12 +2,18 @@
 
 //! The components the engine itself knows about.
 //!
-//! There are seven - `Transform2D`, `Sprite`, `Text2D`, `Animation`,
-//! `Parent`, `Previous2D` and `Camera2D` - and the list is deliberately
-//! short. A game invents its own - `Health`, `Wave`, `PatrolRoute` - and the
-//! engine never sees them; these are only the ones the engine itself reads,
-//! because something has to agree on where a thing is before it can be drawn
-//! there.
+//! There are five - `Transform2D`, `Sprite`, `Text2D`, `Animation` and
+//! `Camera2D` - and the list is deliberately short. A game invents its own -
+//! `Health`, `Wave`, `PatrolRoute` - and the engine never sees them; these
+//! are only the ones the engine itself reads, because something has to agree
+//! on where a thing is before it can be drawn there.
+//!
+//! Each one is a thing somebody making a game would name, which is the test a
+//! component has to pass here. `Parent` and `Previous2D` used to be on this
+//! list and are not any more: parenting is what a transform *does* - Unity
+//! puts it on `Transform` and Godot puts it in the tree - and where something
+//! was a step ago is the engine's own bookkeeping, which a game should never
+//! have to declare. Both are fields of `Transform2D` now.
 //!
 //! `Color` and `Region` are in this file too and are *not* components. They
 //! are values that live inside one - a tint, a rectangle of a sprite sheet -
@@ -49,14 +55,37 @@ const testing = std.testing;
 const ecs = @import("fluxion_ecs");
 const assets = @import("assets.zig");
 
-/// What names a thing in the world. Re-exported because `Parent` holds one.
+/// What names a thing in the world. Re-exported because a transform names
+/// the one it hangs from.
 pub const Entity = ecs.Entity;
 
 /// A colour, four floats from zero to one. `.hex(0x3AA0FF)` is the spelling
 /// to reach for. See `color`.
 pub const Color = @import("color.zig").Color;
 
-/// Where a thing is, how big, and which way round.
+/// Where a thing is, how big, which way round, and what it hangs from.
+///
+/// ```zig
+/// const tank = try world.spawnWith(.{ Transform2D.at(100, 100), Sprite.of(hull) });
+/// _ = try world.spawnWith(.{
+///     Transform2D.childOf(tank, 0, -6),
+///     Sprite.of(turret),
+/// });
+/// ```
+///
+/// **The numbers are local.** They are in the parent's space, and in the
+/// world's only when there is no parent - which is Unity's `Transform` and
+/// Godot's `Node2D`, and is what people mean when they move a turret by one:
+/// one along the tank, not one along the world. `App.worldTransform` is the
+/// other one, `global_position` by another name, and it costs a walk up the
+/// chain rather than a field read.
+///
+/// **The parent is a field rather than a component of its own.** A component
+/// here has to be something a person making a game would name, and nobody
+/// names "parent" - they name the turret and say what it is on. Unity agrees
+/// (`transform.parent`) and so does Godot (the tree itself). Keeping it here
+/// also means an entity gains a parent without moving between archetype
+/// tables, which is what a separate component would cost.
 pub const Transform2D = extern struct {
     x: f32 = 0,
     y: f32 = 0,
@@ -66,18 +95,67 @@ pub const Transform2D = extern struct {
     scale_x: f32 = 1,
     scale_y: f32 = 1,
 
-    /// A transform at a point, unrotated and unscaled. The common case, and
-    /// worth a name so the other three fields do not have to be written to
-    /// say nothing.
+    /// Whose space `x` and `y` are in. `.none` is the world.
+    ///
+    /// A handle to something that has died leaves this transform where it
+    /// last was, rather than snapping it to the origin: a bullet whose
+    /// shooter is gone should carry on, not fall into the corner.
+    parent: Entity = .none,
+
+    /// Whether this turns with its parent.
+    ///
+    /// The *offset* is turned either way - that is what being attached to
+    /// something means. This is only about the thing's own angle, and it is
+    /// off for a shadow on the ground and for a name plate over a leaning
+    /// creature, both of which should follow without tipping over. Godot
+    /// spells the all-or-nothing version of this `top_level`.
+    inherit_rotation: bool = true,
+
+    /// Whether the parent's scale multiplies this one's.
+    inherit_scale: bool = true,
+
+    /// Draw this between its last two fixed steps rather than at the latest.
+    ///
+    /// For anything moved in the `.fixed` stage. A body stepped sixty times a
+    /// second on a screen that refreshes a hundred and forty-four times shows
+    /// every step twice and some three times, which is the stutter that makes
+    /// a fixed-step game look worse than the loop it runs on; drawing it
+    /// somewhere between the last two steps is the cure.
+    ///
+    /// The engine keeps where it was - see `hierarchy.Snapshot` - so nothing
+    /// about a game's own systems changes. They keep writing this transform
+    /// and never look at the other one. Leave it off anything moved in
+    /// `.update`, which already moves once a frame.
+    interpolate: bool = false,
+
+    /// How many links of a chain are followed before giving up. Deep enough
+    /// for a skeleton, shallow enough that a cycle is noticed within a frame.
+    pub const max_depth: u8 = 16;
+
+    /// A transform at a point, unrotated, unscaled and unparented. The common
+    /// case, and worth a name so the other fields do not have to be written
+    /// to say nothing.
     pub fn at(x: f32, y: f32) Transform2D {
         return .{ .x = x, .y = y };
     }
 
-    /// Move by an amount. `t.translate(dx * dt, dy * dt)` is what a movement
-    /// system spends its time doing.
+    /// A transform at a point in something else's space.
+    pub fn childOf(parent: Entity, x: f32, y: f32) Transform2D {
+        return .{ .x = x, .y = y, .parent = parent };
+    }
+
+    /// Move by an amount, in whatever space this transform is in.
     pub fn translate(self: *Transform2D, dx: f32, dy: f32) void {
         self.x += dx;
         self.y += dy;
+    }
+
+    /// The same transform, drawn between fixed steps. For anything a `.fixed`
+    /// system moves: `Transform2D.at(10, 20).interpolated()`.
+    pub fn interpolated(self: Transform2D) Transform2D {
+        var out = self;
+        out.interpolate = true;
+        return out;
     }
 
     /// The same scale on both axes.
@@ -88,7 +166,7 @@ pub const Transform2D = extern struct {
         return out;
     }
 
-    /// Turn a point in this transform's own space into world space.
+    /// Turn a point in this transform's own space into its parent's.
     ///
     /// Written out rather than built from a matrix type because it is two
     /// sines and four multiplies, and the renderer does it for every corner
@@ -101,6 +179,32 @@ pub const Transform2D = extern struct {
         return .{
             .x = self.x + sx * c - sy * s,
             .y = self.y + sx * s + sy * c,
+        };
+    }
+
+    /// Where `local` ends up, given where its parent ended up.
+    ///
+    /// The result carries no parent of its own: it is a world transform, and
+    /// composing it again would apply the same chain twice.
+    pub fn compose(parent: Transform2D, local: Transform2D) Transform2D {
+        const placed = parent.apply(local.x, local.y);
+        return .{
+            .x = placed.x,
+            .y = placed.y,
+            .rotation = if (local.inherit_rotation)
+                parent.rotation + local.rotation
+            else
+                local.rotation,
+            .scale_x = if (local.inherit_scale)
+                parent.scale_x * local.scale_x
+            else
+                local.scale_x,
+            .scale_y = if (local.inherit_scale)
+                parent.scale_y * local.scale_y
+            else
+                local.scale_y,
+            .parent = .none,
+            .interpolate = local.interpolate,
         };
     }
 };
@@ -212,141 +316,6 @@ pub const Sprite = extern struct {
     /// A rectangle of solid colour, with no texture at all.
     pub fn solid(color: Color, width: f32, height: f32) Sprite {
         return .{ .tint = color, .width = width, .height = height };
-    }
-};
-
-/// Where a thing *was* before the last fixed step, for drawing it smoothly.
-///
-/// ```zig
-/// _ = try world.spawnWith(.{ Transform2D.at(0, 0), Sprite.of(hero), Previous2D{} });
-/// ```
-///
-/// A body moved in the `.fixed` stage jumps sixty times a second, and a
-/// screen that refreshes a hundred and forty-four times a second shows every
-/// jump twice and some three times, which is the stutter that makes a
-/// fixed-step game look worse than the loop it runs on. The cure is to draw
-/// each frame somewhere *between* the last two steps, at `Time.alpha`.
-///
-/// Add this component to anything that moves in `.fixed` and wants to be
-/// drawn between steps. The engine fills it in: before every fixed step it
-/// copies the entity's `Transform2D` here, and the renderer blends the two by
-/// `alpha`. Nothing about the game's own systems changes - they keep writing
-/// the `Transform2D` and never look at this one.
-///
-/// Leave it off anything moved in `.update`, which already moves once a
-/// frame and would only be drawn a frame late.
-pub const Previous2D = extern struct {
-    x: f32 = 0,
-    y: f32 = 0,
-    rotation: f32 = 0,
-    scale_x: f32 = 1,
-    scale_y: f32 = 1,
-
-    /// False until the engine has taken the first snapshot, so a thing spawned
-    /// this frame is drawn where it is rather than slid in from the origin.
-    valid: bool = false,
-
-    /// Take a copy of where a thing is now. What the engine does before each
-    /// fixed step, and what a game does itself when it teleports something
-    /// and does not want the renderer to draw the journey.
-    pub fn snapshot(self: *Previous2D, now: Transform2D) void {
-        self.* = .{
-            .x = now.x,
-            .y = now.y,
-            .rotation = now.rotation,
-            .scale_x = now.scale_x,
-            .scale_y = now.scale_y,
-            .valid = true,
-        };
-    }
-
-    /// Somewhere between here and `now`, at `t` from zero to one.
-    ///
-    /// The rotation is blended as a plain number, so a thing that turns more
-    /// than half a circle in one step is drawn going the long way round.
-    /// Nothing moving at sixty steps a second turns that fast.
-    pub fn blend(self: Previous2D, now: Transform2D, t: f32) Transform2D {
-        if (!self.valid) return now;
-        return .{
-            .x = std.math.lerp(self.x, now.x, t),
-            .y = std.math.lerp(self.y, now.y, t),
-            .rotation = std.math.lerp(self.rotation, now.rotation, t),
-            .scale_x = std.math.lerp(self.scale_x, now.scale_x, t),
-            .scale_y = std.math.lerp(self.scale_y, now.scale_y, t),
-        };
-    }
-};
-
-/// Attaches one entity to another, so that moving the parent moves the child.
-///
-/// ```zig
-/// const tank = try world.spawnWith(.{ Transform2D.at(100, 100), Sprite.of(hull) });
-/// _ = try world.spawnWith(.{
-///     Transform2D{},                       // written by the engine, not by you
-///     Sprite.of(turret),
-///     Parent{ .entity = tank, .local = .at(0, -6) },
-/// });
-/// ```
-///
-/// **The local position lives in this component, and `Transform2D` stays the
-/// world one.** That is the opposite way round from Godot and from Bevy,
-/// where the transform is local and a second, derived component holds the
-/// world one - and it is a deliberate trade with a reason on each side.
-///
-/// Their way needs the engine to add a component to every entity that has a
-/// transform, which in an archetype world means moving every one of those
-/// rows into another table. This way a child costs one component, a root
-/// costs nothing at all, the renderer reads one field whether or not anything
-/// is parented, and every system that asks where a thing *is* - collision, a
-/// camera, a spatial index - gets the answer without composing anything.
-///
-/// The cost is the surprise: writing `transform.x` on a child moves it for
-/// one frame and is then overwritten. Move a child by its `local`.
-///
-/// **Cycles are survived, not diagnosed.** Following the chain stops after
-/// `max_depth` links, so an entity accidentally made its own ancestor draws
-/// somewhere wrong instead of hanging the frame.
-pub const Parent = extern struct {
-    /// Who to follow. `.none` - or a handle to something that has died -
-    /// leaves the child where the last resolved frame put it.
-    entity: Entity = .none,
-
-    /// Where this sits in the parent's own space.
-    local: Transform2D = .{},
-
-    /// Whether the child turns with the parent. Off for a health bar over a
-    /// spinning enemy, which should follow it round without tipping over.
-    ///
-    /// The *offset* is turned by the parent either way - that is what being
-    /// attached to something means. This is only about the child's own angle.
-    inherit_rotation: bool = true,
-
-    /// Whether the parent's scale multiplies the child's.
-    inherit_scale: bool = true,
-
-    /// How many links of a chain are followed before giving up. Deep enough
-    /// for a skeleton, shallow enough that a cycle is noticed within a frame.
-    pub const max_depth: u8 = 16;
-
-    /// Where a child ends up, given where its parent ended up.
-    pub fn resolve(self: Parent, parent: Transform2D) Transform2D {
-        const placed = parent.apply(self.local.x, self.local.y);
-        return .{
-            .x = placed.x,
-            .y = placed.y,
-            .rotation = if (self.inherit_rotation)
-                parent.rotation + self.local.rotation
-            else
-                self.local.rotation,
-            .scale_x = if (self.inherit_scale)
-                parent.scale_x * self.local.scale_x
-            else
-                self.local.scale_x,
-            .scale_y = if (self.inherit_scale)
-                parent.scale_y * self.local.scale_y
-            else
-                self.local.scale_y,
-        };
     }
 };
 
@@ -599,10 +568,43 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Transform2D);
     ecs.component.check(Sprite);
     ecs.component.check(Camera2D);
-    ecs.component.check(Previous2D);
-    ecs.component.check(Parent);
     ecs.component.check(Animation);
     ecs.component.check(Text2D);
+}
+
+test "a child is carried round by its parent" {
+    const parent: Transform2D = .{ .x = 100, .y = 100, .rotation = std.math.pi / 2.0 };
+    const local: Transform2D = .at(10, 0);
+
+    // A quarter turn takes the offset from +x to +y, so the child ends up
+    // below the parent rather than to its right.
+    const placed = Transform2D.compose(parent, local);
+    try testing.expectApproxEqAbs(@as(f32, 100), placed.x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 110), placed.y, 0.0001);
+    try testing.expectApproxEqAbs(parent.rotation, placed.rotation, 0.0001);
+}
+
+test "a child that does not inherit rotation is still carried round" {
+    const parent: Transform2D = .{ .rotation = std.math.pi / 2.0 };
+    var local: Transform2D = .at(10, 0);
+    local.inherit_rotation = false;
+
+    const placed = Transform2D.compose(parent, local);
+    try testing.expectApproxEqAbs(@as(f32, 0), placed.x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 10), placed.y, 0.0001);
+    try testing.expectEqual(@as(f32, 0), placed.rotation);
+}
+
+test "scale multiplies down the chain" {
+    const parent: Transform2D = .{ .scale_x = 2, .scale_y = 2 };
+    const local: Transform2D = .{ .scale_x = 3, .scale_y = 3 };
+    try testing.expectEqual(@as(f32, 6), Transform2D.compose(parent, local).scale_x);
+}
+
+test "a composed transform has no parent left to apply" {
+    const parent: Transform2D = .at(5, 5);
+    const local: Transform2D = .childOf(.none, 1, 1);
+    try testing.expect(Transform2D.compose(parent, local).parent.isNone());
 }
 
 test "a label carries its own text" {
@@ -624,34 +626,6 @@ test "text too long is cut on a character boundary" {
 test "an empty label is empty rather than sixty-three zeroes" {
     const label: Text2D = .{};
     try testing.expectEqual(@as(usize, 0), label.slice().len);
-}
-
-test "a child follows its parent round" {
-    const parent: Transform2D = .{ .x = 100, .y = 100, .rotation = std.math.pi / 2.0 };
-    const child: Parent = .{ .local = .at(10, 0) };
-
-    // A quarter turn takes the offset from +x to +y, so the child ends up
-    // below the parent rather than to its right.
-    const placed = child.resolve(parent);
-    try testing.expectApproxEqAbs(@as(f32, 100), placed.x, 0.0001);
-    try testing.expectApproxEqAbs(@as(f32, 110), placed.y, 0.0001);
-    try testing.expectApproxEqAbs(parent.rotation, placed.rotation, 0.0001);
-}
-
-test "a child that does not inherit rotation is still carried round" {
-    const parent: Transform2D = .{ .x = 0, .y = 0, .rotation = std.math.pi / 2.0 };
-    const child: Parent = .{ .local = .at(10, 0), .inherit_rotation = false };
-
-    const placed = child.resolve(parent);
-    try testing.expectApproxEqAbs(@as(f32, 0), placed.x, 0.0001);
-    try testing.expectApproxEqAbs(@as(f32, 10), placed.y, 0.0001);
-    try testing.expectEqual(@as(f32, 0), placed.rotation);
-}
-
-test "scale multiplies down the chain" {
-    const parent: Transform2D = .{ .scale_x = 2, .scale_y = 2 };
-    const child: Parent = .{ .local = .{ .scale_x = 3, .scale_y = 3 } };
-    try testing.expectEqual(@as(f32, 6), child.resolve(parent).scale_x);
 }
 
 test "an animation walks its cells and comes back round" {
@@ -684,20 +658,4 @@ test "an animation with one cell never moves" {
     const region = animation.advance(10);
     try testing.expectEqual(@as(u32, 5), animation.frame());
     try testing.expectEqual(Region.cell(5, 1, 1).u0, region.u0);
-}
-
-test "a fresh snapshot is not blended from" {
-    const now: Transform2D = .at(10, 20);
-    const previous: Previous2D = .{};
-    const drawn = previous.blend(now, 0.5);
-    try testing.expectEqual(@as(f32, 10), drawn.x);
-    try testing.expectEqual(@as(f32, 20), drawn.y);
-}
-
-test "a snapshot is blended halfway at half an alpha" {
-    var previous: Previous2D = .{};
-    previous.snapshot(.at(0, 0));
-    const drawn = previous.blend(.at(10, 20), 0.5);
-    try testing.expectApproxEqAbs(@as(f32, 5), drawn.x, 0.0001);
-    try testing.expectApproxEqAbs(@as(f32, 10), drawn.y, 0.0001);
 }

@@ -23,11 +23,13 @@
 //! the cell into the sprite; nothing in this file touches `Sprite.region`
 //! after the creature is spawned.
 //!
-//! **A `Parent` is how one thing rides on another.** Each creature is four
-//! entities - a body, two eyes and a shadow - and only the body is ever
-//! moved. The eyes turn with it because they inherit its rotation; the shadow
-//! does not, because a shadow on the ground does not tip over when the thing
-//! above it leans.
+//! **A transform's `parent` is how one thing rides on another.** Each creature
+//! is five entities - a body, two eyes, a shadow and a name - and only the
+//! body is ever moved. The eyes turn with it because they inherit its
+//! rotation; the shadow and the name do not, because neither should tip over
+//! when the thing they belong to leans. A child's own numbers stay in its
+//! parent's space, so `-4` above the eyes means four above the body wherever
+//! the body has got to.
 //!
 //! **A `Text2D` carries its own words.** The name over each creature is a
 //! child entity like an eye is, and the line in the corner is a child of the
@@ -48,8 +50,6 @@ const fx = @import("fluxion_engine");
 const Transform2D = fx.Transform2D;
 const Sprite = fx.Sprite;
 const Camera2D = fx.Camera2D;
-const Previous2D = fx.Previous2D;
-const Parent = fx.Parent;
 const Animation = fx.Animation;
 const Text2D = fx.Text2D;
 const Color = fx.Color;
@@ -186,12 +186,11 @@ fn spawn(app: *App) !void {
     // this one. Naming it directly is what a scene file would do.
     const camera = (try fx.Query(.{ Transform2D, Camera2D }).first(world)).?.entities[0];
     _ = try world.spawnWith(.{
-        Transform2D{},
+        // Where in the camera's space it goes is worked out every frame by
+        // `pinHeading`; this only says whose corner it is.
+        Transform2D{ .parent = camera, .inherit_rotation = false },
         heading,
         Heading{},
-        // Where it goes is worked out every frame by `pinHeading`; this only
-        // says whose corner it is.
-        Parent{ .entity = camera, .inherit_rotation = false },
     });
 
     // The ground, as one big untextured rectangle behind everything. A sprite
@@ -218,10 +217,11 @@ fn spawn(app: *App) !void {
             .oklch(0.7, 0.13, rand.float(f32) * 360);
 
         const body = try world.spawnWith(.{
+            // Moved in the fixed stage, so it asks to be drawn between steps.
             Transform2D.at(
                 40 + rand.float(f32) * (field_width - 80),
                 40 + rand.float(f32) * (field_height - 80),
-            ),
+            ).interpolated(),
             Sprite{
                 .texture = sheet,
                 .tint = tint,
@@ -244,8 +244,6 @@ fn spawn(app: *App) !void {
                 .dy = @sin(angle),
                 .phase = rand.float(f32) * std.math.tau,
             },
-            // It moves in the fixed stage, so it is drawn between steps.
-            Previous2D{},
         });
 
         if (is_player) {
@@ -254,7 +252,7 @@ fn spawn(app: *App) !void {
             // A ring round the one being driven, so it can be found in a
             // crowd. Parented, so it never has to be moved.
             _ = try world.spawnWith(.{
-                Transform2D{},
+                Transform2D{ .parent = body, .inherit_rotation = false },
                 Sprite{
                     .texture = sheet,
                     .region = .cell(cell.ring, atlas_columns, atlas_rows),
@@ -263,14 +261,13 @@ fn spawn(app: *App) !void {
                     .height = 46,
                     .layer = -1,
                 },
-                Parent{ .entity = body, .local = .{}, .inherit_rotation = false },
             });
         }
 
         // The shadow does not inherit the body's rotation: a shadow on the
         // ground stays flat however much the thing above it leans.
         _ = try world.spawnWith(.{
-            Transform2D{},
+            Transform2D{ .x = 0, .y = 15, .parent = body, .inherit_rotation = false },
             Sprite{
                 .texture = sheet,
                 .region = .cell(cell.shadow, atlas_columns, atlas_rows),
@@ -279,17 +276,12 @@ fn spawn(app: *App) !void {
                 .height = 12,
                 .layer = -2,
             },
-            Parent{
-                .entity = body,
-                .local = .at(0, 15),
-                .inherit_rotation = false,
-            },
         });
 
         // Two eyes, which do turn with it - that is the whole point of them.
         for ([_]f32{ -7, 7 }) |offset| {
             _ = try world.spawnWith(.{
-                Transform2D{},
+                Transform2D.childOf(body, offset, -4),
                 Sprite{
                     .texture = sheet,
                     .region = .cell(cell.eye, atlas_columns, atlas_rows),
@@ -298,7 +290,6 @@ fn spawn(app: *App) !void {
                     .height = 9,
                     .layer = 1,
                 },
-                Parent{ .entity = body, .local = .at(offset, -4) },
             });
         }
 
@@ -313,13 +304,8 @@ fn spawn(app: *App) !void {
         plate.layer = 2;
 
         _ = try world.spawnWith(.{
-            Transform2D{},
+            Transform2D{ .x = 0, .y = -32, .parent = body, .inherit_rotation = false },
             plate,
-            Parent{
-                .entity = body,
-                .local = .at(0, -32),
-                .inherit_rotation = false,
-            },
         });
     }
 }
@@ -403,7 +389,7 @@ fn drive(app: *App) !void {
     }
 }
 
-const Headings = fx.Query(.{ Text2D, Heading, Parent });
+const Headings = fx.Query(.{ Text2D, Heading, Transform2D });
 
 /// Write what is going on into the pinned label, and hold it in the corner.
 ///
@@ -429,22 +415,21 @@ fn pinHeading(app: *App) !void {
 
     var it = try Headings.over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(Text2D), chunk.slice(Heading), chunk.slice(Parent)) |*label, pinned, *link| {
+        for (chunk.slice(Text2D), chunk.slice(Heading), chunk.slice(Transform2D)) |*label, pinned, *place| {
             label.print("{d} creatures  {d} fps", .{
                 herd,
                 @as(u32, @intFromFloat(app.time.fps())),
             });
 
-            // The top left corner of the view, in the camera's own space,
-            // and a scale that undoes the zoom so the letters are the size
-            // they say they are in pixels.
+            // The top left corner of the view, in the camera's own space -
+            // which is what this transform is in, because the camera is its
+            // parent - and a scale that undoes the zoom, so the letters are
+            // the size they say they are in pixels.
             const inset = pinned.margin / zoom;
-            link.local = .{
-                .x = -half_width + inset,
-                .y = -half_height + inset,
-                .scale_x = 1 / zoom,
-                .scale_y = 1 / zoom,
-            };
+            place.x = -half_width + inset;
+            place.y = -half_height + inset;
+            place.scale_x = 1 / zoom;
+            place.scale_y = 1 / zoom;
         }
     }
 }

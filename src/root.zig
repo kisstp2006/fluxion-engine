@@ -67,6 +67,10 @@ pub const components = @import("components.zig");
 pub const color = @import("color.zig");
 pub const schedule = @import("schedule.zig");
 
+/// Where a thing really is, once its parent has had its say. See
+/// `hierarchy`.
+pub const hierarchy = @import("hierarchy.zig");
+
 pub const render = struct {
     pub const sprite = @import("render/sprite.zig");
 };
@@ -90,9 +94,6 @@ pub const Text2D = components.Text2D;
 
 /// What a `Text2D` is drawn in. See `assets`.
 pub const FontHandle = assets.FontHandle;
-
-/// Attaches one entity's transform to another's. See `components`.
-pub const Parent = components.Parent;
 
 /// A sprite that walks through the cells of its own texture. See
 /// `components`.
@@ -157,6 +158,7 @@ test {
     _ = components;
     _ = color;
     _ = schedule;
+    _ = hierarchy;
     _ = render.sprite;
     _ = text.Atlas;
 }

@@ -25,9 +25,9 @@
 //! **Movement is in `.fixed` and the camera is in `.late`.** The ball moves
 //! at a constant step so it bounces the same way on a fast machine and a slow
 //! one, and the camera runs after everything has moved so it never lags a
-//! frame behind what it is looking at. The ball and the paddles carry a
-//! `Previous2D`, so on a screen faster than sixty hertz they are drawn
-//! between steps rather than jumping from one to the next.
+//! frame behind what it is looking at. The ball and the paddles are
+//! `interpolated`, so on a screen faster than sixty hertz they are drawn
+//! between their last two steps rather than jumping from one to the next.
 //!
 //! **The play field is a fixed size and the window is not.** The camera zooms
 //! to fit `field_width` by `field_height` into whatever the window is, so
@@ -44,7 +44,6 @@ const fx = @import("fluxion_engine");
 const Transform2D = fx.Transform2D;
 const Sprite = fx.Sprite;
 const Camera2D = fx.Camera2D;
-const Previous2D = fx.Previous2D;
 const Color = fx.Color;
 const App = fx.App;
 
@@ -177,29 +176,26 @@ fn spawn(app: *App) !void {
     }
 
     _ = try world.spawnWith(.{
-        Transform2D.at(paddle_inset, field_height / 2),
+        Transform2D.at(paddle_inset, field_height / 2).interpolated(),
         Sprite{ .tint = theme.left, .width = paddle_width, .height = paddle_height },
         Velocity{},
         Paddle.bind(.w, .s),
         Bounds{ .half_width = paddle_width / 2, .half_height = paddle_height / 2 },
-        Previous2D{},
     });
 
     _ = try world.spawnWith(.{
-        Transform2D.at(field_width - paddle_inset, field_height / 2),
+        Transform2D.at(field_width - paddle_inset, field_height / 2).interpolated(),
         Sprite{ .tint = theme.right, .width = paddle_width, .height = paddle_height },
         Velocity{},
         Paddle.bind(.up, .down),
         Bounds{ .half_width = paddle_width / 2, .half_height = paddle_height / 2 },
-        Previous2D{},
     });
 
     _ = try world.spawnWith(.{
-        Transform2D.at(field_width / 2, field_height / 2),
+        Transform2D.at(field_width / 2, field_height / 2).interpolated(),
         Sprite{ .tint = theme.ink, .width = ball_size, .height = ball_size, .layer = 10 },
         Velocity{},
         Ball{},
-        Previous2D{},
     });
 
     _ = try world.spawnWith(.{Score{}});
@@ -403,7 +399,7 @@ fn resetBall(app: *App, towards: f32) !void {
     var it = try Balls.over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.slice(Transform2D), chunk.slice(Velocity), chunk.slice(Ball)) |*place, *speed, *ball| {
-            place.* = .at(field_width / 2, field_height / 2);
+            place.* = Transform2D.at(field_width / 2, field_height / 2).interpolated();
             speed.* = .{};
             ball.* = .{ .towards = if (towards == 0) ball.towards else towards };
         }
@@ -437,7 +433,7 @@ fn fitCamera(app: *App) !void {
     var it = try fx.Query(.{ Transform2D, Camera2D }).over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.slice(Transform2D), chunk.slice(Camera2D)) |*place, *camera| {
-            place.* = .at(field_width / 2, field_height / 2);
+            place.* = Transform2D.at(field_width / 2, field_height / 2).interpolated();
             camera.zoom = zoom;
         }
     }
