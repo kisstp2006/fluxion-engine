@@ -71,44 +71,7 @@ pub const Error = rhi.Error || Allocator.Error || error{ShaderFailed};
 
 /// The shader, in the one language that becomes both.
 ///
-/// Writing it here instead of as GLSL beside HLSL is the whole reason
-/// [Fluxion Shader](https://github.com/kisstp2006/fluxion-shader) exists: the
-/// two would drift, and the drift would show up as one backend drawing
-/// correctly and the other not, which is the most expensive kind of bug this
-/// stack can have.
-const source =
-    \\attribute vec2 corner : 0;
-    \\attribute vec4 placement : 1;
-    \\attribute vec4 spin : 2;
-    \\attribute vec4 tint : 3;
-    \\attribute vec4 uv_rect : 4;
-    \\
-    \\varying vec2 uv;
-    \\varying vec4 shade;
-    \\
-    \\uniform Frame : 0 {
-    \\    mat4 view_projection;
-    \\}
-    \\
-    \\texture2d atlas : 0;
-    \\
-    \\vertex {
-    \\    // `corner` is a unit square. Take the pivot off it, scale it to the
-    \\    // sprite's size, turn it, and put it where the sprite is.
-    \\    vec2 local = (corner - spin.xy) * placement.zw;
-    \\    vec2 turned = vec2(
-    \\        local.x * spin.z - local.y * spin.w,
-    \\        local.x * spin.w + local.y * spin.z
-    \\    );
-    \\    uv = mix(uv_rect.xy, uv_rect.zw, corner);
-    \\    shade = tint;
-    \\    position = view_projection * vec4(placement.xy + turned, 0.0, 1.0);
-    \\}
-    \\
-    \\fragment {
-    \\    target = sample(atlas, uv) * shade;
-    \\}
-;
+const source = @embedFile("shaders/sprite.fxs");
 
 /// Which vertex buffer each attribute is read from.
 ///
