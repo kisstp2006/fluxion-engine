@@ -25,7 +25,9 @@
 //! **Movement is in `.fixed` and the camera is in `.late`.** The ball moves
 //! at a constant step so it bounces the same way on a fast machine and a slow
 //! one, and the camera runs after everything has moved so it never lags a
-//! frame behind what it is looking at.
+//! frame behind what it is looking at. The ball and the paddles carry a
+//! `Previous2D`, so on a screen faster than sixty hertz they are drawn
+//! between steps rather than jumping from one to the next.
 //!
 //! **The play field is a fixed size and the window is not.** The camera zooms
 //! to fit `field_width` by `field_height` into whatever the window is, so
@@ -42,6 +44,7 @@ const fx = @import("fluxion_engine");
 const Transform2D = fx.Transform2D;
 const Sprite = fx.Sprite;
 const Camera2D = fx.Camera2D;
+const Previous2D = fx.Previous2D;
 const Color = fx.Color;
 const App = fx.App;
 
@@ -179,6 +182,7 @@ fn spawn(app: *App) !void {
         Velocity{},
         Paddle.bind(.w, .s),
         Bounds{ .half_width = paddle_width / 2, .half_height = paddle_height / 2 },
+        Previous2D{},
     });
 
     _ = try world.spawnWith(.{
@@ -187,6 +191,7 @@ fn spawn(app: *App) !void {
         Velocity{},
         Paddle.bind(.up, .down),
         Bounds{ .half_width = paddle_width / 2, .half_height = paddle_height / 2 },
+        Previous2D{},
     });
 
     _ = try world.spawnWith(.{
@@ -194,6 +199,7 @@ fn spawn(app: *App) !void {
         Sprite{ .tint = theme.ink, .width = ball_size, .height = ball_size, .layer = 10 },
         Velocity{},
         Ball{},
+        Previous2D{},
     });
 
     _ = try world.spawnWith(.{Score{}});

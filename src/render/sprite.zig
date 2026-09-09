@@ -10,9 +10,16 @@
 //! **One quad, and a buffer of where it goes.** The vertex buffer holds four
 //! corners of a unit square and never changes. Everything that makes one
 //! sprite different from another - where it is, how big, which way round,
-//! what colour, which part of which texture - is forty-eight bytes in a
+//! what colour, which part of which texture - is sixty-four bytes in a
 //! second buffer that steps once per instance. A thousand sprites is a
-//! thousand of those and one `draw`.
+//! thousand of those, one upload, and one `draw`.
+//!
+//! **The upload is one call**, not one per sprite. The sorted sprites are
+//! laid out in a staging array and the whole thing goes to the GPU at once.
+//! A call per sprite looks the same on a diagram and is not: on Direct3D 11
+//! a dynamic buffer is mapped with `WRITE_DISCARD`, which hands back memory
+//! with nothing in it, so every update has to re-send the *whole* buffer -
+//! a thousand sprites would be a thousand maps of sixty-four kilobytes each.
 //!
 //! **The rotation is worked out on the processor, not in the shader.** A
 //! sine and a cosine per sprite on the CPU, against a sine and a cosine per
@@ -47,9 +54,14 @@ const components = @import("../components.zig");
 const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
 const Camera2D = components.Camera2D;
+const Previous2D = components.Previous2D;
 const Color = components.Color;
 
 /// Everything with a place and a picture. The one query this layer runs.
+///
+/// Walked by hand rather than through `Query.over`, because a third
+/// component - `Previous2D` - is read when an archetype has it and skipped
+/// when it does not, and a query can only ask for what every row must have.
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
 
 /// Everything that can be looked through.
@@ -146,12 +158,26 @@ const Item = struct {
     /// and, inside a layer, gathers each texture into one run - so the number
     /// of draw calls is the number of textures, not the number of sprites.
     key: u64,
+    /// `Sprite.order`, between the layer and the texture: it decides the
+    /// order inside a layer and the texture only breaks its ties.
+    order: f32,
+    /// Where in the walk this sprite was found. The last tie-breaker, and
+    /// what makes the order of two otherwise equal sprites the same from one
+    /// frame to the next - the sort is not a stable one, and without this a
+    /// pair of overlapping sprites could swap whenever the world changed
+    /// shape.
+    sequence: u32,
     instance: Instance,
     texture: rhi.Texture,
     sampler: rhi.Sampler,
 
     fn before(_: void, a: Item, b: Item) bool {
-        return a.key < b.key;
+        const layer_a = a.key >> 32;
+        const layer_b = b.key >> 32;
+        if (layer_a != layer_b) return layer_a < layer_b;
+        if (a.order != b.order) return a.order < b.order;
+        if (a.key != b.key) return a.key < b.key;
+        return a.sequence < b.sequence;
     }
 };
 
@@ -177,6 +203,10 @@ pub const Renderer = struct {
     /// This frame's sprites, gathered and sorted. Kept between frames so a
     /// settled game stops allocating for it.
     items: std.ArrayList(Item) = .empty,
+
+    /// The sorted instances, contiguous, as the GPU reads them. Filled from
+    /// `items` after the sort and uploaded in one call.
+    staging: std.ArrayList(Instance) = .empty,
 
     /// How many draw calls the last frame took. Worth watching: it is the
     /// number of textures in use, and a game whose sprites all come from one
@@ -277,6 +307,7 @@ pub const Renderer = struct {
 
     pub fn deinit(self: *Renderer, gpa: Allocator) void {
         self.items.deinit(gpa);
+        self.staging.deinit(gpa);
         self.module.deinit();
         self.device.destroyBuffer(self.quad);
         self.device.destroyBuffer(self.instances);
@@ -292,6 +323,9 @@ pub const Renderer = struct {
     /// the frame today; when there is a 3D layer under it, this becomes null
     /// and the 3D pass does the clearing. That is the whole of what layering
     /// costs, which is the point of doing it this way round.
+    ///
+    /// `alpha` is how far the frame sits between the last two fixed steps,
+    /// from `Time.alpha`, and only a sprite with a `Previous2D` uses it.
     pub fn draw(
         self: *Renderer,
         gpa: Allocator,
@@ -301,8 +335,9 @@ pub const Renderer = struct {
         width: f32,
         height: f32,
         clear: ?Color,
+        alpha: f32,
     ) !void {
-        try self.gather(gpa, world, assets);
+        try self.gather(gpa, world, assets, alpha);
 
         const view_projection = self.viewProjection(world, width, height);
         try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&Frame{
@@ -312,17 +347,13 @@ pub const Renderer = struct {
         if (self.items.items.len > 0) {
             try self.reserve(@intCast(self.items.items.len));
             // The instances are interleaved with their sort keys in `items`,
-            // so they cannot go to the GPU as one slice. They are copied into
-            // the mapped buffer one at a time instead, which is a write of
-            // sixty-four bytes per sprite either way - the copy is the upload,
-            // not an extra one.
-            for (self.items.items, 0..) |item, i| {
-                try self.device.updateBuffer(
-                    self.instances,
-                    i * @sizeOf(Instance),
-                    std.mem.asBytes(&item.instance),
-                );
-            }
+            // so they are laid out contiguously first and go to the GPU as
+            // one slice in one call. See the module comment for why one call
+            // per sprite is not the same thing.
+            self.staging.clearRetainingCapacity();
+            try self.staging.ensureTotalCapacity(gpa, self.items.items.len);
+            for (self.items.items) |item| self.staging.appendAssumeCapacity(item.instance);
+            try self.device.updateBuffer(self.instances, 0, std.mem.sliceAsBytes(self.staging.items));
         }
 
         const list = self.device.begin();
@@ -367,19 +398,38 @@ pub const Renderer = struct {
     }
 
     /// Walk the world and turn every visible sprite into an instance.
-    fn gather(self: *Renderer, gpa: Allocator, world: *ecs.World, assets: *Assets) !void {
+    fn gather(self: *Renderer, gpa: Allocator, world: *ecs.World, assets: *Assets, alpha: f32) !void {
         self.items.clearRetainingCapacity();
 
-        var it = try Drawable.over(world);
-        while (it.next()) |chunk| {
+        const transform_id = try world.idOf(Transform2D);
+        const sprite_id = try world.idOf(Sprite);
+        const previous_id = try world.idOf(Previous2D);
+        const wanted = [_]ecs.component.Id{ transform_id, sprite_id };
+
+        var sequence: u32 = 0;
+
+        for (world.archetypeSlice()) |*archetype| {
+            if (archetype.len() == 0) continue;
+            if (!archetype.signature().containsAll(&wanted)) continue;
+
             // Two plain slices over one archetype's rows, which is what the
             // whole archetype layout is for: no indirection per entity, and a
             // loop the compiler can see all the way through.
-            const transforms = chunk.slice(Transform2D);
-            const sprites = chunk.slice(Sprite);
+            const rows = archetype.len();
+            const transforms = column(Transform2D, archetype, transform_id, rows);
+            const sprites = column(Sprite, archetype, sprite_id, rows);
 
-            for (transforms, sprites) |transform, sprite| {
+            // The third slice is there or it is not, per archetype rather
+            // than per sprite, so the loop below asks once.
+            const previous: ?[]const Previous2D = if (archetype.columnOf(previous_id) != null)
+                column(Previous2D, archetype, previous_id, rows)
+            else
+                null;
+
+            for (transforms, sprites, 0..) |stepped, sprite, row| {
                 if (!sprite.visible or sprite.tint.a <= 0) continue;
+
+                const transform = if (previous) |p| p[row].blend(stepped, alpha) else stepped;
 
                 // A handle that no longer resolves draws as the white texel
                 // rather than not at all. A missing texture that shows up as
@@ -392,8 +442,11 @@ pub const Renderer = struct {
                 const c = @cos(transform.rotation);
                 const s = @sin(transform.rotation);
 
+                defer sequence += 1;
                 try self.items.append(gpa, .{
                     .key = sortKey(sprite.layer, sprite.texture),
+                    .order = sprite.order,
+                    .sequence = sequence,
                     .texture = texture.gpu,
                     .sampler = assets.samplerFor(texture.filter),
                     .instance = .{
@@ -419,6 +472,13 @@ pub const Renderer = struct {
         std.sort.pdq(Item, self.items.items, {}, Item.before);
     }
 
+    /// One component's values for one archetype, as a slice. What
+    /// `Query.Chunk.slice` does, for a walk that is not a query.
+    fn column(comptime T: type, archetype: *ecs.Archetype, id: ecs.component.Id, rows: usize) []T {
+        const typed: [*]T = @ptrCast(@alignCast(archetype.columnOf(id).?.bytes.ptr));
+        return typed[0..rows];
+    }
+
     /// What the camera sees, as one matrix.
     ///
     /// With no camera in the world the view is the window itself: the origin
@@ -441,9 +501,13 @@ pub const Renderer = struct {
         // camera sees half as much - so the extents are divided by it and not
         // multiplied. Getting this the wrong way round is the traditional
         // mistake and looks right until somebody zooms.
-        const zoom = if (camera.zoom > 0) camera.zoom else 1;
-        const half_width = width / (2 * zoom);
-        const half_height = height / (2 * zoom);
+        //
+        // One zoom per axis, because the camera's transform may be scaled
+        // unevenly and a single number could only honour one of the two.
+        const zoom_x = if (camera.zoom_x > 0) camera.zoom_x else 1;
+        const zoom_y = if (camera.zoom_y > 0) camera.zoom_y else 1;
+        const half_width = width / (2 * zoom_x);
+        const half_height = height / (2 * zoom_y);
 
         const projection = math.orthographic(.{
             .left = -half_width,
@@ -486,7 +550,8 @@ pub const Renderer = struct {
 const CameraView = struct {
     x: f32,
     y: f32,
-    zoom: f32,
+    zoom_x: f32,
+    zoom_y: f32,
     rotation: f32,
 };
 
@@ -508,8 +573,9 @@ fn bestCamera(world: *ecs.World) ?CameraView {
                 .y = transform.y,
                 // The camera's own transform may be scaled - a camera parented
                 // to something that grows - and that multiplies the zoom
-                // rather than fighting it.
-                .zoom = camera.zoom * transform.scale_x,
+                // rather than fighting it, on each axis separately.
+                .zoom_x = camera.zoom * transform.scale_x,
+                .zoom_y = camera.zoom * transform.scale_y,
                 .rotation = camera.rotation + transform.rotation,
             };
         }
@@ -551,6 +617,35 @@ test "sprites of one layer are grouped by texture" {
     try testing.expect(sortKey(0, first) < sortKey(0, second));
     // ... but the layer still wins over the texture.
     try testing.expect(sortKey(0, second) < sortKey(1, first));
+}
+
+test "within a layer, order comes before texture and sequence breaks the tie" {
+    const first: Assets.TextureHandle = .{ .index = 1, .generation = 1 };
+    const second: Assets.TextureHandle = .{ .index = 2, .generation = 1 };
+    const blank: Instance = .{ .placement = @splat(0), .spin = @splat(0), .tint = @splat(0), .uv_rect = @splat(0) };
+
+    const item = struct {
+        fn make(layer: i16, order: f32, texture: Assets.TextureHandle, sequence: u32) Item {
+            return .{
+                .key = sortKey(layer, texture),
+                .order = order,
+                .sequence = sequence,
+                .instance = blank,
+                .texture = .none,
+                .sampler = .none,
+            };
+        }
+    };
+
+    // A lower order draws first even on a later texture.
+    try testing.expect(Item.before({}, item.make(0, 1, second, 0), item.make(0, 2, first, 1)));
+    // The same order falls back to the texture, which keeps the batching.
+    try testing.expect(Item.before({}, item.make(0, 0, first, 5), item.make(0, 0, second, 0)));
+    // Everything equal: whichever was found first.
+    try testing.expect(Item.before({}, item.make(0, 0, first, 3), item.make(0, 0, first, 4)));
+    try testing.expect(!Item.before({}, item.make(0, 0, first, 4), item.make(0, 0, first, 3)));
+    // And the layer still wins over all of it.
+    try testing.expect(Item.before({}, item.make(-1, 100, second, 9), item.make(0, 0, first, 0)));
 }
 
 test "a sprite with no size of its own takes the texture's" {

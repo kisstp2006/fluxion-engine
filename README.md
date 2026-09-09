@@ -104,9 +104,22 @@ _ = try world.spawnWith(.{
 ```
 
 - **Sorted back to front, blended, with no depth test.** A depth buffer and
-  half-transparent pixels disagree about what is behind what. The sort key is
-  the layer in its high bits and the texture in its low ones, so sprites of
-  one layer sharing a texture come out as one run and therefore one call.
+  half-transparent pixels disagree about what is behind what. The sort is by
+  `layer`, then `order`, then texture, then the order the sprites were found
+  in - so sprites of one layer sharing a texture come out as one run and
+  therefore one call, and two overlapping sprites that tie on everything are
+  drawn the same way round every frame.
+- **`Sprite.order` is the sort inside a layer.** Zero by default, which keeps
+  the texture grouping. A top-down game writes `transform.y` into it from a
+  `.late` system and gets things sorted by their feet.
+- **Add a `Previous2D` to anything moved in `.fixed`** and it is drawn between
+  its last two steps, at `Time.alpha`. The engine fills it in before every
+  fixed step; the game's own systems never touch it. Without it, a sixty-hertz
+  step on a hundred-and-forty-four-hertz screen shows every step twice and
+  some three times.
+- **The whole instance buffer goes up in one call.** Not one per sprite: on
+  Direct3D 11 a dynamic buffer is re-sent whole on every map, so a call per
+  sprite is quadratic in the number of sprites.
 - **A sprite with no texture is a rectangle of solid colour**, because the
   renderer falls back to a one-texel white texture and the tint does the rest.
   One pipeline, no branch in the shader, no artwork for a health bar.
@@ -190,8 +203,9 @@ Here, and checked by the tests:
 - Keyboard and mouse as levels and edges, with typing kept in order.
 - Textures loaded from PNG, handed out as generational handles, and a white
   texel for everything untextured.
-- The 2D pass: transforms, regions, tints, pivots, layers, visibility, and a
-  camera with zoom and rotation.
+- The 2D pass: transforms, regions, tints, pivots, layers, order within a
+  layer, visibility, interpolation between fixed steps, and a camera with
+  zoom and rotation.
 - Headless everything, and `capture` for a picture without a screen.
 
 Not here, in the order it is likely to arrive:

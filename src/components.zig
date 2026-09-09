@@ -2,7 +2,7 @@
 
 //! The components the engine itself knows about.
 //!
-//! There are four, and the list is deliberately short. A game invents its own
+//! There are five, and the list is deliberately short. A game invents its own
 //! - `Health`, `Wave`, `PatrolRoute` - and the engine never sees them; these
 //! are only the ones the renderer reads, because something has to agree on
 //! where a thing is before it can be drawn there.
@@ -171,16 +171,28 @@ pub const Sprite = extern struct {
 
     /// What is drawn on top of what. Higher is nearer the viewer.
     ///
-    /// Within one layer the order is the order the archetypes happen to be
-    /// in, which is not an order to depend on. Between layers it is this
-    /// number, and it is a sort key rather than a depth value: the 2D pass
-    /// blends back to front with no depth test, because half-transparent
-    /// pixels and a depth buffer disagree about what is behind them.
+    /// Between layers it is this number, and it is a sort key rather than a
+    /// depth value: the 2D pass blends back to front with no depth test,
+    /// because half-transparent pixels and a depth buffer disagree about what
+    /// is behind them. Within one layer, see `order`.
     layer: i16 = 0,
 
     /// Skipped entirely when false. Cheaper than removing the component and
     /// adding it back, which moves the entity between two archetypes twice.
     visible: bool = true,
+
+    /// Where a sprite sits *within* its layer. Lower is drawn first.
+    ///
+    /// Zero for everything, by default, and then sprites of one layer are
+    /// grouped by texture so each texture is one draw call. Setting it is how
+    /// a top-down game sorts by feet: a system in `.late` copying
+    /// `transform.y` in here makes a thing lower on the screen draw over a
+    /// thing higher up. That costs the grouping, which is the trade a
+    /// y-sorted layer always makes.
+    ///
+    /// Two sprites with the same layer, order and texture are drawn in the
+    /// order they were found, which is stable from one frame to the next.
+    order: f32 = 0,
 
     /// A sprite showing the whole of a texture at its own size.
     pub fn of(texture: assets.TextureHandle) Sprite {
@@ -190,6 +202,68 @@ pub const Sprite = extern struct {
     /// A rectangle of solid colour, with no texture at all.
     pub fn solid(color: Color, width: f32, height: f32) Sprite {
         return .{ .tint = color, .width = width, .height = height };
+    }
+};
+
+/// Where a thing *was* before the last fixed step, for drawing it smoothly.
+///
+/// ```zig
+/// _ = try world.spawnWith(.{ Transform2D.at(0, 0), Sprite.of(hero), Previous2D{} });
+/// ```
+///
+/// A body moved in the `.fixed` stage jumps sixty times a second, and a
+/// screen that refreshes a hundred and forty-four times a second shows every
+/// jump twice and some three times, which is the stutter that makes a
+/// fixed-step game look worse than the loop it runs on. The cure is to draw
+/// each frame somewhere *between* the last two steps, at `Time.alpha`.
+///
+/// Add this component to anything that moves in `.fixed` and wants to be
+/// drawn between steps. The engine fills it in: before every fixed step it
+/// copies the entity's `Transform2D` here, and the renderer blends the two by
+/// `alpha`. Nothing about the game's own systems changes - they keep writing
+/// the `Transform2D` and never look at this one.
+///
+/// Leave it off anything moved in `.update`, which already moves once a
+/// frame and would only be drawn a frame late.
+pub const Previous2D = extern struct {
+    x: f32 = 0,
+    y: f32 = 0,
+    rotation: f32 = 0,
+    scale_x: f32 = 1,
+    scale_y: f32 = 1,
+
+    /// False until the engine has taken the first snapshot, so a thing spawned
+    /// this frame is drawn where it is rather than slid in from the origin.
+    valid: bool = false,
+
+    /// Take a copy of where a thing is now. What the engine does before each
+    /// fixed step, and what a game does itself when it teleports something
+    /// and does not want the renderer to draw the journey.
+    pub fn snapshot(self: *Previous2D, now: Transform2D) void {
+        self.* = .{
+            .x = now.x,
+            .y = now.y,
+            .rotation = now.rotation,
+            .scale_x = now.scale_x,
+            .scale_y = now.scale_y,
+            .valid = true,
+        };
+    }
+
+    /// Somewhere between here and `now`, at `t` from zero to one.
+    ///
+    /// The rotation is blended as a plain number, so a thing that turns more
+    /// than half a circle in one step is drawn going the long way round.
+    /// Nothing moving at sixty steps a second turns that fast.
+    pub fn blend(self: Previous2D, now: Transform2D, t: f32) Transform2D {
+        if (!self.valid) return now;
+        return .{
+            .x = std.math.lerp(self.x, now.x, t),
+            .y = std.math.lerp(self.y, now.y, t),
+            .rotation = std.math.lerp(self.rotation, now.rotation, t),
+            .scale_x = std.math.lerp(self.scale_x, now.scale_x, t),
+            .scale_y = std.math.lerp(self.scale_y, now.scale_y, t),
+        };
     }
 };
 
@@ -258,4 +332,21 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Transform2D);
     ecs.component.check(Sprite);
     ecs.component.check(Camera2D);
+    ecs.component.check(Previous2D);
+}
+
+test "a fresh snapshot is not blended from" {
+    const now: Transform2D = .at(10, 20);
+    const previous: Previous2D = .{};
+    const drawn = previous.blend(now, 0.5);
+    try testing.expectEqual(@as(f32, 10), drawn.x);
+    try testing.expectEqual(@as(f32, 20), drawn.y);
+}
+
+test "a snapshot is blended halfway at half an alpha" {
+    var previous: Previous2D = .{};
+    previous.snapshot(.at(0, 0));
+    const drawn = previous.blend(.at(10, 20), 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 5), drawn.x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 10), drawn.y, 0.0001);
 }

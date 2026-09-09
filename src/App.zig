@@ -366,6 +366,9 @@ pub fn step(self: *App) anyerror!bool {
     // instead of as the loop never finishing. See `Time.max_fixed_steps`.
     self.time.dropBacklog();
     while (self.time.takeFixedStep()) |_| {
+        // Where everything was before this step, for drawing the frame
+        // somewhere between this step and the last. See `Previous2D`.
+        try self.snapshotPrevious();
         try self.schedule.run(.fixed, self);
     }
 
@@ -395,6 +398,18 @@ pub fn stop(self: *App) anyerror!void {
 pub fn quit(self: *App) void {
     self.running = false;
     if (self.window) |*w| w.requestClose();
+}
+
+/// Copy every `Transform2D` that has a `Previous2D` beside it into that
+/// `Previous2D`. Called before each fixed step, so that after the step the
+/// pair is "where it was" and "where it is".
+fn snapshotPrevious(self: *App) !void {
+    var it = try ecs.Query(.{ components.Transform2D, components.Previous2D }).over(&self.world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(components.Transform2D), chunk.slice(components.Previous2D)) |now, *previous| {
+            previous.snapshot(now);
+        }
+    }
 }
 
 /// What this frame is drawn into.
@@ -428,6 +443,7 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
         width,
         height,
         self.background,
+        self.time.alpha(),
     );
 
     // 3. The interface layer, over everything, in screen coordinates. See
@@ -552,4 +568,46 @@ test "a fixed step runs as many times as the frame is worth" {
     try app.run();
 
     try testing.expectEqual(@as(u32, 20), counter.steps);
+}
+
+fn spawnInterpolated(app: *App) anyerror!void {
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(0, 0),
+        components.Sprite.solid(.hex(0xFF0000), 8, 8),
+        components.Previous2D{},
+    });
+}
+
+fn slideRight(app: *App) anyerror!void {
+    var it = try ecs.Query(.{components.Transform2D}).over(&app.world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(components.Transform2D)) |*t| t.x += 10;
+    }
+}
+
+test "a previous transform is taken before each fixed step" {
+    // A frame is worth one and a half fixed steps: one step runs, and half
+    // a step is left over for the renderer to blend by.
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 1,
+        .fixed_delta = 0.01,
+    });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 0.015 };
+
+    try app.addSystem(.startup, spawnInterpolated);
+    try app.addSystem(.fixed, slideRight);
+    try app.run();
+
+    var it = try ecs.Query(.{ components.Transform2D, components.Previous2D }).over(&app.world);
+    const chunk = it.next().?;
+    const now = chunk.slice(components.Transform2D)[0];
+    const previous = chunk.slice(components.Previous2D)[0];
+
+    try testing.expect(previous.valid);
+    try testing.expectEqual(@as(f32, 0), previous.x);
+    try testing.expectEqual(@as(f32, 10), now.x);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), app.time.alpha(), 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 5), previous.blend(now, app.time.alpha()).x, 0.01);
 }

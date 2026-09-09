@@ -83,6 +83,10 @@ pub const Region = components.Region;
 /// What the 2D pass looks through. See `components`.
 pub const Camera2D = components.Camera2D;
 
+/// Where a thing was before the last fixed step, so it can be drawn smoothly
+/// between steps. See `components`.
+pub const Previous2D = components.Previous2D;
+
 /// A colour, four floats from zero to one. See `color`.
 pub const Color = color.Color;
 
