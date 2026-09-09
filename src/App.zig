@@ -30,10 +30,11 @@
 //!
 //! **The layers are drawn back to front into one target.** Today that is the
 //! 3D pass, which does not exist yet, and then the 2D pass. The interface
-//! layer belongs on top of those and is not wired up - see
-//! `docs/in-game-ui.md` for what it is waiting on. Each layer is its own
-//! render pass into the same surface: the first clears, the rest load what
-//! the one before it left. Adding the third is one call in `render`.
+//! layer belongs on top of those and is not wired up, because the renderer
+//! that would draw it always clears its pass and so can only be the first
+//! thing in a target. Each layer is its own render pass into the same
+//! surface: the first clears, the rest load what the one before it left.
+//! Adding the third is one call in `render`.
 //!
 //! **It runs without a window at all.** `.headless` opens the `none` backend,
 //! which accepts every call and draws none of them, and steps a clock that
@@ -539,8 +540,9 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
         self.time.alpha(),
     );
 
-    // 3. The interface layer, over everything, in screen coordinates. See
-    //    `docs/in-game-ui.md`.
+    // 3. The interface layer, over everything, in screen coordinates. Not
+    //    here yet: it would have to load this pass rather than clear, and
+    //    the renderer that draws it has no way to be asked for that.
 }
 
 /// Draw one frame into a texture of its own and hand back the pixels.

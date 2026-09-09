@@ -44,8 +44,8 @@
 //! depth test, then 2D blended with none, then the interface on top of both.
 //! Each is its own render pass into the same surface: the first clears, the
 //! rest load what the one before left. Today the 2D pass is the only one
-//! written - see `docs/in-game-ui.md` for what the interface layer is waiting
-//! on, and the note in `App.render` for where the 3D one goes.
+//! written; `App.render` says where the other two go and what the interface
+//! one is waiting on.
 //!
 //! **The engine is what may open a window.** Every library under this one is
 //! forbidden from it - `fluxion-ui` lays out and does not draw, `fluxion-rhi`

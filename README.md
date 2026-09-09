@@ -59,9 +59,12 @@ clears and the rest load what the one before them left, which is the whole of
 what layering costs - no extra textures, no compositing pass.
 
 Today **the 2D layer is the only one written**. The 3D pass has its place in
-`App.render` and nothing in it; the interface layer is waiting on two lines in
-`fluxion-ui`, and [`docs/in-game-ui.md`](docs/in-game-ui.md) says which two and
-what else a game's interface wants that an application's does not.
+`App.render` and nothing in it. The interface layer is waiting on one argument
+in `fluxion-ui`: its renderer opens its pass with the load operation left at
+`.clear`, so it can only ever be the *first* thing in a target - draw a scene
+and then an interface, and the interface wipes the scene. A `clear: ?Color`
+that loads when it is null is the whole of the change, and a `Color` coerces to
+the optional on its own, so no existing caller reads any differently.
 
 ## The frame
 
@@ -234,22 +237,100 @@ Here, and checked by the tests:
 - Sprite animation over a sheet, looping or one-shot.
 - Headless everything, and `capture` for a picture without a screen.
 
-Not here, in the order it is likely to arrive:
+## What comes next
 
-- **The interface layer.** Two lines away in `fluxion-ui`, plus the list in
-  [`docs/in-game-ui.md`](docs/in-game-ui.md).
-- **The 3D pass.** Meshes, a depth attachment, a `Camera3D`. The place it goes
-  is marked.
+In order, and the order is an argument rather than a wish list: each of these
+either unblocks the one after it or is the thing most missed by somebody
+trying to finish a game with what is here.
+
+### 1. Text, and only drawing what can be seen
+
+Two things, together, because the second is ten lines and the first is the
+biggest hole in the engine.
+
+**A game cannot show a number.** Not a score, not a damage figure, not the
+word "Paused". `fluxion-font` reads a TrueType file and rasterises a glyph;
+what is missing between that and a frame is an atlas - each glyph drawn once
+at each size, packed into one texture, and handed to the *sprite* pass as a
+region like any other picture. Text then costs what a sprite costs, world
+space and screen space alike, which is what a damage number floating over an
+enemy needs and what an interface would have needed anyway. That atlas is the
+piece the interface layer wants too, so it is written once and used twice.
+
+**Every sprite in the world is uploaded every frame**, whether or not it is
+anywhere near the camera. `gather` already knows each sprite's box and the
+view's; rejecting the ones that do not meet is a comparison per sprite, and it
+is the difference between a renderer that costs what is *drawn* and one that
+costs what *exists*. Worth doing before there is a level big enough to notice.
+
+### 2. Things touching other things
+
+`pong` works out where its ball is with eight lines of arithmetic, which is
+the honest amount for a game that size. A bigger one needs the engine to
+answer three questions: what is at this point, what does this box overlap, and
+what does this ray hit first.
+
+That is a `Collider2D` component - a box or a circle - a uniform grid to sort
+them into so the answer is not every pair, and three functions on `App`. Not a
+physics engine: no solver, no restitution, no joints. A game that wants those
+can build them on the queries, and most 2D games only ever wanted the
+queries.
+
+### 3. Controls a player can change
+
+The keys are written into the game today - `pong` puts them in a component,
+which is better than most and still means the game knows what a key is. What
+belongs in the engine is an action map: a name, the keys and buttons and stick
+axes bound to it, and `input.action("jump")`. `fluxion-platform` already reads
+gamepads and this engine ignores them entirely, which is the other half of the
+same job.
+
+### 4. A world that survives being closed
+
+`fluxion-ecs` writes a world to bytes and reads it back, and the engine does
+not offer it. The one real problem is that a `TextureHandle` means nothing in
+the next process: saving has to write the *name* a texture was loaded from and
+loading has to resolve it again, which means the asset table has to remember
+its own paths. Everything else is two calls.
+
+### 5. Tilemaps
+
+A `Tilemap` component holding a grid of indices into one sheet, drawn in
+chunks so a level larger than the screen is a handful of instanced draws
+rather than one per tile. It wants the culling from step 1 and nothing else,
+and it is what makes the difference between demonstrations and levels.
+
+### 6. The interface layer
+
+One argument away in `fluxion-ui` - see the note under "Three layers, one
+target" - and then the things a game's interface wants that an application's
+does not: a frame-level "did the interface take this click", focus that moves
+with a d-pad, interface anchored to a point in the world, per-element state so
+a menu can animate, and pictures on elements rather than only rounded
+rectangles.
+
+### 7. The 3D pass
+
+Meshes, a depth attachment, a `Camera3D`, and the pass drawn before the 2D one
+into the same target. The place it goes is marked in `App.render`, and
+`fluxion-rhi` has had depth states, cull modes and depth attachments since
+before this package existed - the seam was cut for it deliberately.
+
+## Not on the list yet
+
+- **Audio.** There is no `fluxion-audio`, and it is a library and a set of
+  platform backends rather than an afternoon in this repository.
 - **Resources** - a typed store for state that is not a component. A singleton
-  entity is the answer today, and it saves and loads with the world for free.
-- **Audio and physics.** Neither is started. Collision in `pong` is eight
-  lines of arithmetic in the game, which is the honest amount for a game that
-  size and not a plan.
+  entity is the answer today, it saves and loads with the world for free, and
+  the case for a second mechanism has not been made.
 - **Parallel systems.** Work inside a system already goes on every core
   through `Query.each`; running two whole systems at once needs each to
-  declare what it touches, which is a change to what a system *is*.
+  declare what it touches, which is a change to what a system *is* and should
+  wait until there is a game slow enough to want it.
 - **Hot reload**, which is what [Fluxion VFS](https://github.com/kisstp2006/fluxion-vfs)
   is for and is not wired up.
+- **An editor.** A separate program, one licence tier up, and a long way
+  after all of the above.
 
 ### Two things that will catch you once
 
