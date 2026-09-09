@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
     const rhi = b.dependency("fluxion_rhi", .{ .target = target, .optimize = optimize });
     const platform = b.dependency("fluxion_platform", .{ .target = target, .optimize = optimize });
     const image = b.dependency("fluxion_image", .{ .target = target, .optimize = optimize });
+    const typeface = b.dependency("fluxion_font", .{ .target = target, .optimize = optimize });
     const shader = b.dependency("fluxion_shader", .{ .target = target, .optimize = optimize });
     const math = b.dependency("fluxion_math", .{ .target = target, .optimize = optimize });
     const id = b.dependency("fluxion_id", .{ .target = target, .optimize = optimize });
@@ -28,6 +29,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
             .{ .name = "fluxion_platform", .module = platform.module("fluxion_platform") },
             .{ .name = "fluxion_image", .module = image.module("fluxion_image") },
+            .{ .name = "fluxion_font", .module = typeface.module("fluxion_font") },
             .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
             .{ .name = "fluxion_math", .module = math.module("fluxion_math") },
             .{ .name = "fluxion_id", .module = id.module("fluxion_id") },

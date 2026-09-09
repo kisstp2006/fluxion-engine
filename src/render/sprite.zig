@@ -38,6 +38,13 @@
 //! That is also why this is a separate pass from the 3D layer that does not
 //! exist yet, rather than more geometry inside it: the 3D pass wants a depth
 //! test and this one must not have one.
+//!
+//! **What the camera cannot see is dropped before it costs anything.** A
+//! sprite outside the view is not sorted, not written into the instance
+//! buffer and not drawn - one comparison against a box, per sprite, per
+//! frame. Without it a level ten screens wide pays for all ten every frame,
+//! which is the difference between a renderer that costs what is drawn and
+//! one that costs what exists.
 
 const std = @import("std");
 const testing = std.testing;
@@ -47,6 +54,7 @@ const ecs = @import("fluxion_ecs");
 const rhi = @import("fluxion_rhi");
 const math = @import("fluxion_math");
 const shader = @import("fluxion_shader");
+const typeface = @import("fluxion_font");
 
 const Assets = @import("../assets.zig");
 const components = @import("../components.zig");
@@ -56,6 +64,7 @@ const Sprite = components.Sprite;
 const Camera2D = components.Camera2D;
 const Previous2D = components.Previous2D;
 const Color = components.Color;
+const Text2D = components.Text2D;
 
 /// Everything with a place and a picture. The one query this layer runs.
 ///
@@ -175,6 +184,12 @@ pub const Renderer = struct {
     /// number of textures in use, and a game whose sprites all come from one
     /// atlas should see one.
     draw_calls: u32 = 0,
+
+    /// How many sprites the last frame threw away for being off screen.
+    ///
+    /// Worth watching beside `drawn`: a level where this is large and `drawn`
+    /// is small is one the culling is earning its place in.
+    culled: u32 = 0,
 
     /// How many sprites the last frame drew.
     drawn: u32 = 0,
@@ -300,7 +315,13 @@ pub const Renderer = struct {
         clear: ?Color,
         alpha: f32,
     ) !void {
-        try self.gather(gpa, world, assets, alpha);
+        try self.gather(gpa, world, assets, alpha, viewBounds(world, width, height));
+
+        // Gathering the text may have rasterised a letter nobody had drawn
+        // before, which changes an atlas that the draw below is about to
+        // sample. Uploading here rather than inside the walk means one upload
+        // for a frame that saw thirty new letters, not thirty.
+        try assets.flushFonts();
 
         const view_projection = self.viewProjection(world, width, height);
         try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&Frame{
@@ -361,8 +382,16 @@ pub const Renderer = struct {
     }
 
     /// Walk the world and turn every visible sprite into an instance.
-    fn gather(self: *Renderer, gpa: Allocator, world: *ecs.World, assets: *Assets, alpha: f32) !void {
+    fn gather(
+        self: *Renderer,
+        gpa: Allocator,
+        world: *ecs.World,
+        assets: *Assets,
+        alpha: f32,
+        bounds: Bounds,
+    ) !void {
         self.items.clearRetainingCapacity();
+        self.culled = 0;
 
         const transform_id = try world.idOf(Transform2D);
         const sprite_id = try world.idOf(Sprite);
@@ -402,6 +431,17 @@ pub const Renderer = struct {
                     assets.get(assets.white) orelse continue;
 
                 const size = spriteSize(sprite, texture);
+                const drawn_width = size.width * transform.scale_x;
+                const drawn_height = size.height * transform.scale_y;
+
+                // Nowhere near the camera: not sorted, not uploaded, not
+                // drawn. This is the line that makes the renderer cost what
+                // is on screen rather than what is in the world.
+                if (!bounds.admits(transform.x, transform.y, spriteRadius(drawn_width, drawn_height))) {
+                    self.culled += 1;
+                    continue;
+                }
+
                 const c = @cos(transform.rotation);
                 const s = @sin(transform.rotation);
 
@@ -413,12 +453,7 @@ pub const Renderer = struct {
                     .texture = texture.gpu,
                     .sampler = assets.samplerFor(texture.filter),
                     .instance = .{
-                        .placement = .{
-                            transform.x,
-                            transform.y,
-                            size.width * transform.scale_x,
-                            size.height * transform.scale_y,
-                        },
+                        .placement = .{ transform.x, transform.y, drawn_width, drawn_height },
                         .spin = .{ sprite.pivot_x, sprite.pivot_y, c, s },
                         .tint = .{ sprite.tint.r, sprite.tint.g, sprite.tint.b, sprite.tint.a },
                         .uv_rect = .{
@@ -432,6 +467,8 @@ pub const Renderer = struct {
             }
         }
 
+        try self.gatherText(gpa, world, assets, alpha, bounds, &sequence);
+
         std.sort.pdq(Item, self.items.items, {}, Item.before);
     }
 
@@ -440,6 +477,203 @@ pub const Renderer = struct {
     fn column(comptime T: type, archetype: *ecs.Archetype, id: ecs.component.Id, rows: usize) []T {
         const typed: [*]T = @ptrCast(@alignCast(archetype.columnOf(id).?.bytes.ptr));
         return typed[0..rows];
+    }
+
+    /// Turn every `Text2D` into one instance per glyph.
+    ///
+    /// The glyphs go into the same list as the sprites, with the same sort
+    /// key, so a label at layer 5 is over a sprite at layer 4 and under one
+    /// at layer 6 without anything special being done about it. What breaks
+    /// the batch is the texture, and a font's atlas is one texture - so all
+    /// the text in one font, at every size, is one draw call.
+    fn gatherText(
+        self: *Renderer,
+        gpa: Allocator,
+        world: *ecs.World,
+        assets: *Assets,
+        alpha: f32,
+        bounds: Bounds,
+        sequence: *u32,
+    ) !void {
+        const transform_id = try world.idOf(Transform2D);
+        const text_id = try world.idOf(Text2D);
+        const previous_id = try world.idOf(Previous2D);
+        const wanted = [_]ecs.component.Id{ transform_id, text_id };
+
+        for (world.archetypeSlice()) |*archetype| {
+            if (archetype.len() == 0) continue;
+            if (!archetype.signature().containsAll(&wanted)) continue;
+
+            const rows = archetype.len();
+            const transforms = column(Transform2D, archetype, transform_id, rows);
+            const labels = column(Text2D, archetype, text_id, rows);
+            const previous: ?[]const Previous2D = if (archetype.columnOf(previous_id) != null)
+                column(Previous2D, archetype, previous_id, rows)
+            else
+                null;
+
+            for (transforms, labels, 0..) |stepped, label, row| {
+                if (!label.visible or label.len == 0 or label.color.a <= 0) continue;
+
+                const transform = if (previous) |p| p[row].blend(stepped, alpha) else stepped;
+                const face = assets.fontOf(label.font) orelse continue;
+
+                try self.layOut(gpa, assets, face, label, transform, bounds, sequence);
+            }
+        }
+    }
+
+    /// Walk one label's characters, and put a quad where each one goes.
+    fn layOut(
+        self: *Renderer,
+        gpa: Allocator,
+        assets: *Assets,
+        face: *Assets.Font,
+        label: Text2D,
+        transform: Transform2D,
+        bounds: Bounds,
+        sequence: *u32,
+    ) !void {
+        // Whole pixels, because that is what the atlas is keyed by. A label
+        // easing through 15.6, 15.8, 16.1 draws two alphabets rather than
+        // three hundred.
+        const pixels: u16 = @intFromFloat(@max(1, @round(label.size)));
+        const scaled = face.face.at(@floatFromInt(pixels));
+        const line_height = scaled.lineHeight() * label.line_spacing;
+
+        // The whole block, boxed generously, against the camera. One test for
+        // a label rather than one per letter.
+        const measured = measure(&face.face, scaled, label.slice());
+        const reach = spriteRadius(
+            measured.width * @abs(transform.scale_x),
+            (measured.lines * line_height) * @abs(transform.scale_y),
+        );
+        if (!bounds.admits(transform.x, transform.y, reach)) {
+            self.culled += 1;
+            return;
+        }
+
+        const c = @cos(transform.rotation);
+        const sn = @sin(transform.rotation);
+        const key = sortKeyOf(label.layer, if (label.font.isNone())
+            assets.default_font.index
+        else
+            label.font.index);
+
+        var line_start: usize = 0;
+        var line_index: f32 = 0;
+        const run = label.slice();
+
+        while (line_start <= run.len) {
+            const end = std.mem.indexOfScalarPos(u8, run, line_start, '\n') orelse run.len;
+            const line = run[line_start..end];
+
+            // The transform is the top left of the first line, so the first
+            // baseline is one ascent below it.
+            const baseline = scaled.ascent() + line_index * line_height;
+            var pen: f32 = switch (label.alignment) {
+                .left => 0,
+                .center => -lineWidth(&face.face, scaled, line) / 2,
+                .right => -lineWidth(&face.face, scaled, line),
+            };
+
+            var previous_glyph: ?u16 = null;
+            var characters = std.unicode.Utf8View.initUnchecked(line).iterator();
+            while (characters.nextCodepoint()) |codepoint| {
+                const index = face.face.glyphFor(codepoint);
+
+                // Kerning is the difference between "AV" and "A V", and it is
+                // the cheapest thing in typography that anybody notices.
+                if (previous_glyph) |left| {
+                    const units = face.face.kern(left, index) catch 0;
+                    pen += @as(f32, @floatFromInt(units)) * scaled.scale;
+                }
+                previous_glyph = index;
+
+                const entry = face.atlas.glyph(&face.face, index, pixels) catch |err| switch (err) {
+                    // A full atlas draws the rest of the frame without this
+                    // letter rather than failing the frame. The game is still
+                    // playable and the missing text says what happened.
+                    error.AtlasFull => break,
+                    else => return err,
+                };
+                defer pen += entry.advance;
+
+                if (entry.width == 0) continue;
+
+                // Where the glyph's top left corner sits, in the label's own
+                // space, and then in the world.
+                const placed = transform.apply(pen + entry.left, baseline - entry.top);
+
+                sequence.* += 1;
+                try self.items.append(gpa, .{
+                    .key = key,
+                    .order = label.order,
+                    .sequence = sequence.*,
+                    .texture = face.texture,
+                    // Always linear: a glyph is drawn at a size the
+                    // rasteriser was not asked for whenever the camera is
+                    // zoomed, and nearest there is a staircase.
+                    .sampler = assets.linear,
+                    .instance = .{
+                        .placement = .{
+                            placed.x,
+                            placed.y,
+                            entry.width * transform.scale_x,
+                            entry.height * transform.scale_y,
+                        },
+                        // The pivot is the corner, because that is the point
+                        // the pen just worked out.
+                        .spin = .{ 0, 0, c, sn },
+                        .tint = .{ label.color.r, label.color.g, label.color.b, label.color.a },
+                        .uv_rect = .{ entry.u0, entry.v0, entry.u1, entry.v1 },
+                    },
+                });
+            }
+
+            if (end == run.len) break;
+            line_start = end + 1;
+            line_index += 1;
+        }
+    }
+
+    /// The part of the world this frame can show, as an axis-aligned box.
+    ///
+    /// Used to throw sprites away before they cost anything. A rotated camera
+    /// makes this larger than what is really visible - the box round a turned
+    /// rectangle - which is the right way to be wrong: a sprite wrongly kept
+    /// is a few bytes in a buffer, and a sprite wrongly dropped is a hole in
+    /// the picture.
+    fn viewBounds(world: *ecs.World, width: f32, height: f32) Bounds {
+        const camera = bestCamera(world) orelse return .{
+            .left = 0,
+            .top = 0,
+            .right = width,
+            .bottom = height,
+        };
+
+        const zoom_x = if (camera.zoom_x > 0) camera.zoom_x else 1;
+        const zoom_y = if (camera.zoom_y > 0) camera.zoom_y else 1;
+        var half_width = width / (2 * zoom_x);
+        var half_height = height / (2 * zoom_y);
+
+        if (camera.rotation != 0) {
+            // The box round the turned box: each half-extent picks up a share
+            // of the other, by how much the rotation leans it over.
+            const c = @abs(@cos(camera.rotation));
+            const sn = @abs(@sin(camera.rotation));
+            const turned_width = half_width * c + half_height * sn;
+            const turned_height = half_width * sn + half_height * c;
+            half_width = turned_width;
+            half_height = turned_height;
+        }
+
+        return .{
+            .left = camera.x - half_width,
+            .top = camera.y - half_height,
+            .right = camera.x + half_width,
+            .bottom = camera.y + half_height,
+        };
     }
 
     /// What the camera sees, as one matrix.
@@ -508,6 +742,69 @@ pub const Renderer = struct {
     }
 };
 
+/// An axis-aligned box in world space.
+const Bounds = struct {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+
+    /// Whether anything within `radius` of this point could be inside.
+    ///
+    /// The radius is the sprite's, and it is generous on purpose - see
+    /// `spriteRadius`.
+    fn admits(self: Bounds, x: f32, y: f32, radius: f32) bool {
+        return x + radius >= self.left and
+            x - radius <= self.right and
+            y + radius >= self.top and
+            y - radius <= self.bottom;
+    }
+};
+
+/// How wide one line is, in pixels, kerning included.
+fn lineWidth(face: *const typeface.Font, scaled: typeface.Scaled, line: []const u8) f32 {
+    var width: f32 = 0;
+    var previous: ?u16 = null;
+
+    var characters = std.unicode.Utf8View.initUnchecked(line).iterator();
+    while (characters.nextCodepoint()) |codepoint| {
+        const index = face.glyphFor(codepoint);
+        if (previous) |left| {
+            const units = face.kern(left, index) catch 0;
+            width += @as(f32, @floatFromInt(units)) * scaled.scale;
+        }
+        previous = index;
+        width += scaled.advance(index) catch 0;
+    }
+    return width;
+}
+
+/// The widest line, and how many there are.
+fn measure(face: *const typeface.Font, scaled: typeface.Scaled, run: []const u8) struct {
+    width: f32,
+    lines: f32,
+} {
+    var widest: f32 = 0;
+    var lines: f32 = 0;
+    var it = std.mem.splitScalar(u8, run, '\n');
+    while (it.next()) |line| {
+        widest = @max(widest, lineWidth(face, scaled, line));
+        lines += 1;
+    }
+    return .{ .width = widest, .lines = lines };
+}
+
+/// How far from its transform a sprite can possibly reach.
+///
+/// The sum of the two sides rather than the diagonal of the half-sizes, which
+/// is larger than it needs to be and costs no square root. It has to cover
+/// every pivot and every rotation at once: a pivot in a corner puts the far
+/// edge a whole width away, and turning it forty-five degrees does not make
+/// that further than width plus height.
+inline fn spriteRadius(width: f32, height: f32) f32 {
+    return @abs(width) + @abs(height);
+}
+
 /// Where the camera is and what it is doing, flattened out of the two
 /// components that say so.
 const CameraView = struct {
@@ -563,8 +860,14 @@ fn spriteSize(sprite: Sprite, texture: *const Assets.Texture) struct { width: f3
 /// background layer on top of everything, and is the sort of bug that looks
 /// like a renderer problem for an afternoon.
 fn sortKey(layer: i16, texture: Assets.TextureHandle) u64 {
+    return sortKeyOf(layer, texture.index);
+}
+
+/// The same, for text - which sorts by the font it is in, because that is the
+/// texture it will be drawn from.
+fn sortKeyOf(layer: i16, texture_index: u32) u64 {
     const biased: u64 = @as(u16, @bitCast(layer)) ^ 0x8000;
-    return (biased << 32) | texture.index;
+    return (biased << 32) | texture_index;
 }
 
 test "the sort key puts a background layer behind a foreground one" {

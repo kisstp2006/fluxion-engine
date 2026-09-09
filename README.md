@@ -13,6 +13,7 @@ A window, a world, and the loop between them. For Zig 0.16.
 | `color` | A colour, and the three ways to write one down. |
 | `Window` | The window and the event queue. |
 | `render.sprite` | The 2D layer, in one instanced draw per texture. |
+| `text.Atlas` | Every glyph the game has drawn, in one texture. |
 
 ```zig
 const fx = @import("fluxion_engine");
@@ -136,6 +137,14 @@ _ = try world.spawnWith(.{
 - **An `Animation` is a sheet and a rate**, and the engine writes the cell it
   lands on into `Sprite.region` once a frame. One sheet holds a walk, an idle
   and an attack; swapping between them is writing two numbers.
+- **A `Text2D` is words at a transform**, drawn through the same pass as
+  everything else: each glyph is a quad out of a glyph atlas, so a label sorts
+  against sprites by the same `layer` and `order` and all the text in one font
+  is one draw call. The text lives *in* the component, in a fixed buffer, and
+  `label.print("{d} points", .{score})` is what a game actually does with it.
+- **What the camera cannot see is dropped before it costs anything**, one
+  comparison per sprite, which is the difference between a renderer that costs
+  what is drawn and one that costs what exists.
 - **The camera is an entity** with a `Transform2D` and a `Camera2D`, and its
   position is the *centre* of the view. With no camera in the world at all,
   the origin is the top left corner and one unit is one pixel - the same
@@ -212,10 +221,12 @@ zig build example-creatures -- --frames 300 --capture creatures.png
 ```
 
 **`creatures`** is the renderer's half: one sprite sheet, an `Animation` over
-its cells, and fourteen creatures each made of four entities - a body, two
-eyes and a shadow - where only the body is ever moved. Arrows or WASD steer
-the one with the ring; the camera follows it and stops at the edge of the
-field.
+its cells, and fourteen creatures each made of five entities - a body, two
+eyes, a shadow and a name - where only the body is ever moved. Arrows or WASD
+steer the one with the ring; the camera follows it and stops at the edge of
+the field. The line in the corner is a label parented to the *camera* and
+scaled against its zoom, which is the whole of what a heads-up display is
+until the interface layer arrives.
 
 Its sheet is `examples/atlas.png`, and the example is what drew it:
 `-- --write-atlas examples/atlas.png` puts it back, so the one binary file in
@@ -235,6 +246,11 @@ Here, and checked by the tests:
 - Parenting, one entity to another, resolved after everything a game does and
   before anything is drawn.
 - Sprite animation over a sheet, looping or one-shot.
+- Text: a shelf-packed glyph atlas per font, kerning, several lines, three
+  alignments, and a label that formats into itself. Not here yet: wrapping, an
+  outline, more than sixty-three bytes in one label, and more than one font in
+  one label.
+- Culling against the camera, sprites and labels alike.
 - Headless everything, and `capture` for a picture without a screen.
 
 ## What comes next
@@ -243,27 +259,7 @@ In order, and the order is an argument rather than a wish list: each of these
 either unblocks the one after it or is the thing most missed by somebody
 trying to finish a game with what is here.
 
-### 1. Text, and only drawing what can be seen
-
-Two things, together, because the second is ten lines and the first is the
-biggest hole in the engine.
-
-**A game cannot show a number.** Not a score, not a damage figure, not the
-word "Paused". `fluxion-font` reads a TrueType file and rasterises a glyph;
-what is missing between that and a frame is an atlas - each glyph drawn once
-at each size, packed into one texture, and handed to the *sprite* pass as a
-region like any other picture. Text then costs what a sprite costs, world
-space and screen space alike, which is what a damage number floating over an
-enemy needs and what an interface would have needed anyway. That atlas is the
-piece the interface layer wants too, so it is written once and used twice.
-
-**Every sprite in the world is uploaded every frame**, whether or not it is
-anywhere near the camera. `gather` already knows each sprite's box and the
-view's; rejecting the ones that do not meet is a comparison per sprite, and it
-is the difference between a renderer that costs what is *drawn* and one that
-costs what *exists*. Worth doing before there is a level big enough to notice.
-
-### 2. Things touching other things
+### 1. Things touching other things
 
 `pong` works out where its ball is with eight lines of arithmetic, which is
 the honest amount for a game that size. A bigger one needs the engine to
@@ -276,7 +272,7 @@ physics engine: no solver, no restitution, no joints. A game that wants those
 can build them on the queries, and most 2D games only ever wanted the
 queries.
 
-### 3. Controls a player can change
+### 2. Controls a player can change
 
 The keys are written into the game today - `pong` puts them in a component,
 which is better than most and still means the game knows what a key is. What
@@ -285,7 +281,7 @@ axes bound to it, and `input.action("jump")`. `fluxion-platform` already reads
 gamepads and this engine ignores them entirely, which is the other half of the
 same job.
 
-### 4. A world that survives being closed
+### 3. A world that survives being closed
 
 `fluxion-ecs` writes a world to bytes and reads it back, and the engine does
 not offer it. The one real problem is that a `TextureHandle` means nothing in
@@ -293,14 +289,14 @@ the next process: saving has to write the *name* a texture was loaded from and
 loading has to resolve it again, which means the asset table has to remember
 its own paths. Everything else is two calls.
 
-### 5. Tilemaps
+### 4. Tilemaps
 
 A `Tilemap` component holding a grid of indices into one sheet, drawn in
 chunks so a level larger than the screen is a handful of instanced draws
-rather than one per tile. It wants the culling from step 1 and nothing else,
-and it is what makes the difference between demonstrations and levels.
+rather than one per tile. It wants nothing that is not already here, and it is
+what makes the difference between demonstrations and levels.
 
-### 6. The interface layer
+### 5. The interface layer
 
 One argument away in `fluxion-ui` - see the note under "Three layers, one
 target" - and then the things a game's interface wants that an application's
@@ -309,7 +305,7 @@ with a d-pad, interface anchored to a point in the world, per-element state so
 a menu can animate, and pictures on elements rather than only rounded
 rectangles.
 
-### 7. The 3D pass
+### 6. The 3D pass
 
 Meshes, a depth attachment, a `Camera3D`, and the pass drawn before the 2D one
 into the same target. The place it goes is marked in `App.render`, and

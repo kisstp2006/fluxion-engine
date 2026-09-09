@@ -622,6 +622,105 @@ test "a headless app runs its stages and draws" {
     try testing.expectEqual(@as(u32, 1), app.sprites.draw_calls);
 }
 
+test "a sprite nowhere near the camera is not drawn" {
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 1,
+        .width = 320,
+        .height = 240,
+    });
+    defer app.destroy();
+
+    // With no camera in the world the view is the window: the origin at the
+    // top left, one unit to the pixel.
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(160, 120),
+        components.Sprite.solid(.white, 16, 16),
+    });
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(9000, 9000),
+        components.Sprite.solid(.white, 16, 16),
+    });
+
+    try app.run();
+
+    try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
+    try testing.expectEqual(@as(u32, 1), app.sprites.culled);
+}
+
+test "a sprite half off the edge is still drawn" {
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 1,
+        .width = 320,
+        .height = 240,
+    });
+    defer app.destroy();
+
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(-4, 120),
+        components.Sprite.solid(.white, 40, 40),
+    });
+
+    try app.run();
+
+    try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
+    try testing.expectEqual(@as(u32, 0), app.sprites.culled);
+}
+
+test "a label with no font loaded draws nothing and does not fall over" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(10, 10),
+        components.Text2D.of("nobody can read this"),
+    });
+
+    try app.run();
+    try testing.expectEqual(@as(u32, 0), app.sprites.drawn);
+}
+
+test "a label becomes one quad per letter" {
+    // A real font off this machine, and a real glyph atlas. Skipped rather
+    // than failed where there is no font to read: a build server has none,
+    // and everything else in this file has to keep running there.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 1,
+        .width = 320,
+        .height = 240,
+        .io = threaded.io(),
+    });
+    defer app.destroy();
+
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch
+        return error.SkipZigTest;
+
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(20, 20),
+        components.Text2D.of("Hi!"),
+    });
+
+    try app.run();
+
+    // Three letters, three quads, and three glyphs in the atlas that was
+    // empty a moment ago.
+    try testing.expectEqual(@as(u32, 3), app.sprites.drawn);
+    const face = app.assets.fontOf(.none).?;
+    try testing.expectEqual(@as(usize, 3), face.atlas.count());
+
+    // And the second frame draws the same letters without rasterising any of
+    // them again, which is the whole point of an atlas.
+    app.running = true;
+    app.frames_left = 1;
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 3), face.atlas.count());
+}
+
 test "the frame count ends the loop" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 5 });
     defer app.destroy();

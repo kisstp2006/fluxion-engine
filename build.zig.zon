@@ -20,10 +20,10 @@
         // window is its job.
         .fluxion_platform = .{ .path = "../fluxion-platform" },
 
-        // Not here yet, and named so the absence is a decision rather than
-        // an oversight: `fluxion-ui` for the layout and `fluxion-font` for
-        // the glyphs come back with the interface layer. See
-        // `docs/in-game-ui.md` for what that layer is waiting on.
+        // TrueType, rasterised into the glyph atlas the 2D pass draws text
+        // from. `fluxion-ui` is still absent, and that absence is a decision:
+        // the interface layer comes back when its renderer can be asked to
+        // load a pass rather than clear it.
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.
         .fluxion_image = .{ .path = "../fluxion-image" },
@@ -48,6 +48,8 @@
             .url = "git+https://github.com/kisstp2006/fluxion-math#92afdbddbf930369265d24136402c7eb5dd8f70e",
             .hash = "fluxion_math-0.1.0-dfpZBeNUBAAwUMriLKaOTRBWGFmfY53_jyYuMUxkPYek",
         },
+
+        .fluxion_font = .{ .path = "../fluxion-font" },
 
         // Generational handles: what the asset tables hand out, and what a
         // component holds instead of a pointer. Pinned for the same reason as

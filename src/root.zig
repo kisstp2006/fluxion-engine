@@ -71,6 +71,11 @@ pub const render = struct {
     pub const sprite = @import("render/sprite.zig");
 };
 
+/// Every glyph the game has drawn, in one texture. See `text.Atlas`.
+pub const text = struct {
+    pub const Atlas = @import("text/Atlas.zig");
+};
+
 /// Where a thing is, how big, and which way round. See `components`.
 pub const Transform2D = components.Transform2D;
 
@@ -79,6 +84,12 @@ pub const Sprite = components.Sprite;
 
 /// Which part of a texture a sprite shows. See `components`.
 pub const Region = components.Region;
+
+/// Words drawn at a transform. See `components`.
+pub const Text2D = components.Text2D;
+
+/// What a `Text2D` is drawn in. See `assets`.
+pub const FontHandle = assets.FontHandle;
 
 /// Attaches one entity's transform to another's. See `components`.
 pub const Parent = components.Parent;
@@ -147,4 +158,5 @@ test {
     _ = color;
     _ = schedule;
     _ = render.sprite;
+    _ = text.Atlas;
 }

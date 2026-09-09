@@ -40,6 +40,9 @@ const Allocator = std.mem.Allocator;
 const rhi = @import("fluxion_rhi");
 const image = @import("fluxion_image");
 const id = @import("fluxion_id");
+const typeface = @import("fluxion_font");
+
+const Atlas = @import("text/Atlas.zig");
 
 const Assets = @This();
 
@@ -102,11 +105,61 @@ pub const TextureHandle = extern struct {
 const Id = id.handle.Handle(Texture);
 const Table = id.handle.Table(Texture);
 
+/// A typeface open, the glyphs it has drawn so far, and the texture they are
+/// in.
+pub const Font = struct {
+    /// The parsed font. It holds views into `bytes` and copies none of it,
+    /// which is why the bytes are owned here and freed with it.
+    face: typeface.Font,
+    bytes: []const u8,
+
+    /// Every glyph this font has drawn, at every size. See `text/Atlas.zig`.
+    atlas: Atlas,
+    /// What the atlas is uploaded into. One texture per font, so a game with
+    /// a title face and a body face draws its text in two calls and a game
+    /// with one draws it in one.
+    texture: rhi.Texture,
+};
+
+/// What a `Text2D` holds. The same shape as a `TextureHandle`, for the same
+/// reasons.
+pub const FontHandle = extern struct {
+    index: u32 = 0,
+    generation: u32 = 0,
+
+    /// No font of its own, which for a `Text2D` means the default one.
+    pub const none: FontHandle = .{};
+
+    pub fn isNone(self: FontHandle) bool {
+        return self.generation == 0;
+    }
+
+    fn toId(self: FontHandle) FontId {
+        return @bitCast(self);
+    }
+
+    fn fromId(handle: FontId) FontHandle {
+        return @bitCast(handle);
+    }
+};
+
+const FontId = id.handle.Handle(Font);
+const FontTable = id.handle.Table(Font);
+
 pub const Error = error{
     /// A texture was asked for from a file, and the engine was built without
     /// anything to read files with. See `App.Options.io`.
     NoIo,
 } || Allocator.Error || rhi.Error;
+
+/// How a font should be opened.
+pub const FontOptions = struct {
+    /// How big its glyph atlas is, per side. 512 square holds a couple of
+    /// alphabets at the sizes a game uses; a game with many sizes or a large
+    /// character set wants more.
+    atlas: u32 = 512,
+    label: []const u8 = "",
+};
 
 /// How a texture should be sampled, and what it is called in a debugger.
 pub const LoadOptions = struct {
@@ -122,6 +175,12 @@ device: *rhi.Device,
 io: ?std.Io,
 
 textures: Table = .empty,
+fonts: FontTable = .empty,
+
+/// What a `Text2D` with no font of its own is drawn in: the first font
+/// loaded, unless something says otherwise. A game with one font never names
+/// it after the line that opened it.
+default_font: FontHandle = .none,
 
 /// One opaque white texel. See the note above.
 white: TextureHandle = .none,
@@ -150,6 +209,14 @@ pub fn deinit(self: *Assets) void {
     var it = self.textures.iterator();
     while (it.next()) |entry| self.device.destroyTexture(entry.value.gpu);
     self.textures.deinit(self.gpa);
+
+    var faces = self.fonts.iterator();
+    while (faces.next()) |entry| {
+        entry.value.atlas.deinit();
+        self.gpa.free(entry.value.bytes);
+        self.device.destroyTexture(entry.value.texture);
+    }
+    self.fonts.deinit(self.gpa);
     self.device.destroySampler(self.nearest);
     self.device.destroySampler(self.linear);
     self.* = undefined;
@@ -200,6 +267,98 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
             .label = if (options.label.len == 0) path else options.label,
         },
     );
+}
+
+/// Open a font from bytes already in memory.
+///
+/// The bytes are **copied**, unlike everywhere else in this stack: a
+/// `typeface.Font` holds views into the file rather than parsing it into
+/// structures of its own, so the file has to outlive the font - and a font in
+/// a table that outlives whatever the caller was holding is the kind of
+/// lifetime nobody should have to think about while making a game.
+pub fn fontFromBytes(self: *Assets, bytes: []const u8, options: FontOptions) !FontHandle {
+    const owned = try self.gpa.dupe(u8, bytes);
+    errdefer self.gpa.free(owned);
+
+    const face: typeface.Font = try .init(owned);
+
+    var atlas: Atlas = try .init(self.gpa, options.atlas, options.atlas);
+    errdefer atlas.deinit();
+
+    const texture = try self.device.createTexture(.{
+        .width = options.atlas,
+        .height = options.atlas,
+        .data = atlas.pixels,
+        .label = if (options.label.len == 0) "glyphs" else options.label,
+    });
+    errdefer self.device.destroyTexture(texture);
+
+    const handle: FontHandle = .fromId(try self.fonts.add(self.gpa, .{
+        .face = face,
+        .bytes = owned,
+        .atlas = atlas,
+        .texture = texture,
+    }));
+
+    if (self.default_font.isNone()) self.default_font = handle;
+    return handle;
+}
+
+/// This operating system's own interface font.
+///
+/// A convenience for getting text on screen before anybody has chosen a
+/// typeface, and not a font-matching library: there is one path per platform
+/// and no fallback chain. A game that ships knows which file it wants and
+/// carries it.
+pub fn systemFontPath() []const u8 {
+    return switch (@import("builtin").os.tag) {
+        .windows => "C:/Windows/Fonts/segoeui.ttf",
+        .macos => "/System/Library/Fonts/Supplemental/Arial.ttf",
+        else => "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    };
+}
+
+/// Open a TrueType file from the disc.
+pub fn loadFont(self: *Assets, path: []const u8, options: FontOptions) !FontHandle {
+    const io = self.io orelse return Error.NoIo;
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(32 << 20));
+    defer self.gpa.free(bytes);
+
+    return self.fontFromBytes(bytes, .{
+        .atlas = options.atlas,
+        .label = if (options.label.len == 0) path else options.label,
+    });
+}
+
+/// What a font handle points at, or the default font when it points at
+/// nothing. Null only when there is no font at all.
+pub fn fontOf(self: *Assets, handle: FontHandle) ?*Font {
+    if (self.fonts.get(handle.toId())) |found| return found;
+    if (handle.isNone() and !self.default_font.isNone()) {
+        return self.fonts.get(self.default_font.toId());
+    }
+    return null;
+}
+
+/// Send any atlas that has grown since the last frame to the device.
+///
+/// Called by the renderer once a frame, before it draws. Uploading the whole
+/// image rather than the rectangle that changed is the simple thing and the
+/// right one at this size: a 512-square atlas is a megabyte, it only happens
+/// on a frame that saw a letter it had never drawn before, and a settled game
+/// stops uploading entirely.
+pub fn flushFonts(self: *Assets) !void {
+    var it = self.fonts.iterator();
+    while (it.next()) |entry| {
+        if (!entry.value.atlas.dirty) continue;
+        try self.device.updateTexture(
+            entry.value.texture,
+            entry.value.atlas.pixels,
+            entry.value.atlas.rowPitch(),
+        );
+        entry.value.atlas.markClean();
+    }
 }
 
 /// Give a texture back to the driver. Every handle to it stops resolving,
@@ -268,6 +427,17 @@ test "there is a white texel before anything is loaded" {
 
     try testing.expect(!assets.white.isNone());
     try testing.expectEqual(@as(usize, 0), assets.count());
+}
+
+test "the first font opened becomes the default" {
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+
+    var assets: Assets = try .init(testing.allocator, &device, null);
+    defer assets.deinit();
+
+    try testing.expect(assets.default_font.isNone());
+    try testing.expect(assets.fontOf(.none) == null);
 }
 
 test "reading a file without an Io says so rather than crashing" {

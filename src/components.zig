@@ -2,7 +2,7 @@
 
 //! The components the engine itself knows about.
 //!
-//! There are seven, and the list is deliberately short. A game invents its own
+//! There are eight, and the list is deliberately short. A game invents its own
 //! - `Health`, `Wave`, `PatrolRoute` - and the engine never sees them; these
 //! are only the ones the renderer reads, because something has to agree on
 //! where a thing is before it can be drawn there.
@@ -430,6 +430,105 @@ pub const Animation = extern struct {
     }
 };
 
+/// Words drawn at a transform, in a font the assets are holding.
+///
+/// ```zig
+/// var label: Text2D = .of("Score");
+/// label.size = 24;
+/// label.color = .hex(0xE6E9EF);
+/// _ = try world.spawnWith(.{ Transform2D.at(16, 16), label });
+///
+/// // ... and later, from a system:
+/// text.print("{d} points", .{score});
+/// ```
+///
+/// **The text is inside the component**, in a fixed buffer, rather than a
+/// slice into somewhere else. A component may not own memory - that is what
+/// lets a row be moved with a `memcpy` and a world be written to a file - so
+/// the choice was between an index into a table of strings the engine keeps
+/// and a few dozen bytes carried in the row. The bytes win for what world
+/// text actually is: a score, a name plate, a damage figure, "Press E". A
+/// paragraph is not this component's job, and when there is a paragraph to
+/// draw it will be the interface layer's.
+///
+/// `print` is the one to reach for, because a game's text is nearly always a
+/// number that changed.
+///
+/// **The transform is the top left of the first line**, not the baseline.
+/// Baselines are how a font thinks and corners are how a person placing a
+/// label thinks, and the renderer knows the ascent it takes to convert.
+pub const Text2D = extern struct {
+    /// The bytes, as UTF-8. Not a slice: see above.
+    bytes: [capacity]u8 = @splat(0),
+    len: u8 = 0,
+
+    /// Which font. `.none` means the first one that was loaded - see
+    /// `assets.default_font` - so a game with one font never names it.
+    font: assets.FontHandle = .none,
+
+    /// Pixels per em, before the transform's scale. Rounded to whole pixels
+    /// when the glyphs are rasterised, so easing a label from 15.6 to 16.4
+    /// does not fill the atlas with an alphabet a frame.
+    size: f32 = 16,
+
+    color: Color = .white,
+
+    /// Where the transform sits along the line.
+    alignment: Alignment = .left,
+
+    /// Multiplies the font's own line height, for text that wants to breathe.
+    line_spacing: f32 = 1,
+
+    /// The same two numbers a `Sprite` sorts by, and they mean the same
+    /// thing: text and sprites are in one list and one order.
+    layer: i16 = 0,
+    order: f32 = 0,
+
+    visible: bool = true,
+
+    /// How many bytes of text fit. Sixty-three and a length, so the whole
+    /// component is a round ninety-six bytes.
+    pub const capacity = 63;
+
+    pub const Alignment = enum(u8) { left, center, right };
+
+    /// A label with this text in it. Truncated if it does not fit, on a
+    /// character boundary rather than in the middle of one.
+    pub fn of(run: []const u8) Text2D {
+        var self: Text2D = .{};
+        self.set(run);
+        return self;
+    }
+
+    /// Replace the text.
+    pub fn set(self: *Text2D, run: []const u8) void {
+        const room = @min(run.len, capacity);
+        // Cutting a UTF-8 sequence in half would put a broken character at
+        // the end, so back up to where one starts. A continuation byte is
+        // `10xxxxxx`; anything else begins a character.
+        var cut = room;
+        while (cut > 0 and cut < run.len and run[cut] & 0xC0 == 0x80) cut -= 1;
+
+        @memcpy(self.bytes[0..cut], run[0..cut]);
+        self.len = @intCast(cut);
+    }
+
+    /// Format into the label, which is what a score does every frame.
+    ///
+    /// Silently truncated rather than failing: a number too long to fit is a
+    /// display problem and not a reason for a frame to stop.
+    pub fn print(self: *Text2D, comptime format: []const u8, args: anytype) void {
+        var buffer: [capacity]u8 = undefined;
+        const written = std.fmt.bufPrint(&buffer, format, args) catch buffer[0..];
+        self.set(written);
+    }
+
+    /// The text, as a string.
+    pub fn slice(self: *const Text2D) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
 /// What the 2D pass looks through.
 ///
 /// The camera's *position* is its entity's `Transform2D`, and its position is
@@ -497,6 +596,28 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Previous2D);
     ecs.component.check(Parent);
     ecs.component.check(Animation);
+    ecs.component.check(Text2D);
+}
+
+test "a label carries its own text" {
+    var label: Text2D = .of("Score");
+    try testing.expectEqualStrings("Score", label.slice());
+
+    label.print("{d} points", .{42});
+    try testing.expectEqualStrings("42 points", label.slice());
+}
+
+test "text too long is cut on a character boundary" {
+    // Twenty-two three-byte characters is sixty-six bytes, which is three
+    // more than fit - so the last whole one has to go, not two thirds of it.
+    var label: Text2D = .of("hétfőkedd" ** 8);
+    try testing.expect(label.len <= Text2D.capacity);
+    try testing.expect(std.unicode.utf8ValidateSlice(label.slice()));
+}
+
+test "an empty label is empty rather than sixty-three zeroes" {
+    const label: Text2D = .{};
+    try testing.expectEqual(@as(usize, 0), label.slice().len);
 }
 
 test "a child follows its parent round" {

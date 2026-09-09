@@ -29,6 +29,12 @@
 //! does not, because a shadow on the ground does not tip over when the thing
 //! above it leans.
 //!
+//! **A `Text2D` carries its own words.** The name over each creature is a
+//! child entity like an eye is, and the line in the corner is a child of the
+//! *camera* - which is the whole of what a heads-up display is here. Every
+//! letter of both comes out of one glyph atlas, so all the text in the window
+//! is one more draw call and not one per label.
+//!
 //! The atlas is read from `examples/atlas.png`, and this program is what drew
 //! it: `-- --write-atlas examples/atlas.png` puts it back. That is the same
 //! bargain `fluxion-rhi` makes with its own atlas - the one binary file in
@@ -45,6 +51,7 @@ const Camera2D = fx.Camera2D;
 const Previous2D = fx.Previous2D;
 const Parent = fx.Parent;
 const Animation = fx.Animation;
+const Text2D = fx.Text2D;
 const Color = fx.Color;
 const App = fx.App;
 
@@ -68,6 +75,8 @@ const theme = struct {
     const shadow: Color = .hexa(0x00000055);
     const player: Color = .oklch(0.78, 0.15, 145);
     const eye: Color = .hex(0xF2F5F8);
+    const name: Color = .hexa(0xE6E9EFCC);
+    const heading: Color = .hex(0x8FA6BF);
 };
 
 /// The sheet is four cells across and two down, each 32 pixels square.
@@ -104,6 +113,26 @@ const Player = extern struct {
     speed: f32 = player_speed,
 };
 
+/// A label that belongs to the corner of the screen rather than to a place in
+/// the world.
+///
+/// It is a child of the camera, and the system below puts it where the corner
+/// is and scales it against the zoom - so it stays the same size on screen
+/// however far in the camera is, which is the whole difference between a
+/// heads-up display and a sign in the world. That arithmetic is what the
+/// interface layer will do for a game once it exists; until then it is four
+/// lines and worth seeing written out.
+const Heading = extern struct {
+    /// Pixels in from the corner.
+    margin: f32 = 14,
+};
+
+/// Names to hand out, so a creature is somebody rather than a colour.
+const names = [_][]const u8{
+    "Bo",   "Pip",  "Ada",  "Juno", "Rex",  "Momo", "Fig",
+    "Nell", "Otto", "Sage", "Tam",  "Wren", "Yuki", "Zed",
+};
+
 /// What the camera is told to look at.
 const Follow = extern struct {
     /// How much of the way to the target the camera moves each second. A
@@ -132,10 +161,37 @@ fn spawn(app: *App) !void {
         );
     };
 
+    // The first font opened becomes the default, so nothing below has to name
+    // it. A missing font is not fatal: the labels simply do not draw.
+    _ = app.assets.loadFont(fx.Assets.systemFontPath(), .{}) catch |err| {
+        std.log.warn("no font ({t}); the labels will not draw", .{err});
+        return;
+    };
+
     _ = try world.spawnWith(.{
         Transform2D.at(field_width / 2, field_height / 2),
         Camera2D{ .zoom = 1 },
         Follow{},
+    });
+
+    // A line of text pinned to the camera rather than to the world, which is
+    // what a heads-up display is: a child of the camera, so it slides along
+    // with it and stays the same size on screen whatever the world does.
+    var heading: Text2D = .of("");
+    heading.size = 15;
+    heading.color = theme.heading;
+    heading.layer = 50;
+
+    // The camera is the last thing spawned above, so it is the entity before
+    // this one. Naming it directly is what a scene file would do.
+    const camera = (try fx.Query(.{ Transform2D, Camera2D }).first(world)).?.entities[0];
+    _ = try world.spawnWith(.{
+        Transform2D{},
+        heading,
+        Heading{},
+        // Where it goes is worked out every frame by `pinHeading`; this only
+        // says whose corner it is.
+        Parent{ .entity = camera, .inherit_rotation = false },
     });
 
     // The ground, as one big untextured rectangle behind everything. A sprite
@@ -245,6 +301,26 @@ fn spawn(app: *App) !void {
                 Parent{ .entity = body, .local = .at(offset, -4) },
             });
         }
+
+        // A name over its head. Parented like everything else, so it never
+        // has to be moved - and not inheriting the lean, because a name plate
+        // that tips over with the thing it names is a name plate nobody can
+        // read.
+        var plate: Text2D = .of(names[i % names.len]);
+        plate.size = 13;
+        plate.color = theme.name;
+        plate.alignment = .center;
+        plate.layer = 2;
+
+        _ = try world.spawnWith(.{
+            Transform2D{},
+            plate,
+            Parent{
+                .entity = body,
+                .local = .at(0, -32),
+                .inherit_rotation = false,
+            },
+        });
     }
 }
 
@@ -323,6 +399,52 @@ fn drive(app: *App) !void {
             drift.dx = dx / length;
             drift.dy = dy / length;
             drift.until_turn = 1;
+        }
+    }
+}
+
+const Headings = fx.Query(.{ Text2D, Heading, Parent });
+
+/// Write what is going on into the pinned label, and hold it in the corner.
+///
+/// `print` formats straight into the component, which is what a score, a
+/// timer and a frame counter all are: a number that changed since last frame.
+///
+/// In `.late` and after the camera has been moved, because where the corner
+/// of the screen *is* depends on where the camera ended up and how far in it
+/// is - and the engine resolves parents after this stage, so writing the
+/// offset here is writing it in time.
+fn pinHeading(app: *App) !void {
+    const zoom = blk: {
+        var cameras = try fx.Query(.{Camera2D}).over(&app.world);
+        while (cameras.next()) |chunk| {
+            const found = chunk.slice(Camera2D);
+            if (found.len > 0) break :blk @max(found[0].zoom, 0.0001);
+        }
+        break :blk 1;
+    };
+
+    const half_width = @as(f32, @floatFromInt(app.width)) / (2 * zoom);
+    const half_height = @as(f32, @floatFromInt(app.height)) / (2 * zoom);
+
+    var it = try Headings.over(&app.world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(Text2D), chunk.slice(Heading), chunk.slice(Parent)) |*label, pinned, *link| {
+            label.print("{d} creatures  {d} fps", .{
+                herd,
+                @as(u32, @intFromFloat(app.time.fps())),
+            });
+
+            // The top left corner of the view, in the camera's own space,
+            // and a scale that undoes the zoom so the letters are the size
+            // they say they are in pixels.
+            const inset = pinned.margin / zoom;
+            link.local = .{
+                .x = -half_width + inset,
+                .y = -half_height + inset,
+                .scale_x = 1 / zoom,
+                .scale_y = 1 / zoom,
+            };
         }
     }
 }
@@ -569,6 +691,7 @@ pub fn main(init: std.process.Init) !void {
     try app.addNamedSystem(.fixed, "wander", wander);
     try app.addNamedSystem(.fixed, "drive", drive);
     try app.addNamedSystem(.late, "follow player", followPlayer);
+    try app.addNamedSystem(.late, "pin heading", pinHeading);
 
     app.run() catch |err| {
         if (app.schedule.failed) |failure| {
