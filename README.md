@@ -327,8 +327,10 @@ work, through a camera that follows the creature and stops at the edge of the
 field. Dragging with the right button locks the pointer and pulls the view
 around. The line in the corner is a label parented to the *camera* and scaled
 against its zoom, which is the whole of what a heads-up display is until the
-interface layer arrives. In both examples F11 fills the screen, and in `pong`
-a controller each drives the bats.
+interface layer arrives. The camera and the player are found by name -
+`app.find("camera")` - rather than by a query that happens to match only one.
+In both examples F11 fills the screen, and in `pong` a controller each drives
+the bats.
 
 Its sheet is `examples/atlas.png`, and the example is what drew it:
 `-- --write-atlas examples/atlas.png` puts it back, so the one binary file in
@@ -347,6 +349,9 @@ Here, and checked by the tests:
 - Timers that live in components, `app.single` for the component there is
   one of, and engine shortcuts for quitting and fullscreen, off unless asked
   for.
+- Names that belong to the entity rather than to a component:
+  `app.setName`, `app.find` and `app.nameOf`, one living entity to a name,
+  and the name free again the moment its entity dies.
 - The engine's command-line flags, read into a struct by name with room for
   a game's own, and captures that are the same picture on every machine.
 - Controllers: sixteen slots, levels and edges, round dead zones, any pad or
@@ -407,7 +412,10 @@ same job.
 not offer it. The one real problem is that a `TextureHandle` means nothing in
 the next process: saving has to write the *name* a texture was loaded from and
 loading has to resolve it again, which means the asset table has to remember
-its own paths. Everything else is two calls.
+its own paths. Entity names are the same problem, smaller: they are kept
+beside the world rather than in it, so a save has to write them too, and a
+load has to hand them to the new handles it mints. Everything else is two
+calls.
 
 ### 4. Tilemaps
 
@@ -473,6 +481,30 @@ beside the world.
 The rule that falls out: **a component is a thing, not a mechanism.** If it
 exists so that the engine can do its job rather than so that the game can say
 what something is, it belongs inside another component or beside the world.
+
+**A name is not a component either**, although Bevy makes it one. It is what
+an entity is called rather than something it has - Unity's `GameObject.name` -
+so the engine keeps it beside the world, the way it keeps where things were a
+step ago:
+
+```zig
+fn spawn(app: *fx.App) !void {
+    const camera = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Camera2D{} });
+    try app.setName(camera, "camera");
+}
+
+fn pan(app: *fx.App) !void {
+    const camera = app.find("camera") orelse return;
+    const place = app.world.get(camera, fx.Transform2D) orelse return;
+    place.x += app.input.axisOf(.keys(.left, .right)) * 200 * app.time.delta;
+}
+```
+
+Naming something does not move it into another table or change which queries
+match it. And a name picks out one living entity at a time - a second one is
+`error.NameTaken` - because a `find` that had to choose between two would
+sometimes choose the wrong one. Many things of one kind are a component and a
+query; a name is for the camera, the player, the door to the next room.
 
 ### One thing to know about components
 

@@ -1,52 +1,17 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! The 2D layer: every entity that has a `Transform2D` and a `Sprite`, drawn
-//! through the camera, in one instanced draw per texture.
+//! The 2D layer: every entity with a `Transform2D` and a `Sprite` or a
+//! `Text2D`, drawn through the camera in one instanced draw per texture.
 //!
-//! ```zig
-//! try renderer.draw(gpa, &world, &assets, &snapshots, target, width, height, background, alpha);
-//! ```
+//! One unit quad, and a buffer of 64-byte `Instance`s uploaded in one call:
+//! an update per sprite would re-send the whole buffer each time on
+//! Direct3D 11, which maps dynamic buffers with `WRITE_DISCARD`. The sine and
+//! cosine of a rotation are worked out once per sprite, not per vertex.
 //!
-//! **One quad, and a buffer of where it goes.** The vertex buffer holds four
-//! corners of a unit square and never changes. Everything that makes one
-//! sprite different from another - where it is, how big, which way round,
-//! what colour, which part of which texture - is sixty-four bytes in a
-//! second buffer that steps once per instance. A thousand sprites is a
-//! thousand of those, one upload, and one `draw`.
-//!
-//! **The upload is one call**, not one per sprite. The sorted sprites are
-//! laid out in a staging array and the whole thing goes to the GPU at once.
-//! A call per sprite looks the same on a diagram and is not: on Direct3D 11
-//! a dynamic buffer is mapped with `WRITE_DISCARD`, which hands back memory
-//! with nothing in it, so every update has to re-send the *whole* buffer -
-//! a thousand sprites would be a thousand maps of sixty-four kilobytes each.
-//!
-//! **The rotation is worked out on the processor, not in the shader.** A
-//! sine and a cosine per sprite on the CPU, against a sine and a cosine per
-//! *vertex* on the GPU - four times as many, for a number that is the same
-//! all four times. The instance carries `cos` and `sin` and the vertex shader
-//! does two multiplies with them.
-//!
-//! **Sorted back to front, and blended with no depth test.** A depth buffer
-//! decides one pixel at a time whether something is behind something else,
-//! which is exactly wrong for half-transparent pixels: the near sprite writes
-//! its depth, the far one is rejected, and the glass has nothing behind it.
-//! So the 2D layer sorts by `Sprite.layer` and draws in that order, and the
-//! sort key has the texture in its low bits so that sprites of one layer
-//! sharing a texture come out as one run and therefore one draw call.
-//!
-//! That is also why this is a separate pass from the 3D layer that does not
-//! exist yet, rather than more geometry inside it: the 3D pass wants a depth
-//! test and this one must not have one.
-//!
-//! **What the camera cannot see is dropped before it costs anything.** A
-//! sprite outside the view is not sorted, not written into the instance
-//! buffer and not drawn - one comparison against a box, per sprite, per
-//! frame. Without it a level ten screens wide pays for all ten every frame,
-//! which is the difference between a renderer that costs what is drawn and
-//! one that costs what exists. The box and the matrix both come from one
-//! `View`, which is also what `App.screenToWorld` runs backwards - see
-//! `render.view`.
+//! Sorted back to front by layer and blended with no depth test, because a
+//! depth buffer and half-transparent pixels disagree. The texture is in the
+//! sort key, so a layer's sprites of one texture are one draw call. What the
+//! camera cannot see is dropped before it is sorted.
 
 const std = @import("std");
 const testing = std.testing;
@@ -70,24 +35,16 @@ const Text2D = components.Text2D;
 const View = view_mod.View;
 const Bounds = view_mod.Bounds;
 
-/// Everything with a place and a picture.
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
-
-/// Everything with a place and some words.
 const Labels = ecs.Query(.{ Transform2D, Text2D });
 
 pub const Error = rhi.Error || Allocator.Error || error{ShaderFailed};
 
-/// The shader, in the one language that becomes both.
-///
+/// The shader, in the one language that becomes both GLSL and HLSL.
 const source = @embedFile("shaders/sprite.fxs");
 
-/// Which vertex buffer each attribute is read from.
-///
-/// The one thing the shader does not know and cannot: a location and a format
-/// belong to the shader, but how the vertices are packed into buffers is this
-/// program's business. `corner` is the quad that never changes; everything
-/// else is the per-instance buffer.
+/// Which vertex buffer an attribute is read from: `corner` is the quad that
+/// never changes, and everything else is per instance.
 fn bufferOf(name: []const u8) u32 {
     return if (std.mem.eql(u8, name, "corner")) 0 else 1;
 }
@@ -102,13 +59,9 @@ fn vertexFormat(ty: shader.Type) !rhi.VertexFormat {
     };
 }
 
-/// One sprite, as the vertex shader reads it. Sixty-four bytes.
-///
-/// `extern` because it is `memcpy`d into a vertex buffer and the attribute
-/// offsets are byte offsets into exactly this. The field order is the order
-/// the attributes are declared in the shader above, and the two must not
-/// drift apart - which they cannot, because the offsets are computed from the
-/// shader's own list rather than written down here.
+/// One sprite, as the vertex shader reads it: 64 bytes. `extern`, because it
+/// is copied into a vertex buffer; the attribute offsets come from the
+/// shader's own list, so the two cannot drift apart.
 pub const Instance = extern struct {
     /// x and y of the pivot in world space, then width and height.
     placement: [4]f32,
@@ -119,25 +72,20 @@ pub const Instance = extern struct {
     uv_rect: [4]f32,
 };
 
-/// What the frame tells the shader: one matrix, sixty-four bytes.
+/// What the frame tells the shader: one matrix.
 const Frame = extern struct {
     view_projection: math.Mat4,
 };
 
 /// A sprite waiting to be drawn, with what decides its place in the queue.
 const Item = struct {
-    /// Layer first, then texture. Sorting on this puts the layers in order
-    /// and, inside a layer, gathers each texture into one run - so the number
-    /// of draw calls is the number of textures, not the number of sprites.
+    /// Layer, then texture, so a layer's sprites of one texture form one run
+    /// and one draw call.
     key: u64,
-    /// `Sprite.order`, between the layer and the texture: it decides the
-    /// order inside a layer and the texture only breaks its ties.
+    /// `Sprite.order`: sorted between the layer and the texture.
     order: f32,
-    /// Where in the walk this sprite was found. The last tie-breaker, and
-    /// what makes the order of two otherwise equal sprites the same from one
-    /// frame to the next - the sort is not a stable one, and without this a
-    /// pair of overlapping sprites could swap whenever the world changed
-    /// shape.
+    /// Where in the walk it was found. The last tie-breaker, so equal sprites
+    /// keep their order from frame to frame: the sort is not stable.
     sequence: u32,
     instance: Instance,
     texture: rhi.Texture,
@@ -159,36 +107,26 @@ const quad_corners = [8]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
 pub const Renderer = struct {
     device: *rhi.Device,
 
-    /// Kept rather than dropped: the pipeline was described out of the names
-    /// in it, and holding it means nothing has to reason about how long a
-    /// driver looks at a string.
+    /// Kept, because the pipeline was described with names inside it.
     module: shader.Module,
     pipeline: rhi.Pipeline,
 
     quad: rhi.Buffer,
     instances: rhi.Buffer,
-    /// How many instances the buffer has room for. Grown, never shrunk: a
-    /// game whose sprite count spikes once will spike again.
+    /// How many instances the buffer has room for. Grown, never shrunk.
     capacity: u32,
     frame: rhi.Buffer,
 
-    /// This frame's sprites, gathered and sorted. Kept between frames so a
-    /// settled game stops allocating for it.
+    /// This frame's sprites, gathered and sorted. Kept for its capacity.
     items: std.ArrayList(Item) = .empty,
 
-    /// The sorted instances, contiguous, as the GPU reads them. Filled from
-    /// `items` after the sort and uploaded in one call.
+    /// The sorted instances, contiguous, as they are uploaded.
     staging: std.ArrayList(Instance) = .empty,
 
-    /// How many draw calls the last frame took. Worth watching: it is the
-    /// number of textures in use, and a game whose sprites all come from one
-    /// atlas should see one.
+    /// How many draw calls the last frame took: the number of textures in use.
     draw_calls: u32 = 0,
 
-    /// How many sprites the last frame threw away for being off screen.
-    ///
-    /// Worth watching beside `drawn`: a level where this is large and `drawn`
-    /// is small is one the culling is earning its place in.
+    /// How many sprites the last frame dropped for being off screen.
     culled: u32 = 0,
 
     /// How many sprites the last frame drew.
@@ -199,8 +137,7 @@ pub const Renderer = struct {
         defer log.deinit();
 
         var module = shader.compile(gpa, source, &log.writer) catch {
-            // The compiler's message names a line and a column in the source
-            // above, which is the only place the mistake can be.
+            // The message names a line and a column in the shader source.
             std.log.scoped(.fluxion_engine).err("sprite shader: {s}", .{log.written()});
             return Error.ShaderFailed;
         };
@@ -215,10 +152,8 @@ pub const Renderer = struct {
             return err;
         };
 
-        // The locations and the formats are the shader's; which buffer each
-        // one is packed into is this file's. Nothing is written down twice,
-        // so adding a field to `Instance` means adding an attribute to the
-        // shader and nothing else.
+        // Locations and formats come from the shader; only which buffer each
+        // is packed into is decided here, by `bufferOf`.
         var attributes: [8]rhi.VertexAttribute = undefined;
         var strides: [2]u32 = @splat(0);
         for (module.attributes, 0..) |a, i| {
@@ -242,9 +177,7 @@ pub const Renderer = struct {
             },
             .topology = .triangle_strip,
             .blend = .alpha,
-            // Both lists come out of the shader itself, in slot order. A
-            // hole in the numbering is the one thing they cannot express, and
-            // this shader has none.
+            // Both lists come out of the shader, in slot order.
             .uniform_blocks = (try module.uniformBlockNames()) orelse return Error.ShaderFailed,
             .textures = (try module.textureNames()) orelse return Error.ShaderFailed,
             .label = "sprites",
@@ -273,8 +206,7 @@ pub const Renderer = struct {
                 .label = "sprite instances",
             }),
             .capacity = initial_capacity,
-            // The size the shader said the block is, not the size this file
-            // guessed it would be.
+            // The size the shader says the block is.
             .frame = try device.createBuffer(.{
                 .kind = .uniform,
                 .size = block.size,
@@ -294,17 +226,11 @@ pub const Renderer = struct {
         self.* = undefined;
     }
 
-    /// Draw every sprite in the world into `target`.
+    /// Draw every sprite and label in the world into `target`.
     ///
-    /// `clear` is the colour to start from, or null to draw on top of what is
-    /// already there. The 2D layer clears because it is the first thing in
-    /// the frame today; when there is a 3D layer under it, this becomes null
-    /// and the 3D pass does the clearing. That is the whole of what layering
-    /// costs, which is the point of doing it this way round.
-    ///
-    /// `alpha` is how far the frame sits between the last two fixed steps,
-    /// from `Time.alpha`, and only a transform that asked to `interpolate`
-    /// uses it.
+    /// `clear` is the colour to start from, or null to draw over what is
+    /// there - for when a 3D pass has drawn first. `alpha` is `Time.alpha`,
+    /// used by transforms that `interpolate`.
     pub fn draw(
         self: *Renderer,
         gpa: Allocator,
@@ -323,10 +249,8 @@ pub const Renderer = struct {
 
         try self.gather(gpa, world, assets, snapshots, alpha, view.bounds());
 
-        // Gathering the text may have rasterised a letter nobody had drawn
-        // before, which changes an atlas that the draw below is about to
-        // sample. Uploading here rather than inside the walk means one upload
-        // for a frame that saw thirty new letters, not thirty.
+        // Gathering the text may have rasterised new letters, so the atlases
+        // go up once, before anything samples them.
         try assets.flushFonts();
 
         try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&Frame{
@@ -335,10 +259,8 @@ pub const Renderer = struct {
 
         if (self.items.items.len > 0) {
             try self.reserve(@intCast(self.items.items.len));
-            // The instances are interleaved with their sort keys in `items`,
-            // so they are laid out contiguously first and go to the GPU as
-            // one slice in one call. See the module comment for why one call
-            // per sprite is not the same thing.
+            // Laid out contiguously and uploaded in one call; see the module
+            // comment.
             self.staging.clearRetainingCapacity();
             try self.staging.ensureTotalCapacity(gpa, self.items.items.len);
             for (self.items.items) |item| self.staging.appendAssumeCapacity(item.instance);
@@ -364,8 +286,7 @@ pub const Renderer = struct {
             const texture = self.items.items[start].texture;
             const sampler = self.items.items[start].sampler;
 
-            // How far this run of one texture goes. Everything in it is one
-            // instanced draw.
+            // How far this run of one texture goes: one instanced draw.
             var end = start + 1;
             while (end < self.items.items.len and
                 std.meta.eql(self.items.items[end].texture, texture) and
@@ -373,8 +294,8 @@ pub const Renderer = struct {
             {}
 
             try list.setTexture(0, texture, sampler);
-            // A draw has no first-instance argument, so a run that does not
-            // start at zero is reached by moving the buffer binding instead.
+            // A draw has no first-instance argument, so the buffer binding is
+            // moved to the start of the run instead.
             try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
             try list.draw(.{ .vertex_count = 4, .instance_count = @intCast(end - start) });
             self.draw_calls += 1;
@@ -403,33 +324,19 @@ pub const Renderer = struct {
 
         var it = try Drawable.over(world);
         while (it.next()) |chunk| {
-            // Two plain slices over one archetype's rows, which is what the
-            // whole archetype layout is for: no indirection per entity, and a
-            // loop the compiler can see all the way through.
             const transforms = chunk.slice(Transform2D);
             const sprites = chunk.slice(Sprite);
 
             for (transforms, sprites, chunk.entities) |local, sprite, entity| {
                 if (!sprite.visible or sprite.tint.a <= 0) continue;
 
-                // Interpolated against where it was, then carried up through
-                // whatever it hangs from. A transform with neither a parent
-                // nor a snapshot comes back unchanged, which is nearly
-                // everything in a scene.
-                //
-                // What cannot be placed is not drawn: either its parent died
-                // this frame and it is about to follow (see
-                // `App.despawnOrphans`), or its chain loops back on itself
-                // and has nowhere to be. Drawing its own numbers as if they
-                // were the world's was what this used to do, and it put
-                // whatever had been riding on a dead thing up in the corner
-                // of the screen.
+                // Interpolated, then carried through whatever it hangs from.
+                // What cannot be placed - its parent died this frame, or its
+                // chain is a cycle - is not drawn.
                 const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse continue;
 
-                // A handle that no longer resolves draws as the white texel
-                // rather than not at all. A missing texture that shows up as
-                // a coloured rectangle is a bug somebody notices; one that
-                // shows up as nothing is a bug somebody ships.
+                // A handle that no longer resolves draws as the white texel:
+                // a coloured rectangle is a bug somebody notices.
                 const texture = assets.get(sprite.texture) orelse
                     assets.get(assets.white) orelse continue;
 
@@ -437,9 +344,7 @@ pub const Renderer = struct {
                 const drawn_width = size.width * transform.scale_x;
                 const drawn_height = size.height * transform.scale_y;
 
-                // Nowhere near the camera: not sorted, not uploaded, not
-                // drawn. This is the line that makes the renderer cost what
-                // is on screen rather than what is in the world.
+                // Nowhere near the camera: not sorted, uploaded or drawn.
                 if (!bounds.admits(transform.x, transform.y, spriteRadius(drawn_width, drawn_height))) {
                     self.culled += 1;
                     continue;
@@ -475,13 +380,9 @@ pub const Renderer = struct {
         std.sort.pdq(Item, self.items.items, {}, Item.before);
     }
 
-    /// Turn every `Text2D` into one instance per glyph.
-    ///
-    /// The glyphs go into the same list as the sprites, with the same sort
-    /// key, so a label at layer 5 is over a sprite at layer 4 and under one
-    /// at layer 6 without anything special being done about it. What breaks
-    /// the batch is the texture, and a font's atlas is one texture - so all
-    /// the text in one font, at every size, is one draw call.
+    /// Turn every `Text2D` into one instance per glyph, in the same list and
+    /// the same order as the sprites. A font's atlas is one texture, so all
+    /// the text in one font is one draw call.
     fn gatherText(
         self: *Renderer,
         gpa: Allocator,
@@ -500,8 +401,7 @@ pub const Renderer = struct {
             for (transforms, labels, chunk.entities) |local, label, entity| {
                 if (!label.visible or label.len == 0 or label.color.a <= 0) continue;
 
-                // Not drawn when it cannot be placed, for the same reasons as
-                // a sprite. See `gather`.
+                // Not drawn when it cannot be placed, as with a sprite.
                 const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse continue;
                 const face = assets.fontOf(label.font) orelse continue;
 
@@ -521,15 +421,13 @@ pub const Renderer = struct {
         bounds: Bounds,
         sequence: *u32,
     ) !void {
-        // Whole pixels, because that is what the atlas is keyed by. A label
-        // easing through 15.6, 15.8, 16.1 draws two alphabets rather than
-        // three hundred.
+        // Whole pixels, as the atlas is keyed.
         const pixels: u16 = @intFromFloat(@max(1, @round(label.size)));
         const scaled = face.face.at(@floatFromInt(pixels));
         const line_height = scaled.lineHeight() * label.line_spacing;
 
-        // The whole block, boxed generously, against the camera. One test for
-        // a label rather than one per letter.
+        // The whole label against the camera, boxed generously: one test, not
+        // one per letter.
         const measured = measure(&face.face, scaled, label.slice());
         const reach = spriteRadius(
             measured.width * @abs(transform.scale_x),
@@ -569,8 +467,6 @@ pub const Renderer = struct {
             while (characters.nextCodepoint()) |codepoint| {
                 const index = face.face.glyphFor(codepoint);
 
-                // Kerning is the difference between "AV" and "A V", and it is
-                // the cheapest thing in typography that anybody notices.
                 if (previous_glyph) |left| {
                     const units = face.face.kern(left, index) catch 0;
                     pen += @as(f32, @floatFromInt(units)) * scaled.scale;
@@ -578,9 +474,8 @@ pub const Renderer = struct {
                 previous_glyph = index;
 
                 const entry = face.atlas.glyph(&face.face, index, pixels) catch |err| switch (err) {
-                    // A full atlas draws the rest of the frame without this
-                    // letter rather than failing the frame. The game is still
-                    // playable and the missing text says what happened.
+                    // A full atlas drops the rest of this label rather than
+                    // failing the frame.
                     error.AtlasFull => break,
                     else => return err,
                 };
@@ -588,8 +483,7 @@ pub const Renderer = struct {
 
                 if (entry.width == 0) continue;
 
-                // Where the glyph's top left corner sits, in the label's own
-                // space, and then in the world.
+                // The glyph's top left, in the label's space, then the world's.
                 const placed = transform.apply(pen + entry.left, baseline - entry.top);
 
                 sequence.* += 1;
@@ -598,9 +492,8 @@ pub const Renderer = struct {
                     .order = label.order,
                     .sequence = sequence.*,
                     .texture = face.texture,
-                    // Always linear: a glyph is drawn at a size the
-                    // rasteriser was not asked for whenever the camera is
-                    // zoomed, and nearest there is a staircase.
+                    // Linear: a zoomed camera draws glyphs at sizes they were
+                    // not rasterised at.
                     .sampler = assets.linear,
                     .instance = .{
                         .placement = .{
@@ -609,8 +502,7 @@ pub const Renderer = struct {
                             entry.width * transform.scale_x,
                             entry.height * transform.scale_y,
                         },
-                        // The pivot is the corner, because that is the point
-                        // the pen just worked out.
+                        // The pivot is the corner the pen worked out.
                         .spin = .{ 0, 0, c, sn },
                         .tint = .{ label.color.r, label.color.g, label.color.b, label.color.a },
                         .uv_rect = .{ entry.u0, entry.v0, entry.u1, entry.v1 },
@@ -676,13 +568,8 @@ fn measure(face: *const typeface.Font, scaled: typeface.Scaled, run: []const u8)
     return .{ .width = widest, .lines = lines };
 }
 
-/// How far from its transform a sprite can possibly reach.
-///
-/// The sum of the two sides rather than the diagonal of the half-sizes, which
-/// is larger than it needs to be and costs no square root. It has to cover
-/// every pivot and every rotation at once: a pivot in a corner puts the far
-/// edge a whole width away, and turning it forty-five degrees does not make
-/// that further than width plus height.
+/// How far from its transform a sprite can reach, whatever its pivot and
+/// rotation: width plus height, which is generous and needs no square root.
 inline fn spriteRadius(width: f32, height: f32) f32 {
     return @abs(width) + @abs(height);
 }
@@ -697,18 +584,13 @@ fn spriteSize(sprite: Sprite, texture: *const Assets.Texture) struct { width: f3
     };
 }
 
-/// Layer in the high bits, texture in the low ones.
-///
-/// The layer is biased rather than cast, because a signed number cast to an
-/// unsigned one sorts negatives *after* positives - which would put every
-/// background layer on top of everything, and is the sort of bug that looks
-/// like a renderer problem for an afternoon.
+/// Layer in the high bits, texture in the low ones. The layer is biased
+/// rather than cast, so negative layers sort before positive ones.
 fn sortKey(layer: i16, texture: Assets.TextureHandle) u64 {
     return sortKeyOf(layer, texture.index);
 }
 
-/// The same, for text - which sorts by the font it is in, because that is the
-/// texture it will be drawn from.
+/// The same for text, which sorts by the font whose atlas it is drawn from.
 fn sortKeyOf(layer: i16, texture_index: u32) u64 {
     const biased: u64 = @as(u16, @bitCast(layer)) ^ 0x8000;
     return (biased << 32) | texture_index;

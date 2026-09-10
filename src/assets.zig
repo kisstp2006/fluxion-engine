@@ -10,28 +10,12 @@
 //! });
 //! ```
 //!
-//! **A component may not hold a pointer**, so it holds a handle: an index and
-//! a generation in eight bytes, from
-//! [Fluxion Id](https://github.com/kisstp2006/fluxion-id). Unloading a texture
-//! and loading another does not make every sprite that pointed at the first
-//! one draw the second - the generation has moved on, the handle resolves to
-//! nothing, and the sprite draws as an untextured rectangle instead of as
-//! whatever happened to land in that slot. A plain index cannot promise that,
-//! and a pointer could not be in a component at all.
-//!
-//! **There is always a white texture.** A sprite with no texture is a
-//! rectangle of solid colour, and the cheap way to draw one is not a second
-//! pipeline with no texture in it - it is one white texel multiplied by the
-//! tint. So `white` exists from `init`, the renderer reaches for it when a
-//! handle resolves to nothing, and there is one pipeline and no branch in the
-//! shader.
-//!
-//! **Loading is not streaming.** `loadTexture` reads the file, decodes it and
-//! uploads it, on the calling thread, before returning - which stalls the
-//! frame it is called from. That is the right shape for a loading screen and
-//! the wrong one for an open world, and the seam for the second is this same
-//! function taking a job rather than doing the work. It is not written yet;
-//! nothing above here needs to change when it is.
+//! A component may not hold a pointer, so it holds a generational handle:
+//! once a texture is unloaded, its old handles resolve to nothing rather than
+//! to whatever reuses the slot. There is always a `white` texel, so an
+//! untextured sprite is white times its tint - one pipeline, no branch in the
+//! shader. Loading is synchronous: right for a loading screen, not for
+//! streaming.
 
 const std = @import("std");
 const testing = std.testing;
@@ -49,36 +33,24 @@ const Assets = @This();
 /// One texture on the device, and what the renderer needs to know about it
 /// without asking the driver.
 pub const Texture = struct {
-    /// The device's own handle.
     gpu: rhi.Texture,
     width: u32,
     height: u32,
-    /// How it is sampled when it is not drawn at its own size. Kept per
-    /// texture rather than per device, because a game is allowed to have a
-    /// pixel-art sprite sheet and a smooth photographic background at once.
+    /// Per texture, so pixel art and a smooth background can be drawn at once.
     filter: rhi.Filter,
 };
 
-/// What a `Sprite` holds. Eight bytes, copyable, and safe to store in a
-/// component or a save file.
+/// What a `Sprite` holds: eight bytes, safe in a component or a save file.
 ///
-/// The same index-and-generation as
-/// [Fluxion Id](https://github.com/kisstp2006/fluxion-id)'s `Handle`, and the
-/// same eight bytes - written out here as an `extern struct` rather than
-/// aliased, for two reasons. The first is that it appears in a component and
-/// in every save file a game writes, so it is the engine's own promise and
-/// not a dependency's representation showing through. The second is
-/// mechanical: `Handle` is a `packed struct(u64)`, whose fields cannot have a
-/// normally aligned pointer taken to them, and the world's entity remapper
-/// walks a component's fields by pointer. A packed handle in a component
-/// therefore fails to compile inside `fluxion-ecs` - see the note in the
-/// README.
+/// The same layout as fluxion-id's `Handle`, but an `extern struct`: `Handle`
+/// is a `packed struct(u64)`, and fluxion-ecs cannot take pointers to a
+/// packed struct's fields when it remaps entities. See the README.
 pub const TextureHandle = extern struct {
     index: u32 = 0,
     generation: u32 = 0,
 
-    /// No texture. Also what all-zero bytes mean, which is why generation
-    /// zero is never handed out.
+    /// No texture. Also what all-zero bytes mean: generation zero is never
+    /// handed out.
     pub const none: TextureHandle = .{};
 
     pub fn isNone(self: TextureHandle) bool {
@@ -89,8 +61,7 @@ pub const TextureHandle = extern struct {
         return self.index == other.index and self.generation == other.generation;
     }
 
-    /// The two halves are in the same order and the same widths, so this is
-    /// a reinterpretation and not a conversion.
+    /// The same fields in the same order, so a reinterpretation.
     fn toId(self: TextureHandle) Id {
         return @bitCast(self);
     }
@@ -100,29 +71,21 @@ pub const TextureHandle = extern struct {
     }
 };
 
-/// The handle the table below actually hands out. Not the engine's own type;
-/// see `TextureHandle`.
 const Id = id.handle.Handle(Texture);
 const Table = id.handle.Table(Texture);
 
-/// A typeface open, the glyphs it has drawn so far, and the texture they are
-/// in.
+/// An open typeface, the glyphs it has drawn so far, and their texture.
 pub const Font = struct {
-    /// The parsed font. It holds views into `bytes` and copies none of it,
-    /// which is why the bytes are owned here and freed with it.
+    /// Holds views into `bytes`, which is why the bytes are owned here.
     face: typeface.Font,
     bytes: []const u8,
 
-    /// Every glyph this font has drawn, at every size. See `text/Atlas.zig`.
     atlas: Atlas,
-    /// What the atlas is uploaded into. One texture per font, so a game with
-    /// a title face and a body face draws its text in two calls and a game
-    /// with one draws it in one.
+    /// One texture per font, so each font's text is one draw call.
     texture: rhi.Texture,
 };
 
-/// What a `Text2D` holds. The same shape as a `TextureHandle`, for the same
-/// reasons.
+/// What a `Text2D` holds. Shaped like `TextureHandle`, for the same reasons.
 pub const FontHandle = extern struct {
     index: u32 = 0,
     generation: u32 = 0,
@@ -147,25 +110,21 @@ const FontId = id.handle.Handle(Font);
 const FontTable = id.handle.Table(Font);
 
 pub const Error = error{
-    /// A texture was asked for from a file, and the engine was built without
-    /// anything to read files with. See `App.Options.io`.
+    /// A file was asked for, and there is no `Io` to read it with. See
+    /// `App.Options.io`.
     NoIo,
 } || Allocator.Error || rhi.Error;
 
 /// How a font should be opened.
 pub const FontOptions = struct {
-    /// How big its glyph atlas is, per side. 512 square holds a couple of
-    /// alphabets at the sizes a game uses; a game with many sizes or a large
-    /// character set wants more.
+    /// The glyph atlas's side. 512 holds a couple of alphabets at game sizes.
     atlas: u32 = 512,
     label: []const u8 = "",
 };
 
 /// How a texture should be sampled, and what it is called in a debugger.
 pub const LoadOptions = struct {
-    /// `.nearest` for pixel art - the default, because a blurred sprite is
-    /// the more surprising of the two mistakes and the harder to notice on a
-    /// screenshot.
+    /// `.nearest` by default: a blurred sprite is the harder mistake to spot.
     filter: rhi.Filter = .nearest,
     label: []const u8 = "",
 };
@@ -178,16 +137,13 @@ textures: Table = .empty,
 fonts: FontTable = .empty,
 
 /// What a `Text2D` with no font of its own is drawn in: the first font
-/// loaded, unless something says otherwise. A game with one font never names
-/// it after the line that opened it.
+/// loaded.
 default_font: FontHandle = .none,
 
-/// One opaque white texel. See the note above.
+/// One opaque white texel. See the module comment.
 white: TextureHandle = .none,
 
-/// The two ways to sample, made once. A sampler is a handful of numbers on
-/// every backend there is, so having both costs nothing and saves the
-/// renderer having to make one when a texture turns out to want it.
+/// Both ways to sample, made once.
 nearest: rhi.Sampler,
 linear: rhi.Sampler,
 
@@ -246,12 +202,7 @@ pub fn textureFromPixels(
     }));
 }
 
-/// A texture from a PNG on the disc.
-///
-/// The path is relative to wherever the program was started from, which is
-/// the same rule every other file in a game follows and the reason a game
-/// that runs from its build directory and not from its install directory has
-/// this function to blame.
+/// A texture from a PNG. The path is relative to the working directory.
 pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !TextureHandle {
     const io = self.io orelse return Error.NoIo;
 
@@ -269,13 +220,8 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
     );
 }
 
-/// Open a font from bytes already in memory.
-///
-/// The bytes are **copied**, unlike everywhere else in this stack: a
-/// `typeface.Font` holds views into the file rather than parsing it into
-/// structures of its own, so the file has to outlive the font - and a font in
-/// a table that outlives whatever the caller was holding is the kind of
-/// lifetime nobody should have to think about while making a game.
+/// Open a font from bytes in memory. The bytes are copied, because the
+/// parsed font keeps views into them.
 pub fn fontFromBytes(self: *Assets, bytes: []const u8, options: FontOptions) !FontHandle {
     const owned = try self.gpa.dupe(u8, bytes);
     errdefer self.gpa.free(owned);
@@ -304,12 +250,8 @@ pub fn fontFromBytes(self: *Assets, bytes: []const u8, options: FontOptions) !Fo
     return handle;
 }
 
-/// This operating system's own interface font.
-///
-/// A convenience for getting text on screen before anybody has chosen a
-/// typeface, and not a font-matching library: there is one path per platform
-/// and no fallback chain. A game that ships knows which file it wants and
-/// carries it.
+/// The operating system's own interface font: one path per platform and no
+/// fallback. A game that ships carries its own.
 pub fn systemFontPath() []const u8 {
     return switch (@import("builtin").os.tag) {
         .windows => "C:/Windows/Fonts/segoeui.ttf",
@@ -341,13 +283,8 @@ pub fn fontOf(self: *Assets, handle: FontHandle) ?*Font {
     return null;
 }
 
-/// Send any atlas that has grown since the last frame to the device.
-///
-/// Called by the renderer once a frame, before it draws. Uploading the whole
-/// image rather than the rectangle that changed is the simple thing and the
-/// right one at this size: a 512-square atlas is a megabyte, it only happens
-/// on a frame that saw a letter it had never drawn before, and a settled game
-/// stops uploading entirely.
+/// Upload every atlas that grew since the last frame. The whole image, which
+/// is cheap at this size, and a settled game uploads nothing.
 pub fn flushFonts(self: *Assets) !void {
     var it = self.fonts.iterator();
     while (it.next()) |entry| {
@@ -361,8 +298,7 @@ pub fn flushFonts(self: *Assets) !void {
     }
 }
 
-/// Give a texture back to the driver. Every handle to it stops resolving,
-/// which is what the generation is for.
+/// Give a texture back to the driver. Every handle to it stops resolving.
 pub fn unload(self: *Assets, handle: TextureHandle) void {
     if (self.textures.remove(handle.toId())) |texture| {
         self.device.destroyTexture(texture.gpu);
@@ -374,8 +310,8 @@ pub fn get(self: *Assets, handle: TextureHandle) ?*Texture {
     return self.textures.get(handle.toId());
 }
 
-/// How big a texture is, in texels. Null for a handle that has expired, which
-/// is what lets a sprite fall back to the white texel rather than crash.
+/// How big a texture is, in texels. Null for an expired handle, so a sprite
+/// falls back to the white texel.
 pub fn sizeOf(self: *Assets, handle: TextureHandle) ?struct { width: f32, height: f32 } {
     const texture = self.textures.get(handle.toId()) orelse return null;
     return .{
@@ -411,8 +347,7 @@ test "a handle stops resolving when what it named is unloaded" {
     assets.unload(handle);
     try testing.expect(assets.get(handle) == null);
 
-    // The slot is handed out again, and the old handle still says no - which
-    // is the whole point of the generation and the bug a plain index has.
+    // The slot is handed out again, and the old handle still says no.
     const second = try assets.textureFromPixels(2, 2, &(.{128} ** 16), .{});
     try testing.expect(assets.get(second) != null);
     try testing.expect(assets.get(handle) == null);

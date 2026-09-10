@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! The engine: a window, a device, a world, and the loop that turns one into
-//! the other sixty times a second.
+//! The engine: a window, a device, a world, and the loop between them.
 //!
 //! ```zig
 //! pub fn main(init: std.process.Init) !void {
@@ -14,38 +13,10 @@
 //! }
 //! ```
 //!
-//! **It is created on the heap, and that is not an accident.** The device
-//! holds a pointer to the window's OpenGL hooks, the renderer holds a pointer
-//! to the device, and the platform's window handle holds a pointer to its
-//! context - all three of which are fields of this struct. A value that
-//! something points at cannot be one that moves, and Zig moves a value on
-//! every return and every assignment. `create` puts it at an address that
-//! stays put; there is no `init` that hands one back by value, because that
-//! function could not be written correctly.
-//!
-//! **The frame is fixed, and the stages are how a game gets into it.** See
-//! `schedule` for the seven of them and what belongs in each. Nothing here is
-//! virtual and nothing is registered by name: a stage is an array of function
-//! pointers, and running one is a loop over it.
-//!
-//! **The layers are drawn back to front into one target.** Today that is the
-//! 3D pass, which does not exist yet, and then the 2D pass. The interface
-//! layer belongs on top of those and is not wired up, because the renderer
-//! that would draw it always clears its pass and so can only be the first
-//! thing in a target. Each layer is its own render pass into the same
-//! surface: the first clears, the rest load what the one before it left.
-//! Adding the third is one call in `render`.
-//!
-//! **A transform is local, and nothing caches the world one.** An entity's
-//! parent is a field of its `Transform2D`, the way Unity puts it on
-//! `Transform` and Godot puts it in the tree - and where a child really ends
-//! up is worked out where it is needed rather than written into a second
-//! component every frame. See `hierarchy`.
-//!
-//! **It runs without a window at all.** `.headless` opens the `none` backend,
-//! which accepts every call and draws none of them, and steps a clock that
-//! does not need a machine to read. Every test in this package runs that way,
-//! and so does a build server.
+//! Created on the heap, because the device, the renderer and the platform
+//! window hold pointers into this struct, and what is pointed at must not
+//! move. The stages of the frame are in `schedule`. With `.headless` it runs
+//! with no window and no GPU, which is how every test here runs.
 
 const std = @import("std");
 const testing = std.testing;
@@ -75,17 +46,15 @@ const App = @This();
 const log = std.log.scoped(.fluxion_engine);
 
 pub const Error = error{
-    /// A window was wanted and this machine has no display. Not the same as
-    /// a broken program: see `Window.isAbsent`.
+    /// A window was wanted and this machine has no display. See
+    /// `Window.isAbsent`.
     NoDisplay,
 } || Allocator.Error || rhi.Error || Window.Error || Assets.Error ||
     sprite.Error || ecs.Jobs.Error;
 
 /// Which drawing API to open.
 pub const Backend = enum {
-    /// OpenGL, which is the best-travelled path through this stack. Chosen
-    /// for `.auto` on every platform - Direct3D is one flag away, and being
-    /// able to run the same game on both is what the RHI is for.
+    /// OpenGL, on every platform for now.
     auto,
     gl,
     d3d11,
@@ -106,15 +75,13 @@ pub const Fullscreen = Window.Fullscreen;
 /// Where the pointer may go, and whether it shows. See `Window.Cursor`.
 pub const Cursor = Window.Cursor;
 
-/// One of the system's own pointer shapes. `fluxion-platform`'s own.
+/// One of the system's own pointer shapes.
 pub const CursorShape = platform.CursorShape;
 
-/// Whether the window is at its own size, maximised, or minimised. See
-/// `Window.State`.
+/// Whether the window is at its own size, maximised, or minimised.
 pub const WindowState = Window.State;
 
-/// How small and how large the player may drag the window. See
-/// `Window.SizeLimits`.
+/// How small and how large the player may drag the window.
 pub const WindowSizeLimits = Window.SizeLimits;
 
 pub const Options = struct {
@@ -124,77 +91,59 @@ pub const Options = struct {
     backend: Backend = .auto,
     vsync: bool = true,
 
-    /// Whether the player may drag the window's edges. Off for a game drawn at
-    /// one size that would rather not be stretched; `setWindowSize` can still
-    /// change it either way.
+    /// Whether the player may drag the window's edges. `setWindowSize` works
+    /// either way.
     resizable: bool = true,
 
-    /// Open maximised: filling the monitor's work area, frame and all. Only a
-    /// resizable window can be. See `setWindowState`.
+    /// Open maximised. Only a resizable window can be.
     maximized: bool = false,
 
-    /// Open filling the screen rather than in a window. `width` and `height`
-    /// are still the size it goes back to when the player asks for a window.
-    /// See `setFullscreen`.
+    /// Open filling the screen. `width` and `height` are still the size of
+    /// the window it goes back to.
     fullscreen: Fullscreen = .windowed,
 
-    /// What files are read with, and what the clock is read from. Null means
-    /// no files and a fixed step - which is what a test wants and what a
-    /// browser build will want.
+    /// What files are read with and the clock is read from. Null means no
+    /// files and a fixed step, as in a test.
     io: ?std.Io = null,
 
     /// Every frame counts as exactly this many seconds, whatever the clock
-    /// says - the same frames every run, which is what a capture compared
-    /// against yesterday's needs. Null reads the clock, when there is an `io`
-    /// to read it with. `Flags.apply` sets it for `--capture`.
+    /// says, so every run is the same. `Flags.apply` sets it for `--capture`.
     frame_time: ?f32 = null,
 
-    /// A key that ends the game, handled by the engine after the `.input`
-    /// stage. Escape, usually. Null - the default - leaves every key to the
-    /// game.
+    /// A key that ends the game, handled after the `.input` stage. Null leaves
+    /// every key to the game.
     quit_key: ?platform.Key = null,
 
-    /// A key that switches between a window and borderless fullscreen - see
-    /// `toggleFullscreen` - handled the same way. F11, usually, rather than
-    /// Alt+Enter: on the `d3d11` backend DXGI answers Alt+Enter itself unless
-    /// it has been told not to, and two things switching fullscreen at once is
-    /// a fight. A switch that fails is a warning in the log, not a stop.
+    /// A key that toggles borderless fullscreen, handled the same way. F11
+    /// rather than Alt+Enter, which DXGI answers on its own on `d3d11`.
     fullscreen_key: ?platform.Key = null,
 
-    /// No window, no display, no GPU. The `none` backend, a texture to draw
-    /// into instead of a surface, and a clock that advances by `fixed_delta`
-    /// whether or not any time passed.
+    /// No window, no display, no GPU: the `none` backend, drawing into a
+    /// texture.
     headless: bool = false,
 
-    /// What the frame is cleared to before anything is drawn.
+    /// What the frame is cleared to.
     background: Color = .hex(0x0E1013),
 
-    /// One fixed step, in seconds. Sixty a second.
+    /// One fixed step, in seconds.
     fixed_delta: f32 = 1.0 / 60.0,
 
-    /// Stop after this many frames. What `--frames 120` is for, and what
-    /// makes a run reproducible.
-    ///
-    /// Worth setting for a headless app: with no window to close, `run` ends
-    /// only when a system calls `quit` or this counter runs out.
+    /// Stop after this many frames. A headless app has no window to close, so
+    /// it needs this or a system that calls `quit`.
     frames: ?u32 = null,
 
-    /// Worker threads for parallel queries. Null leaves it to the scheduler,
-    /// which takes one fewer than the machine has cores.
+    /// Worker threads for parallel queries. Null is one fewer than the cores.
     workers: ?u32 = null,
 };
 
-/// The command-line flags the engine itself understands. Read with
-/// `parseFlags`, and laid over a game's `Options` with `apply`.
+/// The command-line flags the engine understands, read with `parseFlags` and
+/// laid over a game's `Options` with `apply`. A flag that was not given
+/// leaves the game's choice alone.
 ///
 /// ```bash
 /// game --backend d3d11 --width 1280 --height 720
 /// game --frames 300 --capture shot.png
 /// ```
-///
-/// Every field is optional, and a flag that was not given leaves the game's
-/// own choice alone - so a game says what it wants in `Options`, and the
-/// command line only ever overrides.
 pub const Flags = struct {
     /// `--backend gl` or `--backend d3d11`.
     backend: ?Backend = null,
@@ -203,21 +152,16 @@ pub const Flags = struct {
     height: ?u32 = null,
     /// `--frames 300`: stop after this many.
     frames: ?u32 = null,
-    /// `--capture shot.png`: where `saveCapture` should put the last frame,
-    /// once `run` has finished. See `apply` for what else it means.
+    /// `--capture shot.png`: where `saveCapture` puts the last frame. See
+    /// `apply`.
     capture: ?[]const u8 = null,
 
-    /// How many frames a capture runs for when `--frames` does not say.
-    /// Two seconds at sixty.
+    /// How long a capture runs when `--frames` does not say: two seconds.
     pub const capture_frames = 120;
 
-    /// These flags over `options`: what a flag says wins, and what it does
-    /// not say is left as the game had it.
-    ///
-    /// **A capture is made reproducible.** It stops after `--frames` frames -
-    /// or `capture_frames` - and every frame counts as exactly one fixed step
-    /// whatever the clock says, so the same flags draw the same picture on
-    /// every machine, which is what makes two captures worth comparing.
+    /// These flags over `options`. A capture also stops after `--frames` -
+    /// or `capture_frames` - and counts every frame as one fixed step, so the
+    /// same flags draw the same picture on every machine.
     pub fn apply(self: Flags, options: Options) Options {
         var out = options;
         if (self.backend) |backend| out.backend = backend;
@@ -233,18 +177,17 @@ pub const Flags = struct {
 };
 
 pub const FlagError = error{
-    /// A flag no field answers to - a typo, usually, which is why it stops
-    /// the program rather than being passed over.
+    /// A flag no field answers to - usually a typo, so it stops the program.
     UnknownFlag,
     /// A flag at the end of the line with nothing after it.
     MissingValue,
-    /// A value that is not what its field holds: letters for a number, or a
-    /// name the enum does not have.
+    /// A value its field cannot hold: letters for a number, or a name the
+    /// enum does not have.
     InvalidValue,
 };
 
-/// Read `--name value` flags into a struct of optional fields, found by
-/// name: a field `write_atlas` is the flag `--write-atlas`.
+/// Read `--name value` flags into a struct of optional fields: a field
+/// `write_atlas` is the flag `--write-atlas`.
 ///
 /// ```zig
 /// const flags = try App.parseFlags(App.Flags, arguments);
@@ -254,16 +197,10 @@ pub const FlagError = error{
 /// const mine = try App.parseFlags(Mine, arguments);
 /// ```
 ///
-/// **The struct is the whole of the description**, read at compile time: its
-/// field names are the flags, its field types say how to read the values -
-/// text, a whole number, or the name of an enum's value - and a field that
-/// is itself a struct has its fields read as flags too, which is how a game
-/// sets `App.Flags` beside its own without either knowing about the other.
-/// `@typeInfo` is what makes that possible: a loop over a type's fields that
-/// the compiler unrolls, so the parser for a given struct is generated for it
-/// and nothing is looked up by name at run time but the flags themselves.
-///
-/// The first argument is the program's own name and is skipped.
+/// The struct is read at compile time with `@typeInfo`: its field names are
+/// the flags, its field types say how to read the values - text, a whole
+/// number, an enum - and a field that is a struct has its fields read as
+/// flags too. The first argument is the program's own name and is skipped.
 pub fn parseFlags(comptime T: type, arguments: []const []const u8) FlagError!T {
     var flags: T = .{};
     var at: usize = 1;
@@ -324,8 +261,7 @@ device: rhi.Device,
 surface: ?rhi.Surface = null,
 offscreen: ?rhi.Texture = null,
 
-/// Everything in the game. A game's own components go in here beside the
-/// engine's.
+/// Everything in the game.
 world: ecs.World,
 /// What a parallel query runs on. See `ecs.Query.each`.
 jobs: ecs.Jobs,
@@ -335,38 +271,31 @@ sprites: sprite.Renderer,
 
 time: Time,
 
-/// Where each interpolating transform was before the last fixed step.
-///
-/// Beside the world rather than in it, because it is the engine's own
-/// bookkeeping: a game asks for smooth drawing by setting one flag on a
-/// transform and never sees this. Only entities that asked are in here, so a
-/// scene of static things costs nothing at all. See
-/// `Transform2D.interpolate`.
+/// Where each interpolating transform was before the last fixed step: the
+/// engine's own bookkeeping, beside the world. See `Transform2D.interpolate`.
 snapshots: hierarchy.Snapshots = .empty,
 
-/// What `despawnOrphans` found this frame. Kept between frames for its
-/// capacity, like `snapshots`, so a settled game stops allocating for it.
+/// What `despawnOrphans` found. Kept for its capacity.
 orphans: std.ArrayList(ecs.Entity) = .empty,
+
+/// Every named entity's name, and every name's entity. Each name is one
+/// allocation, shared by the two maps and freed once. An array map, so that
+/// `forgetDeadNames` can walk it by index while removing from it.
+names: std.AutoArrayHashMapUnmanaged(ecs.Entity, []const u8) = .empty,
+by_name: std.StringHashMapUnmanaged(ecs.Entity) = .empty,
 
 input: Input = .{},
 schedule: Schedule = .empty,
 
 background: Color,
 
-/// The size of the target, in pixels. Kept here rather than asked of the
-/// window every time, because a headless app has no window to ask.
+/// The size of the target, in pixels. Kept here, because a headless app has
+/// no window to ask.
 width: u32,
 height: u32,
 
-/// True for the one frame in which `width` and `height` changed - the player
-/// dragged an edge, the window was maximised, the game went fullscreen.
-///
-/// Set at the top of the frame, before any system runs, so every stage of
-/// that frame sees it and the next frame sees it gone. What a system that
-/// lays something out against the edges of the window reads, rather than
-/// keeping last frame's size to compare with: the engine already had to
-/// notice, because the swapchain had to be resized, and used to keep the
-/// news to itself.
+/// True for the one frame in which `width` and `height` changed. Set before
+/// any system runs, so every stage of that frame sees it.
 resized: bool = false,
 
 /// The engine's own shortcuts, from `Options`. Null is off.
@@ -383,16 +312,9 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     const self = try gpa.create(App);
     errdefer gpa.destroy(self);
 
-    // Every field, including the ones with a default beside them.
-    //
-    // `create` hands back uninitialised memory, and a field's default applies
-    // to a *struct literal* rather than to whatever an allocator returned - so
-    // filling the fields one at a time silently leaves the rest as whatever
-    // was in that memory before. What that looked like here was
-    // "beginPass: the surface is not alive" from a headless app that had no
-    // surface and a `?Surface` full of rubbish, which is a long way from the
-    // line that caused it. Assigning the whole struct once makes the compiler
-    // the thing that notices a missing field.
+    // Every field at once, defaults included: `create` hands back
+    // uninitialised memory, and a default only applies to a struct literal.
+    // This way the compiler notices a missing field.
     self.* = .{
         .gpa = gpa,
         .io = options.io,
@@ -413,6 +335,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             .{ .fixed = options.fixed_delta }),
         .snapshots = .empty,
         .orphans = .empty,
+        .names = .empty,
+        .by_name = .empty,
         .input = .{},
         .schedule = .empty,
         .background = options.background,
@@ -430,13 +354,10 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 
     const backend = if (options.headless) .none else options.backend.resolve();
 
-    // The window has to come first and has to know whether it is being asked
-    // for an OpenGL context, because no platform lets a window change its
-    // mind about that afterwards. Which is why the backend is chosen before
-    // anything is opened rather than negotiated after.
+    // The window comes first, and has to know whether to make an OpenGL
+    // context: no platform lets a window change its mind about that.
     if (!options.headless) {
-        // Opened at its final address rather than returned into it: the
-        // window's own handle points at the context beside it. See `window`.
+        // Opened in place: its handle points at the context beside it.
         self.window = @as(Window, undefined);
         self.window.?.open(gpa, .{
             .title = options.title,
@@ -454,11 +375,9 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     }
     errdefer if (self.window) |*w| w.close();
 
-    // Straight after opening and before anything is sized from the window, so
-    // the swapchain is made at the size it will be drawn at rather than made
-    // and then resized on the first frame. Not fatal: a game that cannot fill
-    // the screen - no monitor to fill, a display that refuses the mode - is
-    // still a game, in a window.
+    // Before anything is sized from the window, so the swapchain is made at
+    // its final size. Not fatal: a game that cannot fill the screen still
+    // runs in a window.
     if (self.window) |*w| {
         if (options.fullscreen != .windowed) {
             w.setFullscreen(options.fullscreen) catch |err| {
@@ -471,10 +390,9 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     const height = if (self.window) |*w| w.height else options.height;
     self.width = width;
     self.height = height;
-    // Whatever size the window settled at is the size the surface is about to
-    // be made at, so there is nothing left for the first frame to resize.
-    // And the input starts out agreeing with the window about the keyboard,
-    // which it would otherwise learn only from the next focus event.
+    // The surface is about to be made at this size, so the first frame has
+    // nothing to resize; and the input starts out agreeing with the window
+    // about the keyboard.
     if (self.window) |*w| {
         w.resized = false;
         self.input.focused = w.focused;
@@ -487,9 +405,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             .none => .none,
             .auto => .auto,
         },
-        // Only OpenGL wants the context. Direct3D makes its own device and
-        // takes the window handle at surface time instead, which is why this
-        // is the one place the two backends look different from up here.
+        // Only OpenGL wants the context; Direct3D takes the window handle at
+        // surface time instead.
         .gl = if (backend == .gl and self.window != null) self.window.?.hooks() else null,
     });
     errdefer self.device.deinit();
@@ -499,18 +416,13 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             .native_window = w.nativeHandle(),
             .width = width,
             .height = height,
-            // Said here as well as to the window, because the two backends
-            // keep it in different places. OpenGL's swap interval belongs to
-            // the context, and `Window.open` has already set it; Direct3D's
-            // belongs to the swapchain, which reads it from here - and when
-            // this line was missing it defaulted to on, so `.vsync = false`
-            // quietly did nothing on `d3d11`.
+            // Told to the swapchain as well as the window: Direct3D keeps it
+            // on the swapchain, OpenGL on the context.
             .vsync = options.vsync,
         });
     } else {
-        // No window, so the frame goes into a texture. Not a stub: every
-        // draw call the real path makes is made here too, which is what
-        // makes a test on a machine with no display worth running.
+        // No window, so the frame goes into a texture, through every draw
+        // call the real path makes.
         self.offscreen = try self.device.createTexture(.{
             .width = width,
             .height = height,
@@ -541,6 +453,9 @@ pub fn destroy(self: *App) void {
     self.schedule.deinit(gpa);
     self.snapshots.deinit(gpa);
     self.orphans.deinit(gpa);
+    for (self.names.values()) |name| gpa.free(name);
+    self.names.deinit(gpa);
+    self.by_name.deinit(gpa);
     self.sprites.deinit(gpa);
     self.assets.deinit();
     self.jobs.deinit();
@@ -564,23 +479,10 @@ pub fn destroy(self: *App) void {
 /// try app.addSystem(.fixed, "move ball", moveBall);
 /// ```
 ///
-/// **The name is not optional.** Zig cannot recover a function's own name
-/// from a pointer to it, and a failure reported as "the 'system' system
-/// failed" says nothing - so every system says once, here, what a message
-/// about it should call it. See `Schedule.failed`.
-///
-/// **Both are `comptime`**, and each for a reason. The stage, so that a stage
-/// the loop does not run is refused by the compiler rather than accepted and
-/// ignored: `.ui` is such a stage until the interface layer is wired up, and a
-/// system added to it used to go into a list nothing ever walked. A parameter
-/// the compiler knows the value of can be checked with an `if` that runs
-/// during compilation, and the branch that fails is only analysed for the one
-/// call that takes it - so `.fixed` costs nothing and `.ui` is a compile error
-/// naming the line that asked for it. And the name, because the schedule
-/// keeps it without copying it: a string known at compile time lives for the
-/// whole program, where one formatted into a buffer on the stack would be
-/// gone by the time a failure came to print it. What is given up is choosing
-/// either at run time, which no game has wanted to.
+/// The name is what a failure is reported by - see `Schedule.failed` - since
+/// Zig cannot recover a function's name from a pointer. Both are `comptime`:
+/// the stage so that `.ui`, which nothing runs yet, is a compile error, and
+/// the name so that it outlives the schedule, which keeps it uncopied.
 pub fn addSystem(self: *App, comptime stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
     comptime refuseUnrun(stage);
     return self.schedule.add(self.gpa, stage, name, system);
@@ -615,17 +517,13 @@ pub fn startup(self: *App) anyerror!void {
     try self.schedule.run(.startup, self);
 }
 
-/// One frame. Says whether there should be another.
-///
-/// Public because a game with its own idea of a loop - a test stepping
-/// frames, an editor drawing into a panel - should not have to give up the
-/// rest of the engine to have it.
+/// One frame. Says whether there should be another. Public for a game that
+/// drives its own loop.
 pub fn step(self: *App) anyerror!bool {
     if (!self.running) return false;
 
-    // Edges first, then this frame's events on top of them. Doing it the
-    // other way round would throw away the input the pump just gathered. The
-    // resize flag is an edge too, and goes with them.
+    // The old edges go first, then this frame's events. The resize flag is an
+    // edge too.
     self.input.beginFrame();
     self.resized = false;
 
@@ -645,16 +543,13 @@ pub fn step(self: *App) anyerror!bool {
     try self.schedule.run(.input, self);
     self.shortcuts();
 
-    // A backlog too big to work through is dropped rather than chased, which
-    // makes a stalled frame show up as the world running slow for a moment
-    // instead of as the loop never finishing. See `Time.max_fixed_steps`.
+    // A backlog too big to work through is dropped. See
+    // `Time.max_fixed_steps`.
     self.time.dropBacklog();
     {
-        // A fixed step is asked about the edges since the last step rather
-        // than since the top of this frame, which may have run none - see
-        // `Input.clock` - and `time.delta` is the step, not the frame. Both
-        // put back with `defer`, so a step that fails does not leave every
-        // later stage reading the wrong ones.
+        // Inside `.fixed`, the edges are counted since the last step and
+        // `time.delta` is the step. Both are put back with `defer`, so a step
+        // that fails leaves nothing wrong for the stages after it.
         self.input.clock = .fixed;
         defer self.input.clock = .frame;
         const frame_delta = self.time.delta;
@@ -662,36 +557,25 @@ pub fn step(self: *App) anyerror!bool {
         defer self.time.delta = frame_delta;
 
         while (self.time.takeFixedStep()) |_| {
-            // Where everything was before this step, for drawing the frame
-            // somewhere between this step and the last. See
-            // `Transform2D.interpolate`.
+            // Where everything was before this step, to draw between steps.
             try self.snapshotPrevious();
             try self.schedule.run(.fixed, self);
-            // Seen, so gone: the next step hears only what happens after this
-            // one, which is what makes a press one jump and not two.
+            // Seen, so gone: the next step hears only what comes after.
             self.input.endFixedStep();
         }
     }
-    // A frame that gave the fixed stage no time at all, because the world is
-    // paused, hands it no edges either. Otherwise every key pressed on a
-    // pause menu would reach the first step after the game carried on, and
-    // the button that closed the menu would also jump.
+    // A paused frame gives the fixed stage no time, and so no edges: a key
+    // pressed on a pause menu must not reach the first step after it.
     if (self.time.delta == 0) self.input.endFixedStep();
 
     try self.schedule.run(.update, self);
     try self.schedule.run(.late, self);
 
-    // The engine's own passes over the world, after everything a game does
-    // and before anything is drawn. Here rather than registered as systems in
-    // `.late` on purpose: a system added at `create` would run *before* a
-    // game's own late systems.
-    //
-    // Parented transforms are not resolved here, or anywhere: the renderer
-    // works out where a child ended up when it draws it, and
-    // `worldTransform` answers the same question for a game that asks. See
-    // `hierarchy`. What is done here is the other half of parenting: whatever
-    // hung from something despawned this frame goes with it.
+    // The engine's own passes, after the game's `.late` systems and before
+    // drawing: whatever hung from something despawned goes with it, and then
+    // the names of everything that died are given back.
     try self.despawnOrphans();
+    self.forgetDeadNames();
     try self.animate();
 
     try self.render();
@@ -707,9 +591,7 @@ pub fn step(self: *App) anyerror!bool {
     return self.running;
 }
 
-/// The engine's own keys, when a game asked for them: after the game's
-/// `.input` systems, so a game that reads the same key sees it in the same
-/// frame.
+/// The engine's own keys, after the game's `.input` systems.
 fn shortcuts(self: *App) void {
     if (self.quit_key) |key| {
         if (self.input.justPressed(key)) self.quit();
@@ -721,9 +603,7 @@ fn shortcuts(self: *App) void {
     }
 }
 
-/// Take a new size from the window: the numbers, the flag that says they
-/// changed, and the swapchain, which has to match or be an error on every
-/// backend.
+/// Take a new size from the window: the numbers, the flag, and the swapchain.
 fn adoptSize(self: *App, width: u32, height: u32) !void {
     self.width = width;
     self.height = height;
@@ -744,10 +624,7 @@ pub fn quit(self: *App) void {
 }
 
 /// Step every `Animation` and write the cell it landed on into its `Sprite`.
-///
-/// On the frame's own delta rather than the fixed step, because an animation
-/// is something a viewer sees and not something the simulation depends on -
-/// so it runs once a frame however many times physics did.
+/// On the frame's delta: an animation is seen, not simulated.
 fn animate(self: *App) !void {
     const delta = self.time.delta;
 
@@ -759,16 +636,10 @@ fn animate(self: *App) !void {
     }
 }
 
-/// Despawn everything whose parent has died, and everything hanging from
-/// that in turn. See `Transform2D.parent` for why that is the rule.
-///
-/// Once a frame rather than inside a despawn of the engine's own, because a
-/// game despawns through `world.despawn` and nothing here sees it happen: the
-/// only way to know what hung from a dead thing is to look. The look is one
-/// comparison per transform and one generation check per parented one, and
-/// it goes round again only when it found something, because what hung from
-/// the dead thing may have had things hanging from it - a tank's turret goes
-/// on the first pass, and the barrel on the turret goes on the second.
+/// Despawn everything whose parent has died, and what hangs from that in
+/// turn; see `Transform2D.parent`. Once a frame, because a game despawns
+/// through `world.despawn` and nothing here sees it. It goes round until a
+/// pass finds nothing, so a turret's barrel goes one pass after the turret.
 fn despawnOrphans(self: *App) !void {
     while (true) {
         self.orphans.clearRetainingCapacity();
@@ -781,45 +652,32 @@ fn despawnOrphans(self: *App) !void {
             }
         }
 
-        // Found first and despawned after, because a despawn moves rows and
-        // the slices above point at rows.
+        // Found first and despawned after: a despawn moves rows, and the
+        // slices above point at rows.
         if (self.orphans.items.len == 0) return;
         for (self.orphans.items) |orphan| self.world.despawn(orphan);
     }
 }
 
-/// Where an entity really is, with every parent above it applied.
-///
-/// Godot's `global_position` and Unity's `transform.position`, and it costs
-/// what those cost: a walk up the chain rather than a field read. Null when
-/// the entity has no transform, or when something it hangs from was
-/// despawned this frame - it follows at the end of the frame, and a handle to
-/// it reads as dead from then on.
-///
-/// A transform with no parent is its own answer, so this is a comparison and
-/// a copy for almost everything in a scene. And what comes back has no parent
-/// of its own, which makes it the way to let go of something while keeping it
-/// where it is: write it over the entity's own transform.
+/// Where an entity really is, with every parent above it applied: Godot's
+/// `global_position`. Null when it has no transform, or when something it
+/// hangs from was despawned this frame. The result has no parent, so writing
+/// it over the entity's own transform lets go while keeping it in place.
 pub fn worldTransform(self: *App, entity: ecs.Entity) ?components.Transform2D {
     return hierarchy.resolveEntity(&self.world, &self.snapshots, entity, self.time.alpha());
 }
 
-/// The one entity's `T`: a score, a game's state, a settings record - the
-/// component there is exactly one of. Null when there is none.
+/// The one entity's `T`: a score, a game's state - the component there is
+/// exactly one of. Null when there is none.
 ///
 /// ```zig
 /// const score = app.single(Score) orelse return;
 /// score.left += 1;
 /// ```
 ///
-/// **Single means one.** A second entity with a `T` is a mistake in the game
-/// rather than something to choose between, so a debug build stops at the
-/// call that assumed otherwise instead of quietly picking one. The pointer is
-/// good until the next thing that moves rows - an add, a remove, a despawn -
-/// the same as `World.get`.
-///
-/// A component the world has never seen is none, and asking about it
-/// registers nothing - so this can be called before anything is spawned.
+/// A second entity with a `T` stops a debug build here rather than quietly
+/// picking one. The pointer lasts until rows next move, as with `World.get`.
+/// Asking about a component the world has never seen registers nothing.
 pub fn single(self: *App, comptime T: type) ?*T {
     const id = self.world.findId(T) orelse return null;
     var found: ?ecs.Entity = null;
@@ -832,6 +690,104 @@ pub fn single(self: *App, comptime T: type) ?*T {
 }
 
 // -------------------------------------------------------------------------
+// Names
+// -------------------------------------------------------------------------
+
+/// What `setName` can refuse.
+pub const NameError = error{
+    /// Another living entity is called that. A name picks out one thing.
+    NameTaken,
+    /// The entity has been despawned, or never was.
+    NoSuchEntity,
+} || Allocator.Error;
+
+/// Call an entity something, so that `find` can come back to it.
+///
+/// ```zig
+/// fn spawn(app: *App) !void {
+///     const camera = try app.world.spawnWith(.{ Transform2D.at(0, 0), Camera2D{} });
+///     try app.setName(camera, "camera");
+/// }
+///
+/// fn pan(app: *App) !void {
+///     const camera = app.find("camera") orelse return;
+///     ...
+/// }
+/// ```
+///
+/// The name is the entity's own, as a Unity GameObject's is, not a
+/// component: naming does not move the entity to another archetype. One
+/// living entity to a name - another is `error.NameTaken` - because `find`
+/// hands back one. A despawned entity's name is free at once, and calling
+/// this again renames. The text is copied. `ecs.save` does not write names.
+pub fn setName(self: *App, entity: ecs.Entity, name: []const u8) NameError!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+
+    var stale: ?ecs.Entity = null;
+    if (self.by_name.get(name)) |holder| {
+        if (holder.eql(entity)) return;
+        if (self.world.isAlive(holder)) return error.NameTaken;
+        // Despawned and not yet forgotten: the name is free.
+        stale = holder;
+    }
+
+    // Everything that can fail comes before anything changes, so a failed
+    // rename keeps the old name. The copy comes first of all, because `name`
+    // may point into a name that is about to be freed.
+    const copy = try self.gpa.dupe(u8, name);
+    errdefer self.gpa.free(copy);
+    try self.names.ensureUnusedCapacity(self.gpa, 1);
+    try self.by_name.ensureUnusedCapacity(self.gpa, 1);
+
+    if (stale) |holder| self.forgetName(holder);
+    const slot = self.names.getOrPutAssumeCapacity(entity);
+    if (slot.found_existing) {
+        _ = self.by_name.remove(slot.value_ptr.*);
+        self.gpa.free(slot.value_ptr.*);
+    }
+    slot.value_ptr.* = copy;
+    self.by_name.putAssumeCapacityNoClobber(copy, entity);
+}
+
+/// What an entity is called, or null when it has no name or is not alive.
+/// The text lasts until the entity is renamed or despawned.
+pub fn nameOf(self: *const App, entity: ecs.Entity) ?[]const u8 {
+    if (!self.world.isAlive(entity)) return null;
+    return self.names.get(entity);
+}
+
+/// The living entity called `name`, or null. Cheap enough to ask every
+/// frame. See `setName`.
+///
+/// ```zig
+/// const player = app.find("player") orelse return;
+/// ```
+pub fn find(self: *const App, name: []const u8) ?ecs.Entity {
+    const entity = self.by_name.get(name) orelse return null;
+    return if (self.world.isAlive(entity)) entity else null;
+}
+
+/// Take one entity's name off it, if it has one, and free the text.
+fn forgetName(self: *App, entity: ecs.Entity) void {
+    const named = self.names.fetchSwapRemove(entity) orelse return;
+    _ = self.by_name.remove(named.value);
+    self.gpa.free(named.value);
+}
+
+/// Give back the names of everything that has died. Once a frame, after
+/// `despawnOrphans`, for the same reason.
+fn forgetDeadNames(self: *App) void {
+    // Backwards, so the entry a swap-remove moves into the gap has already
+    // been looked at.
+    var at = self.names.count();
+    while (at > 0) {
+        at -= 1;
+        const entity = self.names.keys()[at];
+        if (!self.world.isAlive(entity)) self.forgetName(entity);
+    }
+}
+
+// -------------------------------------------------------------------------
 // The screen and the world
 // -------------------------------------------------------------------------
 
@@ -841,34 +797,20 @@ pub fn single(self: *App, comptime T: type) ?*T {
 /// const aim = app.screenToWorld(app.input.pointer.x, app.input.pointer.y);
 /// ```
 ///
-/// The screen is in framebuffer pixels from the top left, `y` down - the
-/// units of `Input.pointer` and of `width` and `height` - and the world is
-/// whatever the camera makes of it: moved, zoomed and turned. With no camera
-/// in the world the two are the same numbers. See `render.view` for the
-/// arithmetic, which is the renderer's own and not a second copy of it.
-///
-/// **The camera is read as it stands when this is called**, not as it was
-/// when the last frame was drawn. In `.input`, `.fixed` and `.update` that is
-/// the camera the player was looking at when they clicked, which is the one
-/// that should decide what they clicked on. In `.late`, after something has
-/// moved the camera, it is the one the next frame is about to be drawn with.
+/// The screen is in framebuffer pixels from the top left, `y` down. The
+/// camera is read as it is now - before `.late`, the one the player clicked
+/// through. See `render.view`.
 pub fn screenToWorld(self: *App, x: f32, y: f32) math.Vec2 {
     return self.currentView().toWorld(.init(x, y));
 }
 
-/// Where a point in the world lands on the screen, in framebuffer pixels
-/// from the top left. The other half of `screenToWorld`, and what a marker
-/// over somebody's head is placed with.
-///
-/// Nothing is clamped: a point off the screen comes back outside `0..width`
-/// and `0..height`, because how far off and in which direction is exactly
-/// what an arrow at the edge pointing at it needs.
+/// Where a point in the world lands on the screen, in framebuffer pixels. Not
+/// clamped: a point off the screen comes back outside the window.
 pub fn worldToScreen(self: *App, x: f32, y: f32) math.Vec2 {
     return self.currentView().toScreen(.init(x, y));
 }
 
-/// Where the pointer is in the world. `screenToWorld` of `Input.pointer`,
-/// which is what nearly every call to it would be.
+/// Where the pointer is in the world.
 pub fn pointerInWorld(self: *App) math.Vec2 {
     return self.screenToWorld(self.input.pointer.x, self.input.pointer.y);
 }
@@ -882,21 +824,9 @@ fn currentView(self: *App) View {
 // The window
 // -------------------------------------------------------------------------
 
-/// Fill the screen, or go back to being a window.
-///
-/// ```zig
-/// try app.setFullscreen(.borderless);
-/// if (app.input.justPressed(.f11)) try app.toggleFullscreen();
-/// ```
-///
-/// On the monitor the window is on, which is the one the player is looking
-/// at - and the one they dragged it to, if they have two. `.borderless` is
-/// what a game should use; `Fullscreen` says when `.exclusive` is worth what
-/// it costs.
-///
-/// The new size arrives the way every resize does: `width` and `height`
-/// change at the top of the next frame, and the view with them. Without a
-/// window - a headless app - there is nothing to fill, and this does nothing.
+/// Fill the screen, or go back to being a window, on the monitor the window
+/// is on. `.borderless` is what a game should use; see `Fullscreen`. The new
+/// size arrives at the top of the next frame. Nothing without a window.
 pub fn setFullscreen(self: *App, wanted: Fullscreen) Window.Error!void {
     if (self.window) |*window| try window.setFullscreen(wanted);
 }
@@ -907,7 +837,7 @@ pub fn fullscreen(self: *const App) Fullscreen {
     return .windowed;
 }
 
-/// Borderless if it is a window, a window if it is not. What F11 is for.
+/// Borderless if it is a window, a window if it is not.
 pub fn toggleFullscreen(self: *App) Window.Error!void {
     try self.setFullscreen(switch (self.fullscreen()) {
         .windowed => .borderless,
@@ -915,52 +845,40 @@ pub fn toggleFullscreen(self: *App) Window.Error!void {
     });
 }
 
-/// What the title bar says - a level's name, a count of unsaved changes.
-/// Nothing without a window.
+/// What the title bar says. Nothing without a window.
 pub fn setWindowTitle(self: *App, title: []const u8) Window.Error!void {
     if (self.window) |*window| try window.setTitle(title);
 }
 
-/// Make the window's content area this size, in the units of
-/// `Options.width` and `height`.
-///
-/// A fullscreen, maximised or minimised window is made an ordinary window
-/// first, because none of them has a size of its own to change. The new size
-/// arrives the way every resize does: `width`, `height` and `resized` at the
-/// top of the next frame. Nothing without a window.
+/// Make the window's content area this size, in pixels. A fullscreen,
+/// maximised or minimised window becomes an ordinary one first. The new size
+/// arrives at the top of the next frame. Nothing without a window.
 pub fn setWindowSize(self: *App, width: u32, height: u32) Window.Error!void {
     if (self.window) |*window| try window.setSize(width, height);
 }
 
 /// Put the top left of the window's content area at this point of the
-/// desktop. For a game that remembers where the player left its window.
-/// Nothing without a window.
+/// desktop. Nothing without a window.
 pub fn setWindowPosition(self: *App, x: i32, y: i32) Window.Error!void {
     if (self.window) |*window| try window.setPosition(x, y);
 }
 
 /// Where the top left of the window's content area is on the desktop, or
-/// null when there is no window. Always nought, nought on Wayland; see
-/// `Window.position`.
+/// null when there is no window. Always nought, nought on Wayland.
 pub fn windowPosition(self: *const App) ?[2]i32 {
     if (self.window) |*window| return window.position();
     return null;
 }
 
-/// How small and how large the player may drag the window.
-///
-/// ```zig
-/// try app.setWindowSizeLimits(.{ .min_width = 640, .min_height = 360 });
-/// ```
-///
-/// A window already outside the new limits is brought inside them at once.
-/// Nothing without a window.
+/// How small and how large the player may drag the window. A window already
+/// outside the limits is brought inside them at once. Nothing without a
+/// window.
 pub fn setWindowSizeLimits(self: *App, limits: WindowSizeLimits) Window.Error!void {
     if (self.window) |*window| try window.setSizeLimits(limits);
 }
 
-/// Maximise the window, minimise it, or put it back. See `Window.setState`
-/// for how each gets on with fullscreen. Nothing without a window.
+/// Maximise the window, minimise it, or put it back. Nothing without a
+/// window.
 pub fn setWindowState(self: *App, wanted: WindowState) Window.Error!void {
     if (self.window) |*window| try window.setState(wanted);
 }
@@ -972,20 +890,16 @@ pub fn windowState(self: *const App) WindowState {
     return .normal;
 }
 
-/// Lock the pointer, confine it to the window, hide it, or give it back.
+/// Lock the pointer, confine it to the window, hide it, or give it back. See
+/// `Cursor`.
 ///
 /// ```zig
 /// try app.setCursor(.locked);     // a first-person camera, or a drag
 /// const turn = app.input.pointer.dx;
-/// try app.setCursor(.normal);
 /// ```
 ///
-/// A locked or confined pointer is let go whenever the window loses the
-/// keyboard and taken back when it returns, so a player who alt-tabs away
-/// gets their mouse back. While it is locked, `Input.pointer` holds still
-/// where it was and only its movement changes. See `Cursor`.
-///
-/// Without a window there is no pointer to hold, and this does nothing.
+/// A held pointer is let go when the window loses the keyboard, and taken
+/// back when it returns. Nothing without a window.
 pub fn setCursor(self: *App, wanted: Cursor) Window.Error!void {
     const window = if (self.window) |*w| w else return;
     try window.setCursor(wanted);
@@ -998,31 +912,22 @@ pub fn cursor(self: *const App) Cursor {
     return .normal;
 }
 
-/// Use one of the system's own pointer shapes over the window - the hand
-/// over something clickable, the I-beam over text. Nothing without a window.
+/// Use one of the system's own pointer shapes over the window. Nothing
+/// without a window.
 pub fn setCursorShape(self: *App, shape: CursorShape) Window.Error!void {
     if (self.window) |*window| try window.setCursorShape(shape);
 }
 
-/// Teach the platform the layout of controllers it does not know, from
-/// text in SDL's `gamecontrollerdb.txt` format, and say how many lines it
-/// took.
-///
-/// Most controllers never need this: Windows reports an XInput pad in the
-/// Xbox layout, and Linux and Android name their buttons. It is for the pad
-/// that reads as connected and presses nothing - a joystick nobody has told
-/// the platform how to read. Without a window there is no platform to teach,
-/// and it takes nothing.
+/// Teach the platform controllers it does not know, from text in SDL's
+/// `gamecontrollerdb.txt` format, and say how many lines it took. Most
+/// controllers never need it. Nothing without a window.
 pub fn addGamepadMappings(self: *App, text: []const u8) Window.Error!usize {
     const window = if (self.window) |*w| w else return 0;
     return window.ctx.updateGamepadMappings(text);
 }
 
 /// Remember where every interpolating transform is, before a step moves it.
-///
-/// Cleared and refilled rather than added to, so an entity that died does not
-/// sit in the table for the rest of the session. The capacity is kept, so
-/// after the first step this allocates nothing.
+/// Refilled rather than added to, so the dead drop out; the capacity stays.
 fn snapshotPrevious(self: *App) !void {
     self.snapshots.clearRetainingCapacity();
 
@@ -1047,17 +952,14 @@ fn render(self: *App) !void {
     if (self.surface) |surface| try self.device.present(surface);
 }
 
-/// Every layer, in order, into whatever it is given.
-///
-/// Separate from `render` so that `capture` can send the same frame somewhere
-/// else. A layer that only worked when it was drawn into a window would be a
-/// layer nothing could check.
+/// Every layer, in order, into whatever it is given. Separate from `render`,
+/// so that `capture` can draw the same frame somewhere else.
 fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void {
     // 1. The 3D layer, with a depth test, clearing the frame. Not written
-    //    yet. When it is, this is where it goes and the 2D pass below stops
-    //    clearing - which is the whole of what the second layer costs.
+    //    yet; when it is, the 2D pass below stops clearing.
 
-    // 2. The 2D layer: sprites, sorted back to front, blended, no depth.
+    // 2. The 2D layer: sprites and text, sorted back to front, blended, no
+    //    depth.
     try self.sprites.draw(
         self.gpa,
         &self.world,
@@ -1070,22 +972,13 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
         self.time.alpha(),
     );
 
-    // 3. The interface layer, over everything, in screen coordinates. Not
-    //    here yet: it would have to load this pass rather than clear, and
-    //    the renderer that draws it has no way to be asked for that.
+    // 3. The interface layer, on top. Not here yet: fluxion-ui's renderer
+    //    cannot be asked to load the pass rather than clear it.
 }
 
-/// Draw one frame into a texture of its own and hand back the pixels.
-///
-/// Four bytes a pixel, top row first, and the caller owns them. Nothing about
-/// the layers changes: the same passes run against a texture instead of a
-/// swapchain image, which is what makes a capture worth comparing against
-/// what a player sees.
-///
-/// This is how a machine with no eyes checks the picture - a screenshot in a
-/// script, a test that counts coloured pixels, a build server comparing two
-/// backends. The alternative is reading back a swapchain image, which not
-/// every backend can do.
+/// Draw one frame into a texture of its own and hand back the pixels: four
+/// bytes each, top row first, owned by the caller. The same passes as a
+/// frame on screen, so a capture shows what a player sees.
 pub fn capture(self: *App, gpa: Allocator, width: u32, height: u32) ![]u8 {
     const texture = try self.device.createTexture(.{
         .width = width,
@@ -1100,11 +993,7 @@ pub fn capture(self: *App, gpa: Allocator, width: u32, height: u32) ![]u8 {
 }
 
 /// Draw one frame at the target's size into a PNG file: what `--capture`
-/// asks for, once `run` has finished. See `capture`, which this is plus the
-/// file.
-///
-/// Needs `Options.io`, which is what files are written with - `error.NoIo`
-/// without it.
+/// asks for. `error.NoIo` without `Options.io`.
 pub fn saveCapture(self: *App, path: []const u8) !void {
     const io = self.io orelse return error.NoIo;
 
@@ -1119,12 +1008,9 @@ pub fn saveCapture(self: *App, path: []const u8) !void {
     }, .{});
 }
 
-/// Read the frame that was last drawn, as `width * height * 4` bytes.
-///
-/// Only when headless, because only then is the target a texture: a
-/// swapchain image cannot be read back on every backend, and a function that
-/// worked in a test and not in a game would be worse than one that says so.
-/// The caller owns what comes back.
+/// Read the frame that was last drawn, as `width * height * 4` bytes the
+/// caller owns. Headless only: a swapchain image cannot be read back on every
+/// backend.
 pub fn readFrame(self: *App, gpa: Allocator) ![]u8 {
     const texture = self.offscreen orelse return error.NotHeadless;
     return self.device.readTexture(texture, gpa);
@@ -1157,8 +1043,7 @@ test "a headless app runs its stages and draws" {
         .headless = true,
         .width = 64,
         .height = 64,
-        // Without this - or a system that calls `quit` - `run` is an
-        // infinite loop, because a headless app has no window to close.
+        // Without this, or a system that calls `quit`, `run` never ends.
         .frames = 1,
     });
     defer app.destroy();
@@ -1181,8 +1066,7 @@ test "a sprite nowhere near the camera is not drawn" {
     });
     defer app.destroy();
 
-    // With no camera in the world the view is the window: the origin at the
-    // top left, one unit to the pixel.
+    // With no camera, the view is the window.
     _ = try app.world.spawnWith(.{
         components.Transform2D.at(160, 120),
         components.Sprite.solid(.white, 16, 16),
@@ -1232,9 +1116,8 @@ test "a label with no font loaded draws nothing and does not fall over" {
 }
 
 test "a label becomes one quad per letter" {
-    // A real font off this machine, and a real glyph atlas. Skipped rather
-    // than failed where there is no font to read: a build server has none,
-    // and everything else in this file has to keep running there.
+    // A real font off this machine; skipped where there is none, as on a
+    // build server.
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();
 
@@ -1257,14 +1140,12 @@ test "a label becomes one quad per letter" {
 
     try app.run();
 
-    // Three letters, three quads, and three glyphs in the atlas that was
-    // empty a moment ago.
+    // Three letters, three quads, and three glyphs in the atlas.
     try testing.expectEqual(@as(u32, 3), app.sprites.drawn);
     const face = app.assets.fontOf(.none).?;
     try testing.expectEqual(@as(usize, 3), face.atlas.count());
 
-    // And the second frame draws the same letters without rasterising any of
-    // them again, which is the whole point of an atlas.
+    // The second frame rasterises none of them again.
     app.running = true;
     app.frames_left = 1;
     _ = try app.step();
@@ -1309,8 +1190,7 @@ test "a child is where its parent put it, and its own numbers stay local" {
     try testing.expectApproxEqAbs(@as(f32, 100), placed.x, 0.0001);
     try testing.expectApproxEqAbs(@as(f32, 38), placed.y, 0.0001);
 
-    // And the component itself still says what was written into it, which is
-    // the difference between this and a pass that resolves in place.
+    // The component still holds its own local numbers.
     const local = app.world.get(turret, components.Transform2D).?;
     try testing.expectEqual(@as(f32, 0), local.x);
     try testing.expectEqual(@as(f32, -12), local.y);
@@ -1350,21 +1230,17 @@ test "what hangs from something that died goes with it" {
     });
 
     app.world.despawn(tank);
-    // Between the despawn and the end of the frame the chain is broken, and
-    // says so rather than inventing a position.
+    // Until the end of the frame, the chain is broken and says so.
     try testing.expect(app.worldTransform(turret) == null);
 
     try app.run();
 
-    // The turret went because the tank did, and the barrel because the
-    // turret did, one pass later.
+    // The turret went because the tank did, and the barrel one pass later.
     try testing.expect(!app.world.isAlive(turret));
     try testing.expect(!app.world.isAlive(barrel));
     try testing.expect(app.world.isAlive(bystander));
 
-    // And only the bystander was drawn. Before the rule, the turret and the
-    // barrel were drawn at their own numbers as if those were the world's -
-    // up in the top left corner, where nothing had ever been.
+    // And only the bystander was drawn.
     try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
 }
 
@@ -1372,7 +1248,7 @@ test "a parent with no transform places nothing and still owns what hangs from i
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();
 
-    // An entity with no components at all: somewhere nobody can say.
+    // An entity with no components at all.
     const spell = try app.world.spawn();
     const spark = try app.world.spawnWith(.{
         components.Transform2D.childOf(spell, 40, 30),
@@ -1399,8 +1275,8 @@ test "an animation moves the sprite's region on" {
     const app = try App.create(testing.allocator, .{
         .headless = true,
         .frames = 6,
-        // Every frame a tenth of a second, so six frames is six cells at
-        // ten a second: back to the start of a four-cell strip, plus two.
+        // Six frames of a tenth of a second, at ten cells a second: once
+        // round a four-cell strip, and two more.
         .fixed_delta = 0.1,
     });
     defer app.destroy();
@@ -1427,8 +1303,7 @@ test "a fixed step runs as many times as the frame is worth" {
     };
     counter.steps = 0;
 
-    // Every frame is a fiftieth of a second, and a fixed step is a hundredth,
-    // so each frame is worth two of them.
+    // Frames of a fiftieth of a second, steps of a hundredth: two a frame.
     const app = try App.create(testing.allocator, .{
         .headless = true,
         .frames = 10,
@@ -1460,8 +1335,8 @@ fn slideRight(app: *App) anyerror!void {
 }
 
 test "a previous transform is taken before each fixed step" {
-    // A frame is worth one and a half fixed steps: one step runs, and half
-    // a step is left over for the renderer to blend by.
+    // A frame is worth one and a half steps: one runs, and half a step is
+    // left to blend by.
     const app = try App.create(testing.allocator, .{
         .headless = true,
         .frames = 1,
@@ -1479,8 +1354,7 @@ test "a previous transform is taken before each fixed step" {
     const entity = chunk.entities[0];
     const now = chunk.slice(components.Transform2D)[0];
 
-    // Where it is, where it was, and halfway between - which is what the
-    // renderer draws, and what a game asking for a world position gets.
+    // Where it is, where it was, and halfway between: what is drawn.
     try testing.expectEqual(@as(f32, 10), now.x);
     try testing.expectEqual(@as(f32, 0), app.snapshots.get(entity).?.x);
     try testing.expectApproxEqAbs(@as(f32, 0.5), app.time.alpha(), 0.001);
@@ -1499,8 +1373,6 @@ test "a transform that never asked is not remembered at all" {
     _ = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
     try app.run();
 
-    // Nothing in the table, so a scene of static things pays nothing for a
-    // feature it does not use.
     try testing.expectEqual(@as(usize, 0), app.snapshots.count());
 }
 
@@ -1516,8 +1388,7 @@ fn pressOf(key: platform.Key) platform.Event {
 }
 
 /// One press of space on a chosen frame, and a count of the fixed steps
-/// that heard it. File-scoped rather than a closure, because systems are
-/// plain functions with nothing to capture.
+/// that heard it.
 const Jumps = struct {
     var heard: u32 = 0;
     var press_on: u64 = 1;
@@ -1540,9 +1411,8 @@ test "a press is heard by one fixed step when frames are shorter than steps" {
     Jumps.heard = 0;
     Jumps.press_on = 1;
 
-    // A frame is half a step long, so every other frame runs one - and the
-    // frame the press lands on runs none. Powers of two, so the accumulator
-    // is exact and the test is about input rather than about rounding.
+    // A frame is half a step long, so the frame the press lands on runs no
+    // step. Powers of two keep the accumulator exact.
     const app = try App.create(testing.allocator, .{
         .headless = true,
         .frames = 8,
@@ -1555,9 +1425,6 @@ test "a press is heard by one fixed step when frames are shorter than steps" {
     try app.addSystem(.fixed, "jump", Jumps.jump);
     try app.run();
 
-    // Before `Input.clock`, this was zero: the edge was gone by the frame
-    // that ran a step. A game on a 144 Hz screen lost more than half its
-    // jumps that way.
     try testing.expectEqual(@as(u32, 1), Jumps.heard);
 }
 
@@ -1578,8 +1445,6 @@ test "a press is heard by one fixed step when a frame runs two" {
     try app.addSystem(.fixed, "jump", Jumps.jump);
     try app.run();
 
-    // Before, this was two: both steps saw the frame's edge, and one press
-    // was a double jump.
     try testing.expectEqual(@as(u32, 1), Jumps.heard);
 }
 
@@ -1596,9 +1461,8 @@ test "a press made while the world is paused does not reach the step after it" {
     app.time.source = .{ .fixed = 1.0 / 32.0 };
     app.time.scale = 0;
 
-    // Pressed on the second frame, paused until the fourth, and then two
-    // steps a frame: none of them should hear a press that was made while
-    // nothing was running.
+    // Pressed on the second frame, paused until the fourth: no step should
+    // hear it.
     try app.addSystem(.input, "press", Jumps.press);
     try app.addSystem(.input, "wake", Jumps.wake);
     try app.addSystem(.fixed, "jump", Jumps.jump);
@@ -1636,8 +1500,7 @@ test "the pointer is found in the world through the camera" {
     try testing.expectApproxEqAbs(@as(f32, 100), middle.x, 0.001);
     try testing.expectApproxEqAbs(@as(f32, 50), middle.y, 0.001);
 
-    // ... and the top left corner is half a screen away, halved again by
-    // the zoom: 160 pixels across is 80 units, 120 down is 60.
+    // ... and the top left is half a screen away at zoom two: 80 by 60 units.
     const corner = app.screenToWorld(0, 0);
     try testing.expectApproxEqAbs(@as(f32, 20), corner.x, 0.001);
     try testing.expectApproxEqAbs(@as(f32, -10), corner.y, 0.001);
@@ -1652,19 +1515,14 @@ test "a headless app has no screen to fill, and says so without failing" {
     const app = try App.create(testing.allocator, .{ .headless = true, .fullscreen = .borderless });
     defer app.destroy();
 
-    // Asked for at `create`, and at run time, and toggled: all of it quietly
-    // nothing, because there is no window. A test of a game that goes
-    // fullscreen should not have to know that it is running on a build
-    // server.
     try testing.expect(app.fullscreen() == .windowed);
     try app.setFullscreen(.borderless);
     try app.toggleFullscreen();
     try testing.expect(app.fullscreen() == .windowed);
 }
 
-/// A controller in slot zero with A held from the first frame on, handed
-/// over every frame the way `Window.pump` hands over what the platform
-/// polled - which a headless app has no window to do.
+/// A controller in slot zero with A held from the first frame on, handed over
+/// every frame as `Window.pump` would.
 const Controller = struct {
     var heard: u32 = 0;
     var slots: [Input.max_pads]platform.Gamepad = @splat(.{});
@@ -1686,8 +1544,8 @@ test "a controller press is heard by one fixed step, as a key is" {
     Controller.heard = 0;
     Controller.slots = @splat(.{});
 
-    // Frames half a step long, as in the key test above: the frame the
-    // button goes down on runs no step, and the next one does.
+    // Frames half a step long, as in the key test: the frame the button goes
+    // down on runs no step.
     const app = try App.create(testing.allocator, .{
         .headless = true,
         .frames = 8,
@@ -1700,7 +1558,7 @@ test "a controller press is heard by one fixed step, as a key is" {
     try app.addSystem(.fixed, "jump", Controller.jump);
     try app.run();
 
-    // Once, though the button is held for all eight frames and four steps.
+    // Once, though the button is held for all eight frames.
     try testing.expectEqual(@as(u32, 1), Controller.heard);
 }
 
@@ -1747,8 +1605,7 @@ test "resized is true for the one frame the size changed in, and no other" {
     _ = try app.step();
     try testing.expect(!app.resized);
 
-    // What `step` does when the window says it has a new size, done by hand:
-    // a headless app has no window to say so.
+    // What `step` does when the window reports a new size, done by hand.
     try app.adoptSize(400, 300);
     try testing.expect(app.resized);
     try testing.expectEqual(@as(u32, 400), app.width);
@@ -1767,8 +1624,8 @@ test "the engine's flags are read by name, and a game's own sit beside them" {
     try testing.expectEqualStrings("shot.png", engine.capture.?);
     try testing.expect(engine.width == null);
 
-    // A struct of the engine's flags inside a game's own: both read, and the
-    // underscore in the field's name a hyphen in the flag's.
+    // The engine's flags inside a game's own: both read, and `write_atlas`
+    // is `--write-atlas`.
     const Mine = struct { app: Flags = .{}, write_atlas: ?[]const u8 = null };
     const mine = try parseFlags(Mine, &.{ "game", "--write-atlas", "atlas.png", "--width", "640" });
     try testing.expectEqualStrings("atlas.png", mine.write_atlas.?);
@@ -1832,6 +1689,128 @@ test "single finds the one entity with a component, or none" {
     try testing.expectEqual(@as(u32, 5), app.single(Tally).?.points);
 }
 
+test "a name finds its entity, and the entity its name" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const camera = try app.world.spawnWith(.{components.Transform2D{}});
+    const player = try app.world.spawnWith(.{components.Transform2D{}});
+    const shapes = app.world.archetypeSlice().len;
+    try app.setName(camera, "camera");
+    try app.setName(player, "player");
+
+    try testing.expect(app.find("camera").?.eql(camera));
+    try testing.expect(app.find("player").?.eql(player));
+    try testing.expectEqualStrings("camera", app.nameOf(camera).?);
+    try testing.expect(app.find("door") == null);
+
+    // A name is not a component: no new archetype.
+    try testing.expectEqual(shapes, app.world.archetypeSlice().len);
+
+    const rock = try app.world.spawn();
+    try testing.expect(app.nameOf(rock) == null);
+}
+
+test "a name belongs to one living entity at a time" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const first = try app.world.spawn();
+    const second = try app.world.spawn();
+    try app.setName(first, "door");
+
+    try testing.expectError(error.NameTaken, app.setName(second, "door"));
+    // Its own name again is not a clash.
+    try app.setName(first, "door");
+
+    // Despawned: the name is free at once, before the end of the frame.
+    app.world.despawn(first);
+    try testing.expect(app.find("door") == null);
+    try testing.expect(app.nameOf(first) == null);
+    try app.setName(second, "door");
+    try testing.expect(app.find("door").?.eql(second));
+
+    try testing.expectError(error.NoSuchEntity, app.setName(first, "ghost"));
+}
+
+test "renaming frees the old name, and the text is copied" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const thing = try app.world.spawn();
+    var buffer: [16]u8 = undefined;
+    try app.setName(thing, try std.fmt.bufPrint(&buffer, "player {d}", .{2}));
+    @memset(&buffer, 'x');
+    try testing.expect(app.find("player 2").?.eql(thing));
+
+    try app.setName(thing, "hero");
+    try testing.expect(app.find("player 2") == null);
+    try testing.expectEqualStrings("hero", app.nameOf(thing).?);
+
+    // And the old name is anybody's.
+    const other = try app.world.spawn();
+    try app.setName(other, "player 2");
+    try testing.expect(app.find("player 2").?.eql(other));
+}
+
+test "a rename that runs out of memory keeps the old name" {
+    var failing: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    const app = try App.create(failing.allocator(), .{ .headless = true });
+    defer app.destroy();
+
+    const thing = try app.world.spawn();
+    try app.setName(thing, "name 0");
+
+    // Renamed while the tables fill, so each has to grow at some point, with
+    // every allocation of each rename failing in turn: the old name has to
+    // survive every failure.
+    var old_text: [16]u8 = undefined;
+    var new_text: [16]u8 = undefined;
+    for (1..24) |round| {
+        const old = try std.fmt.bufPrint(&old_text, "name {d}", .{round - 1});
+        const new = try std.fmt.bufPrint(&new_text, "name {d}", .{round});
+
+        var fail_after: usize = 0;
+        while (true) : (fail_after += 1) {
+            failing.fail_index = failing.alloc_index + fail_after;
+            app.setName(thing, new) catch |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                try testing.expectEqualStrings(old, app.nameOf(thing).?);
+                try testing.expect(app.find(old).?.eql(thing));
+                try testing.expect(app.find(new) == null);
+                continue;
+            };
+            break;
+        }
+        failing.fail_index = std.math.maxInt(usize);
+        try testing.expect(app.find(new).?.eql(thing));
+
+        const filler = try app.world.spawn();
+        try app.setName(filler, try std.fmt.bufPrint(&new_text, "filler {d}", .{round}));
+    }
+}
+
+test "the names of the dead are given back at the end of the frame" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+
+    const ship = try app.world.spawnWith(.{components.Transform2D.at(10, 10)});
+    const flame = try app.world.spawnWith(.{components.Transform2D.childOf(ship, 0, 8)});
+    const buoy = try app.world.spawn();
+    try app.setName(ship, "ship");
+    try app.setName(flame, "flame");
+    try app.setName(buoy, "buoy");
+
+    app.world.despawn(ship);
+    try app.run();
+
+    // The flame went with the ship, and both names with them.
+    try testing.expect(app.find("flame") == null);
+    try testing.expect(app.find("buoy").?.eql(buoy));
+    try testing.expectEqual(@as(usize, 1), app.names.count());
+    try testing.expectEqual(@as(u32, 1), app.by_name.count());
+}
+
 /// Escape pressed on the third frame, the way the platform would deliver it.
 fn escapeOnThird(app: *App) anyerror!void {
     if (app.time.frame == 3) app.input.apply(pressOf(.escape));
@@ -1884,7 +1863,7 @@ test "time.delta is the step in the fixed stage and the frame everywhere else" {
 
     try testing.expectEqual(@as(f32, 1.0 / 64.0), Deltas.fixed);
     try testing.expectEqual(@as(f32, 1.0 / 32.0), Deltas.update);
-    // And put back afterwards, for the engine's own passes that follow.
+    // And put back afterwards.
     try testing.expectEqual(@as(f32, 1.0 / 32.0), app.time.delta);
 }
 

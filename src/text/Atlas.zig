@@ -7,38 +7,14 @@
 //! defer atlas.deinit();
 //!
 //! const entry = try atlas.glyph(&face, face.glyphFor('H'), 16);
-//! // entry.u0, v0, u1, v1 say where it is; left, top and advance say where
-//! // it goes relative to the pen.
 //! ```
 //!
-//! A renderer cannot upload a glyph per draw: a line of prose is a few dozen
-//! of them and a texture switch between each would be a few dozen draw calls
-//! for one label. So each glyph is rasterised once, packed into a shared
-//! image, and drawn from there for the life of the program - which turns
-//! every piece of text in a frame into instances of the same quad against the
-//! same texture, and therefore into one draw call.
-//!
-//! **Keyed by glyph and size together.** The same letter at 12 pixels and at
-//! 13 is two different pictures and there is no scaling one into the other
-//! that does not look wrong. A game that uses four sizes ends up with four
-//! copies of its alphabet, which is a few hundred kilobytes and worth it.
-//! Sizes are rounded to whole pixels for the key, so a label that eases from
-//! 15.6 to 16.4 does not rasterise a new alphabet every frame.
-//!
-//! **White pixels with the coverage in the alpha**, rather than a single
-//! channel of coverage. One byte a pixel would be four times smaller, and it
-//! would need the sprite shader to know which of its textures was a glyph -
-//! a flag per instance and a branch per fragment - because sampling a
-//! one-channel texture gives back red and nothing else. This way a glyph is a
-//! picture like any other, `sample(atlas, uv) * tint` is already the right
-//! answer, and text goes through the pass that was already there. The day
-//! this is the memory that matters, the shader gains the flag.
-//!
-//! **Packed on shelves.** A row is opened as tall as the first glyph put in
-//! it, filled left to right, and closed when the next glyph will not fit. Not
-//! the tightest packing there is - a proper rectangle packer wastes less -
-//! and it is the right one here, because glyphs of one size are all nearly
-//! the same height and a shelf of them has almost no gap in it.
+//! Each glyph is rasterised once and packed into a shared image, so all the
+//! text in a frame is instances of one quad against one texture. Keyed by
+//! glyph and whole-pixel size. White pixels with the coverage in the alpha,
+//! so a glyph is a picture like any other and the sprite shader needs no
+//! special case. Packed on shelves, which suits glyphs of one size: they are
+//! nearly all the same height.
 
 const std = @import("std");
 const testing = std.testing;
@@ -73,19 +49,15 @@ pub const Entry = struct {
     advance: f32,
 };
 
-/// One glyph at one size. The key of the cache, as a number.
+/// One glyph at one size, as a number.
 const Key = u32;
 
 inline fn keyOf(index: u16, size: u16) Key {
     return (@as(Key, size) << 16) | index;
 }
 
-/// A blank pixel between one glyph and the next.
-///
-/// Without it a linear sampler asked for the edge of a glyph reads a little
-/// of whatever was packed beside it, which looks like a smear of the wrong
-/// letter along one side. One pixel is enough because nothing here is
-/// mip-mapped.
+/// A blank pixel between glyphs, so a linear sampler at one glyph's edge does
+/// not read its neighbour. One is enough without mip-maps.
 const padding: u32 = 1;
 
 gpa: Allocator,
@@ -108,9 +80,7 @@ entries: std.AutoHashMapUnmanaged(Key, Entry) = .empty,
 
 pub fn init(gpa: Allocator, width: u32, height: u32) Allocator.Error!Atlas {
     const pixels = try gpa.alloc(u8, @as(usize, width) * height * 4);
-    // White everywhere, transparent everywhere. Every glyph then only has to
-    // write the alpha, and a sampler that strays outside one reads a
-    // transparent white rather than a black fringe.
+    // White and transparent everywhere, so a glyph only writes its alpha.
     for (0..pixels.len / 4) |i| {
         pixels[i * 4 + 0] = 255;
         pixels[i * 4 + 1] = 255;
@@ -142,12 +112,9 @@ pub fn markClean(self: *Atlas) void {
     self.dirty = false;
 }
 
-/// Where this glyph is in the atlas, rasterising it if this is the first time
-/// anybody has asked.
-///
-/// `size` is in whole pixels per em. The face is passed in rather than held,
-/// because a font lives in a table that may move when another is loaded and
-/// a pointer kept here would be pointing at where it used to be.
+/// Where this glyph is in the atlas, rasterising it the first time it is
+/// asked for. `size` is in whole pixels per em. The face is passed in rather
+/// than held, because the font table may move.
 pub fn glyph(self: *Atlas, face: *const font.Font, index: u16, size: u16) Error!Entry {
     const key = keyOf(index, size);
     if (self.entries.get(key)) |entry| return entry;
@@ -164,8 +131,8 @@ pub fn glyph(self: *Atlas, face: *const font.Font, index: u16, size: u16) Error!
 fn place(self: *Atlas, rendered: font.Rendered) Error!Entry {
     const bitmap = rendered.bitmap;
 
-    // A space has a real advance and nothing to draw. It still gets an entry,
-    // so the cache answers for it and the pen still moves.
+    // A space has an advance and nothing to draw. It still gets an entry, so
+    // the pen still moves.
     if (bitmap.isEmpty()) {
         return .{
             .u0 = 0,
@@ -182,16 +149,14 @@ fn place(self: *Atlas, rendered: font.Rendered) Error!Entry {
 
     if (bitmap.width + padding * 2 > self.width) return Error.AtlasFull;
 
-    // Does it fit on the shelf being filled? If not, close that one and open
-    // another above it.
+    // Not enough room left on this shelf: open another above it.
     if (self.pen + bitmap.width + padding > self.width) {
         self.shelf_top += self.shelf_height + padding;
         self.shelf_height = 0;
         self.pen = padding;
     }
     if (bitmap.height > self.shelf_height) {
-        // A taller glyph raises the shelf it is on, which is only allowed
-        // while the shelf would still fit in the image.
+        // A taller glyph raises its shelf, as long as the shelf still fits.
         if (self.shelf_top + bitmap.height + padding > self.height) return Error.AtlasFull;
         self.shelf_height = bitmap.height;
     }

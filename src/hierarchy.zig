@@ -2,35 +2,16 @@
 
 //! Where a thing really is, once its parent has had its say.
 //!
-//! A `Transform2D` is **local**: its numbers are in its parent's space, and
-//! in the world's only when it has no parent. That is Unity's `Transform`
-//! and Godot's `Node2D` - `position` against `global_position` - and it is
-//! what people expect, because moving a turret by one is moving it one along
-//! the tank rather than one along the world.
+//! A `Transform2D` is local: in its parent's space, as Unity's `Transform`
+//! and Godot's `Node2D` are. Nothing is cached - a parented entity's world
+//! transform is worked out where it is wanted, by walking up to a root - so
+//! there is no second component to move every transform into another
+//! archetype. Each link is interpolated in its own space before composing,
+//! so the children of a body stepped in `.fixed` slide as smoothly as it
+//! does.
 //!
-//! Something has to turn the one into the other, and this is it.
-//!
-//! **Nothing is cached.** The world transform of a parented entity is worked
-//! out where it is wanted, by walking up to a root and composing back down.
-//! The alternative - a second, derived component holding the world value -
-//! is what Bevy does, and in an archetype world it means every entity with a
-//! transform is moved into a different table to make room for it, and every
-//! system that spawns one pays for the move. Walking costs one lookup per
-//! link, and only for entities that have a parent at all: a flat scene pays
-//! a single comparison against `.none`.
-//!
-//! **Interpolation happens before composing**, so a child of a body moved in
-//! the `.fixed` stage slides as smoothly as the body does. Both are blended
-//! in their own space and then put together, which is the only order that
-//! does not make a rotating parent drag its children round in steps.
-//!
-//! **What hangs from something goes with it.** A chain with a dead link in
-//! it cannot be placed - the dead thing's position went with it - so this
-//! file says so with a null, and `App` despawns whatever was hanging there at
-//! the end of the frame. Leaving it in place was the other possibility, and it
-//! would have needed exactly the cache this file refuses to keep: the last
-//! place every child was, written down every frame on the chance its parent
-//! died. See `Transform2D.parent`.
+//! A chain with a dead link cannot be placed: this says null, and `App`
+//! despawns what hung from it at the end of the frame.
 
 const std = @import("std");
 const testing = std.testing;
@@ -41,11 +22,8 @@ const components = @import("components.zig");
 const Transform2D = components.Transform2D;
 const Entity = ecs.Entity;
 
-/// Where a transform was before the last fixed step.
-///
-/// Kept by the `App` in a table beside the world rather than in a component,
-/// because it is the engine's own bookkeeping and not something a game
-/// declares. See `Transform2D.interpolate`.
+/// Where a transform was before the last fixed step. Kept by `App` beside the
+/// world; see `Transform2D.interpolate`.
 pub const Snapshot = struct {
     x: f32,
     y: f32,
@@ -63,11 +41,9 @@ pub const Snapshot = struct {
         };
     }
 
-    /// Somewhere between here and `now`, at `t` from zero to one.
-    ///
-    /// The rotation is blended as a plain number, so a thing that turns more
-    /// than half a circle in one step is drawn going the long way round.
-    /// Nothing moving at sixty steps a second turns that fast.
+    /// Somewhere between here and `now`, at `t` from zero to one. Rotation is
+    /// blended as a plain number, so more than half a turn in one step goes
+    /// the long way round.
     pub fn blend(self: Snapshot, now: Transform2D, t: f32) Transform2D {
         var out = now;
         out.x = std.math.lerp(self.x, now.x, t);
@@ -90,15 +66,11 @@ pub fn stepped(snapshots: *const Snapshots, entity: Entity, local: Transform2D, 
 }
 
 /// Where an entity's transform ends up once every parent above it has been
-/// applied. What comes back has no parent of its own: it is in the world's
-/// space, and composing it again would apply the chain twice.
+/// applied. The result has no parent: it is in world space.
 ///
-/// The chain ends at the first link with no transform to apply: `.none`,
-/// or a parent that is alive and has no `Transform2D` - which is somewhere
-/// nobody can say, and so places nothing. Null when the chain cannot be
-/// followed at all: a link that has died, whose position went with it, or a
-/// chain deeper than `Transform2D.max_depth`, which in practice is one that
-/// loops back on itself. The renderer draws neither.
+/// The chain ends at `.none`, or at a living parent with no `Transform2D`.
+/// Null when a link has died, or when the chain is deeper than
+/// `Transform2D.max_depth` - in practice, a cycle.
 pub fn resolve(
     world: *ecs.World,
     snapshots: *const Snapshots,
@@ -108,9 +80,7 @@ pub fn resolve(
 ) ?Transform2D {
     if (local.parent.isNone()) return stepped(snapshots, entity, local, alpha);
 
-    // The chain from this entity up to a root, nearest first. A fixed array
-    // rather than a list, because `max_depth` is the point at which a chain
-    // is a mistake and this must not allocate inside a frame.
+    // Nearest first. A fixed array, so nothing allocates inside a frame.
     var chain: [Transform2D.max_depth]Transform2D = undefined;
     chain[0] = stepped(snapshots, entity, local, alpha);
     var depth: usize = 1;
@@ -120,22 +90,18 @@ pub fn resolve(
         if (above.isNone()) break;
 
         const parent_local = world.get(above, Transform2D) orelse {
-            // Dead: the chain is broken, and what hangs from it goes at the
-            // end of the frame. See `App.despawnOrphans`.
+            // Dead: the chain is broken. See `App.despawnOrphans`.
             if (!world.isAlive(above)) return null;
-            // Alive with no transform: the chain stops here, as if this were
-            // the world.
+            // Alive with no transform: the chain stops here.
             break;
         };
 
-        // Deeper than anyone means to nest, which in practice means a cycle.
         if (depth == chain.len) return null;
         chain[depth] = stepped(snapshots, above, parent_local.*, alpha);
         depth += 1;
     }
 
-    // Composed back down from the root, whose own numbers are already the
-    // world's. Its parent, if it has one, is the kind that places nothing.
+    // Composed back down from the root, whose numbers are already the world's.
     var placed = chain[depth - 1];
     placed.parent = .none;
     var at = depth - 1;
@@ -146,7 +112,7 @@ pub fn resolve(
     return placed;
 }
 
-/// The same, for an entity whose transform the caller has not already got.
+/// `resolve`, for an entity whose transform the caller has not got.
 pub fn resolveEntity(
     world: *ecs.World,
     snapshots: *const Snapshots,
@@ -215,9 +181,6 @@ test "a parent that died leaves the chain unresolvable" {
     const carrier = try world.spawnWith(.{Transform2D.at(60, 60)});
     const held = try world.spawnWith(.{Transform2D.childOf(carrier, 4, 0)});
 
-    // Null rather than the child's own numbers, which are in the space of
-    // something that no longer has one. `App` despawns it at the end of the
-    // frame; until then nothing draws it.
     world.despawn(carrier);
     try testing.expect(resolveEntity(&world, &snapshots, held, 1) == null);
 }
@@ -232,8 +195,6 @@ test "a parent with no transform is the end of the chain, not a break in it" {
     const arm = try world.spawnWith(.{Transform2D.childOf(owner, 100, 0)});
     const hand = try world.spawnWith(.{Transform2D.childOf(arm, 5, 0)});
 
-    // The arm's numbers are the world's, and the hand is still carried by
-    // the arm - the link with no transform is skipped, not the whole chain.
     const placed = resolveEntity(&world, &snapshots, hand, 1).?;
     try testing.expectApproxEqAbs(@as(f32, 105), placed.x, 0.0001);
     try testing.expect(placed.parent.isNone());

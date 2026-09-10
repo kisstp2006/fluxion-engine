@@ -8,28 +8,11 @@
 //! const under_pointer = view.toWorld(.init(pointer.x, pointer.y));
 //! ```
 //!
-//! **One description of the camera, used three ways.** The renderer builds
-//! the matrix the shader is given from it, throws away whatever falls outside
-//! the box it covers, and `App.screenToWorld` runs it backwards to find what
-//! is under the pointer. The first two used to be separate pieces of
-//! arithmetic over the same two components, each finding the camera for
-//! itself, twice a frame; a third copy for the mouse would have been the one
-//! to drift, and a pointer a few pixels out at the edge of a zoomed, turned
-//! view is a bug nobody finds by looking. A test here holds `toScreen`
-//! against the matrix, so the two cannot disagree without it failing.
-//!
-//! **Screen coordinates are framebuffer pixels**, from the top left with `y`
-//! down: the units of `App.width`, of `Input.pointer`, and of a world with no
-//! camera in it. The pointer arrives in those units on every backend
-//! `fluxion-platform` has today. A backend that one day reports it in
-//! logical units on a HiDPI display will have to scale it there, not here -
-//! this file cannot tell the two apart.
-//!
-//! **With no camera, the view is the window**: the origin at the top left
-//! corner and one world unit to the pixel, which is the interface's
-//! coordinate system too. That is written as a view like any other - centred
-//! on the middle of the window, at zoom one - rather than as a special case
-//! in each of the three uses.
+//! One description of the camera, used three ways: the renderer's matrix,
+//! culling, and `App.screenToWorld`. A test holds `toScreen` against the
+//! matrix, so the two cannot drift apart. Screen coordinates are framebuffer
+//! pixels from the top left, `y` down. With no camera the view is the window:
+//! the origin at the top left, one unit to the pixel.
 
 const std = @import("std");
 const testing = std.testing;
@@ -44,7 +27,6 @@ const Transform2D = components.Transform2D;
 const Camera2D = components.Camera2D;
 const Vec2 = math.Vec2;
 
-/// Everything that can be looked through.
 const Cameras = ecs.Query(.{ Transform2D, Camera2D });
 
 pub const View = struct {
@@ -52,30 +34,26 @@ pub const View = struct {
     x: f32,
     y: f32,
 
-    /// Pixels per world unit. Two draws everything at twice the size, and so
-    /// shows half as much. Never zero or less: see `positive`.
-    ///
-    /// One per axis, because the camera's transform may be scaled unevenly,
-    /// and a single number could only honour one of the two.
+    /// Pixels per world unit, per axis because the camera's transform may be
+    /// scaled unevenly. Never zero or less; see `positive`.
     zoom_x: f32 = 1,
     zoom_y: f32 = 1,
 
-    /// Radians, the camera's own. The world turns the other way, which is
-    /// what a camera turning means.
+    /// Radians, the camera's own. The world turns the other way.
     rotation: f32 = 0,
 
     /// What it is drawn into, in pixels.
     width: f32,
     height: f32,
 
-    /// A world with no camera in it: the origin at the top left, one unit to
-    /// the pixel.
+    /// A world with no camera: the origin at the top left, one unit to the
+    /// pixel.
     pub fn screen(width: f32, height: f32) View {
         return .{ .x = width / 2, .y = height / 2, .width = width, .height = height };
     }
 
-    /// The view through the best camera in the world - the active one with
-    /// the highest `priority` - or `screen` when there is none.
+    /// The view through the active camera with the highest `priority`, or
+    /// `screen` when there is none.
     pub fn of(
         world: *ecs.World,
         snapshots: *const hierarchy.Snapshots,
@@ -91,16 +69,13 @@ pub const View = struct {
             const cameras = chunk.slice(Camera2D);
             for (places, cameras, chunk.entities) |local, camera, entity| {
                 if (!camera.active) continue;
-                // Ties go to whichever was found first, which is not an order
-                // to depend on - see `Camera2D.priority`.
+                // Ties go to the first found; see `Camera2D.priority`.
                 if (best_priority) |priority| {
                     if (camera.priority <= priority) continue;
                 }
 
-                // A camera may be parented too - to the player it follows, or
-                // to a rig that shakes - so where it looks from is resolved
-                // the way everything else is, at the latest step. One that
-                // cannot be placed is not looked through.
+                // A camera may be parented, so it is resolved like anything
+                // else. One that cannot be placed is not looked through.
                 const placed = hierarchy.resolve(world, snapshots, entity, local, 1) orelse continue;
 
                 best_priority = camera.priority;
@@ -108,9 +83,7 @@ pub const View = struct {
                 best = .{
                     .x = placed.x,
                     .y = placed.y,
-                    // The camera's own transform may be scaled - a camera
-                    // parented to something that grows - and that multiplies
-                    // the zoom rather than fighting it, on each axis.
+                    // The camera's own scale multiplies the zoom.
                     .zoom_x = positive(scale * placed.scale_x),
                     .zoom_y = positive(scale * placed.scale_y),
                     .rotation = camera.rotation + placed.rotation,
@@ -124,10 +97,8 @@ pub const View = struct {
 
     /// Where a point in the world is drawn, in pixels from the top left.
     pub fn toScreen(self: View, point: Vec2) Vec2 {
-        // Into the camera's frame - slid so the camera is at the origin, and
-        // turned the other way to it - then out to pixels about the middle of
-        // the screen, zoomed. The same three steps as `matrix`, without the
-        // trip through clip space and back.
+        // Into the camera's frame, then out to pixels about the middle of the
+        // screen: `matrix` without the trip through clip space.
         const dx = point.x - self.x;
         const dy = point.y - self.y;
         const c = @cos(self.rotation);
@@ -138,8 +109,7 @@ pub const View = struct {
         );
     }
 
-    /// What is under a point on the screen. `toScreen`, undone one step at a
-    /// time in the opposite order.
+    /// What is under a point on the screen: `toScreen` undone.
     pub fn toWorld(self: View, point: Vec2) Vec2 {
         const across = (point.x - self.width / 2) / self.zoom_x;
         const down = (point.y - self.height / 2) / self.zoom_y;
@@ -151,20 +121,14 @@ pub const View = struct {
         );
     }
 
-    /// The part of the world this view can show, as a box that does not
-    /// turn.
-    ///
-    /// A turned camera makes it larger than what is really visible - the box
-    /// round a turned rectangle - which is the right way to be wrong for what
-    /// it is used for: a sprite wrongly kept is a few bytes in a buffer, and a
-    /// sprite wrongly dropped is a hole in the picture.
+    /// The part of the world this view shows, as a box that does not turn. A
+    /// turned camera makes it larger than what is visible, which only keeps a
+    /// few extra sprites.
     pub fn bounds(self: View) Bounds {
         var half_width = self.width / (2 * self.zoom_x);
         var half_height = self.height / (2 * self.zoom_y);
 
         if (self.rotation != 0) {
-            // The box round the turned box: each half-extent picks up a share
-            // of the other, by how far the rotation leans it over.
             const c = @abs(@cos(self.rotation));
             const s = @abs(@sin(self.rotation));
             const turned_width = half_width * c + half_height * s;
@@ -183,10 +147,7 @@ pub const View = struct {
 
     /// What the shader is given: the world to clip space, in one matrix.
     pub fn matrix(self: View, clip: math.Clip) math.Mat4 {
-        // A zoom of two means everything twice the size, which means the
-        // camera sees half as much - so the extents are divided by it and not
-        // multiplied. Getting this the wrong way round is the traditional
-        // mistake, and it looks right until somebody zooms.
+        // Zoom divides the extents: twice the size shows half as much.
         const half_width = self.width / (2 * self.zoom_x);
         const half_height = self.height / (2 * self.zoom_y);
 
@@ -201,8 +162,7 @@ pub const View = struct {
             .clip = clip,
         });
 
-        // The world moves opposite to the camera, in both senses: it slides
-        // by minus the camera's position and turns by minus its rotation.
+        // The world slides and turns opposite to the camera.
         const turn: math.Mat4 = .fromAxisAngle(.init(0, 0, 1), -self.rotation);
         const slide: math.Mat4 = .fromTranslation(.init(-self.x, -self.y, 0));
         return projection.mul(turn.mul(slide));
@@ -217,9 +177,6 @@ pub const Bounds = struct {
     bottom: f32,
 
     /// Whether anything within `radius` of this point could be inside.
-    ///
-    /// The radius is the caller's, and it should be generous: see the
-    /// renderer's `spriteRadius`.
     pub fn admits(self: Bounds, x: f32, y: f32, radius: f32) bool {
         return x + radius >= self.left and
             x - radius <= self.right and
@@ -228,18 +185,14 @@ pub const Bounds = struct {
     }
 };
 
-/// A zoom that can be divided by and still draws the right way round. Zero
-/// would divide the view by nothing, and less than zero would turn it inside
-/// out; both are taken as one, which is at least a picture.
+/// A zoom that can be divided by: zero or less is taken as one.
 fn positive(zoom: f32) f32 {
     return if (zoom > 0) zoom else 1;
 }
 
-/// How many pixels one world unit covers, before the camera's own transform
-/// scales it: `zoom`, times whatever fits the camera's fitted area into a
-/// target this size. The smaller of the two ratios, so the whole of the area
-/// is on screen and the spare room shows more world rather than cutting any
-/// of the area off. See `Camera2D.fit_width`.
+/// Pixels per world unit before the camera's own scale: `zoom`, times the
+/// smaller of the two ratios that fit the camera's area into the target, so
+/// all of the area shows. See `Camera2D.fit_width`.
 fn pixelsPerUnit(camera: Camera2D, width: f32, height: f32) f32 {
     if (camera.fit_width <= 0 or camera.fit_height <= 0) return camera.zoom;
     return camera.zoom * @min(width / camera.fit_width, height / camera.fit_height);
@@ -249,8 +202,7 @@ fn pixelsPerUnit(camera: Camera2D, width: f32, height: f32) f32 {
 // Tests
 // -------------------------------------------------------------------------
 
-/// Views worth being right about: none, moved, zoomed unevenly, turned by an
-/// awkward amount, and all of it at once.
+/// None, moved, zoomed unevenly, turned awkwardly, and all of it at once.
 const awkward = [_]View{
     .screen(320, 240),
     .{ .x = 100, .y = -40, .width = 320, .height = 240 },
@@ -293,10 +245,8 @@ test "toWorld undoes toScreen, whatever the camera is doing" {
 }
 
 test "toScreen lands where the shader draws" {
-    // The whole point of this file: the pointer and the picture go through
-    // the same camera. For each view and each point, the matrix the renderer
-    // uploads takes the point to clip space, the viewport takes that to a
-    // pixel - and that pixel has to be the one `toScreen` said.
+    // The matrix and the viewport must take each point to the pixel that
+    // `toScreen` says.
     for ([_]math.Clip{ .gl, .d3d }) |clip| {
         for (awkward) |view| {
             const m = view.matrix(clip);
@@ -316,15 +266,13 @@ test "the middle of the screen is where the camera is, and zoom shows less" {
     const view: View = .{ .x = 100, .y = 50, .zoom_x = 2, .zoom_y = 2, .width = 320, .height = 240 };
     try expectNear(.init(160, 120), view.toScreen(.init(100, 50)));
 
-    // Half a screen is 160 pixels across and 120 down, which at twice the
-    // size is 80 units and 60.
+    // Half a screen, 160 by 120 pixels, is 80 by 60 units at zoom two.
     try expectNear(.init(20, -10), view.toWorld(.init(0, 0)));
 }
 
 test "a turned camera turns the world the other way" {
-    // A quarter turn: positive rotation takes +x towards +y, clockwise on a
-    // screen whose y points down. What was straight below the camera in the
-    // world is now straight to the right of the middle of the screen.
+    // A quarter turn: what was straight below the camera is now straight to
+    // the right of the middle of the screen.
     const view: View = .{ .x = 0, .y = 0, .rotation = std.math.pi / 2.0, .width = 320, .height = 240 };
     try expectNear(.init(170, 120), view.toScreen(.init(0, 10)));
 }
@@ -373,7 +321,7 @@ test "a fitted camera shows the whole area in any window, and zoom multiplies it
     try testing.expectApproxEqAbs(@as(f32, 1), View.of(&world, &snapshots, 640, 360).zoom_x, 0.0001);
 
     // Twice as wide and only as tall: the height decides, and the spare
-    // width shows more world at the sides rather than cutting the top off.
+    // width shows more world at the sides.
     const wide: View = .of(&world, &snapshots, 1280, 360);
     try testing.expectApproxEqAbs(@as(f32, 1), wide.zoom_x, 0.0001);
     const box = wide.bounds();

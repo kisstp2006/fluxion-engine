@@ -52,6 +52,13 @@
 //! the other kind of pointing: `anyPad().stick(.left)` has its dead zone taken
 //! out already, and pushed halfway it walks at half speed.
 //!
+//! **The camera and the player are found by name.** `app.setName(camera,
+//! "camera")` once, when it is spawned, and `app.find("camera")` in every
+//! system that wants it. The name belongs to the entity, as a Unity
+//! GameObject's does, and is not a component - so naming the camera does not
+//! move it to another table, and `find` hands back the one thing called that
+//! rather than the first thing a query happened to reach.
+//!
 //! The atlas is read from `examples/atlas.png`, and this program is what drew
 //! it: `-- --write-atlas examples/atlas.png` puts it back. That is the same
 //! bargain `fluxion-rhi` makes with its own atlas - the one binary file in
@@ -183,18 +190,22 @@ fn spawn(app: *App) !void {
         );
     };
 
-    // The first font opened becomes the default, so nothing below has to name
-    // it. A missing font is not fatal: the labels simply do not draw.
-    _ = app.assets.loadFont(fx.Assets.systemFontPath(), .{}) catch |err| {
+    // The first font opened becomes the default. Without one the labels do
+    // not draw, and everything else is still spawned.
+    _ = app.assets.loadFont(fx.Assets.systemFontPath(), .{}) catch |err| blk: {
         std.log.warn("no font ({t}); the labels will not draw", .{err});
-        return;
+        break :blk .none;
     };
 
-    _ = try world.spawnWith(.{
+    // Named, so the systems below can find it without a query that assumes
+    // there is only one. The name is the entity's own, not a component: it
+    // does not change which table the camera sits in.
+    const camera = try world.spawnWith(.{
         Transform2D.at(field_width / 2, field_height / 2),
         Camera2D{ .zoom = 1 },
         Follow{},
     });
+    try app.setName(camera, "camera");
 
     // A line of text pinned to the camera rather than to the world, which is
     // what a heads-up display is: a child of the camera, so it slides along
@@ -204,9 +215,6 @@ fn spawn(app: *App) !void {
     heading.color = theme.heading;
     heading.layer = 50;
 
-    // The camera is the last thing spawned above, so it is the entity before
-    // this one. Naming it directly is what a scene file would do.
-    const camera = (try fx.Query(.{ Transform2D, Camera2D }).first(world)).?.entities[0];
     _ = try world.spawnWith(.{
         // Where in the camera's space it goes is worked out every frame by
         // `pinHeading`; this only says whose corner it is.
@@ -269,7 +277,11 @@ fn spawn(app: *App) !void {
         });
 
         if (is_player) {
+            // `Player` is what makes the keys drive it; the name is how the
+            // camera finds the one it follows. The words over its head are
+            // something else again - a `Text2D`, for whoever is watching.
             try world.add(body, Player{});
+            try app.setName(body, "player");
 
             // A ring round the one being driven, so it can be found in a
             // crowd. Parented, so it never has to be moved.
@@ -338,7 +350,6 @@ fn spawn(app: *App) !void {
 
 const Wanderers = fx.Query(.{ Transform2D, Wander });
 const Players = fx.Query(.{ Transform2D, Wander, Player });
-const Cameras = fx.Query(.{ Transform2D, Camera2D, Follow });
 
 /// The keys that steer, WASD and the arrows alike, each axis as one binding.
 const steer_x = fx.AxisBinding.keys(.a, .d).orKeys(.left, .right);
@@ -447,14 +458,8 @@ const Headings = fx.Query(.{ Text2D, Heading, Transform2D });
 /// is - and the engine resolves parents after this stage, so writing the
 /// offset here is writing it in time.
 fn pinHeading(app: *App) !void {
-    const zoom = blk: {
-        var cameras = try fx.Query(.{Camera2D}).over(&app.world);
-        while (cameras.next()) |chunk| {
-            const found = chunk.slice(Camera2D);
-            if (found.len > 0) break :blk @max(found[0].zoom, 0.0001);
-        }
-        break :blk 1;
-    };
+    const camera = app.find("camera") orelse return;
+    const zoom = @max(app.world.get(camera, Camera2D).?.zoom, 0.0001);
 
     const half_width = @as(f32, @floatFromInt(app.width)) / (2 * zoom);
     const half_height = @as(f32, @floatFromInt(app.height)) / (2 * zoom);
@@ -502,81 +507,69 @@ fn lookAround(app: *App) !void {
     // frame rate.
     const settle = @exp(-4 * app.time.delta);
 
-    var it = try Cameras.over(&app.world);
-    while (it.next()) |chunk| {
-        for (chunk.slice(Camera2D), chunk.slice(Follow)) |camera, *follow| {
-            if (dragging) {
-                // Grabbing the field: the hand goes right and the field goes
-                // with it, so the view goes left. Pixels over the zoom are
-                // world units.
-                const zoom = @max(camera.zoom, 0.0001);
-                follow.peek_x = std.math.clamp(follow.peek_x - app.input.pointer.dx / zoom, -peek_reach, peek_reach);
-                follow.peek_y = std.math.clamp(follow.peek_y - app.input.pointer.dy / zoom, -peek_reach, peek_reach);
-            } else {
-                follow.peek_x *= settle;
-                follow.peek_y *= settle;
-            }
-        }
+    const camera = app.find("camera") orelse return;
+    const follow = app.world.get(camera, Follow).?;
+    if (dragging) {
+        // Grabbing the field: the hand goes right and the field goes with
+        // it, so the view goes left. Pixels over the zoom are world units.
+        const zoom = @max(app.world.get(camera, Camera2D).?.zoom, 0.0001);
+        follow.peek_x = std.math.clamp(follow.peek_x - app.input.pointer.dx / zoom, -peek_reach, peek_reach);
+        follow.peek_y = std.math.clamp(follow.peek_y - app.input.pointer.dy / zoom, -peek_reach, peek_reach);
+    } else {
+        follow.peek_x *= settle;
+        follow.peek_y *= settle;
     }
 }
 
 /// The camera follows the player, part of the way each frame.
 ///
 /// In `.late`, so it reads where the player ended up this frame rather than
-/// where it was at the end of the last one.
+/// where it was at the end of the last one. Both are found by name: there is
+/// one of each, and saying which is clearer than a query that happens to
+/// match only one.
 fn followPlayer(app: *App) !void {
-    var target: ?Transform2D = null;
-    {
-        var it = try Players.over(&app.world);
-        while (it.next()) |chunk| {
-            const places = chunk.slice(Transform2D);
-            if (places.len > 0) target = places[0];
-        }
-    }
-    const looking_at = target orelse return;
+    const player = app.find("player") orelse return;
+    const camera = app.find("camera") orelse return;
+    const looking_at = app.world.get(player, Transform2D).?.*;
+    const place = app.world.get(camera, Transform2D).?;
+    const follow = app.world.get(camera, Follow).?;
 
     const width: f32 = @floatFromInt(app.width);
     const height: f32 = @floatFromInt(app.height);
     const dt = app.time.delta;
 
-    var it = try Cameras.over(&app.world);
-    while (it.next()) |chunk| {
-        for (chunk.slice(Transform2D), chunk.slice(Camera2D), chunk.slice(Follow)) |*place, *camera, *follow| {
-            // Close enough to fill the window with rather less than the whole
-            // field, so following it is worth doing at all.
-            camera.zoom = @min(width / (field_width * 0.7), height / (field_height * 0.7));
-            const half_view_x = width / (2 * camera.zoom);
-            const half_view_y = height / (2 * camera.zoom);
+    // Close enough to fill the window with rather less than the whole field,
+    // so following it is worth doing at all.
+    const zoom = @min(width / (field_width * 0.7), height / (field_height * 0.7));
+    app.world.get(camera, Camera2D).?.zoom = zoom;
+    const half_view_x = width / (2 * zoom);
+    const half_view_y = height / (2 * zoom);
 
-            // Where it wants to be: over the player, pushed by however far
-            // the view has been dragged, and held inside the field - which is
-            // Godot's camera limits and the difference between a game and a
-            // demonstration. Without it, a player walking into a corner is
-            // looking at half a screen of nothing.
-            const want_x = insideField(looking_at.x + follow.peek_x, half_view_x, field_width);
-            const want_y = insideField(looking_at.y + follow.peek_y, half_view_y, field_height);
+    // Where it wants to be: over the player, pushed by however far the view
+    // has been dragged, and held inside the field - which is Godot's camera
+    // limits and the difference between a game and a demonstration. Without
+    // it, a player walking into a corner is looking at half a screen of
+    // nothing.
+    const want_x = insideField(looking_at.x + follow.peek_x, half_view_x, field_width);
+    const want_y = insideField(looking_at.y + follow.peek_y, half_view_y, field_height);
 
-            // A drag that went past the edge of the field has nothing more to
-            // show, so it is taken back to the edge: dragging the other way
-            // then answers at once, rather than after the hand has come back
-            // as far as it overshot.
-            follow.peek_x = want_x - looking_at.x;
-            follow.peek_y = want_y - looking_at.y;
+    // A drag that went past the edge of the field has nothing more to show,
+    // so it is taken back to the edge: dragging the other way then answers at
+    // once, rather than after the hand has come back as far as it overshot.
+    follow.peek_x = want_x - looking_at.x;
+    follow.peek_y = want_y - looking_at.y;
 
-            // Frame-rate independent easing: the fraction left over shrinks
-            // exponentially, which a plain `lerp(a, b, k)` does not do and is
-            // why a camera tuned at sixty hertz drifts at a hundred and
-            // forty-four.
-            const k = 1 - @exp(-follow.stiffness * dt);
-            place.x += (want_x - place.x) * k;
-            place.y += (want_y - place.y) * k;
+    // Frame-rate independent easing: the fraction left over shrinks
+    // exponentially, which a plain `lerp(a, b, k)` does not do and is why a
+    // camera tuned at sixty hertz drifts at a hundred and forty-four.
+    const k = 1 - @exp(-follow.stiffness * dt);
+    place.x += (want_x - place.x) * k;
+    place.y += (want_y - place.y) * k;
 
-            // And held inside at once when the window has just changed shape,
-            // rather than eased back in over a few frames of nothing.
-            place.x = insideField(place.x, half_view_x, field_width);
-            place.y = insideField(place.y, half_view_y, field_height);
-        }
-    }
+    // And held inside at once when the window has just changed shape, rather
+    // than eased back in over a few frames of nothing.
+    place.x = insideField(place.x, half_view_x, field_width);
+    place.y = insideField(place.y, half_view_y, field_height);
 }
 
 /// Where the middle of a view `half_view` across can be without showing past

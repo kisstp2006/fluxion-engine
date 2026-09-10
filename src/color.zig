@@ -3,21 +3,14 @@
 //! A colour, and the three ways people write one down.
 //!
 //! ```zig
-//! const sky: Color = .hex(0x14161A);      // what artwork is handed over as
+//! const sky: Color = .hex(0x14161A);
 //! const ghost: Color = .rgba(1, 1, 1, 0.4);
 //! const accent: Color = .oklch(0.7, 0.14, 250);
 //! ```
 //!
-//! Four floats from zero to one, which is what a GPU takes and what
-//! [Fluxion RHI](https://github.com/kisstp2006/fluxion-rhi) hands to a clear
-//! or a vertex buffer without touching.
-//!
-//! **This is deliberately the same shape as
-//! [Fluxion UI](https://github.com/kisstp2006/fluxion-ui)'s `Color`** - the
-//! same four fields in the same order, the same constructors, the same
-//! meaning. When the interface layer arrives, one of the two becomes an alias
-//! of the other and nothing that was written against either changes. Until
-//! then the engine does not drag a layout library in to name a colour.
+//! Four floats from zero to one, as the GPU takes them. The same shape as
+//! fluxion-ui's `Color`, so one can become an alias of the other when the
+//! interface layer arrives.
 
 const std = @import("std");
 const testing = std.testing;
@@ -32,7 +25,7 @@ pub const Color = extern struct {
     pub const black: Color = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
     pub const white: Color = .{ .r = 1, .g = 1, .b = 1, .a = 1 };
 
-    /// `0xRRGGBB`, opaque. The spelling artwork actually arrives in.
+    /// `0xRRGGBB`, opaque.
     pub inline fn hex(value: u24) Color {
         return .{
             .r = channel(@intCast((value >> 16) & 0xFF)),
@@ -42,8 +35,7 @@ pub const Color = extern struct {
         };
     }
 
-    /// `0xRRGGBBAA`. The alpha is last, as CSS writes it and as Windows does
-    /// not - which is the mistake this sentence exists to prevent.
+    /// `0xRRGGBBAA`: the alpha is last, as in CSS.
     pub inline fn hexa(value: u32) Color {
         return .{
             .r = channel(@intCast((value >> 24) & 0xFF)),
@@ -61,25 +53,18 @@ pub const Color = extern struct {
         return .{ .r = r, .g = g, .b = b, .a = a };
     }
 
-    /// Lightness, chroma and hue, in OKLCH.
-    ///
-    /// Worth having because it is the only one of the three that behaves: two
-    /// colours a fixed distance apart in hue look equally far apart, and
-    /// changing `l` alone does not change how colourful something looks.
-    /// Picking a palette in hex means eyeballing it; picking one here means
-    /// walking the hue round in even steps, which is what a team colour, a
-    /// damage-number gradient and a minimap key all want.
-    ///
+    /// Lightness, chroma and hue, in OKLCH: even steps of hue look evenly
+    /// spaced, and changing `l` alone does not change how colourful it looks.
     /// `l` is 0 to 1, `c` is about 0 to 0.4, `hue_degrees` goes round.
     pub fn oklch(l: f32, c: f32, hue_degrees: f32) Color {
         const h = hue_degrees * std.math.pi / 180.0;
         return oklab(l, c * @cos(h), c * @sin(h));
     }
 
-    /// The same, in the rectangular form the conversion is defined in.
+    /// The same, in rectangular form.
     pub fn oklab(l: f32, a_axis: f32, b_axis: f32) Color {
-        // Björn Ottosson's OKLab, straight through: to the cone responses,
-        // cube them, then the matrix into linear sRGB.
+        // Björn Ottosson's OKLab: to cone responses, cubed, then into linear
+        // sRGB.
         const long = l + 0.3963377774 * a_axis + 0.2158037573 * b_axis;
         const medium = l - 0.1055613458 * a_axis - 0.0638541728 * b_axis;
         const short = l - 0.0894841775 * a_axis - 1.2914855480 * b_axis;
@@ -96,21 +81,16 @@ pub const Color = extern struct {
         };
     }
 
-    /// The same colour at another opacity. What a fade is made of.
+    /// The same colour at another opacity.
     pub fn withAlpha(self: Color, a: f32) Color {
         var out = self;
         out.a = a;
         return out;
     }
 
-    /// Part of the way from one colour to another.
-    ///
-    /// In the values as stored, which is to say in sRGB and not in a linear
-    /// space - so a half-way point between two bright colours is a little
-    /// darker than the eye expects. That is what every interface toolkit
-    /// does, it is what an artist picking two colours assumes, and doing it
-    /// properly means going through `oklab` and back, which `oklch` is there
-    /// for when it matters.
+    /// Part of the way from one colour to another, in sRGB as stored - so the
+    /// middle of two bright colours is a little dark. Go through `oklch` when
+    /// that matters.
     pub fn mix(from: Color, to: Color, t: f32) Color {
         const k = std.math.clamp(t, 0, 1);
         return .{
@@ -121,8 +101,8 @@ pub const Color = extern struct {
         };
     }
 
-    /// The four numbers as an array, which is what a clear colour and a
-    /// vertex buffer both take.
+    /// The four numbers as an array, as a clear colour and a vertex buffer
+    /// take them.
     pub fn array(self: Color) [4]f32 {
         return .{ self.r, self.g, self.b, self.a };
     }
@@ -131,9 +111,7 @@ pub const Color = extern struct {
         return @as(f32, @floatFromInt(byte)) / 255.0;
     }
 
-    /// Linear light to sRGB, clamped. The last step of the OKLab conversion,
-    /// and the reason a colour picked there lands where it looks like it
-    /// should on screen.
+    /// Linear light to sRGB, clamped.
     fn encode(linear: f32) f32 {
         const x = std.math.clamp(linear, 0, 1);
         return if (x <= 0.0031308)

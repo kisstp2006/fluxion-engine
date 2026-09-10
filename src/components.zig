@@ -1,23 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! The components the engine itself knows about.
-//!
-//! There are five - `Transform2D`, `Sprite`, `Text2D`, `Animation` and
-//! `Camera2D` - and the list is deliberately short. A game invents its own -
-//! `Health`, `Wave`, `PatrolRoute` - and the engine never sees them; these
-//! are only the ones the engine itself reads, because something has to agree
-//! on where a thing is before it can be drawn there.
-//!
-//! Each one is a thing somebody making a game would name, which is the test a
-//! component has to pass here. `Parent` and `Previous2D` used to be on this
-//! list and are not any more: parenting is what a transform *does* - Unity
-//! puts it on `Transform` and Godot puts it in the tree - and where something
-//! was a step ago is the engine's own bookkeeping, which a game should never
-//! have to declare. Both are fields of `Transform2D` now.
-//!
-//! `Color` and `Region` are in this file too and are *not* components. They
-//! are values that live inside one - a tint, a rectangle of a sprite sheet -
-//! and putting either on an entity of its own would mean nothing.
+//! The components the engine itself reads: `Transform2D`, `Sprite`,
+//! `Text2D`, `Animation` and `Camera2D`. A game declares its own beside them.
 //!
 //! ```zig
 //! _ = try app.world.spawnWith(.{
@@ -26,28 +10,10 @@
 //! });
 //! ```
 //!
-//! **Every one of them is plain data**, and
-//! [Fluxion ECS](https://github.com/kisstp2006/fluxion-ecs) checks it at
-//! compile time: no pointers, no slices, nothing that owns anything. That is
-//! what lets a row be moved with a `memcpy` when an entity gains a component,
-//! a column be handed to a job as a slice, and a world be written to a file
-//! that opens on another machine. A texture is therefore a handle and not a
-//! pointer - see `assets`.
-//!
-//! **`extern struct`** rather than a plain one, because these end up in a
-//! vertex buffer by way of the renderer and because the layout being fixed
-//! makes a saved world readable by a build that added a field somewhere else.
-//! It costs nothing here: every field is a float already in declaration
-//! order.
-//!
-//! **The coordinate system is the interface's.** `+x` is right, `+y` is
-//! *down*, and a rotation of a quarter turn takes `+x` towards `+y`, which
-//! looks clockwise on screen. That is the same system
-//! [Fluxion UI](https://github.com/kisstp2006/fluxion-ui) lays out in and the
-//! same one a texture is stored in, so a sprite at `(0, 0)` and a UI element
-//! at `(0, 0)` are in the same corner. Choosing the mathematician's `+y` up
-//! instead would mean one of the three layers disagreeing with the other two,
-//! and the layer that would have to flip is the one with the text in it.
+//! All plain data, as fluxion-ecs requires - no pointers, nothing that owns
+//! memory - so a row moves with a `memcpy` and a world saves to a file. The
+//! coordinate system is the interface's: `+x` right, `+y` down, and a
+//! positive rotation turns `+x` towards `+y`, which is clockwise on screen.
 
 const std = @import("std");
 const testing = std.testing;
@@ -55,12 +21,10 @@ const testing = std.testing;
 const ecs = @import("fluxion_ecs");
 const assets = @import("assets.zig");
 
-/// What names a thing in the world. Re-exported because a transform names
-/// the one it hangs from.
+/// Re-exported because a transform names the entity it hangs from.
 pub const Entity = ecs.Entity;
 
-/// A colour, four floats from zero to one. `.hex(0x3AA0FF)` is the spelling
-/// to reach for. See `color`.
+/// A colour, four floats from zero to one. See `color`.
 pub const Color = @import("color.zig").Color;
 
 /// Where a thing is, how big, which way round, and what it hangs from.
@@ -73,80 +37,43 @@ pub const Color = @import("color.zig").Color;
 /// });
 /// ```
 ///
-/// **The numbers are local.** They are in the parent's space, and in the
-/// world's only when there is no parent - which is Unity's `Transform` and
-/// Godot's `Node2D`, and is what people mean when they move a turret by one:
-/// one along the tank, not one along the world. `App.worldTransform` is the
-/// other one, `global_position` by another name, and it costs a walk up the
-/// chain rather than a field read.
-///
-/// **The parent is a field rather than a component of its own.** A component
-/// here has to be something a person making a game would name, and nobody
-/// names "parent" - they name the turret and say what it is on. Unity agrees
-/// (`transform.parent`) and so does Godot (the tree itself). Keeping it here
-/// also means an entity gains a parent without moving between archetype
-/// tables, which is what a separate component would cost.
+/// The numbers are local - in the parent's space, as with Unity's
+/// `Transform` and Godot's `Node2D` - and `App.worldTransform` gives the
+/// world's. The parent is a field rather than a component, so gaining one
+/// does not move the entity to another archetype.
 pub const Transform2D = extern struct {
     x: f32 = 0,
     y: f32 = 0,
-    /// Radians. Positive turns `+x` towards `+y`, which is clockwise on a
-    /// screen whose `y` points down.
+    /// Radians. Positive turns `+x` towards `+y`: clockwise on screen.
     rotation: f32 = 0,
     scale_x: f32 = 1,
     scale_y: f32 = 1,
 
     /// Whose space `x` and `y` are in. `.none` is the world.
     ///
-    /// **What hangs from something goes with it.** When the parent is
-    /// despawned, so is this - at the end of that frame, before anything is
-    /// drawn - and so is whatever hangs from this in turn. That is Unity's
-    /// rule and Godot's, and it is the one a scene made of parts wants: a
-    /// creature that dies takes its eyes, its shadow and its name plate with
-    /// it, rather than leaving them hanging in the air where it stood. To keep
-    /// something when what it hangs from goes, let go of it first:
-    /// `App.worldTransform` has no parent in it, so writing that over this
-    /// transform keeps the thing exactly where it was.
-    ///
-    /// A parent that is alive and has no `Transform2D` of its own is
-    /// somewhere nobody can say, so it places nothing - these numbers are the
-    /// world's, as if there were no parent - and it still owns this. An entity
-    /// with no transform is therefore a way to say "these belong together"
-    /// without saying where: despawn it, and they all go.
+    /// When the parent is despawned, so is this, at the end of that frame -
+    /// and whatever hangs from this in turn. To keep it, write
+    /// `App.worldTransform` over it first. A living parent with no
+    /// `Transform2D` places nothing, and still owns what hangs from it.
     parent: Entity = .none,
 
-    /// Whether this turns with its parent.
-    ///
-    /// The *offset* is turned either way - that is what being attached to
-    /// something means. This is only about the thing's own angle, and it is
-    /// off for a shadow on the ground and for a name plate over a leaning
-    /// creature, both of which should follow without tipping over. Godot
-    /// spells the all-or-nothing version of this `top_level`.
+    /// Whether this turns with its parent. Its offset turns either way; off is
+    /// for a shadow or a name plate that should not tip over.
     inherit_rotation: bool = true,
 
     /// Whether the parent's scale multiplies this one's.
     inherit_scale: bool = true,
 
-    /// Draw this between its last two fixed steps rather than at the latest.
-    ///
-    /// For anything moved in the `.fixed` stage. A body stepped sixty times a
-    /// second on a screen that refreshes a hundred and forty-four times shows
-    /// every step twice and some three times, which is the stutter that makes
-    /// a fixed-step game look worse than the loop it runs on; drawing it
-    /// somewhere between the last two steps is the cure.
-    ///
-    /// The engine keeps where it was - see `hierarchy.Snapshot` - so nothing
-    /// about a game's own systems changes. They keep writing this transform
-    /// and never look at the other one. Leave it off anything moved in
-    /// `.update`, which already moves once a frame.
+    /// Draw this between its last two fixed steps, for anything moved in
+    /// `.fixed` - otherwise a 60 Hz step stutters on a 144 Hz screen. The
+    /// engine keeps where it was; see `hierarchy.Snapshot`.
     interpolate: bool = false,
 
-    /// How many links of a chain are followed before giving up. Deep enough
-    /// for a skeleton, shallow enough that a cycle is noticed within a frame.
+    /// How many links of a chain are followed before giving up: enough for a
+    /// skeleton, few enough that a cycle is caught within a frame.
     pub const max_depth: u8 = 16;
 
-    /// A transform at a point, unrotated, unscaled and unparented. The common
-    /// case, and worth a name so the other fields do not have to be written
-    /// to say nothing.
+    /// A transform at a point, unrotated, unscaled and unparented.
     pub fn at(x: f32, y: f32) Transform2D {
         return .{ .x = x, .y = y };
     }
@@ -162,8 +89,7 @@ pub const Transform2D = extern struct {
         self.y += dy;
     }
 
-    /// The same transform, drawn between fixed steps. For anything a `.fixed`
-    /// system moves: `Transform2D.at(10, 20).interpolated()`.
+    /// The same transform, drawn between fixed steps.
     pub fn interpolated(self: Transform2D) Transform2D {
         var out = self;
         out.interpolate = true;
@@ -179,10 +105,6 @@ pub const Transform2D = extern struct {
     }
 
     /// Turn a point in this transform's own space into its parent's.
-    ///
-    /// Written out rather than built from a matrix type because it is two
-    /// sines and four multiplies, and the renderer does it for every corner
-    /// of every sprite every frame.
     pub fn apply(self: Transform2D, x: f32, y: f32) struct { x: f32, y: f32 } {
         const sx = x * self.scale_x;
         const sy = y * self.scale_y;
@@ -194,10 +116,8 @@ pub const Transform2D = extern struct {
         };
     }
 
-    /// Where `local` ends up, given where its parent ended up.
-    ///
-    /// The result carries no parent of its own: it is a world transform, and
-    /// composing it again would apply the same chain twice.
+    /// Where `local` ends up, given where its parent ended up. The result has
+    /// no parent of its own.
     pub fn compose(parent: Transform2D, local: Transform2D) Transform2D {
         const placed = parent.apply(local.x, local.y);
         return .{
@@ -221,13 +141,8 @@ pub const Transform2D = extern struct {
     }
 };
 
-/// Which part of a texture a sprite shows, in zero to one.
-///
-/// Normalised rather than in texels, because that is what the shader wants
-/// and because it survives the texture being replaced by one at a different
-/// resolution - which is what an art pass does to every file in the game.
-/// `fromPixels` is there for whoever has the sprite sheet's numbers in front
-/// of them, which is everybody.
+/// Which part of a texture a sprite shows, from zero to one - so it survives
+/// the texture being redrawn at another resolution. `fromPixels` takes texels.
 pub const Region = extern struct {
     u0: f32 = 0,
     v0: f32 = 0,
@@ -247,8 +162,7 @@ pub const Region = extern struct {
         };
     }
 
-    /// One cell of a grid of them, counting left to right and then down.
-    /// What an animation strip is made of.
+    /// One cell of a grid, counted left to right and then down.
     pub fn cell(index: u32, columns: u32, rows: u32) Region {
         const cw = 1 / @as(f32, @floatFromInt(columns));
         const ch = 1 / @as(f32, @floatFromInt(rows));
@@ -257,11 +171,12 @@ pub const Region = extern struct {
         return .{ .u0 = cx, .v0 = cy, .u1 = cx + cw, .v1 = cy + ch };
     }
 
-    /// The same region, mirrored. What a character walking the other way is.
+    /// Mirrored left to right.
     pub fn flippedX(self: Region) Region {
         return .{ .u0 = self.u1, .v0 = self.v0, .u1 = self.u0, .v1 = self.v1 };
     }
 
+    /// Mirrored top to bottom.
     pub fn flippedY(self: Region) Region {
         return .{ .u0 = self.u0, .v0 = self.v1, .u1 = self.u1, .v1 = self.v0 };
     }
@@ -269,55 +184,39 @@ pub const Region = extern struct {
 
 /// A picture drawn at a transform.
 pub const Sprite = extern struct {
-    /// What to draw. `.none` - the default, and what a zeroed component is -
-    /// draws a rectangle of solid `tint`, because the renderer falls back to
-    /// the white texel.
+    /// What to draw. `.none` - also what a zeroed component holds - draws a
+    /// rectangle of solid `tint`.
     texture: assets.TextureHandle = .none,
 
-    /// Multiplied into whatever the texture says. White leaves it alone;
-    /// anything else tints it, and the alpha fades it.
+    /// Multiplied into the texture. White leaves it alone; the alpha fades it.
     tint: Color = .white,
 
     /// Which part of the texture.
     region: Region = .full,
 
-    /// How big it is in world units, before the transform's scale.
-    ///
-    /// Zero on either axis means "as many world units as the region has
-    /// texels", which for a game whose camera is at zoom 1 means the sprite
-    /// comes out the size of its own artwork. That default is why most
-    /// sprites need no size at all.
+    /// Size in world units, before the transform's scale. Zero means the
+    /// region's size in texels, so most sprites need no size.
     width: f32 = 0,
     height: f32 = 0,
 
-    /// Which point of the sprite sits on the transform, in zero to one.
-    /// The middle by default, so rotation spins a thing about itself.
+    /// Which point of the sprite sits on the transform, from zero to one. The
+    /// middle by default, so it turns about itself.
     pivot_x: f32 = 0.5,
     pivot_y: f32 = 0.5,
 
-    /// What is drawn on top of what. Higher is nearer the viewer.
-    ///
-    /// Between layers it is this number, and it is a sort key rather than a
-    /// depth value: the 2D pass blends back to front with no depth test,
-    /// because half-transparent pixels and a depth buffer disagree about what
-    /// is behind them. Within one layer, see `order`.
+    /// What is drawn over what: higher is nearer. A sort key, not a depth -
+    /// the 2D pass blends back to front with no depth test. Within a layer,
+    /// see `order`.
     layer: i16 = 0,
 
-    /// Skipped entirely when false. Cheaper than removing the component and
-    /// adding it back, which moves the entity between two archetypes twice.
+    /// Skipped when false. Cheaper than removing the component, which moves
+    /// the entity between archetypes.
     visible: bool = true,
 
-    /// Where a sprite sits *within* its layer. Lower is drawn first.
-    ///
-    /// Zero for everything, by default, and then sprites of one layer are
-    /// grouped by texture so each texture is one draw call. Setting it is how
-    /// a top-down game sorts by feet: a system in `.late` copying
-    /// `transform.y` in here makes a thing lower on the screen draw over a
-    /// thing higher up. That costs the grouping, which is the trade a
-    /// y-sorted layer always makes.
-    ///
-    /// Two sprites with the same layer, order and texture are drawn in the
-    /// order they were found, which is stable from one frame to the next.
+    /// Where a sprite sits within its layer: lower is drawn first. At zero, a
+    /// layer's sprites are grouped by texture, one draw call each. Copying
+    /// `transform.y` in here sorts a top-down game by feet, at the cost of
+    /// that grouping. Ties keep a stable order.
     order: f32 = 0,
 
     /// A sprite showing the whole of a texture at its own size.
@@ -341,17 +240,11 @@ pub const Sprite = extern struct {
 /// });
 /// ```
 ///
-/// The engine advances it once a frame - in `.update` rather than `.fixed`,
-/// because an animation is something a viewer sees and not something the
-/// simulation depends on - and writes the result into `Sprite.region`. A game
-/// that would rather drive the region itself leaves this component off.
-///
-/// **The strip is a grid, counted left to right and then down**, which is how
-/// every sprite sheet an artist hands over is arranged. `first` is where this
-/// animation starts in that grid, so one sheet holds a walk, an idle and an
-/// attack, and swapping between them is writing two numbers.
+/// The engine advances it once a frame and writes the cell into
+/// `Sprite.region`. The sheet is a grid counted left to right and then down,
+/// and `first` is where this animation starts, so one sheet can hold several.
 pub const Animation = extern struct {
-    /// The cell this animation starts at, counting across the whole sheet.
+    /// The cell it starts at, counting across the whole sheet.
     first: u16 = 0,
     /// How many cells it runs for. One is a still picture.
     length: u16 = 1,
@@ -363,8 +256,8 @@ pub const Animation = extern struct {
     /// Cells a second. Twelve is the usual hand-drawn rate.
     fps: f32 = 12,
 
-    /// How far into the animation it is, in seconds. Kept rather than a frame
-    /// number, so that changing `fps` part way through does not jump.
+    /// Seconds into the animation, rather than a frame number, so changing
+    /// `fps` part way through does not jump.
     time: f32 = 0,
 
     playing: bool = true,
@@ -373,13 +266,11 @@ pub const Animation = extern struct {
     /// and sets `finished`.
     looping: bool = true,
 
-    /// True once a non-looping animation has reached its end. A game reads it
-    /// to know when to swap back to the idle, and clears it by writing a new
+    /// Set when a one-shot reaches its end. Cleared by writing a new
     /// animation over the component.
     finished: bool = false,
 
-    /// The first `length` cells of a single row, which is what most sheets
-    /// are.
+    /// The first `length` cells of a single row.
     pub fn strip(length: u16, fps: f32) Animation {
         return .{ .length = length, .columns = length, .rows = 1, .fps = fps };
     }
@@ -395,11 +286,8 @@ pub const Animation = extern struct {
         return self.first + within;
     }
 
-    /// Move it on by `delta` seconds, and say which cell to show.
-    ///
-    /// The clock is wound back by whole loops rather than left to grow, so an
-    /// animation running for an hour is as precise as one that started a
-    /// second ago - an `f32` counting seconds has lost its sixtieths by then.
+    /// Move it on by `delta` seconds, and say which cell to show. The clock is
+    /// wound back by whole loops, so it stays precise however long it runs.
     pub fn advance(self: *Animation, delta: f32) Region {
         if (self.playing and self.length > 1 and self.fps > 0) {
             self.time += delta;
@@ -422,40 +310,25 @@ pub const Animation = extern struct {
 /// ```zig
 /// var label: Text2D = .of("Score");
 /// label.size = 24;
-/// label.color = .hex(0xE6E9EF);
 /// _ = try world.spawnWith(.{ Transform2D.at(16, 16), label });
 ///
 /// // ... and later, from a system:
 /// text.print("{d} points", .{score});
 /// ```
 ///
-/// **The text is inside the component**, in a fixed buffer, rather than a
-/// slice into somewhere else. A component may not own memory - that is what
-/// lets a row be moved with a `memcpy` and a world be written to a file - so
-/// the choice was between an index into a table of strings the engine keeps
-/// and a few dozen bytes carried in the row. The bytes win for what world
-/// text actually is: a score, a name plate, a damage figure, "Press E". A
-/// paragraph is not this component's job, and when there is a paragraph to
-/// draw it will be the interface layer's.
-///
-/// `print` is the one to reach for, because a game's text is nearly always a
-/// number that changed.
-///
-/// **The transform is the top left of the first line**, not the baseline.
-/// Baselines are how a font thinks and corners are how a person placing a
-/// label thinks, and the renderer knows the ascent it takes to convert.
+/// The text is inside the component, in a fixed buffer: a component may not
+/// own memory, and world text is short - a score, a name plate, "Press E".
+/// The transform is the top left of the first line, not the baseline.
 pub const Text2D = extern struct {
-    /// The bytes, as UTF-8. Not a slice: see above.
+    /// UTF-8. Not a slice: see above.
     bytes: [capacity]u8 = @splat(0),
     len: u8 = 0,
 
-    /// Which font. `.none` means the first one that was loaded - see
-    /// `assets.default_font` - so a game with one font never names it.
+    /// `.none` is the default font, the first one loaded.
     font: assets.FontHandle = .none,
 
     /// Pixels per em, before the transform's scale. Rounded to whole pixels
-    /// when the glyphs are rasterised, so easing a label from 15.6 to 16.4
-    /// does not fill the atlas with an alphabet a frame.
+    /// when rasterised.
     size: f32 = 16,
 
     color: Color = .white,
@@ -463,24 +336,22 @@ pub const Text2D = extern struct {
     /// Where the transform sits along the line.
     alignment: Alignment = .left,
 
-    /// Multiplies the font's own line height, for text that wants to breathe.
+    /// Multiplies the font's own line height.
     line_spacing: f32 = 1,
 
-    /// The same two numbers a `Sprite` sorts by, and they mean the same
-    /// thing: text and sprites are in one list and one order.
+    /// The same sort keys as a `Sprite`'s: text and sprites are one list.
     layer: i16 = 0,
     order: f32 = 0,
 
     visible: bool = true,
 
-    /// How many bytes of text fit. Sixty-three and a length, so the whole
-    /// component is a round ninety-six bytes.
+    /// Bytes of text that fit: 63 and a length make the component 96 bytes.
     pub const capacity = 63;
 
     pub const Alignment = enum(u8) { left, center, right };
 
-    /// A label with this text in it. Truncated if it does not fit, on a
-    /// character boundary rather than in the middle of one.
+    /// A label with this text in it, cut on a character boundary if it does
+    /// not fit.
     pub fn of(run: []const u8) Text2D {
         var self: Text2D = .{};
         self.set(run);
@@ -490,9 +361,8 @@ pub const Text2D = extern struct {
     /// Replace the text.
     pub fn set(self: *Text2D, run: []const u8) void {
         const room = @min(run.len, capacity);
-        // Cutting a UTF-8 sequence in half would put a broken character at
-        // the end, so back up to where one starts. A continuation byte is
-        // `10xxxxxx`; anything else begins a character.
+        // Back up to the start of a character rather than cut one in half. A
+        // continuation byte is `10xxxxxx`.
         var cut = room;
         while (cut > 0 and cut < run.len and run[cut] & 0xC0 == 0x80) cut -= 1;
 
@@ -500,10 +370,8 @@ pub const Text2D = extern struct {
         self.len = @intCast(cut);
     }
 
-    /// Format into the label, which is what a score does every frame.
-    ///
-    /// Silently truncated rather than failing: a number too long to fit is a
-    /// display problem and not a reason for a frame to stop.
+    /// Format into the label. Cut short rather than failing: a number too long
+    /// to fit is no reason to stop the frame.
     pub fn print(self: *Text2D, comptime format: []const u8, args: anytype) void {
         var buffer: [capacity]u8 = undefined;
         const written = std.fmt.bufPrint(&buffer, format, args) catch buffer[0..];
@@ -516,44 +384,26 @@ pub const Text2D = extern struct {
     }
 };
 
-/// What the 2D pass looks through.
-///
-/// The camera's *position* is its entity's `Transform2D`, and its position is
-/// the centre of the view - not a corner. An entity with both is a camera;
-/// there is no separate registry to keep in step with the world.
-///
-/// **With no camera in the world at all**, the pass draws with the origin at
-/// the top left corner of the window and one world unit to the pixel, which
-/// is the same coordinate system as the interface layer. That is a deliberate
-/// default rather than an oversight: a game that has not thought about
-/// cameras yet is usually laying things out in screen coordinates, and it
-/// should be able to.
+/// What the 2D pass looks through. Its position is its entity's
+/// `Transform2D`, at the middle of the view. With no camera in the world, the
+/// origin is the window's top left and one unit is one pixel.
 pub const Camera2D = extern struct {
-    /// Bigger is closer in. 2 draws everything at twice the size.
-    ///
-    /// With `fit_width` and `fit_height` set, this multiplies the fit rather
-    /// than replacing it: 1 shows exactly the fitted area, 2 half of it.
+    /// Bigger is closer: 2 draws everything at twice the size. With a fit set,
+    /// it multiplies the fit: 1 shows exactly the fitted area.
     zoom: f32 = 1,
 
-    /// A part of the world that is always all on screen, whatever size the
-    /// window is: the play field of a game designed at one size.
-    ///
-    /// The view is scaled so this area fits the window with nothing cut off,
-    /// and whatever room the window has spare in one direction shows more of
-    /// the world around it. Zero on either - the default - is no fit, and one
-    /// world unit is one pixel before `zoom`. Doing this by hand is a system
-    /// reading the window's size every frame and writing the zoom, which is
-    /// what `pong` did.
+    /// An area always shown whole, whatever the window's size: a play field
+    /// designed at one size. Spare room shows more of the world around it.
+    /// Zero on either is no fit.
     fit_width: f32 = 0,
     fit_height: f32 = 0,
 
-    /// Radians, the same sense as `Transform2D.rotation`. The world turns the
-    /// other way, which is what a camera rotating means.
+    /// Radians, as `Transform2D.rotation`. The world turns the other way.
     rotation: f32 = 0,
 
-    /// Which camera to use when there is more than one. The one with the
-    /// highest `priority` that is `active` wins; ties go to whichever the
-    /// archetypes are walked first, which is not an order to depend on.
+    /// With more than one camera, the active one with the highest priority
+    /// wins. Ties go to whichever is found first, which is not an order to
+    /// depend on.
     priority: i16 = 0,
 
     active: bool = true,
@@ -562,8 +412,7 @@ pub const Camera2D = extern struct {
         return .{ .zoom = zoom };
     }
 
-    /// A camera that always shows the whole of an area this size. See
-    /// `fit_width`.
+    /// A camera that always shows the whole of an area this size.
     pub fn fitting(width: f32, height: f32) Camera2D {
         return .{ .fit_width = width, .fit_height = height };
     }
@@ -595,9 +444,7 @@ test "mirroring swaps the horizontal edges and leaves the vertical ones" {
 }
 
 test "every engine component is one the world will accept" {
-    // This is the check the world would make when the component is first
-    // used, brought forward so a field that cannot be a component is a
-    // failing test here rather than a compile error in somebody's game.
+    // The check the world makes on first use, brought forward into a test.
     ecs.component.check(Transform2D);
     ecs.component.check(Sprite);
     ecs.component.check(Camera2D);
@@ -609,8 +456,7 @@ test "a child is carried round by its parent" {
     const parent: Transform2D = .{ .x = 100, .y = 100, .rotation = std.math.pi / 2.0 };
     const local: Transform2D = .at(10, 0);
 
-    // A quarter turn takes the offset from +x to +y, so the child ends up
-    // below the parent rather than to its right.
+    // A quarter turn puts the child below the parent, not to its right.
     const placed = Transform2D.compose(parent, local);
     try testing.expectApproxEqAbs(@as(f32, 100), placed.x, 0.0001);
     try testing.expectApproxEqAbs(@as(f32, 110), placed.y, 0.0001);
@@ -649,10 +495,10 @@ test "a label carries its own text" {
 }
 
 test "text too long is cut on a character boundary" {
-    // Twenty-two three-byte characters is sixty-six bytes, which is three
-    // more than fit - so the last whole one has to go, not two thirds of it.
-    var label: Text2D = .of("hétfőkedd" ** 8);
-    try testing.expect(label.len <= Text2D.capacity);
+    // `é` is two bytes, so byte 63 is the middle of the thirty-second one:
+    // the cut has to back up to 62.
+    var label: Text2D = .of("é" ** 40);
+    try testing.expectEqual(@as(u8, 62), label.len);
     try testing.expect(std.unicode.utf8ValidateSlice(label.slice()));
 }
 
@@ -670,8 +516,7 @@ test "an animation walks its cells and comes back round" {
     _ = animation.advance(0.2);
     try testing.expectEqual(@as(u32, 3), animation.frame());
 
-    // A whole loop is four tenths of a second, so this is back at the start
-    // rather than off the end of the sheet.
+    // A whole loop is 0.4 seconds, so this is back at the start.
     _ = animation.advance(0.1);
     try testing.expectEqual(@as(u32, 0), animation.frame());
 }
