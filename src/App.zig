@@ -54,6 +54,7 @@ const Allocator = std.mem.Allocator;
 const ecs = @import("fluxion_ecs");
 const rhi = @import("fluxion_rhi");
 const math = @import("fluxion_math");
+const platform = @import("fluxion_platform");
 
 const Assets = @import("assets.zig");
 const Input = @import("input.zig");
@@ -100,6 +101,12 @@ pub const Backend = enum {
 
 /// How the window fills the screen. See `Window.Fullscreen`.
 pub const Fullscreen = Window.Fullscreen;
+
+/// Where the pointer may go, and whether it shows. See `Window.Cursor`.
+pub const Cursor = Window.Cursor;
+
+/// One of the system's own pointer shapes. `fluxion-platform`'s own.
+pub const CursorShape = platform.CursorShape;
 
 pub const Options = struct {
     title: []const u8 = "fluxion",
@@ -275,7 +282,12 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.height = height;
     // Whatever size the window settled at is the size the surface is about to
     // be made at, so there is nothing left for the first frame to resize.
-    if (self.window) |*w| w.resized = false;
+    // And the input starts out agreeing with the window about the keyboard,
+    // which it would otherwise learn only from the next focus event.
+    if (self.window) |*w| {
+        w.resized = false;
+        self.input.focused = w.focused;
+    }
 
     self.device = try .init(gpa, .{
         .backend = switch (backend) {
@@ -655,6 +667,52 @@ pub fn toggleFullscreen(self: *App) Window.Error!void {
         .windowed => .borderless,
         else => .windowed,
     });
+}
+
+/// Lock the pointer, confine it to the window, hide it, or give it back.
+///
+/// ```zig
+/// try app.setCursor(.locked);     // a first-person camera, or a drag
+/// const turn = app.input.pointer.dx;
+/// try app.setCursor(.normal);
+/// ```
+///
+/// A locked or confined pointer is let go whenever the window loses the
+/// keyboard and taken back when it returns, so a player who alt-tabs away
+/// gets their mouse back. While it is locked, `Input.pointer` holds still
+/// where it was and only its movement changes. See `Cursor`.
+///
+/// Without a window there is no pointer to hold, and this does nothing.
+pub fn setCursor(self: *App, wanted: Cursor) Window.Error!void {
+    const window = if (self.window) |*w| w else return;
+    try window.setCursor(wanted);
+    self.input.pointer.locked = wanted == .locked;
+}
+
+/// What the pointer was last asked to do. `.normal` when there is no window.
+pub fn cursor(self: *const App) Cursor {
+    if (self.window) |*window| return window.cursor();
+    return .normal;
+}
+
+/// Use one of the system's own pointer shapes over the window - the hand
+/// over something clickable, the I-beam over text. Nothing without a window.
+pub fn setCursorShape(self: *App, shape: CursorShape) Window.Error!void {
+    if (self.window) |*window| try window.setCursorShape(shape);
+}
+
+/// Teach the platform the layout of controllers it does not know, from
+/// text in SDL's `gamecontrollerdb.txt` format, and say how many lines it
+/// took.
+///
+/// Most controllers never need this: Windows reports an XInput pad in the
+/// Xbox layout, and Linux and Android name their buttons. It is for the pad
+/// that reads as connected and presses nothing - a joystick nobody has told
+/// the platform how to read. Without a window there is no platform to teach,
+/// and it takes nothing.
+pub fn addGamepadMappings(self: *App, text: []const u8) Window.Error!usize {
+    const window = if (self.window) |*w| w else return 0;
+    return window.ctx.updateGamepadMappings(text);
 }
 
 /// Remember where every interpolating transform is, before a step moves it.
@@ -1123,8 +1181,6 @@ test "a transform that never asked is not remembered at all" {
     try testing.expectEqual(@as(usize, 0), app.snapshots.count());
 }
 
-const platform = @import("fluxion_platform");
-
 /// A key going down, as the platform would deliver it.
 fn pressOf(key: platform.Key) platform.Event {
     return .{ .key = .{
@@ -1281,4 +1337,57 @@ test "a headless app has no screen to fill, and says so without failing" {
     try app.setFullscreen(.borderless);
     try app.toggleFullscreen();
     try testing.expect(app.fullscreen() == .windowed);
+}
+
+/// A controller in slot zero with A held from the first frame on, handed
+/// over every frame the way `Window.pump` hands over what the platform
+/// polled - which a headless app has no window to do.
+const Controller = struct {
+    var heard: u32 = 0;
+    var slots: [Input.max_pads]platform.Gamepad = @splat(.{});
+
+    fn poll(app: *App) anyerror!void {
+        if (app.time.frame == 1) {
+            slots[0].connected = true;
+            slots[0].state.buttons[@intFromEnum(platform.GamepadButton.a)] = true;
+        }
+        app.input.readPads(&slots);
+    }
+
+    fn jump(app: *App) anyerror!void {
+        if (app.input.anyPad().justPressed(.a)) heard += 1;
+    }
+};
+
+test "a controller press is heard by one fixed step, as a key is" {
+    Controller.heard = 0;
+    Controller.slots = @splat(.{});
+
+    // Frames half a step long, as in the key test above: the frame the
+    // button goes down on runs no step, and the next one does.
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 8,
+        .fixed_delta = 1.0 / 64.0,
+    });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 1.0 / 128.0 };
+
+    try app.addSystem(.input, Controller.poll);
+    try app.addSystem(.fixed, Controller.jump);
+    try app.run();
+
+    // Once, though the button is held for all eight frames and four steps.
+    try testing.expectEqual(@as(u32, 1), Controller.heard);
+}
+
+test "a headless app has no pointer to hold, and says so without failing" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    try app.setCursor(.locked);
+    try testing.expect(app.cursor() == .normal);
+    try testing.expect(!app.input.pointer.locked);
+    try app.setCursorShape(.pointing_hand);
+    try testing.expectEqual(@as(usize, 0), try app.addGamepadMappings("not a mapping"));
 }

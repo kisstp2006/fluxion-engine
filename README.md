@@ -8,7 +8,7 @@ A window, a world, and the loop between them. For Zig 0.16.
 | `schedule` | When a game's systems run. |
 | `components` | What the renderer knows how to read. |
 | `assets` | What the GPU is holding, and the handles that name it. |
-| `Input` | What the keyboard and the mouse did. |
+| `Input` | What the keyboard, the mouse and the controllers did. |
 | `Time` | How long the last frame took, and the fixed step. |
 | `color` | A colour, and the three ways to write one down. |
 | `Window` | The window and the event queue. |
@@ -101,6 +101,41 @@ most frames run no fixed step at all, and on a slow machine one frame runs
 two - so a `.fixed` system asking `justPressed` is answered from edges kept
 since the last *step*, not since the top of the frame. Each press reaches
 exactly one step, and a press made while the world is paused reaches none.
+A controller's buttons work the same way.
+
+## Controllers and the pointer
+
+```zig
+const pad = app.input.anyPad();            // or app.input.pad(1) for player two
+const walk = pad.stick(.left);             // a Vec2, dead zone already out
+if (pad.justPressed(.a)) jump();
+
+try app.setCursor(.locked);                // a first-person camera, or a drag
+const turn = app.input.pointer.dx;
+```
+
+- **Controllers are read, not heard.** A stick is a position rather than a
+  thing that happened, so the platform polls every controller once a frame
+  and "pressed this frame" is this frame's buttons against the last. XInput
+  on Windows, evdev on Linux, Android's own, and SDL's mapping format for the
+  pad nobody recognises - `app.addGamepadMappings(text)`.
+- **`anyPad()` is every controller as one**, for a game with one player who
+  should be able to pick up whichever is nearest; `pad(slot)` is one of them,
+  and a slot is the controller's for as long as it stays plugged in, which
+  makes slots player numbers.
+- **The dead zone is round.** On the stick's distance from the middle rather
+  than on each axis, so a nearly diagonal push does not snap to a straight
+  line, and rescaled so the first movement past it is small rather than a
+  jump. `Input.stick_deadzone` is a fifth by default.
+- **`setCursor` takes four modes**: `.normal`, `.hidden` for a game that
+  draws its own pointer, `.confined` to hold it inside the window, and
+  `.locked` to take it away and report movement with no edge to stop at,
+  unaccelerated where the system allows. While locked, `input.pointer` holds
+  still where it was and only `dx` and `dy` move.
+- **A held pointer is let go when the window loses the keyboard**, and taken
+  back when it returns - so a player who alt-tabs away from a locked game gets
+  their mouse back, and the lock is still a lock when they come back to it. A
+  lock asked for while the window is in the background waits for it.
 
 ## The 2D layer
 
@@ -240,13 +275,15 @@ zig build example-creatures -- --frames 300 --capture creatures.png
 
 **`creatures`** is the renderer's half: one sprite sheet, an `Animation` over
 its cells, and fourteen creatures each made of five entities - a body, two
-eyes, a shadow and a name - where only the body is ever moved. Arrows or WASD
-steer the one with the ring, and so does holding the left mouse button where
-it should go: that is `app.pointerInWorld()` at work, through a camera that
-follows the creature and stops at the edge of the field. The line in the
-corner is a label parented to the *camera* and scaled against its zoom, which
-is the whole of what a heads-up display is until the interface layer arrives.
-In both examples, F11 fills the screen.
+eyes, a shadow and a name - where only the body is ever moved. Arrows, WASD
+or a controller's left stick steer the one with the ring, and so does holding
+the left mouse button where it should go: that is `app.pointerInWorld()` at
+work, through a camera that follows the creature and stops at the edge of the
+field. Dragging with the right button locks the pointer and pulls the view
+around. The line in the corner is a label parented to the *camera* and scaled
+against its zoom, which is the whole of what a heads-up display is until the
+interface layer arrives. In both examples F11 fills the screen, and in `pong`
+a controller each drives the bats.
 
 Its sheet is `examples/atlas.png`, and the example is what drew it:
 `-- --write-atlas examples/atlas.png` puts it back, so the one binary file in
@@ -259,7 +296,10 @@ Here, and checked by the tests:
 - The loop, the seven stages, the fixed step and its backlog.
 - Keyboard and mouse as levels and edges, with typing kept in order, and
   edges that a fixed step hears exactly once.
-- The pointer in world coordinates, through the camera.
+- Controllers: sixteen slots, levels and edges, round dead zones, any pad or
+  one pad, and SDL mappings for the ones the system does not know.
+- The pointer in world coordinates, through the camera; locked, confined or
+  hidden, and let go whenever the window loses the keyboard.
 - Fullscreen - borderless, or exclusive at a chosen mode - on whichever
   monitor the window is on, at `create` or at any time after, and a no-op
   without a window.

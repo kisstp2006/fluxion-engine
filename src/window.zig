@@ -58,6 +58,44 @@ pub const Fullscreen = union(enum) {
     exclusive: platform.VideoMode,
 };
 
+/// Where the pointer may go, and whether it shows.
+///
+/// `fluxion-platform`'s cursor modes under the names a game uses for them -
+/// its `captured` is `confined` here and its `disabled` is `locked` - because
+/// "disabled" is what the pointer is and "locked" is what the game did to it.
+pub const Cursor = enum {
+    /// The ordinary arrow, free to leave the window. What a window starts
+    /// with.
+    normal,
+    /// Invisible over the window, and otherwise free. For a game that draws
+    /// its own pointer.
+    hidden,
+    /// Visible, and held inside the window. A strategy game that scrolls
+    /// when the pointer touches an edge, in a window rather than fullscreen.
+    confined,
+    /// Gone: invisible, held, and reporting movement with no edge to stop
+    /// at, unaccelerated where the system can manage it. What a first-person
+    /// camera needs, and what makes dragging a map further than the screen
+    /// is wide possible. `Input.pointer` holds still while it is locked and
+    /// only its `dx` and `dy` move; see `Input.Pointer.locked`.
+    locked,
+
+    /// Does this mode keep the pointer inside the window? Those are the two
+    /// that have to be let go when the window loses the keyboard.
+    pub fn holds(self: Cursor) bool {
+        return self == .confined or self == .locked;
+    }
+
+    fn platformMode(self: Cursor) platform.CursorMode {
+        return switch (self) {
+            .normal => .normal,
+            .hidden => .hidden,
+            .confined => .captured,
+            .locked => .disabled,
+        };
+    }
+};
+
 pub const Desc = struct {
     title: []const u8 = "fluxion",
     width: u32 = 1280,
@@ -87,6 +125,21 @@ resized: bool = false,
 
 /// Set by the close button, by Alt+F4, and by anything that calls `close`.
 closing: bool = false,
+
+/// What the game asked the pointer to do. Not always what the platform has
+/// been told: while the window is in the background a held pointer is let
+/// go, and this is what it is taken back to. See `refocus`.
+cursor_wanted: Cursor = .normal,
+
+/// Whether the window has the keyboard: asked of the platform when the
+/// window opens, and kept up to date by its focus events after that.
+///
+/// Asked rather than assumed, because a window is not always made with it -
+/// Windows gives the keyboard to a new window only if the program that made
+/// it already had it, so a game started from something in the background
+/// opens behind whatever the player is using. Assuming otherwise would lock
+/// the pointer over a window the player cannot see.
+focused: bool = true,
 
 /// Open a window at this address.
 pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
@@ -122,6 +175,7 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
     const fb = self.handle.framebufferSize();
     self.width = fb[0];
     self.height = fb[1];
+    self.focused = self.handle.isFocused();
 }
 
 pub fn close(self: *Window) void {
@@ -133,9 +187,67 @@ pub fn close(self: *Window) void {
     if (self.handle.fullscreen() == .exclusive) {
         self.handle.setFullscreen(.windowed) catch {};
     }
+    // And a held pointer is let go, for the same reason: the rectangle it is
+    // confined to belongs to the whole machine, not to this window, and
+    // outlives it unless somebody says otherwise.
+    if (self.cursor_wanted.holds()) {
+        self.handle.setCursorMode(.normal) catch {};
+    }
     self.handle.destroy();
     self.ctx.deinit();
     self.* = undefined;
+}
+
+/// Where the pointer may go, and whether it shows. See `Cursor`.
+///
+/// A mode that holds the pointer is only ever held while the window has the
+/// keyboard: asked for from the background, it is remembered and taken when
+/// the window comes back. See `refocus`.
+pub fn setCursor(self: *Window, wanted: Cursor) Error!void {
+    // Unaccelerated movement means anything only while locked, and asking for
+    // it once is enough: the platform turns it on and off as the mode comes
+    // and goes. Where the system cannot give it, locking still works, on the
+    // accelerated numbers.
+    if (wanted == .locked) _ = self.handle.setRawMouseMotion(true);
+
+    if (self.focused or !wanted.holds()) {
+        try self.handle.setCursorMode(wanted.platformMode());
+    }
+    self.cursor_wanted = wanted;
+}
+
+/// What the game asked the pointer to do.
+pub fn cursor(self: *const Window) Cursor {
+    return self.cursor_wanted;
+}
+
+/// Use one of the system's own pointer shapes over this window: a hand over
+/// a button, an I-beam over a text box. `error.Unavailable` for a shape this
+/// system has not got; see `fluxion-platform`'s `cursor.Shape`.
+pub fn setCursorShape(self: *Window, shape: platform.CursorShape) Error!void {
+    try self.handle.setCursorShape(shape);
+}
+
+/// Let a held pointer go while the window is in the background, and take it
+/// back when the window returns.
+///
+/// On Windows the platform holds the pointer by asking for a rectangle of the
+/// screen, and nothing on its side gives the rectangle back when the window
+/// loses the keyboard - nor asks for it again when the window returns, in
+/// case it was let go in the meantime. A locked pointer without raw motion is
+/// also put back in the middle of the window on every move over it, focused
+/// or not. So without this, a game alt-tabbed away from while it held the
+/// pointer could keep it trapped where its window was, or come back holding
+/// nothing. GLFW lets go on losing focus and takes hold again on getting it
+/// back, and so does this.
+fn refocus(self: *Window, focused: bool) void {
+    self.focused = focused;
+    if (!self.cursor_wanted.holds()) return;
+
+    const mode: platform.CursorMode = if (focused) self.cursor_wanted.platformMode() else .normal;
+    self.handle.setCursorMode(mode) catch |err| {
+        log.warn("could not {s} the pointer: {t}", .{ if (focused) "take back" else "let go of", err });
+    };
 }
 
 /// Fill the monitor the window is on, or go back to being a window. See
@@ -237,10 +349,24 @@ pub fn pump(self: *Window, input: *Input) bool {
         return false;
     };
 
+    // The platform polled every controller inside that pump, before handing
+    // out the events - so a connection notice and the state it announces
+    // arrive in the same frame.
+    input.readPads(self.ctx.gamepads());
+
     while (self.ctx.poll()) |ev| {
+        // Only what happened to this window, and what happened to no window
+        // in particular - a controller plugged in, the app sent to the
+        // background. A game that opens a second platform window for a tool
+        // of its own should not find that window's keys, or its focus, in the
+        // game's input.
+        const about = ev.window();
+        if (about != .none and about != self.handle.id) continue;
+
         input.apply(ev);
         switch (ev) {
             .close => self.closing = true,
+            .focus => |state| self.refocus(state.value),
             .framebuffer_resize => |size| {
                 // Minimising a window on Windows reports zero by zero, and a
                 // swapchain of that size is an error on every backend. Held

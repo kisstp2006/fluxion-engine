@@ -11,7 +11,8 @@
 //!
 //! W and S on the left, up and down on the right, F11 to fill the screen,
 //! Escape to leave. The ball serves itself a moment after each point, or at
-//! once if you press space.
+//! once if you press space. A controller each works too: the left stick or
+//! the d-pad moves a bat, A serves and Start begins again.
 //!
 //! It is here to be read as much as played, because it is the shortest honest
 //! answer to "what does a game made with this look like". Four things are
@@ -92,7 +93,7 @@ const Velocity = extern struct {
     y: f32 = 0,
 };
 
-/// A bat, and which keys drive it.
+/// A bat, and which keys and which controller drive it.
 ///
 /// The controls are *in the component*, which is what makes remapping them a
 /// saved game rather than a config file to parse.
@@ -106,10 +107,14 @@ const Velocity = extern struct {
 const Paddle = extern struct {
     up: i32,
     down: i32,
+    /// Which controller slot drives it as well as the keys. Slot zero - on
+    /// Windows, the first controller XInput numbers - takes the left bat, and
+    /// slot one the right, so two players with a pad each need no set-up.
+    pad: u8,
     speed: f32 = 300,
 
-    fn bind(up: fx.Key, down: fx.Key) Paddle {
-        return .{ .up = @intFromEnum(up), .down = @intFromEnum(down) };
+    fn bind(up: fx.Key, down: fx.Key, pad: u8) Paddle {
+        return .{ .up = @intFromEnum(up), .down = @intFromEnum(down), .pad = pad };
     }
 
     fn keys(self: Paddle) struct { up: fx.Key, down: fx.Key } {
@@ -180,7 +185,7 @@ fn spawn(app: *App) !void {
         Transform2D.at(paddle_inset, field_height / 2).interpolated(),
         Sprite{ .tint = theme.left, .width = paddle_width, .height = paddle_height },
         Velocity{},
-        Paddle.bind(.w, .s),
+        Paddle.bind(.w, .s, 0),
         Bounds{ .half_width = paddle_width / 2, .half_height = paddle_height / 2 },
     });
 
@@ -188,7 +193,7 @@ fn spawn(app: *App) !void {
         Transform2D.at(field_width - paddle_inset, field_height / 2).interpolated(),
         Sprite{ .tint = theme.right, .width = paddle_width, .height = paddle_height },
         Velocity{},
-        Paddle.bind(.up, .down),
+        Paddle.bind(.up, .down, 1),
         Bounds{ .half_width = paddle_width / 2, .half_height = paddle_height / 2 },
     });
 
@@ -228,7 +233,8 @@ const Balls = fx.Query(.{ Transform2D, Velocity, Ball });
 const Scores = fx.Query(.{Score});
 const Pips = fx.Query(.{ Sprite, Pip });
 
-/// Escape leaves, space serves, R starts again, F11 fills the screen.
+/// Escape leaves, space serves, R starts again, F11 fills the screen - and
+/// A and Start on any controller do what space and R do.
 fn readKeys(app: *App) !void {
     if (app.input.justPressed(.escape)) app.quit();
 
@@ -240,14 +246,18 @@ fn readKeys(app: *App) !void {
         std.log.warn("could not change fullscreen: {t}", .{err});
     };
 
-    if (app.input.justPressed(.r)) {
+    // Any controller, not a particular one: whoever reaches for a button
+    // first may press it.
+    const pads = app.input.anyPad();
+
+    if (app.input.justPressed(.r) or pads.justPressed(.start)) {
         if (try Scores.first(&app.world)) |chunk| {
             chunk.slice(Score)[0] = .{};
         }
         try resetBall(app, 1);
     }
 
-    if (app.input.justPressed(.space)) {
+    if (app.input.justPressed(.space) or pads.justPressed(.a)) {
         var it = try Balls.over(&app.world);
         while (it.next()) |chunk| {
             for (chunk.slice(Ball)) |*ball| {
@@ -299,7 +309,19 @@ fn drivePaddles(app: *App) !void {
 
         for (places, speeds, paddles) |*place, *speed, paddle| {
             const bound = paddle.keys();
-            speed.y = app.input.axis(bound.up, bound.down) * paddle.speed;
+            const pad = app.input.pad(paddle.pad);
+            // The keys, the stick and the d-pad add up and are then held to
+            // one, so any of them works and all of them at once is no faster.
+            // The stick is a level, like a held key, so it is safe to read
+            // here in the fixed step; its dead zone is already out of it.
+            const intent = std.math.clamp(
+                app.input.axis(bound.up, bound.down) +
+                    pad.axis(.left_y) +
+                    pad.buttonAxis(.dpad_up, .dpad_down),
+                -1,
+                1,
+            );
+            speed.y = intent * paddle.speed;
             place.y += speed.y * dt;
             place.y = std.math.clamp(
                 place.y,
@@ -545,6 +567,7 @@ pub fn main(init: std.process.Init) !void {
 
     try out.print("{f}\n", .{app.device.info()});
     try out.print("W/S and Up/Down to play, space to serve, R to start again, F11 to fill the screen, Escape to leave.\n", .{});
+    try out.print("Or a controller each: left stick or d-pad to move, A to serve, Start to begin again.\n", .{});
     try out.flush();
 
     try app.addNamedSystem(.startup, "spawn", spawn);

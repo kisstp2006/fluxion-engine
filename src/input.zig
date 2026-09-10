@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! What the keyboard and the mouse did, as a thing to ask rather than a thing
-//! to be told.
+//! What the keyboard, the mouse and the controllers did, as a thing to ask
+//! rather than a thing to be told.
 //!
 //! ```zig
 //! fn steer(app: *App) !void {
 //!     const x = app.input.axis(.a, .d);          // -1, 0 or 1
 //!     if (app.input.justPressed(.space)) jump();
 //!     if (app.input.buttonDown(.left)) shoot(app.input.pointer.x, app.input.pointer.y);
+//!
+//!     const pad = app.input.anyPad();
+//!     const walk = pad.stick(.left);             // dead zone already out
+//!     if (pad.justPressed(.a)) jump();
 //! }
 //! ```
 //!
@@ -40,11 +44,22 @@
 //! from it: one press, one jump, whatever the frame rate. See `clock`. What
 //! is counted per frame and has no second set - `pointer.dx` and `dy`,
 //! `wheel`, `typed` - belongs in the stages that run once a frame.
+//!
+//! **A controller is read, not heard.** A stick is a position rather than a
+//! thing that happened, so the platform polls every controller once a frame
+//! and `readPads` compares what it found with what it found last time: that
+//! difference is a controller's "pressed this frame", and it goes into both
+//! sets of edges exactly as a key's does. `pad(slot)` asks one controller and
+//! `anyPad()` asks all of them at once, which is what a game with one player
+//! wants - whichever controller they picked up, it works.
 
 const std = @import("std");
 const testing = std.testing;
 
 const platform = @import("fluxion_platform");
+const math = @import("fluxion_math");
+
+const Vec2 = math.Vec2;
 
 const Input = @This();
 
@@ -110,9 +125,188 @@ mods: platform.Mods = .{},
 typed: [typed_capacity]Typed = undefined,
 typed_len: usize = 0,
 
+/// Every controller slot, as it stood at the top of this frame. Asked
+/// through `pad` and `anyPad`, which is where the dead zones and the clock
+/// are applied.
+pads: [max_pads]PadState = @splat(.{}),
+
+/// How far a stick has to lean before it counts, as a fraction of full tilt.
+///
+/// A stick that has been used for a year does not come back to exactly the
+/// middle, and a camera steered by the raw number drifts for ever. A fifth is
+/// enough for a worn stick and little enough that a gentle push still moves
+/// something; a settings screen can hand it to the player.
+stick_deadzone: f32 = 0.2,
+
+/// The same for a trigger, which rests more reliably and wants less.
+trigger_deadzone: f32 = 0.1,
+
+/// Whether the window has the keyboard, from the platform's focus events.
+/// For a game that pauses when nobody is looking at it.
+focused: bool = true,
+
 /// How much typing one frame can hold. A fast typist manages about twenty
 /// characters a second, so this is more than a frame will ever see.
 pub const typed_capacity = 32;
+
+/// How many controllers can be told apart: `fluxion-platform`'s slots.
+pub const max_pads = platform.gamepad.max_devices;
+
+/// The fifteen buttons a mapped controller has, one bit each.
+const PadButtons = std.StaticBitSet(platform.GamepadButton.count);
+
+/// One controller slot, as it stood at the top of this frame.
+///
+/// Built by `readPads` from what the platform polled. The same levels and
+/// edges as a key, and the same second set of edges for the fixed step.
+pub const PadState = struct {
+    connected: bool = false,
+    down: PadButtons = .initEmpty(),
+    pressed: PadButtons = .initEmpty(),
+    released: PadButtons = .initEmpty(),
+    fixed_pressed: PadButtons = .initEmpty(),
+    fixed_released: PadButtons = .initEmpty(),
+    /// As the platform reports them, with no dead zone: a stick from -1 to
+    /// 1 on each axis with up negative - the same way round as the world -
+    /// and a trigger from 0 to 1.
+    axes: [platform.GamepadAxis.count]f32 = @splat(0),
+};
+
+/// Which of a controller's two sticks.
+pub const Side = enum { left, right };
+
+/// One controller, or every controller at once, to ask questions of.
+///
+/// A view rather than a copy: it holds the `Input` it came from and reads it
+/// when asked, so a `Pad` in a `.fixed` system answers from the fixed step's
+/// edges like everything else here. See `clock`.
+pub const Pad = struct {
+    input: *const Input,
+    /// Which slot, or null for every connected one. See `anyPad`.
+    slot: ?usize,
+
+    /// The slots this view reads: one, or all of them.
+    fn states(self: Pad) []const PadState {
+        const slot = self.slot orelse return &self.input.pads;
+        if (slot >= max_pads) return &.{};
+        return self.input.pads[slot .. slot + 1];
+    }
+
+    /// Is something plugged into this slot? For `anyPad`, into any slot?
+    pub fn connected(self: Pad) bool {
+        for (self.states()) |state| {
+            if (state.connected) return true;
+        }
+        return false;
+    }
+
+    /// Is this button held down now?
+    pub fn down(self: Pad, button: platform.GamepadButton) bool {
+        const i = @intFromEnum(button);
+        for (self.states()) |state| {
+            if (state.down.isSet(i)) return true;
+        }
+        return false;
+    }
+
+    /// Did it go down this frame - or, in a `.fixed` system, since the last
+    /// fixed step?
+    pub fn justPressed(self: Pad, button: platform.GamepadButton) bool {
+        const i = @intFromEnum(button);
+        for (self.states()) |*state| {
+            const edges = if (self.input.clock == .fixed) &state.fixed_pressed else &state.pressed;
+            if (edges.isSet(i)) return true;
+        }
+        return false;
+    }
+
+    /// Did it come up this frame - or since the last fixed step?
+    pub fn justReleased(self: Pad, button: platform.GamepadButton) bool {
+        const i = @intFromEnum(button);
+        for (self.states()) |*state| {
+            const edges = if (self.input.clock == .fixed) &state.fixed_released else &state.released;
+            if (edges.isSet(i)) return true;
+        }
+        return false;
+    }
+
+    /// Two buttons as one number, -1, 0 or 1. The d-pad as an axis, the way
+    /// `Input.axis` makes one out of two keys - and both held is a standstill
+    /// for the same reason.
+    pub fn buttonAxis(self: Pad, negative: platform.GamepadButton, positive: platform.GamepadButton) f32 {
+        const n: f32 = if (self.down(negative)) 1 else 0;
+        const p: f32 = if (self.down(positive)) 1 else 0;
+        return p - n;
+    }
+
+    /// A stick, with its dead zone taken out: nothing at all until it leans
+    /// past `Input.stick_deadzone`, then rising from zero to a length of one
+    /// at full tilt. Up is negative, like the world's `y`.
+    ///
+    /// **Round, not square.** The dead zone is on how far the stick is from
+    /// the middle rather than on each axis separately, because a square one
+    /// snaps a nearly diagonal push onto the nearest axis, and the player
+    /// feels the stick catch on straight lines. And never longer than one,
+    /// because some sticks report more than full tilt on both axes at once in
+    /// the corners, which would make a diagonal faster than a straight line.
+    ///
+    /// For `anyPad`, whichever stick is leaning furthest - so two controllers
+    /// resting slightly off centre do not add up to a drift.
+    pub fn stick(self: Pad, side: Side) Vec2 {
+        const axes: [2]platform.GamepadAxis = switch (side) {
+            .left => .{ .left_x, .left_y },
+            .right => .{ .right_x, .right_y },
+        };
+        var furthest: Vec2 = .zero;
+        for (self.states()) |state| {
+            if (!state.connected) continue;
+            const leaning = roundDeadzone(
+                state.axes[@intFromEnum(axes[0])],
+                state.axes[@intFromEnum(axes[1])],
+                self.input.stick_deadzone,
+            );
+            if (leaning.lenSq() > furthest.lenSq()) furthest = leaning;
+        }
+        return furthest;
+    }
+
+    /// One axis, with its dead zone taken out. A stick's axis is that
+    /// component of `stick`, so the two always agree; a trigger rests at zero
+    /// and reads up to one.
+    pub fn axis(self: Pad, which: platform.GamepadAxis) f32 {
+        return switch (which) {
+            .left_x => self.stick(.left).x,
+            .left_y => self.stick(.left).y,
+            .right_x => self.stick(.right).x,
+            .right_y => self.stick(.right).y,
+            .left_trigger, .right_trigger => self.trigger(which),
+        };
+    }
+
+    fn trigger(self: Pad, which: platform.GamepadAxis) f32 {
+        const dead = std.math.clamp(self.input.trigger_deadzone, 0, 0.99);
+        var most: f32 = 0;
+        for (self.states()) |state| {
+            if (!state.connected) continue;
+            const raw = state.axes[@intFromEnum(which)];
+            if (raw <= dead) continue;
+            most = @max(most, @min((raw - dead) / (1 - dead), 1));
+        }
+        return most;
+    }
+};
+
+/// A stick position with a round dead zone taken out of it: zero inside,
+/// then rescaled so the edge of the dead zone is zero and full tilt is one.
+/// Rescaled rather than cut, so the first movement past the edge is a small
+/// one and not a jump to a fifth of full speed.
+fn roundDeadzone(x: f32, y: f32, deadzone: f32) Vec2 {
+    const dead = std.math.clamp(deadzone, 0, 0.99);
+    const length = @sqrt(x * x + y * y);
+    if (length <= dead) return .zero;
+    const rescaled = (@min(length, 1) - dead) / (1 - dead);
+    return .init(x / length * rescaled, y / length * rescaled);
+}
 
 /// Which edges the questions answer from. See `clock`.
 pub const Clock = enum {
@@ -130,6 +324,17 @@ pub const Pointer = struct {
     /// Whether the pointer is over the window at all. A game that hides the
     /// crosshair when the mouse leaves wants this.
     inside: bool = true,
+
+    /// Whether the cursor is locked. See `App.setCursor`.
+    ///
+    /// While it is, `x` and `y` hold still where the pointer was when it was
+    /// locked, and only `dx` and `dy` move. A locked pointer has been taken
+    /// out of the picture and the platform reports it at nought, nought;
+    /// passing that on would throw a crosshair into the corner, and where it
+    /// last was is the more useful thing to go on saying - it is also where
+    /// the pointer comes back when it is let go. Set by `App`, and nothing
+    /// else should touch it.
+    locked: bool = false,
 };
 
 pub const Wheel = struct {
@@ -220,6 +425,30 @@ pub fn typedThisFrame(self: *const Input) []const Typed {
     return self.typed[0..self.typed_len];
 }
 
+/// One controller, by the slot the platform put it in.
+///
+/// ```zig
+/// const player_two = app.input.pad(1);
+/// if (player_two.justPressed(.start)) join(2);
+/// ```
+///
+/// A slot is the controller's for as long as it stays plugged in, which is
+/// what makes slots usable as player numbers; on Windows they are XInput's
+/// own four, the quarter of the ring an Xbox controller lights up. An empty
+/// slot answers no and zero to everything, so a game can ask after player two
+/// before player two has arrived.
+pub fn pad(self: *const Input, slot: usize) Pad {
+    return .{ .input = self, .slot = slot };
+}
+
+/// Every connected controller as one: a button is down if it is down on any
+/// of them, and a stick reads whichever one is leaning furthest. For a game
+/// with one player, who should be able to pick up whichever controller is
+/// nearest.
+pub fn anyPad(self: *const Input) Pad {
+    return .{ .input = self, .slot = null };
+}
+
 // -------------------------------------------------------------------------
 // Being told
 // -------------------------------------------------------------------------
@@ -234,6 +463,10 @@ pub fn beginFrame(self: *Input) void {
     self.released = .initEmpty();
     self.button_pressed = .initEmpty();
     self.button_released = .initEmpty();
+    for (&self.pads) |*state| {
+        state.pressed = .initEmpty();
+        state.released = .initEmpty();
+    }
     self.pointer.dx = 0;
     self.pointer.dy = 0;
     self.wheel = .{};
@@ -248,6 +481,48 @@ pub fn endFixedStep(self: *Input) void {
     self.fixed_released = .initEmpty();
     self.fixed_button_pressed = .initEmpty();
     self.fixed_button_released = .initEmpty();
+    for (&self.pads) |*state| {
+        state.fixed_pressed = .initEmpty();
+        state.fixed_released = .initEmpty();
+    }
+}
+
+/// Take this frame's controllers from the platform, and work out what
+/// changed since the last frame's.
+///
+/// Called by `Window.pump`, after the platform has polled. What went down is
+/// what is down now and was not before, so a press that begins and ends
+/// between two polls is never seen - at sixty polls a second that is a tap
+/// shorter than a sixtieth of a second, which a thumb seldom manages.
+///
+/// A controller that is unplugged lets go of everything it was holding, for
+/// the same reason losing focus does: a button held when it went would
+/// otherwise stay held for the rest of the session.
+pub fn readPads(self: *Input, devices: []const platform.Gamepad) void {
+    for (&self.pads, 0..) |*state, slot| {
+        const device: ?*const platform.Gamepad =
+            if (slot < devices.len and devices[slot].connected) &devices[slot] else null;
+
+        var down: PadButtons = .initEmpty();
+        var axes: [platform.GamepadAxis.count]f32 = @splat(0);
+        if (device) |found| {
+            for (found.state.buttons, 0..) |held, i| {
+                if (held) down.set(i);
+            }
+            axes = found.state.axes;
+        }
+
+        const pressed = down.differenceWith(state.down);
+        const released = state.down.differenceWith(down);
+        state.pressed.setUnion(pressed);
+        state.released.setUnion(released);
+        state.fixed_pressed.setUnion(pressed);
+        state.fixed_released.setUnion(released);
+
+        state.down = down;
+        state.axes = axes;
+        state.connected = device != null;
+    }
 }
 
 /// Fold one platform event in. Events that are not about the user are
@@ -283,8 +558,12 @@ pub fn apply(self: *Input, ev: platform.Event) void {
         },
         .mouse_button => |b| {
             self.mods = b.mods;
-            self.pointer.x = @floatCast(b.x);
-            self.pointer.y = @floatCast(b.y);
+            // A locked pointer has no position to report. See
+            // `Pointer.locked`.
+            if (!self.pointer.locked) {
+                self.pointer.x = @floatCast(b.x);
+                self.pointer.y = @floatCast(b.y);
+            }
             const i = @intFromEnum(b.button);
             if (i >= button_span) return;
             switch (b.action) {
@@ -302,6 +581,18 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             }
         },
         .cursor => |m| {
+            if (self.pointer.locked) {
+                // Movement only, and only while the window has the keyboard.
+                // A locked pointer is let go while the window is in the
+                // background - see `Window.refocus` - and a hand moving over
+                // it then belongs to somebody using another program, not to
+                // the camera this movement would turn.
+                if (self.focused) {
+                    self.pointer.dx += @floatCast(m.dx);
+                    self.pointer.dy += @floatCast(m.dy);
+                }
+                return;
+            }
             self.pointer.x = @floatCast(m.x);
             self.pointer.y = @floatCast(m.y);
             self.pointer.dx += @floatCast(m.dx);
@@ -312,11 +603,14 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             self.wheel.x += @floatCast(w.x);
             self.wheel.y += @floatCast(w.y);
         },
-        // Focus lost with keys held would otherwise leave them held for ever:
-        // the release arrives at whatever window took the focus, and this one
-        // never hears about it. Alt+Tab away while walking, and walk into the
-        // wall for the rest of the session.
-        .focus => |s| if (!s.value) self.releaseEverything(),
+        .focus => |s| {
+            self.focused = s.value;
+            // Focus lost with keys held would otherwise leave them held for
+            // ever: the release arrives at whatever window took the focus,
+            // and this one never hears about it. Alt+Tab away while walking,
+            // and walk into the wall for the rest of the session.
+            if (!s.value) self.releaseEverything();
+        },
         else => {},
     }
 }
@@ -441,4 +735,209 @@ test "an unknown key is not an index" {
     var input: Input = .{};
     input.apply(keyEvent(.unknown, .press));
     try testing.expect(!input.isDown(.unknown));
+}
+
+/// Every slot empty, as the platform would hand them over with nothing
+/// plugged in - to be filled in by a test.
+fn emptySlots() [max_pads]platform.Gamepad {
+    return @splat(.{});
+}
+
+fn hold(device: *platform.Gamepad, button: platform.GamepadButton, held: bool) void {
+    device.connected = true;
+    device.state.buttons[@intFromEnum(button)] = held;
+}
+
+fn lean(device: *platform.Gamepad, which: platform.GamepadAxis, value: f32) void {
+    device.connected = true;
+    device.state.axes[@intFromEnum(which)] = value;
+}
+
+test "a controller press is this frame's buttons against the last" {
+    var input: Input = .{};
+    var slots = emptySlots();
+
+    hold(&slots[0], .a, true);
+    input.beginFrame();
+    input.readPads(&slots);
+    try testing.expect(input.pad(0).connected());
+    try testing.expect(input.pad(0).down(.a));
+    try testing.expect(input.pad(0).justPressed(.a));
+
+    // Still held a frame later: down, and no longer an edge.
+    input.beginFrame();
+    input.readPads(&slots);
+    try testing.expect(input.pad(0).down(.a));
+    try testing.expect(!input.pad(0).justPressed(.a));
+
+    hold(&slots[0], .a, false);
+    input.beginFrame();
+    input.readPads(&slots);
+    try testing.expect(input.pad(0).justReleased(.a));
+    try testing.expect(!input.pad(0).down(.a));
+
+    // And a slot with nothing in it says no to everything.
+    try testing.expect(!input.pad(3).connected());
+    try testing.expect(!input.pad(99).down(.a));
+}
+
+test "a controller unplugged lets go of everything it held" {
+    var input: Input = .{};
+    var slots = emptySlots();
+
+    hold(&slots[2], .right_bumper, true);
+    input.readPads(&slots);
+
+    slots[2] = .{};
+    input.beginFrame();
+    input.readPads(&slots);
+
+    try testing.expect(!input.pad(2).connected());
+    try testing.expect(!input.pad(2).down(.right_bumper));
+    try testing.expect(input.pad(2).justReleased(.right_bumper));
+}
+
+test "a stick at rest inside its dead zone is still, and full tilt is one" {
+    var input: Input = .{};
+    var slots = emptySlots();
+
+    // A worn stick, resting a little off centre.
+    lean(&slots[0], .left_x, 0.12);
+    lean(&slots[0], .left_y, -0.08);
+    input.readPads(&slots);
+    try testing.expectEqual(@as(f32, 0), input.pad(0).stick(.left).len());
+
+    // Pushed all the way right.
+    lean(&slots[0], .left_x, 1);
+    lean(&slots[0], .left_y, 0);
+    input.readPads(&slots);
+    try testing.expectApproxEqAbs(@as(f32, 1), input.pad(0).stick(.left).x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 1), input.pad(0).axis(.left_x), 0.0001);
+
+    // A corner that reports more than full tilt on both axes is no faster
+    // than a straight push.
+    lean(&slots[0], .left_x, 1);
+    lean(&slots[0], .left_y, 1);
+    input.readPads(&slots);
+    try testing.expectApproxEqAbs(@as(f32, 1), input.pad(0).stick(.left).len(), 0.0001);
+
+    // Just past the edge of the dead zone is a small number, not a jump.
+    lean(&slots[0], .left_x, 0.21);
+    lean(&slots[0], .left_y, 0);
+    input.readPads(&slots);
+    try testing.expect(input.pad(0).stick(.left).x < 0.05);
+}
+
+test "a trigger rests at zero and reads up to one" {
+    var input: Input = .{};
+    var slots = emptySlots();
+
+    lean(&slots[0], .right_trigger, 0.05);
+    input.readPads(&slots);
+    try testing.expectEqual(@as(f32, 0), input.pad(0).axis(.right_trigger));
+
+    lean(&slots[0], .right_trigger, 1);
+    input.readPads(&slots);
+    try testing.expectApproxEqAbs(@as(f32, 1), input.pad(0).axis(.right_trigger), 0.0001);
+}
+
+test "any pad is every pad at once" {
+    var input: Input = .{};
+    var slots = emptySlots();
+
+    hold(&slots[0], .a, true);
+    lean(&slots[3], .left_x, -0.9);
+    // Resting slightly off, on a third controller nobody is using.
+    lean(&slots[5], .left_x, 0.15);
+    input.readPads(&slots);
+
+    const any = input.anyPad();
+    try testing.expect(any.connected());
+    try testing.expect(any.down(.a));
+    try testing.expect(any.justPressed(.a));
+    // The stick being pushed, not the sum of it and the one resting.
+    try testing.expect(any.stick(.left).x < -0.8);
+    try testing.expect(!input.pad(3).down(.a));
+}
+
+test "a controller press reaches exactly one fixed step" {
+    var input: Input = .{};
+    var slots = emptySlots();
+
+    hold(&slots[0], .a, true);
+    input.beginFrame();
+    input.readPads(&slots);
+
+    // A frame that ran no fixed step, and the next one, still held: no new
+    // edge for the frame...
+    input.beginFrame();
+    input.readPads(&slots);
+    try testing.expect(!input.pad(0).justPressed(.a));
+
+    // ... and the press still waiting for the step that finally runs.
+    input.clock = .fixed;
+    try testing.expect(input.anyPad().justPressed(.a));
+    input.endFixedStep();
+    try testing.expect(!input.anyPad().justPressed(.a));
+}
+
+test "the d-pad makes an axis the way two keys do" {
+    var input: Input = .{};
+    var slots = emptySlots();
+
+    hold(&slots[0], .dpad_up, true);
+    input.readPads(&slots);
+    try testing.expectEqual(@as(f32, -1), input.pad(0).buttonAxis(.dpad_up, .dpad_down));
+
+    hold(&slots[0], .dpad_down, true);
+    input.readPads(&slots);
+    try testing.expectEqual(@as(f32, 0), input.pad(0).buttonAxis(.dpad_up, .dpad_down));
+}
+
+fn cursorEvent(x: f64, y: f64, dx: f64, dy: f64) platform.Event {
+    return .{ .cursor = .{ .window = .none, .x = x, .y = y, .dx = dx, .dy = dy } };
+}
+
+test "a locked pointer holds still, and only its movement counts" {
+    var input: Input = .{};
+    input.apply(cursorEvent(120, 80, 0, 0));
+
+    input.pointer.locked = true;
+    input.beginFrame();
+    // What the platform sends while the cursor is locked: no position, and
+    // movement that keeps coming however far the hand goes.
+    input.apply(cursorEvent(0, 0, 7, -3));
+    input.apply(cursorEvent(0, 0, 5, 1));
+
+    try testing.expectEqual(@as(f32, 120), input.pointer.x);
+    try testing.expectEqual(@as(f32, 80), input.pointer.y);
+    try testing.expectEqual(@as(f32, 12), input.pointer.dx);
+    try testing.expectEqual(@as(f32, -2), input.pointer.dy);
+
+    // A click while locked does not move it either.
+    input.apply(.{ .mouse_button = .{
+        .window = .none,
+        .button = .left,
+        .action = .press,
+        .mods = .{},
+        .x = 0,
+        .y = 0,
+    } });
+    try testing.expectEqual(@as(f32, 120), input.pointer.x);
+    try testing.expect(input.buttonDown(.left));
+}
+
+test "a locked pointer does not turn anything while the window is in the background" {
+    var input: Input = .{};
+    input.pointer.locked = true;
+    input.apply(.{ .focus = .{ .window = .none, .value = false } });
+    try testing.expect(!input.focused);
+
+    input.beginFrame();
+    input.apply(cursorEvent(0, 0, 40, 40));
+    try testing.expectEqual(@as(f32, 0), input.pointer.dx);
+
+    input.apply(.{ .focus = .{ .window = .none, .value = true } });
+    input.apply(cursorEvent(0, 0, 3, 0));
+    try testing.expectEqual(@as(f32, 3), input.pointer.dx);
 }

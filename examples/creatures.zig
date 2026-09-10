@@ -8,9 +8,10 @@
 //! zig build example-creatures -- --frames 300 --capture creatures.png
 //! ```
 //!
-//! Arrow keys or WASD steer the one with the ring round it, or hold the left
-//! mouse button where it should go; the rest wander. F11 fills the screen,
-//! Escape leaves.
+//! Arrow keys, WASD or a controller's left stick steer the one with the ring
+//! round it, or hold the left mouse button where it should go; the rest
+//! wander. Drag with the right mouse button to look around. F11 fills the
+//! screen, Escape leaves.
 //!
 //! Where `pong` shows the loop and the world, this shows the three things a
 //! 2D game needs from the *renderer* and how each is spelt:
@@ -43,6 +44,13 @@
 //! pixel under the mouse is a different place in the field every frame.
 //! `app.pointerInWorld()` runs that camera backwards, and holding the button
 //! walks the ringed creature to wherever it lands.
+//!
+//! **A drag locks the pointer.** While the right button is held the pointer
+//! is taken out of the picture - `app.setCursor(.locked)` - so the view can be
+//! pulled further than the screen is wide without the pointer stopping at
+//! the edge, and it is back where it was when the button comes up. A stick is
+//! the other kind of pointing: `anyPad().stick(.left)` has its dead zone taken
+//! out already, and pushed halfway it walks at half speed.
 //!
 //! The atlas is read from `examples/atlas.png`, and this program is what drew
 //! it: `-- --write-atlas examples/atlas.png` puts it back. That is the same
@@ -145,7 +153,14 @@ const Follow = extern struct {
     /// How much of the way to the target the camera moves each second. A
     /// camera that snapped would shake with every step the player takes.
     stiffness: f32 = 6,
+    /// How far the view has been dragged away from the player, in world
+    /// units. The right mouse button drags it; let go, and it drifts back.
+    peek_x: f32 = 0,
+    peek_y: f32 = 0,
 };
+
+/// How far the view may be dragged from the player before it stops.
+const peek_reach: f32 = 180;
 
 // -------------------------------------------------------------------------
 // Setting the table
@@ -376,14 +391,21 @@ fn wander(app: *App) !void {
     }
 }
 
-/// The keys drive one creature, over the top of its wandering - and so does
-/// the mouse, held down over wherever it should go.
+/// The keys drive one creature, over the top of its wandering - and so do a
+/// controller's left stick and the mouse, held down over wherever it should
+/// go.
 fn drive(app: *App) !void {
     const dt = app.time.fixed_delta;
     const keys: fx.Vec2 = .init(
         app.input.axis(.a, .d) + app.input.axis(.left, .right),
         app.input.axis(.w, .s) + app.input.axis(.up, .down),
     );
+
+    // Whichever controller is being pushed. Not made to length one like the
+    // keys: pushed halfway it walks at half speed, which is the reason to
+    // have a stick at all, and its dead zone is already out of it - so a
+    // controller left on the table does not creep.
+    const stick = app.input.anyPad().stick(.left);
 
     // Where the pointer is in the *world*. It arrives in pixels, and between
     // the pixels and the field is a camera that follows, zooms and stops at
@@ -395,28 +417,28 @@ fn drive(app: *App) !void {
     var it = try Players.over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.slice(Transform2D), chunk.slice(Wander), chunk.slice(Player)) |*place, *drift, player| {
-            // The keys win when both are in use. The pointer otherwise, until
-            // the creature is close enough to stop rather than dither back
+            // The keys first, then the stick, then the pointer - until the
+            // creature is close enough to it to stop rather than dither back
             // and forth over the spot: four units is more than one step of
             // walking, so it cannot overshoot and come back.
-            var heading = keys;
+            var heading: fx.Vec2 = keys.tryNorm() orelse stick;
             if (heading.lenSq() == 0) {
                 if (target) |at| {
                     const to = at.sub(.init(place.x, place.y));
-                    if (to.len() > 4) heading = to;
+                    if (to.len() > 4) heading = to.norm();
                 }
             }
-            const direction = heading.tryNorm() orelse continue;
+            const facing = heading.tryNorm() orelse continue;
 
-            place.x += direction.x * player.speed * dt;
-            place.y += direction.y * player.speed * dt;
+            place.x += heading.x * player.speed * dt;
+            place.y += heading.y * player.speed * dt;
             place.x = std.math.clamp(place.x, 20, field_width - 20);
             place.y = std.math.clamp(place.y, 20, field_height - 20);
 
             // Keep the wandering pointed the way the player is going, so
             // letting go does not snap it round.
-            drift.dx = direction.x;
-            drift.dy = direction.y;
+            drift.dx = facing.x;
+            drift.dy = facing.y;
             drift.until_turn = 1;
         }
     }
@@ -467,6 +489,46 @@ fn pinHeading(app: *App) !void {
     }
 }
 
+/// Drag with the right mouse button to look around; let go, and the view
+/// drifts back to the player.
+///
+/// The pointer is locked for as long as the button is down, which is what
+/// makes this a drag rather than a reach: the movement keeps coming however
+/// far the hand goes, nothing else on the desktop gets clicked, and the
+/// pointer is back where it was when the button comes up. In `.update`,
+/// because `pointer.dx` is counted once a frame and a fixed step would see it
+/// none, one or several times.
+fn lookAround(app: *App) !void {
+    const dragging = app.input.buttonDown(.right);
+    if (dragging != (app.cursor() == .locked)) {
+        app.setCursor(if (dragging) .locked else .normal) catch |err| {
+            std.log.warn("could not lock the pointer: {t}", .{err});
+        };
+    }
+
+    // How much of a let-go drag is left after this frame. Exponential, like
+    // the camera's easing, and for the same reason: the same drift at any
+    // frame rate.
+    const settle = @exp(-4 * app.time.delta);
+
+    var it = try Cameras.over(&app.world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(Camera2D), chunk.slice(Follow)) |camera, *follow| {
+            if (dragging) {
+                // Grabbing the field: the hand goes right and the field goes
+                // with it, so the view goes left. Pixels over the zoom are
+                // world units.
+                const zoom = @max(camera.zoom, 0.0001);
+                follow.peek_x = std.math.clamp(follow.peek_x - app.input.pointer.dx / zoom, -peek_reach, peek_reach);
+                follow.peek_y = std.math.clamp(follow.peek_y - app.input.pointer.dy / zoom, -peek_reach, peek_reach);
+            } else {
+                follow.peek_x *= settle;
+                follow.peek_y *= settle;
+            }
+        }
+    }
+}
+
 /// The camera follows the player, part of the way each frame.
 ///
 /// In `.late`, so it reads where the player ended up this frame rather than
@@ -488,37 +550,51 @@ fn followPlayer(app: *App) !void {
 
     var it = try Cameras.over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(Transform2D), chunk.slice(Camera2D), chunk.slice(Follow)) |*place, *camera, follow| {
+        for (chunk.slice(Transform2D), chunk.slice(Camera2D), chunk.slice(Follow)) |*place, *camera, *follow| {
+            // Close enough to fill the window with rather less than the whole
+            // field, so following it is worth doing at all.
+            camera.zoom = @min(width / (field_width * 0.7), height / (field_height * 0.7));
+            const half_view_x = width / (2 * camera.zoom);
+            const half_view_y = height / (2 * camera.zoom);
+
+            // Where it wants to be: over the player, pushed by however far
+            // the view has been dragged, and held inside the field - which is
+            // Godot's camera limits and the difference between a game and a
+            // demonstration. Without it, a player walking into a corner is
+            // looking at half a screen of nothing.
+            const want_x = insideField(looking_at.x + follow.peek_x, half_view_x, field_width);
+            const want_y = insideField(looking_at.y + follow.peek_y, half_view_y, field_height);
+
+            // A drag that went past the edge of the field has nothing more to
+            // show, so it is taken back to the edge: dragging the other way
+            // then answers at once, rather than after the hand has come back
+            // as far as it overshot.
+            follow.peek_x = want_x - looking_at.x;
+            follow.peek_y = want_y - looking_at.y;
+
             // Frame-rate independent easing: the fraction left over shrinks
             // exponentially, which a plain `lerp(a, b, k)` does not do and is
             // why a camera tuned at sixty hertz drifts at a hundred and
             // forty-four.
             const k = 1 - @exp(-follow.stiffness * dt);
-            place.x += (looking_at.x - place.x) * k;
-            place.y += (looking_at.y - place.y) * k;
+            place.x += (want_x - place.x) * k;
+            place.y += (want_y - place.y) * k;
 
-            // Close enough to fill the window with rather less than the whole
-            // field, so following it is worth doing at all.
-            camera.zoom = @min(width / (field_width * 0.7), height / (field_height * 0.7));
-
-            // Held inside the field, which is Godot's camera limits and the
-            // difference between a game and a demonstration: without it, a
-            // player walking into a corner is looking at half a screen of
-            // nothing. Half the *view* is the margin, and a view wider than
-            // the field is centred rather than clamped to a range that has
-            // its ends the wrong way round.
-            const half_view_x = width / (2 * camera.zoom);
-            const half_view_y = height / (2 * camera.zoom);
-            place.x = if (half_view_x * 2 >= field_width)
-                field_width / 2
-            else
-                std.math.clamp(place.x, half_view_x, field_width - half_view_x);
-            place.y = if (half_view_y * 2 >= field_height)
-                field_height / 2
-            else
-                std.math.clamp(place.y, half_view_y, field_height - half_view_y);
+            // And held inside at once when the window has just changed shape,
+            // rather than eased back in over a few frames of nothing.
+            place.x = insideField(place.x, half_view_x, field_width);
+            place.y = insideField(place.y, half_view_y, field_height);
         }
     }
+}
+
+/// Where the middle of a view `half_view` across can be without showing past
+/// either end of a field `field` long. Half the *view* is the margin, and a
+/// view wider than the field is centred rather than clamped to a range with
+/// its ends the wrong way round.
+fn insideField(at: f32, half_view: f32, field: f32) f32 {
+    if (half_view * 2 >= field) return field / 2;
+    return std.math.clamp(at, half_view, field - half_view);
 }
 
 // -------------------------------------------------------------------------
@@ -701,13 +777,15 @@ pub fn main(init: std.process.Init) !void {
     if (options.capture != null) app.time.source = .{ .fixed = 1.0 / 60.0 };
 
     try out.print("{f}\n", .{app.device.info()});
-    try out.print("Arrows, WASD or the held mouse button to steer the one with the ring; F11 to fill the screen; Escape to leave.\n", .{});
+    try out.print("Arrows, WASD, a controller's left stick or the held mouse button to steer the one with the ring;\n", .{});
+    try out.print("drag with the right mouse button to look around; F11 to fill the screen; Escape to leave.\n", .{});
     try out.flush();
 
     try app.addNamedSystem(.startup, "spawn", spawn);
     try app.addNamedSystem(.input, "read keys", readKeys);
     try app.addNamedSystem(.fixed, "wander", wander);
     try app.addNamedSystem(.fixed, "drive", drive);
+    try app.addNamedSystem(.update, "look around", lookAround);
     try app.addNamedSystem(.late, "follow player", followPlayer);
     try app.addNamedSystem(.late, "pin heading", pinHeading);
 

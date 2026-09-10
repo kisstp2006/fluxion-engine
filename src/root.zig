@@ -108,6 +108,20 @@ pub const Camera2D = components.Camera2D;
 /// How the window fills the screen. See `Window.Fullscreen`.
 pub const Fullscreen = Window.Fullscreen;
 
+/// Where the pointer may go, and whether it shows. See `Window.Cursor`.
+pub const Cursor = Window.Cursor;
+
+/// One of the system's own pointer shapes. See `platform.cursor`.
+pub const CursorShape = platform.CursorShape;
+
+/// A button on a controller, named by where it is rather than by what is
+/// printed on it: `.a` is the bottom face button on every pad. See
+/// `platform.gamepad`.
+pub const GamepadButton = platform.GamepadButton;
+
+/// A stick's axis or a trigger on a controller. See `platform.gamepad`.
+pub const GamepadAxis = platform.GamepadAxis;
+
 /// A point or a direction in the plane: what `App.screenToWorld` hands
 /// back. See `math`.
 pub const Vec2 = math.Vec2;
