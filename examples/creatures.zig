@@ -738,6 +738,7 @@ pub fn main(init: std.process.Init) !void {
         "{d} frames, {d} entities, {d} sprites in {d} draw call(s) on the last one\n",
         .{ app.time.frame, app.world.count(), app.sprites.drawn, app.sprites.draw_calls },
     );
+    try out.print("time per system on the last frame:\n{f}", .{app.schedule});
 
     if (flags.app.capture) |path| {
         try app.saveCapture(path);

@@ -52,6 +52,8 @@ pub const Stage = enum {
 pub const Entry = struct {
     name: []const u8,
     run: System,
+    time_this_frame: std.Io.Duration = .zero,
+    time_last_frame: std.Io.Duration = .zero,
 };
 
 /// What went wrong, and where. See `Schedule.failed`.
@@ -76,6 +78,8 @@ pub const Schedule = struct {
     /// program's decision.
     failed: ?Failure = null,
 
+    io: ?std.Io = null,
+
     pub const empty: Schedule = .{};
 
     pub fn deinit(self: *Schedule, gpa: Allocator) void {
@@ -98,17 +102,35 @@ pub const Schedule = struct {
     /// Run one stage's systems in order, and stop at the first that fails:
     /// the ones after it usually read what it should have written.
     pub fn run(self: *Schedule, stage: Stage, app: *App) anyerror!void {
-        for (self.stages[@intFromEnum(stage)].items) |entry| {
+        for (self.stages[@intFromEnum(stage)].items) |*entry| {
+            const started = if (self.io) |io| std.Io.Timestamp.now(io, .awake) else null;
             entry.run(app) catch |err| {
                 self.failed = .{ .stage = stage, .name = entry.name, .err = err };
                 return err;
             };
+            if (started) |then| entry.time_this_frame.nanoseconds += then.durationTo(.now(self.io.?, .awake)).nanoseconds;
         }
     }
 
-    /// How many systems are in a stage.
-    pub fn countIn(self: *const Schedule, stage: Stage) usize {
-        return self.stages[@intFromEnum(stage)].items.len;
+    pub fn beginFrame(self: *Schedule) void {
+        for (&self.stages) |*list| {
+            for (list.items) |*entry| {
+                entry.time_last_frame = entry.time_this_frame;
+                entry.time_this_frame = .zero;
+            }
+        }
+    }
+
+    pub fn systemsIn(self: *const Schedule, stage: Stage) []const Entry {
+        return self.stages[@intFromEnum(stage)].items;
+    }
+
+    pub fn format(self: Schedule, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        for (std.enums.values(Stage)) |stage| {
+            for (self.systemsIn(stage)) |entry| {
+                try w.print("{s:<9} {s:<24} {f}\n", .{ @tagName(stage), entry.name, entry.time_last_frame });
+            }
+        }
     }
 
     /// Whether any stage has anything in it.
@@ -182,6 +204,46 @@ test "a failing system stops the stage" {
     try testing.expectEqualStrings(
         "the 'guaranteed to fail' system in stage .update failed: Deliberate",
         try std.fmt.bufPrint(&buffer, "{f}", .{schedule.failed.?}),
+    );
+}
+
+test "every system is timed, and a frame's steps add up" {
+    const busy = struct {
+        fn run(_: *App) anyerror!void {
+            const start: std.Io.Timestamp = .now(std.testing.io, .awake);
+            while (start.durationTo(.now(std.testing.io, .awake)).nanoseconds < 2 * std.time.ns_per_ms) {}
+        }
+    };
+
+    var schedule: Schedule = .{ .io = std.testing.io };
+    defer schedule.deinit(testing.allocator);
+    try schedule.add(testing.allocator, .fixed, "busy", busy.run);
+
+    try schedule.run(.fixed, undefined);
+    try schedule.run(.fixed, undefined);
+    schedule.beginFrame();
+
+    const timed = schedule.systemsIn(.fixed)[0];
+    try testing.expect(timed.time_last_frame.nanoseconds >= 4 * std.time.ns_per_ms);
+    try testing.expectEqual(0, timed.time_this_frame.nanoseconds);
+}
+
+test "the schedule prints every system's time over the last frame" {
+    const idle = struct {
+        fn run(_: *App) anyerror!void {}
+    };
+
+    var schedule: Schedule = .empty;
+    defer schedule.deinit(testing.allocator);
+    try schedule.add(testing.allocator, .fixed, "move ball", idle.run);
+    try schedule.add(testing.allocator, .update, "show score", idle.run);
+    schedule.stages[@intFromEnum(Stage.fixed)].items[0].time_last_frame = .fromNanoseconds(1_500_000);
+
+    var buffer: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "fixed" ++ " " ** 5 ++ "move ball" ++ " " ** 16 ++ "1.5ms\n" ++
+            "update" ++ " " ** 4 ++ "show score" ++ " " ** 15 ++ "0ns\n",
+        try std.fmt.bufPrint(&buffer, "{f}", .{schedule}),
     );
 }
 

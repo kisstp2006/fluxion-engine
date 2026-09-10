@@ -38,6 +38,7 @@ pub const Texture = struct {
     height: u32,
     /// Per texture, so pixel art and a smooth background can be drawn at once.
     filter: rhi.Filter,
+    wrap: rhi.Wrap,
 };
 
 /// What a `Sprite` holds: eight bytes, safe in a component or a save file.
@@ -109,6 +110,8 @@ pub const FontHandle = extern struct {
 const FontId = id.handle.Handle(Font);
 const FontTable = id.handle.Table(Font);
 
+const Samplers = std.EnumArray(rhi.Filter, std.EnumArray(rhi.Wrap, rhi.Sampler));
+
 pub const Error = error{
     /// A file was asked for, and there is no `Io` to read it with. See
     /// `App.Options.io`.
@@ -126,6 +129,7 @@ pub const FontOptions = struct {
 pub const LoadOptions = struct {
     /// `.nearest` by default: a blurred sprite is the harder mistake to spot.
     filter: rhi.Filter = .nearest,
+    wrap: rhi.Wrap = .clamp_to_edge,
     label: []const u8 = "",
 };
 
@@ -143,19 +147,27 @@ default_font: FontHandle = .none,
 /// One opaque white texel. See the module comment.
 white: TextureHandle = .none,
 
-/// Both ways to sample, made once.
-nearest: rhi.Sampler,
-linear: rhi.Sampler,
+samplers: Samplers,
 
 pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io) Error!Assets {
     var self: Assets = .{
         .gpa = gpa,
         .device = device,
         .io = io,
-        .nearest = try device.createSampler(.nearest),
-        .linear = try device.createSampler(.linear),
+        .samplers = .initFill(.initFill(.none)),
     };
     errdefer self.deinit();
+
+    for (std.enums.values(rhi.Filter)) |filter| {
+        for (std.enums.values(rhi.Wrap)) |wrap| {
+            self.samplers.getPtr(filter).set(wrap, try device.createSampler(.{
+                .min_filter = filter,
+                .mag_filter = filter,
+                .wrap_u = wrap,
+                .wrap_v = wrap,
+            }));
+        }
+    }
 
     self.white = try self.textureFromPixels(1, 1, &.{ 255, 255, 255, 255 }, .{ .label = "white" });
     return self;
@@ -173,8 +185,9 @@ pub fn deinit(self: *Assets) void {
         self.device.destroyTexture(entry.value.texture);
     }
     self.fonts.deinit(self.gpa);
-    self.device.destroySampler(self.nearest);
-    self.device.destroySampler(self.linear);
+    for (self.samplers.values) |by_wrap| {
+        for (by_wrap.values) |sampler| self.device.destroySampler(sampler);
+    }
     self.* = undefined;
 }
 
@@ -199,6 +212,7 @@ pub fn textureFromPixels(
         .width = width,
         .height = height,
         .filter = options.filter,
+        .wrap = options.wrap,
     }));
 }
 
@@ -215,6 +229,7 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
         decoded.pixels,
         .{
             .filter = options.filter,
+            .wrap = options.wrap,
             .label = if (options.label.len == 0) path else options.label,
         },
     );
@@ -321,11 +336,8 @@ pub fn sizeOf(self: *Assets, handle: TextureHandle) ?struct { width: f32, height
 }
 
 /// The sampler a texture asked for.
-pub fn samplerFor(self: *const Assets, filter: rhi.Filter) rhi.Sampler {
-    return switch (filter) {
-        .nearest => self.nearest,
-        .linear => self.linear,
-    };
+pub fn samplerFor(self: *const Assets, filter: rhi.Filter, wrap: rhi.Wrap) rhi.Sampler {
+    return self.samplers.get(filter).get(wrap);
 }
 
 /// How many textures are loaded, not counting the white texel.
@@ -373,6 +385,19 @@ test "the first font opened becomes the default" {
 
     try testing.expect(assets.default_font.isNone());
     try testing.expect(assets.fontOf(.none) == null);
+}
+
+test "every filter and wrap has a sampler of its own" {
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+
+    var assets: Assets = try .init(testing.allocator, &device, null);
+    defer assets.deinit();
+
+    const tile = try assets.textureFromPixels(1, 1, &.{ 255, 255, 255, 255 }, .{ .wrap = .repeat });
+    try testing.expectEqual(rhi.Wrap.repeat, assets.get(tile).?.wrap);
+    try testing.expect(!std.meta.eql(assets.samplerFor(.nearest, .repeat), assets.samplerFor(.nearest, .clamp_to_edge)));
+    try testing.expect(!std.meta.eql(assets.samplerFor(.nearest, .repeat), assets.samplerFor(.linear, .repeat)));
 }
 
 test "reading a file without an Io says so rather than crashing" {

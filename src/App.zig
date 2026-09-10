@@ -342,7 +342,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .names = .empty,
         .by_name = .empty,
         .input = .{},
-        .schedule = .empty,
+        .schedule = .{ .io = options.io },
         .background = options.background,
         .width = options.width,
         .height = options.height,
@@ -530,6 +530,7 @@ pub fn step(self: *App) anyerror!bool {
     // The old edges go first, then this frame's events. The resize flag is an
     // edge too.
     self.input.beginFrame();
+    self.schedule.beginFrame();
     self.resized = false;
 
     if (self.window) |*window| {
@@ -1927,6 +1928,55 @@ test "vsync is remembered, even with no display to wait for" {
     try testing.expect(app.vsync());
     try app.setVsync(false);
     try testing.expect(!app.vsync());
+}
+
+test "additive sprites get a draw of their own, and share it with each other" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+
+    for ([_]components.Sprite.Blend{ .additive, .alpha, .additive }, 0..) |blend, i| {
+        var glow = components.Sprite.solid(.white, 8, 8);
+        glow.blend = blend;
+        _ = try app.world.spawnWith(.{ components.Transform2D.at(@floatFromInt(10 + i * 10), 10), glow });
+    }
+    try app.run();
+
+    try testing.expectEqual(@as(u32, 3), app.sprites.drawn);
+    try testing.expectEqual(@as(u32, 2), app.sprites.draw_calls);
+}
+
+test "a repeating texture tiles across a region past its edge" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+
+    const tile = try app.assets.textureFromPixels(2, 2, &(.{255} ** 16), .{ .wrap = .repeat });
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(32, 32),
+        components.Sprite{ .texture = tile, .region = .repeated(4, 2) },
+    });
+    try app.run();
+
+    const drawn = app.sprites.items.items[0];
+    try testing.expect(std.meta.eql(app.assets.samplers.get(.nearest).get(.repeat), drawn.sampler));
+    try testing.expectEqual(@as(f32, 8), drawn.instance.placement[2]);
+    try testing.expectEqual(@as(f32, 4), drawn.instance.placement[3]);
+}
+
+const Nap = struct {
+    fn run(_: *App) anyerror!void {
+        try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+};
+
+test "each system's time over the last frame is kept under its name" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 2, .io = testing.io });
+    defer app.destroy();
+    try app.addSystem(.update, "nap", Nap.run);
+    try app.run();
+
+    const nap = app.schedule.systemsIn(.update)[0];
+    try testing.expectEqualStrings("nap", nap.name);
+    try testing.expect(nap.time_last_frame.nanoseconds >= std.time.ns_per_ms / 2);
 }
 
 test "a frame cap slows the loop down to it" {

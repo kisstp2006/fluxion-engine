@@ -162,6 +162,10 @@ pub const Region = extern struct {
         };
     }
 
+    pub fn repeated(across: f32, down: f32) Region {
+        return .{ .u1 = across, .v1 = down };
+    }
+
     /// One cell of a grid, counted left to right and then down.
     pub fn cell(index: u32, columns: u32, rows: u32) Region {
         const cw = 1 / @as(f32, @floatFromInt(columns));
@@ -213,11 +217,15 @@ pub const Sprite = extern struct {
     /// the entity between archetypes.
     visible: bool = true,
 
+    blend: Blend = .alpha,
+
     /// Where a sprite sits within its layer: lower is drawn first. At zero, a
     /// layer's sprites are grouped by texture, one draw call each. Copying
     /// `transform.y` in here sorts a top-down game by feet, at the cost of
     /// that grouping. Ties keep a stable order.
     order: f32 = 0,
+
+    pub const Blend = enum(u8) { alpha, additive };
 
     /// A sprite showing the whole of a texture at its own size.
     pub fn of(texture: assets.TextureHandle) Sprite {
@@ -433,6 +441,10 @@ test "a cell of a strip is the strip divided up" {
     try testing.expectApproxEqAbs(@as(f32, 0.5), r.u1, 0.0001);
     try testing.expectApproxEqAbs(@as(f32, 0), r.v0, 0.0001);
     try testing.expectApproxEqAbs(@as(f32, 1), r.v1, 0.0001);
+}
+
+test "a sprite's blend mode fits in the padding it already had" {
+    try testing.expectEqual(64, @sizeOf(Sprite));
 }
 
 test "mirroring swaps the horizontal edges and leaves the vertical ones" {

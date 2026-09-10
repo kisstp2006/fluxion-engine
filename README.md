@@ -103,6 +103,15 @@ since the last *step*, not since the top of the frame. Each press reaches
 exactly one step, and a press made while the world is paused reaches none.
 A controller's buttons work the same way.
 
+**Every system is timed**, under the name it was added with.
+`app.schedule.systemsIn(.update)` gives each one's `time_last_frame` - a
+`.fixed` system's steps added up - and `{f}` prints them all:
+
+```zig
+std.debug.print("{f}", .{app.schedule});
+// fixed     move ball                21.4us
+```
+
 ## Controllers and the pointer
 
 ```zig
@@ -199,10 +208,16 @@ _ = try world.spawnWith(.{
 
 - **Sorted back to front, blended, with no depth test.** A depth buffer and
   half-transparent pixels disagree about what is behind what. The sort is by
-  `layer`, then `order`, then texture, then the order the sprites were found
-  in - so sprites of one layer sharing a texture come out as one run and
-  therefore one call, and two overlapping sprites that tie on everything are
-  drawn the same way round every frame.
+  `layer`, then `order`, then blend mode, then texture, then the order the
+  sprites were found in - so sprites of one layer sharing a texture come out
+  as one run and therefore one call, and two overlapping sprites that tie on
+  everything are drawn the same way round every frame.
+- **`Sprite.blend = .additive` adds light** instead of covering what is
+  behind: sparks, glows, lasers. It is a second pipeline, and additive sprites
+  of one layer and order are grouped so they stay one draw call.
+- **A texture loaded with `.wrap = .repeat` tiles** across a region that goes
+  past its edge: `.region = .repeated(8, 4)` draws it eight times across and
+  four down.
 - **`Sprite.order` is the sort inside a layer.** Zero by default, which keeps
   the texture grouping. A top-down game writes `transform.y` into it from a
   `.late` system and gets things sorted by their feet.
@@ -383,11 +398,14 @@ Here, and checked by the tests:
   maximised and minimised, and `resized` for the frame the size changed in.
 - Frame pacing: vsync switched while running, a frame cap that holds its
   average, and a minimised window that sleeps instead of drawing.
+- Every system timed, under the name it was added with: its time over the
+  last frame, and the whole schedule printable with `{f}`.
 - Textures loaded from PNG, handed out as generational handles, and a white
   texel for everything untextured.
 - The 2D pass: transforms, regions, tints, pivots, layers, order within a
-  layer, visibility, interpolation between fixed steps, and a camera with
-  zoom, rotation and an area it always fits to the window.
+  layer, visibility, additive blending, textures that repeat, interpolation
+  between fixed steps, and a camera with zoom, rotation and an area it always
+  fits to the window.
 - Parenting, one entity to another, resolved where it is needed rather than
   cached into a second component, and taken down with its parent.
 - Sprite animation over a sheet, looping or one-shot.

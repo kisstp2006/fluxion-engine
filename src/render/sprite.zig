@@ -90,14 +90,22 @@ const Item = struct {
     instance: Instance,
     texture: rhi.Texture,
     sampler: rhi.Sampler,
+    blend: Sprite.Blend,
 
     fn before(_: void, a: Item, b: Item) bool {
         const layer_a = a.key >> 32;
         const layer_b = b.key >> 32;
         if (layer_a != layer_b) return layer_a < layer_b;
         if (a.order != b.order) return a.order < b.order;
+        if (a.blend != b.blend) return @intFromEnum(a.blend) < @intFromEnum(b.blend);
         if (a.key != b.key) return a.key < b.key;
         return a.sequence < b.sequence;
+    }
+
+    fn sharesDrawWith(self: Item, other: Item) bool {
+        return self.blend == other.blend and
+            std.meta.eql(self.texture, other.texture) and
+            std.meta.eql(self.sampler, other.sampler);
     }
 };
 
@@ -109,7 +117,7 @@ pub const Renderer = struct {
 
     /// Kept, because the pipeline was described with names inside it.
     module: shader.Module,
-    pipeline: rhi.Pipeline,
+    pipelines: std.EnumArray(Sprite.Blend, rhi.Pipeline),
 
     quad: rhi.Buffer,
     instances: rhi.Buffer,
@@ -168,23 +176,30 @@ pub const Renderer = struct {
             strides[buffer] += format.size();
         }
 
-        const pipeline = device.createPipeline(.{
-            .shader = handle,
-            .attributes = attributes[0..module.attributes.len],
-            .buffers = &.{
-                .{ .stride = strides[0] },
-                .{ .stride = strides[1], .step = .instance },
-            },
-            .topology = .triangle_strip,
-            .blend = .alpha,
-            // Both lists come out of the shader, in slot order.
-            .uniform_blocks = (try module.uniformBlockNames()) orelse return Error.ShaderFailed,
-            .textures = (try module.textureNames()) orelse return Error.ShaderFailed,
-            .label = "sprites",
-        }) catch |err| {
-            std.log.scoped(.fluxion_engine).err("sprite pipeline: {s}", .{device.diagnostics()});
-            return err;
-        };
+        var pipelines: std.EnumArray(Sprite.Blend, rhi.Pipeline) = .initFill(.none);
+        errdefer for (pipelines.values) |pipeline| device.destroyPipeline(pipeline);
+        for (std.enums.values(Sprite.Blend)) |blend| {
+            pipelines.set(blend, device.createPipeline(.{
+                .shader = handle,
+                .attributes = attributes[0..module.attributes.len],
+                .buffers = &.{
+                    .{ .stride = strides[0] },
+                    .{ .stride = strides[1], .step = .instance },
+                },
+                .topology = .triangle_strip,
+                .blend = switch (blend) {
+                    .alpha => .alpha,
+                    .additive => .additive,
+                },
+                // Both lists come out of the shader, in slot order.
+                .uniform_blocks = (try module.uniformBlockNames()) orelse return Error.ShaderFailed,
+                .textures = (try module.textureNames()) orelse return Error.ShaderFailed,
+                .label = "sprites",
+            }) catch |err| {
+                std.log.scoped(.fluxion_engine).err("sprite pipeline: {s}", .{device.diagnostics()});
+                return err;
+            });
+        }
 
         const block = module.block("Frame") orelse return Error.ShaderFailed;
         const initial_capacity = 256;
@@ -192,7 +207,7 @@ pub const Renderer = struct {
         return .{
             .device = device,
             .module = module,
-            .pipeline = pipeline,
+            .pipelines = pipelines,
             .quad = try device.createBuffer(.{
                 .kind = .vertex,
                 .size = @sizeOf(@TypeOf(quad_corners)),
@@ -222,7 +237,7 @@ pub const Renderer = struct {
         self.device.destroyBuffer(self.quad);
         self.device.destroyBuffer(self.instances);
         self.device.destroyBuffer(self.frame);
-        self.device.destroyPipeline(self.pipeline);
+        for (self.pipelines.values) |pipeline| self.device.destroyPipeline(pipeline);
         self.* = undefined;
     }
 
@@ -274,7 +289,8 @@ pub const Renderer = struct {
             .clear_color = if (clear) |c| c.array() else .{ 0, 0, 0, 1 },
         } });
         try list.setViewport(.{ .width = width, .height = height });
-        try list.setPipeline(self.pipeline);
+        var bound_blend: Sprite.Blend = .alpha;
+        try list.setPipeline(self.pipelines.get(bound_blend));
         try list.setVertexBuffer(0, self.quad, 0);
         try list.setUniformBuffer(0, self.frame);
 
@@ -283,17 +299,16 @@ pub const Renderer = struct {
 
         var start: usize = 0;
         while (start < self.items.items.len) {
-            const texture = self.items.items[start].texture;
-            const sampler = self.items.items[start].sampler;
+            const first = self.items.items[start];
 
-            // How far this run of one texture goes: one instanced draw.
             var end = start + 1;
-            while (end < self.items.items.len and
-                std.meta.eql(self.items.items[end].texture, texture) and
-                std.meta.eql(self.items.items[end].sampler, sampler)) : (end += 1)
-            {}
+            while (end < self.items.items.len and first.sharesDrawWith(self.items.items[end])) : (end += 1) {}
 
-            try list.setTexture(0, texture, sampler);
+            if (first.blend != bound_blend) {
+                bound_blend = first.blend;
+                try list.setPipeline(self.pipelines.get(bound_blend));
+            }
+            try list.setTexture(0, first.texture, first.sampler);
             // A draw has no first-instance argument, so the buffer binding is
             // moved to the start of the run instead.
             try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
@@ -359,7 +374,8 @@ pub const Renderer = struct {
                     .order = sprite.order,
                     .sequence = sequence,
                     .texture = texture.gpu,
-                    .sampler = assets.samplerFor(texture.filter),
+                    .sampler = assets.samplerFor(texture.filter, texture.wrap),
+                    .blend = sprite.blend,
                     .instance = .{
                         .placement = .{ transform.x, transform.y, drawn_width, drawn_height },
                         .spin = .{ sprite.pivot_x, sprite.pivot_y, c, s },
@@ -494,7 +510,8 @@ pub const Renderer = struct {
                     .texture = face.texture,
                     // Linear: a zoomed camera draws glyphs at sizes they were
                     // not rasterised at.
-                    .sampler = assets.linear,
+                    .sampler = assets.samplerFor(.linear, .clamp_to_edge),
+                    .blend = .alpha,
                     .instance = .{
                         .placement = .{
                             placed.x,
@@ -611,7 +628,7 @@ test "sprites of one layer are grouped by texture" {
     try testing.expect(sortKey(0, second) < sortKey(1, first));
 }
 
-test "within a layer, order comes before texture and sequence breaks the tie" {
+test "within a layer, order comes first, then blend, then texture, and sequence breaks the tie" {
     const first: Assets.TextureHandle = .{ .index = 1, .generation = 1 };
     const second: Assets.TextureHandle = .{ .index = 2, .generation = 1 };
     const blank: Instance = .{ .placement = @splat(0), .spin = @splat(0), .tint = @splat(0), .uv_rect = @splat(0) };
@@ -625,7 +642,14 @@ test "within a layer, order comes before texture and sequence breaks the tie" {
                 .instance = blank,
                 .texture = .none,
                 .sampler = .none,
+                .blend = .alpha,
             };
+        }
+
+        fn glowing(layer: i16, order: f32, texture: Assets.TextureHandle, sequence: u32) Item {
+            var out = make(layer, order, texture, sequence);
+            out.blend = .additive;
+            return out;
         }
     };
 
@@ -638,10 +662,13 @@ test "within a layer, order comes before texture and sequence breaks the tie" {
     try testing.expect(!Item.before({}, item.make(0, 0, first, 4), item.make(0, 0, first, 3)));
     // And the layer still wins over all of it.
     try testing.expect(Item.before({}, item.make(-1, 100, second, 9), item.make(0, 0, first, 0)));
+
+    try testing.expect(Item.before({}, item.make(0, 0, second, 1), item.glowing(0, 0, first, 0)));
+    try testing.expect(Item.before({}, item.glowing(0, -1, first, 2), item.make(0, 0, second, 1)));
 }
 
 test "a sprite with no size of its own takes the texture's" {
-    const texture: Assets.Texture = .{ .gpu = .none, .width = 32, .height = 16, .filter = .nearest };
+    const texture: Assets.Texture = .{ .gpu = .none, .width = 32, .height = 16, .filter = .nearest, .wrap = .clamp_to_edge };
     const size = spriteSize(.{}, &texture);
     try testing.expectEqual(@as(f32, 32), size.width);
     try testing.expectEqual(@as(f32, 16), size.height);
@@ -652,7 +679,7 @@ test "a sprite with no size of its own takes the texture's" {
 }
 
 test "a mirrored region is not a negative size" {
-    const texture: Assets.Texture = .{ .gpu = .none, .width = 32, .height = 32, .filter = .nearest };
+    const texture: Assets.Texture = .{ .gpu = .none, .width = 32, .height = 32, .filter = .nearest, .wrap = .clamp_to_edge };
     const size = spriteSize(.{ .region = components.Region.full.flippedX() }, &texture);
     try testing.expectEqual(@as(f32, 32), size.width);
 }
