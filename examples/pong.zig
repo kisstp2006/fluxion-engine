@@ -565,6 +565,14 @@ pub fn main(init: std.process.Init) !void {
     };
     defer app.destroy();
 
+    // The camera fits the field to whatever the window is, so any size plays
+    // the same - down to about half the field, below which the ball is a
+    // speck. Said once here, and the window is never dragged smaller.
+    try app.setWindowSizeLimits(.{
+        .min_width = @intFromFloat(field_width / 2),
+        .min_height = @intFromFloat(field_height / 2),
+    });
+
     try out.print("{f}\n", .{app.device.info()});
     try out.print("W/S and Up/Down to play, space to serve, R to start again, F11 to fill the screen, Escape to leave.\n", .{});
     try out.print("Or a controller each: left stick or d-pad to move, A to serve, Start to begin again.\n", .{});

@@ -96,11 +96,33 @@ pub const Cursor = enum {
     }
 };
 
+/// Whether a window is at its own size, filling the screen's work area, or
+/// down in the taskbar.
+pub const State = enum {
+    /// A window at its own size and place.
+    normal,
+    /// Filling the monitor's work area, frame and title bar included. Still
+    /// a window, which is the difference from fullscreen.
+    maximized,
+    /// Down in the taskbar or the dock. `App.width` and `height` hold at the
+    /// last real size while it is, because a swapchain of nought by nought is
+    /// an error on every backend.
+    minimized,
+};
+
+/// How small and how large the player may drag the window, in the units of
+/// `Desc.width` and `height`. Zero on an edge is no limit there.
+/// `fluxion-platform`'s own.
+pub const SizeLimits = platform.backend.SizeLimits;
+
 pub const Desc = struct {
     title: []const u8 = "fluxion",
     width: u32 = 1280,
     height: u32 = 720,
     resizable: bool = true,
+    /// Open maximised. Only a resizable window can be: one that cannot change
+    /// size has no maximise button, and asking is quietly nothing.
+    maximized: bool = false,
     /// Ask for an OpenGL context. Required by the `gl` backend and pointless
     /// to the Direct3D one, which makes its own device and takes the window
     /// handle at surface time instead.
@@ -158,6 +180,7 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
         .width = desc.width,
         .height = desc.height,
         .resizable = desc.resizable,
+        .maximized = desc.maximized,
         .gl = if (desc.gl) .{ .major = 3, .minor = 3, .profile = .core } else null,
     });
     errdefer self.handle.destroy();
@@ -279,6 +302,111 @@ pub fn fullscreen(self: *const Window) Fullscreen {
     };
 }
 
+/// What the title bar says.
+pub fn setTitle(self: *Window, title: []const u8) Error!void {
+    try self.handle.setTitle(title);
+}
+
+/// Make the content area this size, in the units of `Desc.width` and
+/// `height` - pixels, on every backend `fluxion-platform` has today.
+///
+/// A fullscreen, maximised or minimised window has no size of its own to
+/// change, so it is made an ordinary window first - which is what a settings
+/// screen offering "1280 by 720, in a window" means by it.
+pub fn setSize(self: *Window, width: u32, height: u32) Error!void {
+    try self.makeOrdinary();
+    try self.handle.setSize(width, height);
+    self.refreshSize();
+}
+
+/// Put the top left of the content area at this point of the desktop: the
+/// coordinates of `position`, and of a monitor's bounds. An ordinary window
+/// first, for the same reason as `setSize`.
+pub fn setPosition(self: *Window, x: i32, y: i32) Error!void {
+    try self.makeOrdinary();
+    try self.handle.setPosition(x, y);
+}
+
+/// Where the top left of the content area is on the desktop. Nought, nought
+/// on Wayland, always: it does not tell a program where its own window is,
+/// because a program that knew could argue with the compositor about it.
+pub fn position(self: *const Window) [2]i32 {
+    return self.handle.position();
+}
+
+/// How small and how large the player may drag the window. See `SizeLimits`.
+///
+/// The platform only applies limits when the player next drags an edge, so a
+/// window already outside the new ones is brought inside them here and now:
+/// a minimum that the window is smaller than is not a minimum anybody can
+/// see.
+pub fn setSizeLimits(self: *Window, limits: SizeLimits) Error!void {
+    try self.handle.setSizeLimits(limits);
+
+    // Only an ordinary window has a size of its own to bring inside. A
+    // maximised or fullscreen one is sized by its monitor, and meets the
+    // limits when it goes back to being a window.
+    if (self.state() != .normal or self.fullscreen() != .windowed) return;
+    const width = within(self.width, limits.min_width, limits.max_width);
+    const height = within(self.height, limits.min_height, limits.max_height);
+    if (width != self.width or height != self.height) try self.setSize(width, height);
+}
+
+/// Maximise the window, minimise it, or put it back.
+///
+/// Maximised is a kind of window, so a fullscreen one stops being fullscreen
+/// first. Minimised is not, and a fullscreen game minimised comes back
+/// fullscreen when it is put back.
+pub fn setState(self: *Window, wanted: State) Error!void {
+    if (self.state() == wanted) return;
+    switch (wanted) {
+        .minimized => try self.handle.iconify(),
+        .maximized => {
+            if (self.fullscreen() != .windowed) try self.setFullscreen(.windowed);
+            try self.handle.maximize();
+        },
+        .normal => try self.restoreFully(),
+    }
+    self.refreshSize();
+}
+
+/// Whether the window is at its own size, maximised, or minimised.
+pub fn state(self: *const Window) State {
+    if (self.handle.isIconified()) return .minimized;
+    if (self.handle.isMaximized()) return .maximized;
+    return .normal;
+}
+
+/// Not fullscreen, not maximised, not minimised: a window with a size and a
+/// place of its own, which is the only kind that can be given either.
+fn makeOrdinary(self: *Window) Error!void {
+    if (self.fullscreen() != .windowed) try self.setFullscreen(.windowed);
+    try self.restoreFully();
+}
+
+/// Back to the window's own size and place - twice, when it takes two.
+///
+/// Windows puts a minimised window back the way it was before it went down,
+/// so one that was maximised first comes back maximised, and only a second
+/// restore takes it the rest of the way. Asking for `.normal` and getting a
+/// maximised window was what one restore did; the test that found it is a
+/// window maximised, minimised, and then put back.
+fn restoreFully(self: *Window) Error!void {
+    for (0..2) |_| {
+        if (self.state() == .normal) return;
+        try self.handle.restore();
+    }
+}
+
+/// One edge of a size held between its limits, where a limit of zero is no
+/// limit at all.
+fn within(value: u32, min: u32, max: u32) u32 {
+    var held = value;
+    if (min != 0) held = @max(held, min);
+    if (max != 0) held = @min(held, max);
+    return held;
+}
+
 /// Which of the context's monitors the window is on: the one under the
 /// middle of it, or the primary one when it is over none of them - which is
 /// where a minimised window is, parked by Windows at minus thirty-two
@@ -366,7 +494,7 @@ pub fn pump(self: *Window, input: *Input) bool {
         input.apply(ev);
         switch (ev) {
             .close => self.closing = true,
-            .focus => |state| self.refocus(state.value),
+            .focus => |change| self.refocus(change.value),
             .framebuffer_resize => |size| {
                 // Minimising a window on Windows reports zero by zero, and a
                 // swapchain of that size is an error on every backend. Held

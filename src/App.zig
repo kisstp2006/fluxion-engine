@@ -108,12 +108,29 @@ pub const Cursor = Window.Cursor;
 /// One of the system's own pointer shapes. `fluxion-platform`'s own.
 pub const CursorShape = platform.CursorShape;
 
+/// Whether the window is at its own size, maximised, or minimised. See
+/// `Window.State`.
+pub const WindowState = Window.State;
+
+/// How small and how large the player may drag the window. See
+/// `Window.SizeLimits`.
+pub const WindowSizeLimits = Window.SizeLimits;
+
 pub const Options = struct {
     title: []const u8 = "fluxion",
     width: u32 = 1280,
     height: u32 = 720,
     backend: Backend = .auto,
     vsync: bool = true,
+
+    /// Whether the player may drag the window's edges. Off for a game drawn at
+    /// one size that would rather not be stretched; `setWindowSize` can still
+    /// change it either way.
+    resizable: bool = true,
+
+    /// Open maximised: filling the monitor's work area, frame and all. Only a
+    /// resizable window can be. See `setWindowState`.
+    maximized: bool = false,
 
     /// Open filling the screen rather than in a window. `width` and `height`
     /// are still the size it goes back to when the player asks for a window.
@@ -193,6 +210,17 @@ background: Color,
 width: u32,
 height: u32,
 
+/// True for the one frame in which `width` and `height` changed - the player
+/// dragged an edge, the window was maximised, the game went fullscreen.
+///
+/// Set at the top of the frame, before any system runs, so every stage of
+/// that frame sees it and the next frame sees it gone. What a system that
+/// lays something out against the edges of the window reads, rather than
+/// keeping last frame's size to compare with: the engine already had to
+/// notice, because the swapchain had to be resized, and used to keep the
+/// news to itself.
+resized: bool = false,
+
 /// Cleared by `quit`, and by the frame counter running out.
 running: bool = true,
 frames_left: ?u32,
@@ -232,6 +260,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .background = options.background,
         .width = options.width,
         .height = options.height,
+        .resized = false,
         .running = true,
         .frames_left = options.frames,
         .started = false,
@@ -253,6 +282,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             .title = options.title,
             .width = options.width,
             .height = options.height,
+            .resizable = options.resizable,
+            .maximized = options.maximized,
             .gl = backend == .gl,
             .vsync = options.vsync,
         }) catch |err| {
@@ -432,8 +463,10 @@ pub fn step(self: *App) anyerror!bool {
     if (!self.running) return false;
 
     // Edges first, then this frame's events on top of them. Doing it the
-    // other way round would throw away the input the pump just gathered.
+    // other way round would throw away the input the pump just gathered. The
+    // resize flag is an edge too, and goes with them.
     self.input.beginFrame();
+    self.resized = false;
 
     if (self.window) |*window| {
         if (!window.pump(&self.input)) {
@@ -442,11 +475,7 @@ pub fn step(self: *App) anyerror!bool {
         }
         if (window.resized) {
             window.resized = false;
-            self.width = window.width;
-            self.height = window.height;
-            if (self.surface) |surface| {
-                try self.device.resizeSurface(surface, self.width, self.height);
-            }
+            try self.adoptSize(window.width, window.height);
         }
     }
 
@@ -510,6 +539,16 @@ pub fn step(self: *App) anyerror!bool {
     }
 
     return self.running;
+}
+
+/// Take a new size from the window: the numbers, the flag that says they
+/// changed, and the swapchain, which has to match or be an error on every
+/// backend.
+fn adoptSize(self: *App, width: u32, height: u32) !void {
+    self.width = width;
+    self.height = height;
+    self.resized = true;
+    if (self.surface) |surface| try self.device.resizeSurface(surface, width, height);
 }
 
 /// Run the `.shutdown` stage. Called by `run`; call it yourself if you drive
@@ -667,6 +706,63 @@ pub fn toggleFullscreen(self: *App) Window.Error!void {
         .windowed => .borderless,
         else => .windowed,
     });
+}
+
+/// What the title bar says - a level's name, a count of unsaved changes.
+/// Nothing without a window.
+pub fn setWindowTitle(self: *App, title: []const u8) Window.Error!void {
+    if (self.window) |*window| try window.setTitle(title);
+}
+
+/// Make the window's content area this size, in the units of
+/// `Options.width` and `height`.
+///
+/// A fullscreen, maximised or minimised window is made an ordinary window
+/// first, because none of them has a size of its own to change. The new size
+/// arrives the way every resize does: `width`, `height` and `resized` at the
+/// top of the next frame. Nothing without a window.
+pub fn setWindowSize(self: *App, width: u32, height: u32) Window.Error!void {
+    if (self.window) |*window| try window.setSize(width, height);
+}
+
+/// Put the top left of the window's content area at this point of the
+/// desktop. For a game that remembers where the player left its window.
+/// Nothing without a window.
+pub fn setWindowPosition(self: *App, x: i32, y: i32) Window.Error!void {
+    if (self.window) |*window| try window.setPosition(x, y);
+}
+
+/// Where the top left of the window's content area is on the desktop, or
+/// null when there is no window. Always nought, nought on Wayland; see
+/// `Window.position`.
+pub fn windowPosition(self: *const App) ?[2]i32 {
+    if (self.window) |*window| return window.position();
+    return null;
+}
+
+/// How small and how large the player may drag the window.
+///
+/// ```zig
+/// try app.setWindowSizeLimits(.{ .min_width = 640, .min_height = 360 });
+/// ```
+///
+/// A window already outside the new limits is brought inside them at once.
+/// Nothing without a window.
+pub fn setWindowSizeLimits(self: *App, limits: WindowSizeLimits) Window.Error!void {
+    if (self.window) |*window| try window.setSizeLimits(limits);
+}
+
+/// Maximise the window, minimise it, or put it back. See `Window.setState`
+/// for how each gets on with fullscreen. Nothing without a window.
+pub fn setWindowState(self: *App, wanted: WindowState) Window.Error!void {
+    if (self.window) |*window| try window.setState(wanted);
+}
+
+/// Whether the window is at its own size, maximised, or minimised. `.normal`
+/// when there is no window.
+pub fn windowState(self: *const App) WindowState {
+    if (self.window) |*window| return window.state();
+    return .normal;
 }
 
 /// Lock the pointer, confine it to the window, hide it, or give it back.
@@ -1390,4 +1486,49 @@ test "a headless app has no pointer to hold, and says so without failing" {
     try testing.expect(!app.input.pointer.locked);
     try app.setCursorShape(.pointing_hand);
     try testing.expectEqual(@as(usize, 0), try app.addGamepadMappings("not a mapping"));
+}
+
+test "a headless app has no window to move or resize, and says so without failing" {
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .width = 320,
+        .height = 240,
+        .resizable = false,
+        .maximized = true,
+    });
+    defer app.destroy();
+
+    try app.setWindowTitle("nobody reads this");
+    try app.setWindowSize(800, 600);
+    try app.setWindowPosition(10, 20);
+    try app.setWindowSizeLimits(.{ .min_width = 640, .min_height = 480 });
+    try app.setWindowState(.maximized);
+
+    try testing.expect(app.windowPosition() == null);
+    try testing.expect(app.windowState() == .normal);
+    // The target is the size it was made at, and nothing was resized.
+    try testing.expectEqual(@as(u32, 320), app.width);
+    try testing.expectEqual(@as(u32, 240), app.height);
+    try testing.expect(!app.resized);
+}
+
+test "resized is true for the one frame the size changed in, and no other" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240 });
+    defer app.destroy();
+
+    try app.startup();
+    _ = try app.step();
+    try testing.expect(!app.resized);
+
+    // What `step` does when the window says it has a new size, done by hand:
+    // a headless app has no window to say so.
+    try app.adoptSize(400, 300);
+    try testing.expect(app.resized);
+    try testing.expectEqual(@as(u32, 400), app.width);
+    try testing.expectEqual(@as(u32, 300), app.height);
+
+    // The next frame is at the new size, and the news is old.
+    _ = try app.step();
+    try testing.expect(!app.resized);
+    try testing.expectEqual(@as(u32, 400), app.width);
 }

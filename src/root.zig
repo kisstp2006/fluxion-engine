@@ -114,6 +114,14 @@ pub const Cursor = Window.Cursor;
 /// One of the system's own pointer shapes. See `platform.cursor`.
 pub const CursorShape = platform.CursorShape;
 
+/// Whether the window is at its own size, maximised, or minimised. See
+/// `Window.State`.
+pub const WindowState = Window.State;
+
+/// How small and how large the player may drag the window. See
+/// `Window.SizeLimits`.
+pub const WindowSizeLimits = Window.SizeLimits;
+
 /// A button on a controller, named by where it is rather than by what is
 /// printed on it: `.a` is the bottom face button on every pad. See
 /// `platform.gamepad`.

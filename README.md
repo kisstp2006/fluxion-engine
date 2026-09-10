@@ -137,6 +137,35 @@ const turn = app.input.pointer.dx;
   their mouse back, and the lock is still a lock when they come back to it. A
   lock asked for while the window is in the background waits for it.
 
+## The window
+
+```zig
+try app.setWindowTitle("Level 3");
+try app.setWindowSize(1280, 720);
+try app.setWindowSizeLimits(.{ .min_width = 640, .min_height = 360 });
+try app.setWindowState(.maximized);         // .normal, .maximized, .minimized
+if (app.resized) layOutAgain(app.width, app.height);
+```
+
+- **`app.resized` is true for the one frame the size changed in** - an edge
+  dragged, a maximise, fullscreen - and false again the frame after. The
+  engine always had to notice, because the swapchain had to be resized; now
+  the systems hear about it too, instead of keeping last frame's size to
+  compare with.
+- **Sizes are the content area, in the units of `Options.width` and
+  `height`**: pixels, on every backend there is today.
+- **A fullscreen, maximised or minimised window is made an ordinary one
+  before it is sized or moved**, because none of them has a size of its own.
+  `.normal` means the window's own size even for one that was maximised
+  before it was minimised, which Windows would otherwise bring back
+  maximised.
+- **Limits apply at once.** The platform only enforces them on the next
+  drag, so a window already outside new limits is brought inside them when
+  they are set.
+- **`Options.resizable` and `Options.maximized`** say what can only be said
+  when the window is made. Without a window - headless - all of this is
+  nothing, and says so without failing.
+
 ## The 2D layer
 
 One quad in a vertex buffer and a second buffer stepping once per instance
@@ -303,6 +332,8 @@ Here, and checked by the tests:
 - Fullscreen - borderless, or exclusive at a chosen mode - on whichever
   monitor the window is on, at `create` or at any time after, and a no-op
   without a window.
+- The window changed while it runs: title, size, position, size limits,
+  maximised and minimised, and `resized` for the frame the size changed in.
 - Textures loaded from PNG, handed out as generational handles, and a white
   texel for everything untextured.
 - The 2D pass: transforms, regions, tints, pivots, layers, order within a
