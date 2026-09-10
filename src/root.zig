@@ -19,8 +19,8 @@
 //!     const app = try fx.App.create(init.gpa, .{ .title = "game", .io = init.io });
 //!     defer app.destroy();
 //!
-//!     try app.addSystem(.startup, spawn);
-//!     try app.addSystem(.fixed, move);
+//!     try app.addSystem(.startup, "spawn", spawn);
+//!     try app.addSystem(.fixed, "move", move);
 //!     try app.run();
 //! }
 //!
@@ -129,6 +129,13 @@ pub const GamepadButton = platform.GamepadButton;
 
 /// A stick's axis or a trigger on a controller. See `platform.gamepad`.
 pub const GamepadAxis = platform.GamepadAxis;
+
+/// Everything that moves one axis - keys, a stick, a d-pad - as data a
+/// component can hold. See `Input.AxisBinding`.
+pub const AxisBinding = Input.AxisBinding;
+
+/// A countdown that lives in a component. See `Time.Timer`.
+pub const Timer = Time.Timer;
 
 /// A point or a direction in the plane: what `App.screenToWorld` hands
 /// back. See `math`.

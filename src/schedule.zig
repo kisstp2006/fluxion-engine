@@ -3,9 +3,9 @@
 //! When each of a game's systems runs.
 //!
 //! ```zig
-//! try app.addSystem(.fixed, movePaddles);
-//! try app.addSystem(.update, spinCoins);
-//! try app.addSystem(.late, followPlayer);
+//! try app.addSystem(.fixed, "move paddles", movePaddles);
+//! try app.addSystem(.update, "spin coins", spinCoins);
+//! try app.addSystem(.late, "follow player", followPlayer);
 //! ```
 //!
 //! A system is a plain function that takes the `App`. Not a closure - Zig has
@@ -91,6 +91,13 @@ pub const Failure = struct {
     stage: Stage,
     name: []const u8,
     err: anyerror,
+
+    /// Print as `the 'move ball' system in stage .fixed failed: OutOfMemory`,
+    /// with `{f}`. Written here once rather than by every program that
+    /// catches the error from `App.run`.
+    pub fn format(self: Failure, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.print("the '{s}' system in stage .{t} failed: {t}", .{ self.name, self.stage, self.err });
+    }
 };
 
 pub const Schedule = struct {
@@ -116,17 +123,13 @@ pub const Schedule = struct {
         self.* = undefined;
     }
 
-    /// Add a system to the end of a stage.
-    pub fn add(self: *Schedule, gpa: Allocator, stage: Stage, system: System) Allocator.Error!void {
-        return self.addNamed(gpa, stage, "system", system);
-    }
-
-    /// The same, with a name that turns up in a profile or a panic message.
+    /// Add a system to the end of a stage, under the name a failure is
+    /// reported by. See `App.addSystem`, which is what a game calls.
     ///
     /// Zig cannot recover a function's own name from a pointer to it, so the
-    /// name has to be handed over. It is borrowed, not copied: a string
-    /// literal is the expected argument and it outlives everything.
-    pub fn addNamed(
+    /// name has to be handed over. It is borrowed, not copied: the string has
+    /// to outlive the schedule, which a literal does.
+    pub fn add(
         self: *Schedule,
         gpa: Allocator,
         stage: Stage,
@@ -191,9 +194,9 @@ test "systems run in the order they were added" {
     var schedule: Schedule = .empty;
     defer schedule.deinit(testing.allocator);
 
-    try schedule.add(testing.allocator, .update, order.first);
-    try schedule.add(testing.allocator, .update, order.second);
-    try schedule.add(testing.allocator, .update, order.third);
+    try schedule.add(testing.allocator, .update, "first", order.first);
+    try schedule.add(testing.allocator, .update, "second", order.second);
+    try schedule.add(testing.allocator, .update, "third", order.third);
 
     // No `App` is touched by any of them, so a pointer to none is safe here
     // and nowhere else.
@@ -218,8 +221,8 @@ test "a failing system stops the stage" {
     var schedule: Schedule = .empty;
     defer schedule.deinit(testing.allocator);
 
-    try schedule.addNamed(testing.allocator, .update, "guaranteed to fail", counted.fails);
-    try schedule.add(testing.allocator, .update, counted.after);
+    try schedule.add(testing.allocator, .update, "guaranteed to fail", counted.fails);
+    try schedule.add(testing.allocator, .update, "after", counted.after);
 
     try testing.expectError(error.Deliberate, schedule.run(.update, undefined));
     try testing.expectEqual(@as(usize, 1), counted.ran);
@@ -227,6 +230,12 @@ test "a failing system stops the stage" {
     // And the schedule remembers which one, which an error value cannot say.
     try testing.expectEqualStrings("guaranteed to fail", schedule.failed.?.name);
     try testing.expectEqual(Stage.update, schedule.failed.?.stage);
+
+    var buffer: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "the 'guaranteed to fail' system in stage .update failed: Deliberate",
+        try std.fmt.bufPrint(&buffer, "{f}", .{schedule.failed.?}),
+    );
 }
 
 test "a stage nobody registered anything in runs nothing" {

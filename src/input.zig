@@ -5,7 +5,7 @@
 //!
 //! ```zig
 //! fn steer(app: *App) !void {
-//!     const x = app.input.axis(.a, .d);          // -1, 0 or 1
+//!     const x = app.input.axisOf(.keys(.a, .d)); // -1, 0 or 1
 //!     if (app.input.justPressed(.space)) jump();
 //!     if (app.input.buttonDown(.left)) shoot(app.input.pointer.x, app.input.pointer.y);
 //!
@@ -52,6 +52,12 @@
 //! sets of edges exactly as a key's does. `pad(slot)` asks one controller and
 //! `anyPad()` asks all of them at once, which is what a game with one player
 //! wants - whichever controller they picked up, it works.
+//!
+//! **What moves an axis is data.** Two keys, a second two, a stick and two
+//! controller buttons, all held in one `AxisBinding` a component can carry and
+//! a save can keep, and read with `axisOf` - the one place where sources are
+//! added together. Everything else here reads one source: a key, a button, a
+//! stick.
 
 const std = @import("std");
 const testing = std.testing;
@@ -230,15 +236,6 @@ pub const Pad = struct {
         return false;
     }
 
-    /// Two buttons as one number, -1, 0 or 1. The d-pad as an axis, the way
-    /// `Input.axis` makes one out of two keys - and both held is a standstill
-    /// for the same reason.
-    pub fn buttonAxis(self: Pad, negative: platform.GamepadButton, positive: platform.GamepadButton) f32 {
-        const n: f32 = if (self.down(negative)) 1 else 0;
-        const p: f32 = if (self.down(positive)) 1 else 0;
-        return p - n;
-    }
-
     /// A stick, with its dead zone taken out: nothing at all until it leans
     /// past `Input.stick_deadzone`, then rising from zero to a length of one
     /// at full tilt. Up is negative, like the world's `y`.
@@ -307,6 +304,91 @@ fn roundDeadzone(x: f32, y: f32, deadzone: f32) Vec2 {
     const rescaled = (@min(length, 1) - dead) / (1 - dead);
     return .init(x / length * rescaled, y / length * rescaled);
 }
+
+/// Everything that moves one axis - two keys, a second two, a controller's
+/// stick and two of its buttons - as plain data. Read with `Input.axisOf`.
+///
+/// ```zig
+/// const Paddle = extern struct { move: AxisBinding, speed: f32 = 300 };
+///
+/// .move = AxisBinding.keys(.w, .s).withPadY(0),         // spawn
+/// speed.y = app.input.axisOf(paddle.move) * paddle.speed; // drive
+/// ```
+///
+/// **Data, so it can live in a component and in a saved game** - which is
+/// what makes a player's remapped controls a thing that is saved rather than
+/// a config file to parse. Every field is a number for that reason:
+/// `platform.Key` has an open `_` for keys the list does not name, and an enum
+/// like that cannot be written down, so `fluxion-data` refuses it and
+/// `fluxion-ecs` refuses it in a component. The builders below take the
+/// enums, and nothing else has to see the numbers; a settings screen that
+/// rebinds a key writes the field.
+pub const AxisBinding = extern struct {
+    /// The keys that push towards -1 and towards 1: a pair, and a second
+    /// pair for the same axis - WASD and the arrows. `no_key` for none.
+    negative: [2]i32 = @splat(no_key),
+    positive: [2]i32 = @splat(no_key),
+
+    /// Which controller slot, or `any_pad` for whichever is being used.
+    pad: u8 = any_pad,
+    /// Which of its axes, as `GamepadAxis`'s number, or `no_pad_input`.
+    pad_axis: u8 = no_pad_input,
+    /// Which of its buttons push towards -1 and towards 1, as
+    /// `GamepadButton`'s numbers - the d-pad, usually - or `no_pad_input`.
+    pad_negative: u8 = no_pad_input,
+    pad_positive: u8 = no_pad_input,
+
+    /// No key: `Key.unknown`'s number, which is never down.
+    pub const no_key: i32 = @intFromEnum(platform.Key.unknown);
+    /// Every connected controller at once. See `Input.anyPad`.
+    pub const any_pad: u8 = 0xFF;
+    /// No axis or button on the controller. Past the end of both lists, so
+    /// an out-of-range number read from a file means the same thing.
+    pub const no_pad_input: u8 = 0xFF;
+
+    /// Two keys: the first pushes towards -1, the second towards 1.
+    pub fn keys(negative: platform.Key, positive: platform.Key) AxisBinding {
+        return .{
+            .negative = .{ @intFromEnum(negative), no_key },
+            .positive = .{ @intFromEnum(positive), no_key },
+        };
+    }
+
+    /// The same, with a second pair on the same axis: WASD and the arrows.
+    pub fn orKeys(self: AxisBinding, negative: platform.Key, positive: platform.Key) AxisBinding {
+        var out = self;
+        out.negative[1] = @intFromEnum(negative);
+        out.positive[1] = @intFromEnum(positive);
+        return out;
+    }
+
+    /// The same, with the left stick's horizontal axis and the d-pad's left
+    /// and right, on controller `slot` or on `any_pad`.
+    pub fn withPadX(self: AxisBinding, slot: u8) AxisBinding {
+        return self.withPad(slot, .left_x, .dpad_left, .dpad_right);
+    }
+
+    /// The same, with the left stick's vertical axis and the d-pad's up and
+    /// down. Up is -1, the same way round as the world's `y`.
+    pub fn withPadY(self: AxisBinding, slot: u8) AxisBinding {
+        return self.withPad(slot, .left_y, .dpad_up, .dpad_down);
+    }
+
+    fn withPad(
+        self: AxisBinding,
+        slot: u8,
+        axis: platform.GamepadAxis,
+        negative: platform.GamepadButton,
+        positive: platform.GamepadButton,
+    ) AxisBinding {
+        var out = self;
+        out.pad = slot;
+        out.pad_axis = @intFromEnum(axis);
+        out.pad_negative = @intFromEnum(negative);
+        out.pad_positive = @intFromEnum(positive);
+        return out;
+    }
+};
 
 /// Which edges the questions answer from. See `clock`.
 pub const Clock = enum {
@@ -397,21 +479,46 @@ pub fn buttonJustReleased(self: *const Input, button: platform.MouseButton) bool
     return i < button_span and edges.isSet(i);
 }
 
-/// Two keys as one number: -1, 0 or 1.
+/// How far a binding says its axis is pushed, from -1 to 1.
 ///
 /// ```zig
-/// const dx = input.axis(.a, .d);
-/// const dy = input.axis(.w, .s);
+/// const dx = input.axisOf(.keys(.a, .d));
+/// const dy = input.axisOf(AxisBinding.keys(.w, .s).orKeys(.up, .down));
 /// ```
 ///
-/// Both down is zero rather than whichever was pressed last. That is a real
-/// choice and the less annoying one: the alternative needs the order the keys
-/// arrived in, which means state, and a player resting a thumb on both keys
-/// expects to stop.
-pub fn axis(self: *const Input, negative: platform.Key, positive: platform.Key) f32 {
-    const n: f32 = if (self.isDown(negative)) 1 else 0;
-    const p: f32 = if (self.isDown(positive)) 1 else 0;
-    return p - n;
+/// Every source the binding names is added up and the sum held to that
+/// range, so any of them works and all of them at once is no faster. The
+/// keys at one end count once however many of them are down, and both ends
+/// held is a standstill rather than whichever was pressed last: the
+/// alternative needs the order the keys arrived in, which means state, and a
+/// player resting a thumb on both expects to stop. A stick is read with its
+/// dead zone taken out. See `AxisBinding`.
+pub fn axisOf(self: *const Input, binding: AxisBinding) f32 {
+    var sum = self.anyKeyOf(binding.positive) - self.anyKeyOf(binding.negative);
+
+    const controller = if (binding.pad == AxisBinding.any_pad) self.anyPad() else self.pad(binding.pad);
+    // Checked against the ends of both lists, so a number out of range - a
+    // saved binding from a build that had more buttons, or `no_pad_input` -
+    // is no input rather than an enum that does not exist.
+    if (binding.pad_axis < platform.GamepadAxis.count) {
+        sum += controller.axis(@enumFromInt(binding.pad_axis));
+    }
+    if (binding.pad_positive < platform.GamepadButton.count and controller.down(@enumFromInt(binding.pad_positive))) {
+        sum += 1;
+    }
+    if (binding.pad_negative < platform.GamepadButton.count and controller.down(@enumFromInt(binding.pad_negative))) {
+        sum -= 1;
+    }
+    return std.math.clamp(sum, -1, 1);
+}
+
+/// One if any of these keys is down, and zero if none is: two keys held for
+/// the same end of an axis count once.
+fn anyKeyOf(self: *const Input, keys: [2]i32) f32 {
+    for (keys) |raw| {
+        if (self.isDown(@enumFromInt(raw))) return 1;
+    }
+    return 0;
 }
 
 /// Whether anything at all is held down, for an attract screen that ends when
@@ -677,10 +784,22 @@ test "down and up inside one frame still counts as both" {
 test "both directions held is a standstill" {
     var input: Input = .{};
     input.apply(keyEvent(.a, .press));
-    try testing.expectEqual(@as(f32, -1), input.axis(.a, .d));
+    try testing.expectEqual(@as(f32, -1), input.axisOf(.keys(.a, .d)));
 
     input.apply(keyEvent(.d, .press));
-    try testing.expectEqual(@as(f32, 0), input.axis(.a, .d));
+    try testing.expectEqual(@as(f32, 0), input.axisOf(.keys(.a, .d)));
+}
+
+test "two keys for one end of an axis count once" {
+    var input: Input = .{};
+    const walk = AxisBinding.keys(.a, .d).orKeys(.left, .right);
+
+    input.apply(keyEvent(.left, .press));
+    try testing.expectEqual(@as(f32, -1), input.axisOf(walk));
+
+    // A and the left arrow together are still -1, not -2.
+    input.apply(keyEvent(.a, .press));
+    try testing.expectEqual(@as(f32, -1), input.axisOf(walk));
 }
 
 test "losing focus lets go of everything" {
@@ -884,14 +1003,50 @@ test "a controller press reaches exactly one fixed step" {
 test "the d-pad makes an axis the way two keys do" {
     var input: Input = .{};
     var slots = emptySlots();
+    const climb = (AxisBinding{}).withPadY(0);
 
     hold(&slots[0], .dpad_up, true);
     input.readPads(&slots);
-    try testing.expectEqual(@as(f32, -1), input.pad(0).buttonAxis(.dpad_up, .dpad_down));
+    try testing.expectEqual(@as(f32, -1), input.axisOf(climb));
 
     hold(&slots[0], .dpad_down, true);
     input.readPads(&slots);
-    try testing.expectEqual(@as(f32, 0), input.pad(0).buttonAxis(.dpad_up, .dpad_down));
+    try testing.expectEqual(@as(f32, 0), input.axisOf(climb));
+}
+
+test "a binding adds its keys, its stick and its d-pad, and holds the sum to one" {
+    var input: Input = .{};
+    var slots = emptySlots();
+    const bat = AxisBinding.keys(.w, .s).withPadY(1);
+
+    // The stick halfway down: a little over half, once its dead zone is out.
+    lean(&slots[1], .left_y, 0.6);
+    input.readPads(&slots);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), input.axisOf(bat), 0.0001);
+
+    // And S as well: one, not one and a half.
+    input.apply(keyEvent(.s, .press));
+    try testing.expectEqual(@as(f32, 1), input.axisOf(bat));
+
+    // The binding is for slot one: the same stick on slot zero moves nothing.
+    var other = emptySlots();
+    lean(&other[0], .left_y, 0.6);
+    input.apply(keyEvent(.s, .release));
+    input.readPads(&other);
+    try testing.expectEqual(@as(f32, 0), input.axisOf(bat));
+}
+
+test "a binding with a number out of range is no input, not a crash" {
+    var input: Input = .{};
+    var slots = emptySlots();
+    hold(&slots[0], .a, true);
+    input.readPads(&slots);
+
+    // What a save written by a build with more buttons might hold.
+    var strange = (AxisBinding{}).withPadY(0);
+    strange.pad_axis = 200;
+    strange.pad_positive = 99;
+    try testing.expectEqual(@as(f32, 0), input.axisOf(strange));
 }
 
 fn cursorEvent(x: f64, y: f64, dx: f64, dy: f64) platform.Event {

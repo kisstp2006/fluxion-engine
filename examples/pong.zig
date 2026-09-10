@@ -15,7 +15,7 @@
 //! the d-pad moves a bat, A serves and Start begins again.
 //!
 //! It is here to be read as much as played, because it is the shortest honest
-//! answer to "what does a game made with this look like". Four things are
+//! answer to "what does a game made with this look like". Five things are
 //! worth noticing:
 //!
 //! **The game's components are the game's.** `Velocity`, `Paddle`, `Ball` and
@@ -24,21 +24,25 @@
 //! what the renderer reads - everything else about what a thing *is* belongs
 //! to whoever is making the thing.
 //!
-//! **Movement is in `.fixed` and the camera is in `.late`.** The ball moves
-//! at a constant step so it bounces the same way on a fast machine and a slow
-//! one, and the camera runs after everything has moved so it never lags a
-//! frame behind what it is looking at. The ball and the paddles are
+//! **The controls are data.** Each bat holds an `AxisBinding` - its keys, its
+//! controller's stick and d-pad - so remapping them is writing a component,
+//! and saving them is saving the world. `input.axisOf` adds the sources up.
+//!
+//! **Movement is in `.fixed`.** The ball moves at a constant step so it
+//! bounces the same way on a fast machine and a slow one, and `time.delta` is
+//! that step while the stage runs. The ball and the paddles are
 //! `interpolated`, so on a screen faster than sixty hertz they are drawn
 //! between their last two steps rather than jumping from one to the next.
 //!
-//! **The play field is a fixed size and the window is not.** The camera zooms
-//! to fit `field_width` by `field_height` into whatever the window is, so
-//! resizing changes how much of the screen the game takes and never how the
-//! game plays.
+//! **The play field is a fixed size and the window is not.** The camera is
+//! told the size of the field - `Camera2D.fitting` - and the engine scales it
+//! to whatever the window is, so resizing changes how much of the screen the
+//! game takes and never how the game plays.
 //!
-//! **The score is a component on an entity.** There is nowhere else to put
-//! it: this engine has no resource registry yet, and a singleton entity is
-//! the ECS answer anyway - it is saved and loaded with the world for free.
+//! **The score is a component on an entity**, the only one of its kind, and
+//! `app.single(Score)` is how every system finds it. A singleton entity is the
+//! ECS answer to state that is not about a thing, and it is saved and loaded
+//! with the world for free.
 
 const std = @import("std");
 const fx = @import("fluxion_engine");
@@ -93,42 +97,22 @@ const Velocity = extern struct {
     y: f32 = 0,
 };
 
-/// A bat, and which keys and which controller drive it.
-///
-/// The controls are *in the component*, which is what makes remapping them a
-/// saved game rather than a config file to parse.
-///
-/// They are stored as `Key`'s number rather than as the enum, and the reason
-/// is a compile error worth reading: `platform.Key` is non-exhaustive - it
-/// has an open `_` for the keys a platform knows about that the list does not
-/// name - and a value with unnamed cases cannot be written to a file, so
-/// `fluxion-data` refuses it and `fluxion-ecs` refuses it as a component. The
-/// number underneath has no such problem. `keys` puts the enum back.
+/// A bat, and what drives it.
 const Paddle = extern struct {
-    up: i32,
-    down: i32,
-    /// Which controller slot drives it as well as the keys. Slot zero - on
-    /// Windows, the first controller XInput numbers - takes the left bat, and
-    /// slot one the right, so two players with a pad each need no set-up.
-    pad: u8,
+    /// Its keys, and the stick and d-pad of one controller: slot zero - on
+    /// Windows, the first controller XInput numbers - for the left bat and
+    /// slot one for the right, so two players with a pad each need no set-up.
+    move: fx.AxisBinding,
     speed: f32 = 300,
-
-    fn bind(up: fx.Key, down: fx.Key, pad: u8) Paddle {
-        return .{ .up = @intFromEnum(up), .down = @intFromEnum(down), .pad = pad };
-    }
-
-    fn keys(self: Paddle) struct { up: fx.Key, down: fx.Key } {
-        return .{ .up = @enumFromInt(self.up), .down = @enumFromInt(self.down) };
-    }
 };
 
 /// There is one of these. Its speed is on it rather than in a constant so
 /// that a rally can make it faster.
 const Ball = extern struct {
     speed: f32 = ball_start_speed,
-    /// Seconds until it serves itself. Counted down in the fixed stage, so
-    /// the pause is the same length on every machine; space cuts it short.
-    wait: f32 = serve_pause,
+    /// Until it serves itself. Ticked in the fixed stage, so the pause is the
+    /// same length on every machine; space cuts it short.
+    wait: fx.Timer = .seconds(serve_pause),
     /// Which way the next serve goes: 1 right, -1 left.
     towards: f32 = 1,
 };
@@ -148,12 +132,6 @@ const Pip = extern struct {
     side: u8,
 };
 
-/// A wall the ball bounces off, as a half-size about the transform.
-const Bounds = extern struct {
-    half_width: f32,
-    half_height: f32,
-};
-
 // -------------------------------------------------------------------------
 // Setting the table
 // -------------------------------------------------------------------------
@@ -161,12 +139,11 @@ const Bounds = extern struct {
 fn spawn(app: *App) !void {
     const world = &app.world;
 
-    // The camera. Its transform is where it looks, and the middle of the
-    // field is where it should be looking; `fitCamera` sets the zoom every
-    // frame from the size of the window.
+    // The camera looks at the middle of the field and always shows all of
+    // it, whatever shape the window is: the engine works out the zoom.
     _ = try world.spawnWith(.{
         Transform2D.at(field_width / 2, field_height / 2),
-        Camera2D{ .zoom = 1 },
+        Camera2D.fitting(field_width, field_height),
     });
 
     // The net, drawn as a column of faint dashes. Sprites with no texture at
@@ -185,16 +162,14 @@ fn spawn(app: *App) !void {
         Transform2D.at(paddle_inset, field_height / 2).interpolated(),
         Sprite{ .tint = theme.left, .width = paddle_width, .height = paddle_height },
         Velocity{},
-        Paddle.bind(.w, .s, 0),
-        Bounds{ .half_width = paddle_width / 2, .half_height = paddle_height / 2 },
+        Paddle{ .move = fx.AxisBinding.keys(.w, .s).withPadY(0) },
     });
 
     _ = try world.spawnWith(.{
         Transform2D.at(field_width - paddle_inset, field_height / 2).interpolated(),
         Sprite{ .tint = theme.right, .width = paddle_width, .height = paddle_height },
         Velocity{},
-        Paddle.bind(.up, .down, 1),
-        Bounds{ .half_width = paddle_width / 2, .half_height = paddle_height / 2 },
+        Paddle{ .move = fx.AxisBinding.keys(.up, .down).withPadY(1) },
     });
 
     _ = try world.spawnWith(.{
@@ -230,39 +205,24 @@ fn spawn(app: *App) !void {
 
 const Paddles = fx.Query(.{ Transform2D, Velocity, Paddle });
 const Balls = fx.Query(.{ Transform2D, Velocity, Ball });
-const Scores = fx.Query(.{Score});
 const Pips = fx.Query(.{ Sprite, Pip });
 
-/// Escape leaves, space serves, R starts again, F11 fills the screen - and
-/// A and Start on any controller do what space and R do.
+/// Space serves and R starts again - and A and Start on any controller do
+/// the same. Escape and F11 are the engine's; see `main`.
 fn readKeys(app: *App) !void {
-    if (app.input.justPressed(.escape)) app.quit();
-
-    // F11 rather than Alt+Enter, because on the `d3d11` backend DXGI answers
-    // Alt+Enter itself unless it has been told not to, and two things
-    // switching fullscreen at once is a fight. Not fatal when it cannot be
-    // done: a game with no monitor to fill is still a game.
-    if (app.input.justPressed(.f11)) app.toggleFullscreen() catch |err| {
-        std.log.warn("could not change fullscreen: {t}", .{err});
-    };
-
     // Any controller, not a particular one: whoever reaches for a button
     // first may press it.
     const pads = app.input.anyPad();
 
     if (app.input.justPressed(.r) or pads.justPressed(.start)) {
-        if (try Scores.first(&app.world)) |chunk| {
-            chunk.slice(Score)[0] = .{};
-        }
+        if (app.single(Score)) |score| score.* = .{};
         try resetBall(app, 1);
     }
 
     if (app.input.justPressed(.space) or pads.justPressed(.a)) {
         var it = try Balls.over(&app.world);
         while (it.next()) |chunk| {
-            for (chunk.slice(Ball)) |*ball| {
-                if (ball.wait > 0) ball.wait = 0;
-            }
+            for (chunk.slice(Ball)) |*ball| ball.wait.finish();
         }
     }
 }
@@ -272,16 +232,10 @@ fn readKeys(app: *App) !void {
 /// In the fixed stage with everything else that moves, so a capture taken at
 /// frame two hundred shows the same rally every time it is run.
 fn serve(app: *App) !void {
-    const dt = app.time.fixed_delta;
-
     var it = try Balls.over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.slice(Ball), chunk.slice(Velocity)) |*ball, *velocity| {
-            if (ball.wait <= 0) continue;
-            ball.wait -= dt;
-            if (ball.wait > 0) continue;
-
-            ball.wait = 0;
+            if (!ball.wait.tick(app.time.delta)) continue;
             // Never quite flat, so a serve always has somewhere to go.
             velocity.* = .{
                 .x = ball.speed * ball.towards,
@@ -291,13 +245,12 @@ fn serve(app: *App) !void {
     }
 }
 
-/// Turn the keys into speeds, and the speeds into positions.
+/// Turn the controls into speeds, and the speeds into positions.
 ///
 /// Both halves are in the fixed stage, so how fast a paddle moves does not
-/// depend on how fast the machine draws.
+/// depend on how fast the machine draws. A held key and a pushed stick are
+/// levels rather than edges, so they are safe to read here.
 fn drivePaddles(app: *App) !void {
-    const dt = app.time.fixed_delta;
-
     var it = try Paddles.over(&app.world);
     while (it.next()) |chunk| {
         // Three slices over one archetype's rows, lined up. This is the loop
@@ -308,21 +261,8 @@ fn drivePaddles(app: *App) !void {
         const paddles = chunk.slice(Paddle);
 
         for (places, speeds, paddles) |*place, *speed, paddle| {
-            const bound = paddle.keys();
-            const pad = app.input.pad(paddle.pad);
-            // The keys, the stick and the d-pad add up and are then held to
-            // one, so any of them works and all of them at once is no faster.
-            // The stick is a level, like a held key, so it is safe to read
-            // here in the fixed step; its dead zone is already out of it.
-            const intent = std.math.clamp(
-                app.input.axis(bound.up, bound.down) +
-                    pad.axis(.left_y) +
-                    pad.buttonAxis(.dpad_up, .dpad_down),
-                -1,
-                1,
-            );
-            speed.y = intent * paddle.speed;
-            place.y += speed.y * dt;
+            speed.y = app.input.axisOf(paddle.move) * paddle.speed;
+            place.y += speed.y * app.time.delta;
             place.y = std.math.clamp(
                 place.y,
                 paddle_height / 2,
@@ -334,7 +274,7 @@ fn drivePaddles(app: *App) !void {
 
 /// The ball: move it, bounce it, and give a point away when it goes past.
 fn moveBall(app: *App) !void {
-    const dt = app.time.fixed_delta;
+    const dt = app.time.delta;
 
     // The paddles are collected first rather than queried inside the ball
     // loop, because two iterators over one world at once is a thing that
@@ -357,7 +297,7 @@ fn moveBall(app: *App) !void {
     var it = try Balls.over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.slice(Transform2D), chunk.slice(Velocity), chunk.slice(Ball)) |*place, *speed, *ball| {
-            if (ball.wait > 0) continue;
+            if (ball.wait.running()) continue;
 
             place.x += speed.x * dt;
             place.y += speed.y * dt;
@@ -402,7 +342,7 @@ fn moveBall(app: *App) !void {
 
     if (scored != 0) {
         const winner: u8 = if (scored == 1) 1 else 2;
-        try award(app, winner);
+        award(app, winner);
         // Served towards whoever just lost the point, which is the rule
         // everywhere and stops one player being served at twice running.
         try resetBall(app, if (winner == 1) -1 else 1);
@@ -416,9 +356,8 @@ fn overlaps(place: Transform2D, bat: Bat) bool {
         @abs(place.y - bat.y) < (paddle_height + ball_size) / 2;
 }
 
-fn award(app: *App, side: u8) !void {
-    const chunk = try Scores.first(&app.world) orelse return;
-    const score = &chunk.slice(Score)[0];
+fn award(app: *App, side: u8) void {
+    const score = app.single(Score) orelse return;
     if (score.winner != 0) return;
 
     if (side == 1) score.left += 1 else score.right += 1;
@@ -439,8 +378,7 @@ fn resetBall(app: *App, towards: f32) !void {
 
 /// Show one pip per point. The scoreboard is sprites, like everything else.
 fn showScore(app: *App) !void {
-    const chunk = try Scores.first(&app.world) orelse return;
-    const score = chunk.slice(Score)[0];
+    const score = app.single(Score) orelse return;
 
     var it = try Pips.over(&app.world);
     while (it.next()) |pips| {
@@ -451,30 +389,10 @@ fn showScore(app: *App) !void {
     }
 }
 
-/// Fit the field to the window, whatever size it is.
-///
-/// In `.late` rather than `.update`, so it runs after everything has moved
-/// and the frame that is about to be drawn is looked at by a camera that
-/// knows about it.
-fn fitCamera(app: *App) !void {
-    const width: f32 = @floatFromInt(app.width);
-    const height: f32 = @floatFromInt(app.height);
-    const zoom = @min(width / field_width, height / field_height);
-
-    var it = try fx.Query(.{ Transform2D, Camera2D }).over(&app.world);
-    while (it.next()) |chunk| {
-        for (chunk.slice(Transform2D), chunk.slice(Camera2D)) |*place, *camera| {
-            place.* = Transform2D.at(field_width / 2, field_height / 2).interpolated();
-            camera.zoom = zoom;
-        }
-    }
-}
-
 /// A won game pulses the winner's colour, which is the whole of the
 /// celebration a game with no text can manage.
 fn celebrate(app: *App) !void {
-    const chunk = try Scores.first(&app.world) orelse return;
-    const score = chunk.slice(Score)[0];
+    const score = app.single(Score) orelse return;
     if (score.winner == 0) return;
 
     const pulse = 0.5 + 0.5 * @sin(@as(f32, @floatCast(app.time.elapsed)) * 6);
@@ -486,52 +404,6 @@ fn celebrate(app: *App) !void {
 // The program
 // -------------------------------------------------------------------------
 
-const Options = struct {
-    backend: App.Backend = .auto,
-    frames: ?u32 = null,
-    width: u32 = 960,
-    height: u32 = 540,
-    /// Play `--frames` frames without showing them, then write the last one
-    /// to this file. How the picture is checked on a machine nobody is
-    /// sitting at, and how two backends are compared without a pair of eyes.
-    capture: ?[]const u8 = null,
-};
-
-fn parse(arguments: []const []const u8) !Options {
-    var options: Options = .{};
-    var i: usize = 1;
-    while (i < arguments.len) : (i += 1) {
-        const argument = arguments[i];
-        const value = if (i + 1 < arguments.len) arguments[i + 1] else null;
-
-        if (std.mem.eql(u8, argument, "--backend")) {
-            const name = value orelse return error.MissingValue;
-            options.backend = if (std.mem.eql(u8, name, "d3d11"))
-                .d3d11
-            else if (std.mem.eql(u8, name, "gl"))
-                .gl
-            else
-                return error.UnknownBackend;
-            i += 1;
-        } else if (std.mem.eql(u8, argument, "--frames")) {
-            options.frames = try std.fmt.parseInt(u32, value orelse return error.MissingValue, 10);
-            i += 1;
-        } else if (std.mem.eql(u8, argument, "--width")) {
-            options.width = try std.fmt.parseInt(u32, value orelse return error.MissingValue, 10);
-            i += 1;
-        } else if (std.mem.eql(u8, argument, "--capture")) {
-            options.capture = value orelse return error.MissingValue;
-            i += 1;
-        } else if (std.mem.eql(u8, argument, "--height")) {
-            options.height = try std.fmt.parseInt(u32, value orelse return error.MissingValue, 10);
-            i += 1;
-        } else {
-            return error.UnknownArgument;
-        }
-    }
-    return options;
-}
-
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
 
@@ -539,23 +411,19 @@ pub fn main(init: std.process.Init) !void {
     var stdout: std.Io.File.Writer = .init(.stdout(), init.io, &buffer);
     const out = &stdout.interface;
 
-    const options = try parse(try init.minimal.args.toSlice(init.arena.allocator()));
+    // The engine's own flags - `--backend`, `--width`, `--height`, `--frames`
+    // and `--capture` - and no others: pong has none of its own.
+    const flags = try App.parseFlags(App.Flags, try init.minimal.args.toSlice(init.arena.allocator()));
 
-    const app = App.create(gpa, .{
+    const app = App.create(gpa, flags.apply(.{
         .title = "Pong - Fluxion Engine",
-        .width = options.width,
-        .height = options.height,
-        .backend = options.backend,
-        // A capture needs a fixed number of frames to stop at, and the same
-        // number every run: the ball has to be in the same place in both
-        // pictures for comparing them to mean anything.
-        .frames = if (options.capture != null) options.frames orelse 120 else options.frames,
+        .width = 960,
+        .height = 540,
         .background = theme.background,
         .io = init.io,
-        // A capture must not depend on how long the machine took, so the
-        // clock is thrown away and every frame is worth a sixtieth.
-        .fixed_delta = 1.0 / 60.0,
-    }) catch |err| switch (err) {
+        .quit_key = .escape,
+        .fullscreen_key = .f11,
+    })) catch |err| switch (err) {
         error.NoDisplay => {
             try out.print("no display, so nothing to play on\n", .{});
             try out.flush();
@@ -578,25 +446,19 @@ pub fn main(init: std.process.Init) !void {
     try out.print("Or a controller each: left stick or d-pad to move, A to serve, Start to begin again.\n", .{});
     try out.flush();
 
-    try app.addNamedSystem(.startup, "spawn", spawn);
-    try app.addNamedSystem(.input, "read keys", readKeys);
-    try app.addNamedSystem(.fixed, "serve", serve);
-    try app.addNamedSystem(.fixed, "drive paddles", drivePaddles);
-    try app.addNamedSystem(.fixed, "move ball", moveBall);
-    try app.addNamedSystem(.update, "show score", showScore);
-    try app.addNamedSystem(.update, "celebrate", celebrate);
-    try app.addNamedSystem(.late, "fit camera", fitCamera);
+    try app.addSystem(.startup, "spawn", spawn);
+    try app.addSystem(.input, "read keys", readKeys);
+    try app.addSystem(.fixed, "serve", serve);
+    try app.addSystem(.fixed, "drive paddles", drivePaddles);
+    try app.addSystem(.fixed, "move ball", moveBall);
+    try app.addSystem(.update, "show score", showScore);
+    try app.addSystem(.update, "celebrate", celebrate);
 
     app.run() catch |err| {
         // The schedule remembers which system it was, which the error value
         // cannot say on its own.
-        if (app.schedule.failed) |failure| {
-            try out.print(
-                "the '{s}' system in stage .{t} failed: {t}\n",
-                .{ failure.name, failure.stage, failure.err },
-            );
-            try out.flush();
-        }
+        if (app.schedule.failed) |failure| try out.print("{f}\n", .{failure});
+        try out.flush();
         return err;
     };
 
@@ -605,16 +467,8 @@ pub fn main(init: std.process.Init) !void {
         .{ app.time.frame, app.sprites.drawn, app.sprites.draw_calls },
     );
 
-    if (options.capture) |path| {
-        const pixels = try app.capture(gpa, options.width, options.height);
-        defer gpa.free(pixels);
-
-        try fx.image.png.writeFile(gpa, init.io, path, .{
-            .width = options.width,
-            .height = options.height,
-            .pixels = pixels,
-            .row_pitch = options.width * 4,
-        }, .{});
+    if (flags.capture) |path| {
+        try app.saveCapture(path);
         try out.print("wrote {s}\n", .{path});
     }
 

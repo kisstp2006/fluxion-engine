@@ -340,20 +340,14 @@ const Wanderers = fx.Query(.{ Transform2D, Wander });
 const Players = fx.Query(.{ Transform2D, Wander, Player });
 const Cameras = fx.Query(.{ Transform2D, Camera2D, Follow });
 
-fn readKeys(app: *App) !void {
-    if (app.input.justPressed(.escape)) app.quit();
-
-    // F11 rather than Alt+Enter, which DXGI answers by itself on the `d3d11`
-    // backend. See `pong`.
-    if (app.input.justPressed(.f11)) app.toggleFullscreen() catch |err| {
-        std.log.warn("could not change fullscreen: {t}", .{err});
-    };
-}
+/// The keys that steer, WASD and the arrows alike, each axis as one binding.
+const steer_x = fx.AxisBinding.keys(.a, .d).orKeys(.left, .right);
+const steer_y = fx.AxisBinding.keys(.w, .s).orKeys(.up, .down);
 
 /// Everything that wanders picks a new direction now and then, and turns to
 /// face the way it is going.
 fn wander(app: *App) !void {
-    const dt = app.time.fixed_delta;
+    const dt = app.time.delta;
     const elapsed: f32 = @floatCast(app.time.elapsed);
 
     var it = try Wanderers.over(&app.world);
@@ -395,11 +389,8 @@ fn wander(app: *App) !void {
 /// controller's left stick and the mouse, held down over wherever it should
 /// go.
 fn drive(app: *App) !void {
-    const dt = app.time.fixed_delta;
-    const keys: fx.Vec2 = .init(
-        app.input.axis(.a, .d) + app.input.axis(.left, .right),
-        app.input.axis(.w, .s) + app.input.axis(.up, .down),
-    );
+    const dt = app.time.delta;
+    const keys: fx.Vec2 = .init(app.input.axisOf(steer_x), app.input.axisOf(steer_y));
 
     // Whichever controller is being pushed. Not made to length one like the
     // keys: pushed halfway it walks at half speed, which is the reason to
@@ -680,53 +671,12 @@ fn coverage(signed: f32, softness: f32) f32 {
 // The program
 // -------------------------------------------------------------------------
 
-const Options = struct {
-    backend: App.Backend = .auto,
-    frames: ?u32 = null,
-    width: u32 = 960,
-    height: u32 = 540,
-    capture: ?[]const u8 = null,
-    /// Write the sheet this repository ships and stop.
+/// The engine's flags, and the one this example adds: write the sheet this
+/// repository ships and stop.
+const Flags = struct {
+    app: App.Flags = .{},
     write_atlas: ?[]const u8 = null,
 };
-
-fn parse(arguments: []const []const u8) !Options {
-    var options: Options = .{};
-    var i: usize = 1;
-    while (i < arguments.len) : (i += 1) {
-        const argument = arguments[i];
-        const value = if (i + 1 < arguments.len) arguments[i + 1] else null;
-
-        if (std.mem.eql(u8, argument, "--backend")) {
-            const name = value orelse return error.MissingValue;
-            options.backend = if (std.mem.eql(u8, name, "d3d11"))
-                .d3d11
-            else if (std.mem.eql(u8, name, "gl"))
-                .gl
-            else
-                return error.UnknownBackend;
-            i += 1;
-        } else if (std.mem.eql(u8, argument, "--frames")) {
-            options.frames = try std.fmt.parseInt(u32, value orelse return error.MissingValue, 10);
-            i += 1;
-        } else if (std.mem.eql(u8, argument, "--width")) {
-            options.width = try std.fmt.parseInt(u32, value orelse return error.MissingValue, 10);
-            i += 1;
-        } else if (std.mem.eql(u8, argument, "--height")) {
-            options.height = try std.fmt.parseInt(u32, value orelse return error.MissingValue, 10);
-            i += 1;
-        } else if (std.mem.eql(u8, argument, "--capture")) {
-            options.capture = value orelse return error.MissingValue;
-            i += 1;
-        } else if (std.mem.eql(u8, argument, "--write-atlas")) {
-            options.write_atlas = value orelse return error.MissingValue;
-            i += 1;
-        } else {
-            return error.UnknownArgument;
-        }
-    }
-    return options;
-}
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -735,10 +685,10 @@ pub fn main(init: std.process.Init) !void {
     var stdout: std.Io.File.Writer = .init(.stdout(), init.io, &buffer);
     const out = &stdout.interface;
 
-    const options = try parse(try init.minimal.args.toSlice(init.arena.allocator()));
+    const flags = try App.parseFlags(Flags, try init.minimal.args.toSlice(init.arena.allocator()));
 
     // Writing the sheet needs no window, no device and no display.
-    if (options.write_atlas) |path| {
+    if (flags.write_atlas) |path| {
         const pixels = makeAtlas();
         try fx.image.png.writeFile(gpa, init.io, path, .{
             .width = atlas_columns * cell_size,
@@ -755,15 +705,15 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    const app = App.create(gpa, .{
+    const app = App.create(gpa, flags.app.apply(.{
         .title = "Creatures - Fluxion Engine",
-        .width = options.width,
-        .height = options.height,
-        .backend = options.backend,
-        .frames = if (options.capture != null) options.frames orelse 300 else options.frames,
+        .width = 960,
+        .height = 540,
         .background = theme.background,
         .io = init.io,
-    }) catch |err| switch (err) {
+        .quit_key = .escape,
+        .fullscreen_key = .f11,
+    })) catch |err| switch (err) {
         error.NoDisplay => {
             try out.print("no display, so nothing to look at\n", .{});
             try out.flush();
@@ -773,30 +723,21 @@ pub fn main(init: std.process.Init) !void {
     };
     defer app.destroy();
 
-    // A capture must not depend on how long the machine took.
-    if (options.capture != null) app.time.source = .{ .fixed = 1.0 / 60.0 };
-
     try out.print("{f}\n", .{app.device.info()});
     try out.print("Arrows, WASD, a controller's left stick or the held mouse button to steer the one with the ring;\n", .{});
     try out.print("drag with the right mouse button to look around; F11 to fill the screen; Escape to leave.\n", .{});
     try out.flush();
 
-    try app.addNamedSystem(.startup, "spawn", spawn);
-    try app.addNamedSystem(.input, "read keys", readKeys);
-    try app.addNamedSystem(.fixed, "wander", wander);
-    try app.addNamedSystem(.fixed, "drive", drive);
-    try app.addNamedSystem(.update, "look around", lookAround);
-    try app.addNamedSystem(.late, "follow player", followPlayer);
-    try app.addNamedSystem(.late, "pin heading", pinHeading);
+    try app.addSystem(.startup, "spawn", spawn);
+    try app.addSystem(.fixed, "wander", wander);
+    try app.addSystem(.fixed, "drive", drive);
+    try app.addSystem(.update, "look around", lookAround);
+    try app.addSystem(.late, "follow player", followPlayer);
+    try app.addSystem(.late, "pin heading", pinHeading);
 
     app.run() catch |err| {
-        if (app.schedule.failed) |failure| {
-            try out.print(
-                "the '{s}' system in stage .{t} failed: {t}\n",
-                .{ failure.name, failure.stage, failure.err },
-            );
-            try out.flush();
-        }
+        if (app.schedule.failed) |failure| try out.print("{f}\n", .{failure});
+        try out.flush();
         return err;
     };
 
@@ -805,16 +746,8 @@ pub fn main(init: std.process.Init) !void {
         .{ app.time.frame, app.world.count(), app.sprites.drawn, app.sprites.draw_calls },
     );
 
-    if (options.capture) |path| {
-        const pixels = try app.capture(gpa, options.width, options.height);
-        defer gpa.free(pixels);
-
-        try fx.image.png.writeFile(gpa, init.io, path, .{
-            .width = options.width,
-            .height = options.height,
-            .pixels = pixels,
-            .row_pitch = options.width * 4,
-        }, .{});
+    if (flags.app.capture) |path| {
+        try app.saveCapture(path);
         try out.print("wrote {s}\n", .{path});
     }
 

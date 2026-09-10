@@ -530,7 +530,22 @@ pub const Text2D = extern struct {
 /// should be able to.
 pub const Camera2D = extern struct {
     /// Bigger is closer in. 2 draws everything at twice the size.
+    ///
+    /// With `fit_width` and `fit_height` set, this multiplies the fit rather
+    /// than replacing it: 1 shows exactly the fitted area, 2 half of it.
     zoom: f32 = 1,
+
+    /// A part of the world that is always all on screen, whatever size the
+    /// window is: the play field of a game designed at one size.
+    ///
+    /// The view is scaled so this area fits the window with nothing cut off,
+    /// and whatever room the window has spare in one direction shows more of
+    /// the world around it. Zero on either - the default - is no fit, and one
+    /// world unit is one pixel before `zoom`. Doing this by hand is a system
+    /// reading the window's size every frame and writing the zoom, which is
+    /// what `pong` did.
+    fit_width: f32 = 0,
+    fit_height: f32 = 0,
 
     /// Radians, the same sense as `Transform2D.rotation`. The world turns the
     /// other way, which is what a camera rotating means.
@@ -545,6 +560,12 @@ pub const Camera2D = extern struct {
 
     pub fn atZoom(zoom: f32) Camera2D {
         return .{ .zoom = zoom };
+    }
+
+    /// A camera that always shows the whole of an area this size. See
+    /// `fit_width`.
+    pub fn fitting(width: f32, height: f32) Camera2D {
+        return .{ .fit_width = width, .fit_height = height };
     }
 };
 

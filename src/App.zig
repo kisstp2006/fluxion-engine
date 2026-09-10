@@ -8,8 +8,8 @@
 //!     const app = try App.create(init.gpa, .{ .title = "game", .io = init.io });
 //!     defer app.destroy();
 //!
-//!     try app.addSystem(.startup, spawnWorld);
-//!     try app.addSystem(.fixed, movePaddles);
+//!     try app.addSystem(.startup, "spawn world", spawnWorld);
+//!     try app.addSystem(.fixed, "move paddles", movePaddles);
 //!     try app.run();
 //! }
 //! ```
@@ -55,6 +55,7 @@ const ecs = @import("fluxion_ecs");
 const rhi = @import("fluxion_rhi");
 const math = @import("fluxion_math");
 const platform = @import("fluxion_platform");
+const image = @import("fluxion_image");
 
 const Assets = @import("assets.zig");
 const Input = @import("input.zig");
@@ -142,6 +143,24 @@ pub const Options = struct {
     /// browser build will want.
     io: ?std.Io = null,
 
+    /// Every frame counts as exactly this many seconds, whatever the clock
+    /// says - the same frames every run, which is what a capture compared
+    /// against yesterday's needs. Null reads the clock, when there is an `io`
+    /// to read it with. `Flags.apply` sets it for `--capture`.
+    frame_time: ?f32 = null,
+
+    /// A key that ends the game, handled by the engine after the `.input`
+    /// stage. Escape, usually. Null - the default - leaves every key to the
+    /// game.
+    quit_key: ?platform.Key = null,
+
+    /// A key that switches between a window and borderless fullscreen - see
+    /// `toggleFullscreen` - handled the same way. F11, usually, rather than
+    /// Alt+Enter: on the `d3d11` backend DXGI answers Alt+Enter itself unless
+    /// it has been told not to, and two things switching fullscreen at once is
+    /// a fight. A switch that fails is a warning in the log, not a stop.
+    fullscreen_key: ?platform.Key = null,
+
     /// No window, no display, no GPU. The `none` backend, a texture to draw
     /// into instead of a surface, and a clock that advances by `fixed_delta`
     /// whether or not any time passed.
@@ -164,6 +183,135 @@ pub const Options = struct {
     /// which takes one fewer than the machine has cores.
     workers: ?u32 = null,
 };
+
+/// The command-line flags the engine itself understands. Read with
+/// `parseFlags`, and laid over a game's `Options` with `apply`.
+///
+/// ```bash
+/// game --backend d3d11 --width 1280 --height 720
+/// game --frames 300 --capture shot.png
+/// ```
+///
+/// Every field is optional, and a flag that was not given leaves the game's
+/// own choice alone - so a game says what it wants in `Options`, and the
+/// command line only ever overrides.
+pub const Flags = struct {
+    /// `--backend gl` or `--backend d3d11`.
+    backend: ?Backend = null,
+    /// `--width 1280`, `--height 720`: the window's size.
+    width: ?u32 = null,
+    height: ?u32 = null,
+    /// `--frames 300`: stop after this many.
+    frames: ?u32 = null,
+    /// `--capture shot.png`: where `saveCapture` should put the last frame,
+    /// once `run` has finished. See `apply` for what else it means.
+    capture: ?[]const u8 = null,
+
+    /// How many frames a capture runs for when `--frames` does not say.
+    /// Two seconds at sixty.
+    pub const capture_frames = 120;
+
+    /// These flags over `options`: what a flag says wins, and what it does
+    /// not say is left as the game had it.
+    ///
+    /// **A capture is made reproducible.** It stops after `--frames` frames -
+    /// or `capture_frames` - and every frame counts as exactly one fixed step
+    /// whatever the clock says, so the same flags draw the same picture on
+    /// every machine, which is what makes two captures worth comparing.
+    pub fn apply(self: Flags, options: Options) Options {
+        var out = options;
+        if (self.backend) |backend| out.backend = backend;
+        if (self.width) |width| out.width = width;
+        if (self.height) |height| out.height = height;
+        if (self.frames) |frames| out.frames = frames;
+        if (self.capture != null) {
+            out.frames = out.frames orelse capture_frames;
+            out.frame_time = out.fixed_delta;
+        }
+        return out;
+    }
+};
+
+pub const FlagError = error{
+    /// A flag no field answers to - a typo, usually, which is why it stops
+    /// the program rather than being passed over.
+    UnknownFlag,
+    /// A flag at the end of the line with nothing after it.
+    MissingValue,
+    /// A value that is not what its field holds: letters for a number, or a
+    /// name the enum does not have.
+    InvalidValue,
+};
+
+/// Read `--name value` flags into a struct of optional fields, found by
+/// name: a field `write_atlas` is the flag `--write-atlas`.
+///
+/// ```zig
+/// const flags = try App.parseFlags(App.Flags, arguments);
+///
+/// // A game with flags of its own puts the engine's beside them:
+/// const Mine = struct { app: App.Flags = .{}, write_atlas: ?[]const u8 = null };
+/// const mine = try App.parseFlags(Mine, arguments);
+/// ```
+///
+/// **The struct is the whole of the description**, read at compile time: its
+/// field names are the flags, its field types say how to read the values -
+/// text, a whole number, or the name of an enum's value - and a field that
+/// is itself a struct has its fields read as flags too, which is how a game
+/// sets `App.Flags` beside its own without either knowing about the other.
+/// `@typeInfo` is what makes that possible: a loop over a type's fields that
+/// the compiler unrolls, so the parser for a given struct is generated for it
+/// and nothing is looked up by name at run time but the flags themselves.
+///
+/// The first argument is the program's own name and is skipped.
+pub fn parseFlags(comptime T: type, arguments: []const []const u8) FlagError!T {
+    var flags: T = .{};
+    var at: usize = 1;
+    while (at < arguments.len) : (at += 2) {
+        if (at + 1 == arguments.len) return error.MissingValue;
+        if (!try setFlag(T, &flags, arguments[at], arguments[at + 1])) return error.UnknownFlag;
+    }
+    return flags;
+}
+
+/// Set the field of `T` - or of a struct inside it - that `name` names.
+/// False when no field answers to it.
+fn setFlag(comptime T: type, into: *T, name: []const u8, value: []const u8) FlagError!bool {
+    inline for (@typeInfo(T).@"struct".fields) |field| {
+        switch (@typeInfo(field.type)) {
+            .@"struct" => if (try setFlag(field.type, &@field(into, field.name), name, value)) return true,
+            .optional => |optional| if (std.mem.eql(u8, name, comptime flagName(field.name))) {
+                @field(into, field.name) = try flagValue(optional.child, value);
+                return true;
+            },
+            else => @compileError("fluxion-engine: the flag field '" ++ field.name ++
+                "' has to be optional - a flag that was not given is null - or a struct of flags"),
+        }
+    }
+    return false;
+}
+
+/// `write_atlas` as `--write-atlas`, worked out once, at compile time.
+fn flagName(comptime field: []const u8) []const u8 {
+    comptime {
+        var name: [field.len + 2]u8 = undefined;
+        name[0] = '-';
+        name[1] = '-';
+        for (field, 0..) |c, i| name[i + 2] = if (c == '_') '-' else c;
+        const done = name;
+        return &done;
+    }
+}
+
+/// One flag's value, read as whatever its field holds.
+fn flagValue(comptime V: type, text: []const u8) FlagError!V {
+    if (V == []const u8) return text;
+    return switch (@typeInfo(V)) {
+        .int => std.fmt.parseInt(V, text, 10) catch error.InvalidValue,
+        .@"enum" => std.meta.stringToEnum(V, text) orelse error.InvalidValue,
+        else => @compileError("fluxion-engine: a flag holds text, a whole number or an enum, not " ++ @typeName(V)),
+    };
+}
 
 gpa: Allocator,
 io: ?std.Io,
@@ -221,6 +369,10 @@ height: u32,
 /// news to itself.
 resized: bool = false,
 
+/// The engine's own shortcuts, from `Options`. Null is off.
+quit_key: ?platform.Key = null,
+fullscreen_key: ?platform.Key = null,
+
 /// Cleared by `quit`, and by the frame counter running out.
 running: bool = true,
 frames_left: ?u32,
@@ -252,7 +404,13 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .jobs = undefined,
         .assets = undefined,
         .sprites = undefined,
-        .time = .init(if (options.io) |io| .{ .clock = io } else .{ .fixed = options.fixed_delta }),
+        // A fixed frame time wins over the clock, and the clock over nothing.
+        .time = .init(if (options.frame_time) |seconds|
+            .{ .fixed = seconds }
+        else if (options.io) |io|
+            .{ .clock = io }
+        else
+            .{ .fixed = options.fixed_delta }),
         .snapshots = .empty,
         .orphans = .empty,
         .input = .{},
@@ -261,6 +419,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .width = options.width,
         .height = options.height,
         .resized = false,
+        .quit_key = options.quit_key,
+        .fullscreen_key = options.fullscreen_key,
         .running = true,
         .frames_left = options.frames,
         .started = false,
@@ -398,31 +558,32 @@ pub fn destroy(self: *App) void {
 // Systems
 // -------------------------------------------------------------------------
 
-/// Add a system to a stage. See `schedule`.
+/// Add a system to a stage, under a name. See `schedule`.
 ///
-/// **The stage is `comptime`**, and that is what lets a stage the loop does
-/// not run be refused by the compiler rather than accepted and ignored. `.ui`
-/// is such a stage until the interface layer is wired up: a system added to
-/// it used to go into a list nothing ever walked, and say nothing about it.
-/// A parameter the compiler knows the value of can be checked with an `if`
-/// that runs during compilation, and the branch that fails is only analysed
-/// for the one call that takes it - so `.fixed` costs nothing and `.ui` is a
-/// compile error naming the line that asked for it. Every caller passes a
-/// literal anyway; the only thing given up is choosing a stage at run time.
-pub fn addSystem(self: *App, comptime stage: Stage, system: System) Allocator.Error!void {
+/// ```zig
+/// try app.addSystem(.fixed, "move ball", moveBall);
+/// ```
+///
+/// **The name is not optional.** Zig cannot recover a function's own name
+/// from a pointer to it, and a failure reported as "the 'system' system
+/// failed" says nothing - so every system says once, here, what a message
+/// about it should call it. See `Schedule.failed`.
+///
+/// **Both are `comptime`**, and each for a reason. The stage, so that a stage
+/// the loop does not run is refused by the compiler rather than accepted and
+/// ignored: `.ui` is such a stage until the interface layer is wired up, and a
+/// system added to it used to go into a list nothing ever walked. A parameter
+/// the compiler knows the value of can be checked with an `if` that runs
+/// during compilation, and the branch that fails is only analysed for the one
+/// call that takes it - so `.fixed` costs nothing and `.ui` is a compile error
+/// naming the line that asked for it. And the name, because the schedule
+/// keeps it without copying it: a string known at compile time lives for the
+/// whole program, where one formatted into a buffer on the stack would be
+/// gone by the time a failure came to print it. What is given up is choosing
+/// either at run time, which no game has wanted to.
+pub fn addSystem(self: *App, comptime stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
     comptime refuseUnrun(stage);
-    return self.schedule.add(self.gpa, stage, system);
-}
-
-/// The same, with a name for a profile or a failure message.
-pub fn addNamedSystem(
-    self: *App,
-    comptime stage: Stage,
-    name: []const u8,
-    system: System,
-) Allocator.Error!void {
-    comptime refuseUnrun(stage);
-    return self.schedule.addNamed(self.gpa, stage, name, system);
+    return self.schedule.add(self.gpa, stage, name, system);
 }
 
 /// A compile error for a stage `step` does not run. See `addSystem`.
@@ -482,6 +643,7 @@ pub fn step(self: *App) anyerror!bool {
     self.time.tick();
 
     try self.schedule.run(.input, self);
+    self.shortcuts();
 
     // A backlog too big to work through is dropped rather than chased, which
     // makes a stalled frame show up as the world running slow for a moment
@@ -489,11 +651,15 @@ pub fn step(self: *App) anyerror!bool {
     self.time.dropBacklog();
     {
         // A fixed step is asked about the edges since the last step rather
-        // than since the top of this frame, which may have run none. See
-        // `Input.clock`. Put back with `defer` so a step that fails does not
-        // leave every later stage reading the wrong set.
+        // than since the top of this frame, which may have run none - see
+        // `Input.clock` - and `time.delta` is the step, not the frame. Both
+        // put back with `defer`, so a step that fails does not leave every
+        // later stage reading the wrong ones.
         self.input.clock = .fixed;
         defer self.input.clock = .frame;
+        const frame_delta = self.time.delta;
+        self.time.delta = self.time.fixed_delta;
+        defer self.time.delta = frame_delta;
 
         while (self.time.takeFixedStep()) |_| {
             // Where everything was before this step, for drawing the frame
@@ -539,6 +705,20 @@ pub fn step(self: *App) anyerror!bool {
     }
 
     return self.running;
+}
+
+/// The engine's own keys, when a game asked for them: after the game's
+/// `.input` systems, so a game that reads the same key sees it in the same
+/// frame.
+fn shortcuts(self: *App) void {
+    if (self.quit_key) |key| {
+        if (self.input.justPressed(key)) self.quit();
+    }
+    if (self.fullscreen_key) |key| {
+        if (self.input.justPressed(key)) self.toggleFullscreen() catch |err| {
+            log.warn("could not change fullscreen: {t}", .{err});
+        };
+    }
 }
 
 /// Take a new size from the window: the numbers, the flag that says they
@@ -622,6 +802,33 @@ fn despawnOrphans(self: *App) !void {
 /// where it is: write it over the entity's own transform.
 pub fn worldTransform(self: *App, entity: ecs.Entity) ?components.Transform2D {
     return hierarchy.resolveEntity(&self.world, &self.snapshots, entity, self.time.alpha());
+}
+
+/// The one entity's `T`: a score, a game's state, a settings record - the
+/// component there is exactly one of. Null when there is none.
+///
+/// ```zig
+/// const score = app.single(Score) orelse return;
+/// score.left += 1;
+/// ```
+///
+/// **Single means one.** A second entity with a `T` is a mistake in the game
+/// rather than something to choose between, so a debug build stops at the
+/// call that assumed otherwise instead of quietly picking one. The pointer is
+/// good until the next thing that moves rows - an add, a remove, a despawn -
+/// the same as `World.get`.
+///
+/// A component the world has never seen is none, and asking about it
+/// registers nothing - so this can be called before anything is spawned.
+pub fn single(self: *App, comptime T: type) ?*T {
+    const id = self.world.findId(T) orelse return null;
+    var found: ?ecs.Entity = null;
+    for (self.world.archetypeSlice()) |*archetype| {
+        if (archetype.len() == 0 or !archetype.signature().contains(id)) continue;
+        std.debug.assert(found == null and archetype.len() == 1);
+        found = archetype.entities.items[0];
+    }
+    return self.world.get(found orelse return null, T);
 }
 
 // -------------------------------------------------------------------------
@@ -892,6 +1099,26 @@ pub fn capture(self: *App, gpa: Allocator, width: u32, height: u32) ![]u8 {
     return self.device.readTexture(texture, gpa);
 }
 
+/// Draw one frame at the target's size into a PNG file: what `--capture`
+/// asks for, once `run` has finished. See `capture`, which this is plus the
+/// file.
+///
+/// Needs `Options.io`, which is what files are written with - `error.NoIo`
+/// without it.
+pub fn saveCapture(self: *App, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+
+    const pixels = try self.capture(self.gpa, self.width, self.height);
+    defer self.gpa.free(pixels);
+
+    try image.png.writeFile(self.gpa, io, path, .{
+        .width = self.width,
+        .height = self.height,
+        .pixels = pixels,
+        .row_pitch = self.width * 4,
+    }, .{});
+}
+
 /// Read the frame that was last drawn, as `width * height * 4` bytes.
 ///
 /// Only when headless, because only then is the target a texture: a
@@ -936,7 +1163,7 @@ test "a headless app runs its stages and draws" {
     });
     defer app.destroy();
 
-    try app.addSystem(.startup, spawnOne);
+    try app.addSystem(.startup, "spawn one", spawnOne);
     try app.run();
 
     try testing.expectEqual(@as(usize, 1), app.world.count());
@@ -1056,7 +1283,7 @@ test "quitting from a system ends the loop" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try app.addSystem(.update, countFrames);
+    try app.addSystem(.update, "count frames", countFrames);
     try app.run();
 
     try testing.expect(!app.running);
@@ -1210,7 +1437,7 @@ test "a fixed step runs as many times as the frame is worth" {
     defer app.destroy();
     app.time.source = .{ .fixed = 0.02 };
 
-    try app.addSystem(.fixed, counter.count);
+    try app.addSystem(.fixed, "count", counter.count);
     try app.run();
 
     try testing.expectEqual(@as(u32, 20), counter.steps);
@@ -1243,8 +1470,8 @@ test "a previous transform is taken before each fixed step" {
     defer app.destroy();
     app.time.source = .{ .fixed = 0.015 };
 
-    try app.addSystem(.startup, spawnInterpolated);
-    try app.addSystem(.fixed, slideRight);
+    try app.addSystem(.startup, "spawn interpolated", spawnInterpolated);
+    try app.addSystem(.fixed, "slide right", slideRight);
     try app.run();
 
     var it = try ecs.Query(.{components.Transform2D}).over(&app.world);
@@ -1324,8 +1551,8 @@ test "a press is heard by one fixed step when frames are shorter than steps" {
     defer app.destroy();
     app.time.source = .{ .fixed = 1.0 / 128.0 };
 
-    try app.addSystem(.input, Jumps.press);
-    try app.addSystem(.fixed, Jumps.jump);
+    try app.addSystem(.input, "press", Jumps.press);
+    try app.addSystem(.fixed, "jump", Jumps.jump);
     try app.run();
 
     // Before `Input.clock`, this was zero: the edge was gone by the frame
@@ -1347,8 +1574,8 @@ test "a press is heard by one fixed step when a frame runs two" {
     defer app.destroy();
     app.time.source = .{ .fixed = 1.0 / 32.0 };
 
-    try app.addSystem(.input, Jumps.press);
-    try app.addSystem(.fixed, Jumps.jump);
+    try app.addSystem(.input, "press", Jumps.press);
+    try app.addSystem(.fixed, "jump", Jumps.jump);
     try app.run();
 
     // Before, this was two: both steps saw the frame's edge, and one press
@@ -1372,9 +1599,9 @@ test "a press made while the world is paused does not reach the step after it" {
     // Pressed on the second frame, paused until the fourth, and then two
     // steps a frame: none of them should hear a press that was made while
     // nothing was running.
-    try app.addSystem(.input, Jumps.press);
-    try app.addSystem(.input, Jumps.wake);
-    try app.addSystem(.fixed, Jumps.jump);
+    try app.addSystem(.input, "press", Jumps.press);
+    try app.addSystem(.input, "wake", Jumps.wake);
+    try app.addSystem(.fixed, "jump", Jumps.jump);
     try app.run();
 
     try testing.expectEqual(@as(u32, 0), Jumps.heard);
@@ -1469,8 +1696,8 @@ test "a controller press is heard by one fixed step, as a key is" {
     defer app.destroy();
     app.time.source = .{ .fixed = 1.0 / 128.0 };
 
-    try app.addSystem(.input, Controller.poll);
-    try app.addSystem(.fixed, Controller.jump);
+    try app.addSystem(.input, "poll", Controller.poll);
+    try app.addSystem(.fixed, "jump", Controller.jump);
     try app.run();
 
     // Once, though the button is held for all eight frames and four steps.
@@ -1531,4 +1758,163 @@ test "resized is true for the one frame the size changed in, and no other" {
     _ = try app.step();
     try testing.expect(!app.resized);
     try testing.expectEqual(@as(u32, 400), app.width);
+}
+
+test "the engine's flags are read by name, and a game's own sit beside them" {
+    const engine = try parseFlags(Flags, &.{ "game", "--backend", "d3d11", "--frames", "300", "--capture", "shot.png" });
+    try testing.expectEqual(Backend.d3d11, engine.backend.?);
+    try testing.expectEqual(@as(u32, 300), engine.frames.?);
+    try testing.expectEqualStrings("shot.png", engine.capture.?);
+    try testing.expect(engine.width == null);
+
+    // A struct of the engine's flags inside a game's own: both read, and the
+    // underscore in the field's name a hyphen in the flag's.
+    const Mine = struct { app: Flags = .{}, write_atlas: ?[]const u8 = null };
+    const mine = try parseFlags(Mine, &.{ "game", "--write-atlas", "atlas.png", "--width", "640" });
+    try testing.expectEqualStrings("atlas.png", mine.write_atlas.?);
+    try testing.expectEqual(@as(u32, 640), mine.app.width.?);
+}
+
+test "a flag that is wrong stops the program rather than being passed over" {
+    try testing.expectError(error.UnknownFlag, parseFlags(Flags, &.{ "game", "--frame", "10" }));
+    try testing.expectError(error.MissingValue, parseFlags(Flags, &.{ "game", "--frames" }));
+    try testing.expectError(error.InvalidValue, parseFlags(Flags, &.{ "game", "--frames", "ten" }));
+    try testing.expectError(error.InvalidValue, parseFlags(Flags, &.{ "game", "--backend", "metal" }));
+}
+
+test "flags override what they say and leave the rest, and a capture is reproducible" {
+    const base: Options = .{ .width = 960, .height = 540, .frames = null };
+
+    const sized = (Flags{ .width = 1280 }).apply(base);
+    try testing.expectEqual(@as(u32, 1280), sized.width);
+    try testing.expectEqual(@as(u32, 540), sized.height);
+    try testing.expect(sized.frame_time == null);
+
+    // A capture: a frame count to stop at, and a clock that is not the
+    // machine's.
+    const captured = (Flags{ .capture = "shot.png" }).apply(base);
+    try testing.expectEqual(@as(u32, Flags.capture_frames), captured.frames.?);
+    try testing.expectEqual(captured.fixed_delta, captured.frame_time.?);
+
+    // With a count of its own, that count.
+    const counted = (Flags{ .capture = "shot.png", .frames = 7 }).apply(base);
+    try testing.expectEqual(@as(u32, 7), counted.frames.?);
+}
+
+test "a fixed frame time wins over the clock" {
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 3,
+        .io = testing.io,
+        .frame_time = 0.25,
+    });
+    defer app.destroy();
+
+    try app.run();
+    try testing.expectApproxEqAbs(@as(f64, 0.75), app.time.elapsed, 0.0001);
+}
+
+const Tally = extern struct { points: u32 = 0 };
+
+test "single finds the one entity with a component, or none" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    // Never seen, so nothing - and asking registered nothing.
+    try testing.expect(app.single(Tally) == null);
+    const before = app.world.componentCount();
+    try testing.expect(app.single(Tally) == null);
+    try testing.expectEqual(before, app.world.componentCount());
+
+    // Beside other components, in an archetype of its own.
+    _ = try app.world.spawnWith(.{ components.Transform2D{}, Tally{ .points = 4 } });
+    app.single(Tally).?.points += 1;
+    try testing.expectEqual(@as(u32, 5), app.single(Tally).?.points);
+}
+
+/// Escape pressed on the third frame, the way the platform would deliver it.
+fn escapeOnThird(app: *App) anyerror!void {
+    if (app.time.frame == 3) app.input.apply(pressOf(.escape));
+}
+
+test "a quit key ends the game after the frame it was pressed in" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 100, .quit_key = .escape });
+    defer app.destroy();
+
+    try app.addSystem(.input, "escape on third", escapeOnThird);
+    try app.run();
+    try testing.expectEqual(@as(u64, 3), app.time.frame);
+}
+
+test "a shortcut nobody asked for is not one" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 5 });
+    defer app.destroy();
+
+    try app.addSystem(.input, "escape on third", escapeOnThird);
+    try app.run();
+    try testing.expectEqual(@as(u64, 5), app.time.frame);
+}
+
+/// What `time.delta` said in each stage, the last time each ran.
+const Deltas = struct {
+    var fixed: f32 = 0;
+    var update: f32 = 0;
+
+    fn inFixed(app: *App) anyerror!void {
+        fixed = app.time.delta;
+    }
+
+    fn inUpdate(app: *App) anyerror!void {
+        update = app.time.delta;
+    }
+};
+
+test "time.delta is the step in the fixed stage and the frame everywhere else" {
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 2,
+        .fixed_delta = 1.0 / 64.0,
+        .frame_time = 1.0 / 32.0,
+    });
+    defer app.destroy();
+
+    try app.addSystem(.fixed, "in fixed", Deltas.inFixed);
+    try app.addSystem(.update, "in update", Deltas.inUpdate);
+    try app.run();
+
+    try testing.expectEqual(@as(f32, 1.0 / 64.0), Deltas.fixed);
+    try testing.expectEqual(@as(f32, 1.0 / 32.0), Deltas.update);
+    // And put back afterwards, for the engine's own passes that follow.
+    try testing.expectEqual(@as(f32, 1.0 / 32.0), app.time.delta);
+}
+
+test "a capture is saved as a PNG the size of the target" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .width = 32,
+        .height = 16,
+        .frames = 1,
+        .io = testing.io,
+    });
+    defer app.destroy();
+    try app.run();
+
+    var buffer: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/shot.png", .{tmp.sub_path});
+    try app.saveCapture(path);
+
+    var decoded = try image.png.readFile(testing.allocator, testing.io, path, .{});
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 32), decoded.width);
+    try testing.expectEqual(@as(u32, 16), decoded.height);
+}
+
+test "a capture with nothing to write files with says so" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+    try app.run();
+    try testing.expectError(error.NoIo, app.saveCapture("nowhere.png"));
 }

@@ -24,8 +24,8 @@ pub fn main(init: std.process.Init) !void {
     const app = try fx.App.create(init.gpa, .{ .title = "game", .io = init.io });
     defer app.destroy();
 
-    try app.addSystem(.startup, spawn);
-    try app.addSystem(.fixed, move);
+    try app.addSystem(.startup, "spawn", spawn);
+    try app.addSystem(.fixed, "move", move);
     try app.run();
 }
 
@@ -40,7 +40,7 @@ fn move(app: *fx.App) !void {
     var it = try fx.Query(.{fx.Transform2D}).over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.slice(fx.Transform2D)) |*place| {
-            place.x += app.input.axis(.a, .d) * 200 * app.time.fixed_delta;
+            place.x += app.input.axisOf(.keys(.a, .d)) * 200 * app.time.delta;
         }
     }
 }
@@ -225,7 +225,9 @@ _ = try world.spawnWith(.{
   position is the *centre* of the view. With no camera in the world at all,
   the origin is the top left corner and one unit is one pixel - the same
   coordinate system the interface layer uses, so a game that has not thought
-  about cameras yet can lay things out in screen coordinates.
+  about cameras yet can lay things out in screen coordinates. A game designed
+  at one size says so - `Camera2D.fitting(640, 360)` - and the whole of that
+  area is on screen in any window, with `zoom` multiplying it.
 - **The pointer is found in the world through the same camera.**
   `app.pointerInWorld()`, `app.screenToWorld(x, y)` and
   `app.worldToScreen(x, y)` run the view the renderer draws with, forwards
@@ -250,8 +252,22 @@ way, which is why `zig build test` passes on a machine with no display.
 
 For a picture on such a machine, `app.capture(gpa, w, h)` draws one frame into
 a texture of its own and hands back the pixels - the same passes, somewhere
-else. `zig build example-pong -- --frames 420 --capture out.png` is that, and
-it is how the screenshot in a pull request gets made.
+else - and `app.saveCapture(path)` writes them to a PNG.
+`zig build example-pong -- --frames 420 --capture out.png` is that, and it is
+how the screenshot in a pull request gets made.
+
+Those are the engine's own flags, and a game gets them in two lines:
+
+```zig
+const flags = try App.parseFlags(App.Flags, arguments);  // --backend --width --height --frames --capture
+const app = try App.create(gpa, flags.apply(.{ .title = "game", .io = io }));
+```
+
+`parseFlags` reads any struct of optional fields by name - `write_atlas` is
+`--write-atlas` - and a struct inside it as flags too, so a game puts
+`App.Flags` beside its own. `apply` lays the flags over the game's options,
+and makes a capture reproducible: every frame one fixed step, whatever the
+clock says, so the same flags draw the same picture on every machine.
 
 ## Install
 
@@ -322,9 +338,17 @@ this repository is one the code can account for.
 
 Here, and checked by the tests:
 
-- The loop, the seven stages, the fixed step and its backlog.
+- The loop, the seven stages, the fixed step and its backlog, and
+  `time.delta` that is the step inside it.
 - Keyboard and mouse as levels and edges, with typing kept in order, and
   edges that a fixed step hears exactly once.
+- Controls as data: an `AxisBinding` holds two keys, a second two, a stick
+  and a d-pad, lives in a component and saves with the world.
+- Timers that live in components, `app.single` for the component there is
+  one of, and engine shortcuts for quitting and fullscreen, off unless asked
+  for.
+- The engine's command-line flags, read into a struct by name with room for
+  a game's own, and captures that are the same picture on every machine.
 - Controllers: sixteen slots, levels and edges, round dead zones, any pad or
   one pad, and SDL mappings for the ones the system does not know.
 - The pointer in world coordinates, through the camera; locked, confined or
@@ -338,7 +362,7 @@ Here, and checked by the tests:
   texel for everything untextured.
 - The 2D pass: transforms, regions, tints, pivots, layers, order within a
   layer, visibility, interpolation between fixed steps, and a camera with
-  zoom and rotation.
+  zoom, rotation and an area it always fits to the window.
 - Parenting, one entity to another, resolved where it is needed rather than
   cached into a second component, and taken down with its parent.
 - Sprite animation over a sheet, looping or one-shot.
@@ -413,8 +437,9 @@ before this package existed - the seam was cut for it deliberately.
 - **Audio.** There is no `fluxion-audio`, and it is a library and a set of
   platform backends rather than an afternoon in this repository.
 - **Resources** - a typed store for state that is not a component. A singleton
-  entity is the answer today, it saves and loads with the world for free, and
-  the case for a second mechanism has not been made.
+  entity is the answer today - `app.single(Score)` finds it - it saves and
+  loads with the world for free, and the case for a second mechanism has not
+  been made.
 - **Parallel systems.** Work inside a system already goes on every core
   through `Query.each`; running two whole systems at once needs each to
   declare what it touches, which is a change to what a system *is* and should

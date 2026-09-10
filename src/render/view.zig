@@ -104,14 +104,15 @@ pub const View = struct {
                 const placed = hierarchy.resolve(world, snapshots, entity, local, 1) orelse continue;
 
                 best_priority = camera.priority;
+                const scale = pixelsPerUnit(camera, width, height);
                 best = .{
                     .x = placed.x,
                     .y = placed.y,
                     // The camera's own transform may be scaled - a camera
                     // parented to something that grows - and that multiplies
                     // the zoom rather than fighting it, on each axis.
-                    .zoom_x = positive(camera.zoom * placed.scale_x),
-                    .zoom_y = positive(camera.zoom * placed.scale_y),
+                    .zoom_x = positive(scale * placed.scale_x),
+                    .zoom_y = positive(scale * placed.scale_y),
                     .rotation = camera.rotation + placed.rotation,
                     .width = width,
                     .height = height,
@@ -234,6 +235,16 @@ fn positive(zoom: f32) f32 {
     return if (zoom > 0) zoom else 1;
 }
 
+/// How many pixels one world unit covers, before the camera's own transform
+/// scales it: `zoom`, times whatever fits the camera's fitted area into a
+/// target this size. The smaller of the two ratios, so the whole of the area
+/// is on screen and the spare room shows more world rather than cutting any
+/// of the area off. See `Camera2D.fit_width`.
+fn pixelsPerUnit(camera: Camera2D, width: f32, height: f32) f32 {
+    if (camera.fit_width <= 0 or camera.fit_height <= 0) return camera.zoom;
+    return camera.zoom * @min(width / camera.fit_width, height / camera.fit_height);
+}
+
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
@@ -348,6 +359,33 @@ test "the best active camera is the one looked through" {
     const view: View = .of(&world, &snapshots, 320, 240);
     try testing.expectEqual(@as(f32, 2), view.x);
     try testing.expectEqual(@as(f32, 2), view.y);
+}
+
+test "a fitted camera shows the whole area in any window, and zoom multiplies it" {
+    var world: ecs.World = .init(testing.allocator);
+    defer world.deinit();
+    var snapshots: hierarchy.Snapshots = .empty;
+    defer snapshots.deinit(testing.allocator);
+
+    const camera = try world.spawnWith(.{ Transform2D.at(320, 180), Camera2D.fitting(640, 360) });
+
+    // Exactly the design size: one unit, one pixel.
+    try testing.expectApproxEqAbs(@as(f32, 1), View.of(&world, &snapshots, 640, 360).zoom_x, 0.0001);
+
+    // Twice as wide and only as tall: the height decides, and the spare
+    // width shows more world at the sides rather than cutting the top off.
+    const wide: View = .of(&world, &snapshots, 1280, 360);
+    try testing.expectApproxEqAbs(@as(f32, 1), wide.zoom_x, 0.0001);
+    const box = wide.bounds();
+    try testing.expect(box.top <= 0 and box.bottom >= 360);
+    try testing.expect(box.left < 0 and box.right > 640);
+
+    // Twice the size both ways: twice the scale.
+    try testing.expectApproxEqAbs(@as(f32, 2), View.of(&world, &snapshots, 1280, 720).zoom_x, 0.0001);
+
+    // And zoom on top of the fit: 2 shows half the area.
+    world.get(camera, Camera2D).?.zoom = 2;
+    try testing.expectApproxEqAbs(@as(f32, 2), View.of(&world, &snapshots, 640, 360).zoom_x, 0.0001);
 }
 
 test "a zoom of nothing is taken as one rather than divided by" {
