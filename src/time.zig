@@ -57,6 +57,10 @@ accumulator: f32 = 0,
 /// a slow machine runs slow instead of never catching up.
 max_fixed_steps: u32 = 8,
 
+max_fps: ?f32 = null,
+
+next_frame: std.Io.Timestamp = .zero,
+
 /// A countdown that lives in a component: a serve after a pause, a cooldown.
 ///
 /// ```zig
@@ -149,6 +153,24 @@ pub fn fps(self: Time) f32 {
     return 1 / self.unscaled_delta;
 }
 
+pub fn sleepUntilNextFrame(self: *Time, target_fps: f32) std.Io.Cancelable!void {
+    if (target_fps <= 0) return;
+    const io = switch (self.source) {
+        .clock => |io| io,
+        .fixed => return,
+    };
+    if (self.advanceFrameDeadline(.now(io, .awake), target_fps)) {
+        try self.next_frame.withClock(.awake).wait(io);
+    }
+}
+
+fn advanceFrameDeadline(self: *Time, now: std.Io.Timestamp, target_fps: f32) bool {
+    self.next_frame = self.next_frame.addDuration(.fromNanoseconds(@intFromFloat(std.time.ns_per_s / target_fps)));
+    const late_by = self.next_frame.durationTo(now).nanoseconds;
+    if (late_by > @as(i96, @intFromFloat(self.max_delta * std.time.ns_per_s))) self.next_frame = now;
+    return late_by < 0;
+}
+
 test "a fixed source makes every frame the same length" {
     var time: Time = .init(.{ .fixed = 1.0 / 60.0 });
     for (0..60) |_| time.tick();
@@ -204,4 +226,39 @@ test "finishing a timer makes the next tick go off, not skip it" {
     var idle: Timer = .{};
     idle.finish();
     try std.testing.expect(!idle.tick(0.001));
+}
+
+test "a frame cap spaces the frames out" {
+    var time: Time = .init(.{ .clock = std.testing.io });
+    const start: std.Io.Timestamp = .now(std.testing.io, .awake);
+    for (0..5) |_| try time.sleepUntilNextFrame(200);
+
+    const waited = start.durationTo(.now(std.testing.io, .awake));
+    try std.testing.expect(waited.nanoseconds >= 15 * std.time.ns_per_ms);
+}
+
+test "a late frame is caught up with, and a stall starts the schedule again" {
+    var time: Time = .init(.{ .fixed = 0 });
+    const ms = std.time.ns_per_ms;
+
+    try std.testing.expect(!time.advanceFrameDeadline(.fromNanoseconds(1000 * ms), 100));
+    try std.testing.expectEqual(1000 * ms, time.next_frame.nanoseconds);
+
+    try std.testing.expect(time.advanceFrameDeadline(.fromNanoseconds(1002 * ms), 100));
+    try std.testing.expect(!time.advanceFrameDeadline(.fromNanoseconds(1025 * ms), 100));
+    try std.testing.expectEqual(1020 * ms, time.next_frame.nanoseconds);
+    try std.testing.expect(time.advanceFrameDeadline(.fromNanoseconds(1026 * ms), 100));
+
+    try std.testing.expect(!time.advanceFrameDeadline(.fromNanoseconds(2000 * ms), 100));
+    try std.testing.expectEqual(2000 * ms, time.next_frame.nanoseconds);
+}
+
+test "a fixed clock, or a cap of zero, never sleeps" {
+    var fixed: Time = .init(.{ .fixed = 1.0 / 60.0 });
+    try fixed.sleepUntilNextFrame(0.001);
+    var uncapped: Time = .init(.{ .clock = std.testing.io });
+    try uncapped.sleepUntilNextFrame(0);
+
+    try std.testing.expectEqual(std.Io.Timestamp.zero, fixed.next_frame);
+    try std.testing.expectEqual(std.Io.Timestamp.zero, uncapped.next_frame);
 }

@@ -166,6 +166,24 @@ if (app.resized) layOutAgain(app.width, app.height);
   when the window is made. Without a window - headless - all of this is
   nothing, and says so without failing.
 
+## Frame pacing
+
+```zig
+try app.setVsync(false);
+app.time.max_fps = 144;                     // null is no cap
+if (!app.input.focused) pause(app);
+```
+
+- **The cap keeps a schedule**, so a late frame is caught up with and the
+  average holds; after a stall longer than `time.max_delta` it starts again.
+  On Windows a sleep is only as precise as the system timer - 15.6 ms unless
+  something asks for better - so a cap above about 60 is right on average and
+  uneven frame to frame.
+- **A minimised window is not drawn**, and the loop wakes ten times a second
+  instead of spinning. The fixed steps keep the simulation in real time.
+- **On `d3d11`, vsync off does not yet go past the refresh rate**: the
+  flip-model swapchain in fluxion-rhi has two buffers and no tearing support.
+
 ## The 2D layer
 
 One quad in a vertex buffer and a second buffer stepping once per instance
@@ -363,6 +381,8 @@ Here, and checked by the tests:
   without a window.
 - The window changed while it runs: title, size, position, size limits,
   maximised and minimised, and `resized` for the frame the size changed in.
+- Frame pacing: vsync switched while running, a frame cap that holds its
+  average, and a minimised window that sleeps instead of drawing.
 - Textures loaded from PNG, handed out as generational handles, and a white
   texel for everything untextured.
 - The 2D pass: transforms, regions, tints, pivots, layers, order within a

@@ -122,6 +122,8 @@ cursor_wanted: Cursor = .normal,
 /// it.
 focused: bool = true,
 
+has_gl_context: bool = false,
+
 /// Open a window at this address.
 pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
     self.* = .{
@@ -130,6 +132,7 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
         .handle = undefined,
         .width = desc.width,
         .height = desc.height,
+        .has_gl_context = desc.gl,
     };
     errdefer self.ctx.deinit();
 
@@ -146,7 +149,7 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
     if (desc.gl) {
         try self.handle.makeContextCurrent();
         // Not fatal: a driver that refuses draws at a rate of its own.
-        self.handle.setSwapInterval(if (desc.vsync) .vsync else .immediate) catch |err| {
+        self.setVsync(desc.vsync) catch |err| {
             log.warn("could not set the swap interval: {t}", .{err});
         };
     }
@@ -188,6 +191,10 @@ pub fn setCursor(self: *Window, wanted: Cursor) Error!void {
 /// What the game asked the pointer to do.
 pub fn cursor(self: *const Window) Cursor {
     return self.cursor_wanted;
+}
+
+pub fn setVsync(self: *Window, on: bool) Error!void {
+    if (self.has_gl_context) try self.handle.setSwapInterval(if (on) .vsync else .immediate);
 }
 
 /// Use one of the system's own pointer shapes over this window.

@@ -45,6 +45,8 @@ const System = schedule_mod.System;
 const App = @This();
 const log = std.log.scoped(.fluxion_engine);
 
+const fps_while_minimized = 10;
+
 pub const Error = error{
     /// A window was wanted and this machine has no display. See
     /// `Window.isAbsent`.
@@ -302,6 +304,8 @@ resized: bool = false,
 quit_key: ?platform.Key = null,
 fullscreen_key: ?platform.Key = null,
 
+vsync_on: bool = true,
+
 /// Cleared by `quit`, and by the frame counter running out.
 running: bool = true,
 frames_left: ?u32,
@@ -345,6 +349,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .resized = false,
         .quit_key = options.quit_key,
         .fullscreen_key = options.fullscreen_key,
+        .vsync_on = options.vsync,
         .running = true,
         .frames_left = options.frames,
         .started = false,
@@ -578,7 +583,8 @@ pub fn step(self: *App) anyerror!bool {
     self.forgetDeadNames();
     try self.animate();
 
-    try self.render();
+    const minimized = self.windowState() == .minimized;
+    if (!minimized) try self.render();
 
     if (self.frames_left) |left| {
         if (left <= 1) {
@@ -588,7 +594,13 @@ pub fn step(self: *App) anyerror!bool {
         }
     }
 
+    if (self.running) try self.waitForNextFrame(minimized);
     return self.running;
+}
+
+fn waitForNextFrame(self: *App, minimized: bool) !void {
+    const target_fps: f32 = if (minimized) fps_while_minimized else self.time.max_fps orelse return;
+    try self.time.sleepUntilNextFrame(target_fps);
 }
 
 /// The engine's own keys, after the game's `.input` systems.
@@ -888,6 +900,16 @@ pub fn setWindowState(self: *App, wanted: WindowState) Window.Error!void {
 pub fn windowState(self: *const App) WindowState {
     if (self.window) |*window| return window.state();
     return .normal;
+}
+
+pub fn setVsync(self: *App, on: bool) (rhi.Error || Window.Error)!void {
+    self.vsync_on = on;
+    if (self.surface) |surface| try self.device.setVsync(surface, on);
+    if (self.window) |*window| try window.setVsync(on);
+}
+
+pub fn vsync(self: *const App) bool {
+    return self.vsync_on;
 }
 
 /// Lock the pointer, confine it to the window, hide it, or give it back. See
@@ -1896,4 +1918,22 @@ test "a capture with nothing to write files with says so" {
     defer app.destroy();
     try app.run();
     try testing.expectError(error.NoIo, app.saveCapture("nowhere.png"));
+}
+
+test "vsync is remembered, even with no display to wait for" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .vsync = true });
+    defer app.destroy();
+
+    try testing.expect(app.vsync());
+    try app.setVsync(false);
+    try testing.expect(!app.vsync());
+}
+
+test "a frame cap slows the loop down to it" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 6, .io = testing.io });
+    defer app.destroy();
+    app.time.max_fps = 100;
+
+    try app.run();
+    try testing.expect(app.time.elapsed >= 0.03);
 }
