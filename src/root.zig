@@ -73,6 +73,9 @@ pub const hierarchy = @import("hierarchy.zig");
 
 pub const render = struct {
     pub const sprite = @import("render/sprite.zig");
+    /// What the camera sees, and where the pointer is in the world. See
+    /// `render.view`.
+    pub const view = @import("render/view.zig");
 };
 
 /// Every glyph the game has drawn, in one texture. See `text.Atlas`.
@@ -102,9 +105,12 @@ pub const Animation = components.Animation;
 /// What the 2D pass looks through. See `components`.
 pub const Camera2D = components.Camera2D;
 
-/// Where a thing was before the last fixed step, so it can be drawn smoothly
-/// between steps. See `components`.
-pub const Previous2D = components.Previous2D;
+/// How the window fills the screen. See `Window.Fullscreen`.
+pub const Fullscreen = Window.Fullscreen;
+
+/// A point or a direction in the plane: what `App.screenToWorld` hands
+/// back. See `math`.
+pub const Vec2 = math.Vec2;
 
 /// A colour, four floats from zero to one. See `color`.
 pub const Color = color.Color;
@@ -160,5 +166,17 @@ test {
     _ = schedule;
     _ = hierarchy;
     _ = render.sprite;
+    _ = render.view;
     _ = text.Atlas;
+}
+
+test "every name this file exports is one that exists" {
+    // Zig checks a declaration only when something uses it, so a re-export of
+    // a name that has since been renamed or removed compiles here for ever
+    // and fails in the first game that reaches for it. `Previous2D` did
+    // exactly that, once it had become a flag on `Transform2D`. Touching
+    // every declaration moves that failure into this file's tests.
+    std.testing.refAllDecls(@This());
+    std.testing.refAllDecls(render);
+    std.testing.refAllDecls(text);
 }

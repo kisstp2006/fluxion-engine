@@ -5,7 +5,7 @@
 //! ```zig
 //! try app.addSystem(.fixed, movePaddles);
 //! try app.addSystem(.update, spinCoins);
-//! try app.addSystem(.ui, scoreboard);
+//! try app.addSystem(.late, followPlayer);
 //! ```
 //!
 //! A system is a plain function that takes the `App`. Not a closure - Zig has
@@ -23,7 +23,7 @@
 //! | `fixed` | Zero or more times, at a constant delta. Physics. |
 //! | `update` | Once, at whatever the frame took. Everything else. |
 //! | `late` | After `update`, before anything is drawn. Cameras follow here. |
-//! | `ui` | Inside the interface's own frame. Declares the interface. |
+//! | `ui` | Inside the interface's own frame. Not run yet - see below. |
 //! | `shutdown` | Once, after the last frame. |
 //!
 //! **`late` exists for one reason**: a camera that follows a player must run
@@ -31,10 +31,13 @@
 //! accident of registration order. A camera in `late` is a frame behind
 //! nothing and stutters for nobody.
 //!
-//! **`ui` is not a stage that happens to draw.** It runs between the layout
-//! engine's `begin` and `end`, so the calls a system makes to `app.ui` build
-//! that frame's tree. Declaring interface anywhere else does nothing at all,
-//! which is the one surprise in the list and the reason it has its own name.
+//! **`ui` is not a stage that happens to draw.** It will run between the
+//! layout engine's `begin` and `end`, so the calls a system makes to `app.ui`
+//! build that frame's tree - declaring interface anywhere else would do
+//! nothing at all, which is the reason it has its own name. Until the
+//! interface layer is wired up, nothing runs it, and `App.addSystem` refuses
+//! it at compile time rather than accepting a system that would never be
+//! called and never say so.
 //!
 //! **Within a stage, systems run in the order they were added**, on one
 //! thread. That is not where the parallelism is: it is inside a system, in

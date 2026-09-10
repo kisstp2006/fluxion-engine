@@ -4,7 +4,7 @@
 //! through the camera, in one instanced draw per texture.
 //!
 //! ```zig
-//! try renderer.draw(gpa, &world, &assets, .{ .surface = surface }, width, height, background);
+//! try renderer.draw(gpa, &world, &assets, &snapshots, target, width, height, background, alpha);
 //! ```
 //!
 //! **One quad, and a buffer of where it goes.** The vertex buffer holds four
@@ -44,7 +44,9 @@
 //! buffer and not drawn - one comparison against a box, per sprite, per
 //! frame. Without it a level ten screens wide pays for all ten every frame,
 //! which is the difference between a renderer that costs what is drawn and
-//! one that costs what exists.
+//! one that costs what exists. The box and the matrix both come from one
+//! `View`, which is also what `App.screenToWorld` runs backwards - see
+//! `render.view`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -59,22 +61,20 @@ const typeface = @import("fluxion_font");
 const Assets = @import("../assets.zig");
 const components = @import("../components.zig");
 const hierarchy = @import("../hierarchy.zig");
+const view_mod = @import("view.zig");
 
 const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
-const Camera2D = components.Camera2D;
 const Color = components.Color;
 const Text2D = components.Text2D;
+const View = view_mod.View;
+const Bounds = view_mod.Bounds;
 
-/// Everything with a place and a picture. The one query this layer runs.
-///
-/// Walked by hand rather than through `Query.over`, because a third
-/// component - `Previous2D` - is read when an archetype has it and skipped
-/// when it does not, and a query can only ask for what every row must have.
+/// Everything with a place and a picture.
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
 
-/// Everything that can be looked through.
-const Cameras = ecs.Query(.{ Transform2D, Camera2D });
+/// Everything with a place and some words.
+const Labels = ecs.Query(.{ Transform2D, Text2D });
 
 pub const Error = rhi.Error || Allocator.Error || error{ShaderFailed};
 
@@ -303,7 +303,8 @@ pub const Renderer = struct {
     /// costs, which is the point of doing it this way round.
     ///
     /// `alpha` is how far the frame sits between the last two fixed steps,
-    /// from `Time.alpha`, and only a sprite with a `Previous2D` uses it.
+    /// from `Time.alpha`, and only a transform that asked to `interpolate`
+    /// uses it.
     pub fn draw(
         self: *Renderer,
         gpa: Allocator,
@@ -316,7 +317,11 @@ pub const Renderer = struct {
         clear: ?Color,
         alpha: f32,
     ) !void {
-        try self.gather(gpa, world, assets, snapshots, alpha, viewBounds(world, snapshots, width, height));
+        // The camera, found once: the box that culls and the matrix that
+        // draws are two readings of the same view.
+        const view: View = .of(world, snapshots, width, height);
+
+        try self.gather(gpa, world, assets, snapshots, alpha, view.bounds());
 
         // Gathering the text may have rasterised a letter nobody had drawn
         // before, which changes an atlas that the draw below is about to
@@ -324,9 +329,8 @@ pub const Renderer = struct {
         // for a frame that saw thirty new letters, not thirty.
         try assets.flushFonts();
 
-        const view_projection = self.viewProjection(world, snapshots, width, height);
         try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&Frame{
-            .view_projection = view_projection,
+            .view_projection = view.matrix(self.device.clip()),
         }));
 
         if (self.items.items.len > 0) {
@@ -395,32 +399,32 @@ pub const Renderer = struct {
         self.items.clearRetainingCapacity();
         self.culled = 0;
 
-        const transform_id = try world.idOf(Transform2D);
-        const sprite_id = try world.idOf(Sprite);
-        const wanted = [_]ecs.component.Id{ transform_id, sprite_id };
-
         var sequence: u32 = 0;
 
-        for (world.archetypeSlice()) |*archetype| {
-            if (archetype.len() == 0) continue;
-            if (!archetype.signature().containsAll(&wanted)) continue;
-
+        var it = try Drawable.over(world);
+        while (it.next()) |chunk| {
             // Two plain slices over one archetype's rows, which is what the
             // whole archetype layout is for: no indirection per entity, and a
             // loop the compiler can see all the way through.
-            const rows = archetype.len();
-            const transforms = column(Transform2D, archetype, transform_id, rows);
-            const sprites = column(Sprite, archetype, sprite_id, rows);
-            const entities = archetype.entities.items;
+            const transforms = chunk.slice(Transform2D);
+            const sprites = chunk.slice(Sprite);
 
-            for (transforms, sprites, entities) |local, sprite, entity| {
+            for (transforms, sprites, chunk.entities) |local, sprite, entity| {
                 if (!sprite.visible or sprite.tint.a <= 0) continue;
 
                 // Interpolated against where it was, then carried up through
                 // whatever it hangs from. A transform with neither a parent
                 // nor a snapshot comes back unchanged, which is nearly
                 // everything in a scene.
-                const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse local;
+                //
+                // What cannot be placed is not drawn: either its parent died
+                // this frame and it is about to follow (see
+                // `App.despawnOrphans`), or its chain loops back on itself
+                // and has nowhere to be. Drawing its own numbers as if they
+                // were the world's was what this used to do, and it put
+                // whatever had been riding on a dead thing up in the corner
+                // of the screen.
+                const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse continue;
 
                 // A handle that no longer resolves draws as the white texel
                 // rather than not at all. A missing texture that shows up as
@@ -471,13 +475,6 @@ pub const Renderer = struct {
         std.sort.pdq(Item, self.items.items, {}, Item.before);
     }
 
-    /// One component's values for one archetype, as a slice. What
-    /// `Query.Chunk.slice` does, for a walk that is not a query.
-    fn column(comptime T: type, archetype: *ecs.Archetype, id: ecs.component.Id, rows: usize) []T {
-        const typed: [*]T = @ptrCast(@alignCast(archetype.columnOf(id).?.bytes.ptr));
-        return typed[0..rows];
-    }
-
     /// Turn every `Text2D` into one instance per glyph.
     ///
     /// The glyphs go into the same list as the sprites, with the same sort
@@ -495,23 +492,17 @@ pub const Renderer = struct {
         bounds: Bounds,
         sequence: *u32,
     ) !void {
-        const transform_id = try world.idOf(Transform2D);
-        const text_id = try world.idOf(Text2D);
-        const wanted = [_]ecs.component.Id{ transform_id, text_id };
+        var it = try Labels.over(world);
+        while (it.next()) |chunk| {
+            const transforms = chunk.slice(Transform2D);
+            const labels = chunk.slice(Text2D);
 
-        for (world.archetypeSlice()) |*archetype| {
-            if (archetype.len() == 0) continue;
-            if (!archetype.signature().containsAll(&wanted)) continue;
-
-            const rows = archetype.len();
-            const transforms = column(Transform2D, archetype, transform_id, rows);
-            const labels = column(Text2D, archetype, text_id, rows);
-            const entities = archetype.entities.items;
-
-            for (transforms, labels, entities) |local, label, entity| {
+            for (transforms, labels, chunk.entities) |local, label, entity| {
                 if (!label.visible or label.len == 0 or label.color.a <= 0) continue;
 
-                const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse local;
+                // Not drawn when it cannot be placed, for the same reasons as
+                // a sprite. See `gather`.
+                const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse continue;
                 const face = assets.fontOf(label.font) orelse continue;
 
                 try self.layOut(gpa, assets, face, label, transform, bounds, sequence);
@@ -633,103 +624,6 @@ pub const Renderer = struct {
         }
     }
 
-    /// The part of the world this frame can show, as an axis-aligned box.
-    ///
-    /// Used to throw sprites away before they cost anything. A rotated camera
-    /// makes this larger than what is really visible - the box round a turned
-    /// rectangle - which is the right way to be wrong: a sprite wrongly kept
-    /// is a few bytes in a buffer, and a sprite wrongly dropped is a hole in
-    /// the picture.
-    fn viewBounds(
-        world: *ecs.World,
-        snapshots: *const hierarchy.Snapshots,
-        width: f32,
-        height: f32,
-    ) Bounds {
-        const camera = bestCamera(world, snapshots) orelse return .{
-            .left = 0,
-            .top = 0,
-            .right = width,
-            .bottom = height,
-        };
-
-        const zoom_x = if (camera.zoom_x > 0) camera.zoom_x else 1;
-        const zoom_y = if (camera.zoom_y > 0) camera.zoom_y else 1;
-        var half_width = width / (2 * zoom_x);
-        var half_height = height / (2 * zoom_y);
-
-        if (camera.rotation != 0) {
-            // The box round the turned box: each half-extent picks up a share
-            // of the other, by how much the rotation leans it over.
-            const c = @abs(@cos(camera.rotation));
-            const sn = @abs(@sin(camera.rotation));
-            const turned_width = half_width * c + half_height * sn;
-            const turned_height = half_width * sn + half_height * c;
-            half_width = turned_width;
-            half_height = turned_height;
-        }
-
-        return .{
-            .left = camera.x - half_width,
-            .top = camera.y - half_height,
-            .right = camera.x + half_width,
-            .bottom = camera.y + half_height,
-        };
-    }
-
-    /// What the camera sees, as one matrix.
-    ///
-    /// With no camera in the world the view is the window itself: the origin
-    /// at the top left corner, one world unit to the pixel. See `Camera2D`.
-    fn viewProjection(
-        self: *Renderer,
-        world: *ecs.World,
-        snapshots: *const hierarchy.Snapshots,
-        width: f32,
-        height: f32,
-    ) math.Mat4 {
-        const clip = self.device.clip();
-
-        const found = bestCamera(world, snapshots);
-        const camera = found orelse return math.orthographic(.{
-            .left = 0,
-            .right = width,
-            .bottom = height,
-            .top = 0,
-            .near = -1,
-            .far = 1,
-            .clip = clip,
-        });
-
-        // A zoom of two means everything twice the size, which means the
-        // camera sees half as much - so the extents are divided by it and not
-        // multiplied. Getting this the wrong way round is the traditional
-        // mistake and looks right until somebody zooms.
-        //
-        // One zoom per axis, because the camera's transform may be scaled
-        // unevenly and a single number could only honour one of the two.
-        const zoom_x = if (camera.zoom_x > 0) camera.zoom_x else 1;
-        const zoom_y = if (camera.zoom_y > 0) camera.zoom_y else 1;
-        const half_width = width / (2 * zoom_x);
-        const half_height = height / (2 * zoom_y);
-
-        const projection = math.orthographic(.{
-            .left = -half_width,
-            .right = half_width,
-            .bottom = half_height,
-            .top = -half_height,
-            .near = -1,
-            .far = 1,
-            .clip = clip,
-        });
-
-        // The world moves opposite to the camera, in both senses: it slides
-        // by minus the camera's position and turns by minus its rotation.
-        const turn: math.Mat4 = .fromAxisAngle(.init(0, 0, 1), -camera.rotation);
-        const slide: math.Mat4 = .fromTranslation(.init(-camera.x, -camera.y, 0));
-        return projection.mul(turn.mul(slide));
-    }
-
     /// Make sure the instance buffer holds at least this many.
     fn reserve(self: *Renderer, count: u32) !void {
         if (count <= self.capacity) return;
@@ -746,25 +640,6 @@ pub const Renderer = struct {
         self.device.destroyBuffer(self.instances);
         self.instances = grown;
         self.capacity = capacity;
-    }
-};
-
-/// An axis-aligned box in world space.
-const Bounds = struct {
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-
-    /// Whether anything within `radius` of this point could be inside.
-    ///
-    /// The radius is the sprite's, and it is generous on purpose - see
-    /// `spriteRadius`.
-    fn admits(self: Bounds, x: f32, y: f32, radius: f32) bool {
-        return x + radius >= self.left and
-            x - radius <= self.right and
-            y + radius >= self.top and
-            y - radius <= self.bottom;
     }
 };
 
@@ -810,48 +685,6 @@ fn measure(face: *const typeface.Font, scaled: typeface.Scaled, run: []const u8)
 /// that further than width plus height.
 inline fn spriteRadius(width: f32, height: f32) f32 {
     return @abs(width) + @abs(height);
-}
-
-/// Where the camera is and what it is doing, flattened out of the two
-/// components that say so.
-const CameraView = struct {
-    x: f32,
-    y: f32,
-    zoom_x: f32,
-    zoom_y: f32,
-    rotation: f32,
-};
-
-/// The active camera with the highest priority, or none.
-fn bestCamera(world: *ecs.World, snapshots: *const hierarchy.Snapshots) ?CameraView {
-    var it = Cameras.over(world) catch return null;
-    var best: ?CameraView = null;
-    var best_priority: i16 = std.math.minInt(i16);
-
-    while (it.next()) |chunk| {
-        const transforms = chunk.slice(Transform2D);
-        const cameras = chunk.slice(Camera2D);
-        for (transforms, cameras, chunk.entities) |local, camera, entity| {
-            if (!camera.active) continue;
-            // A camera may be parented too - to the player it follows, or to
-            // a rig that shakes - so where it is looking from is resolved the
-            // same way everything else is.
-            const transform = hierarchy.resolve(world, snapshots, entity, local, 1) orelse local;
-            if (best != null and camera.priority <= best_priority) continue;
-            best_priority = camera.priority;
-            best = .{
-                .x = transform.x,
-                .y = transform.y,
-                // The camera's own transform may be scaled - a camera parented
-                // to something that grows - and that multiplies the zoom
-                // rather than fighting it, on each axis separately.
-                .zoom_x = camera.zoom * transform.scale_x,
-                .zoom_y = camera.zoom * transform.scale_y,
-                .rotation = camera.rotation + transform.rotation,
-            };
-        }
-    }
-    return best;
 }
 
 /// How big a sprite is, falling back to the size of its own artwork.

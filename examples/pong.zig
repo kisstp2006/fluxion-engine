@@ -9,8 +9,9 @@
 //! zig build example-pong -- --frames 600
 //! ```
 //!
-//! W and S on the left, up and down on the right, Escape to leave. The ball
-//! serves itself a moment after each point, or at once if you press space.
+//! W and S on the left, up and down on the right, F11 to fill the screen,
+//! Escape to leave. The ball serves itself a moment after each point, or at
+//! once if you press space.
 //!
 //! It is here to be read as much as played, because it is the shortest honest
 //! answer to "what does a game made with this look like". Four things are
@@ -227,9 +228,17 @@ const Balls = fx.Query(.{ Transform2D, Velocity, Ball });
 const Scores = fx.Query(.{Score});
 const Pips = fx.Query(.{ Sprite, Pip });
 
-/// Escape leaves, space serves, R starts again.
+/// Escape leaves, space serves, R starts again, F11 fills the screen.
 fn readKeys(app: *App) !void {
     if (app.input.justPressed(.escape)) app.quit();
+
+    // F11 rather than Alt+Enter, because on the `d3d11` backend DXGI answers
+    // Alt+Enter itself unless it has been told not to, and two things
+    // switching fullscreen at once is a fight. Not fatal when it cannot be
+    // done: a game with no monitor to fill is still a game.
+    if (app.input.justPressed(.f11)) app.toggleFullscreen() catch |err| {
+        std.log.warn("could not change fullscreen: {t}", .{err});
+    };
 
     if (app.input.justPressed(.r)) {
         if (try Scores.first(&app.world)) |chunk| {
@@ -535,7 +544,7 @@ pub fn main(init: std.process.Init) !void {
     defer app.destroy();
 
     try out.print("{f}\n", .{app.device.info()});
-    try out.print("W/S and Up/Down to play, space to serve, R to start again, Escape to leave.\n", .{});
+    try out.print("W/S and Up/Down to play, space to serve, R to start again, F11 to fill the screen, Escape to leave.\n", .{});
     try out.flush();
 
     try app.addNamedSystem(.startup, "spawn", spawn);

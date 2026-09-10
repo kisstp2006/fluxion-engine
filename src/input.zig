@@ -29,6 +29,17 @@
 //! of this one, so a system that runs late in the frame sees the same edges
 //! as one that ran early. `beginFrame` is what does it, and `App` calls it
 //! before any event of the new frame is read.
+//!
+//! **A fixed step counts its own edges.** The `.fixed` stage runs as many
+//! times as the frame was worth, which on a fast screen is usually none - at
+//! a hundred and forty-four hertz, five frames in twelve run a step - so an
+//! edge that lasted one frame was missed by more than half the jumps read
+//! there, and seen twice on a slow frame that ran two steps. So every edge
+//! also goes into a second set that is cleared only after a fixed step has
+//! run, and while `App` runs that stage, `justPressed` and the rest answer
+//! from it: one press, one jump, whatever the frame rate. See `clock`. What
+//! is counted per frame and has no second set - `pointer.dx` and `dy`,
+//! `wheel`, `typed` - belongs in the stages that run once a frame.
 
 const std = @import("std");
 const testing = std.testing;
@@ -61,6 +72,23 @@ button_down: Buttons = .initEmpty(),
 button_pressed: Buttons = .initEmpty(),
 button_released: Buttons = .initEmpty(),
 
+/// The four sets of edges again, counted since the last fixed step rather
+/// than since the top of the frame. What the questions below answer from
+/// while `clock` is `.fixed`.
+fixed_pressed: Keys = .initEmpty(),
+fixed_released: Keys = .initEmpty(),
+fixed_button_pressed: Buttons = .initEmpty(),
+fixed_button_released: Buttons = .initEmpty(),
+
+/// Which edges `justPressed` and the rest answer from.
+///
+/// A mode rather than a second set of functions, because the bug it fixes is
+/// a game calling `justPressed` from a `.fixed` system - and a function the
+/// game had to remember to call instead would leave that line exactly as
+/// wrong as it was. `App` sets this around the fixed stage and puts it back
+/// afterwards; nothing else should touch it.
+clock: Clock = .frame,
+
 /// Where the pointer is, in pixels from the top left of the content area,
 /// and how far it moved this frame.
 pointer: Pointer = .{},
@@ -85,6 +113,14 @@ typed_len: usize = 0,
 /// How much typing one frame can hold. A fast typist manages about twenty
 /// characters a second, so this is more than a frame will ever see.
 pub const typed_capacity = 32;
+
+/// Which edges the questions answer from. See `clock`.
+pub const Clock = enum {
+    /// Since the top of this frame. What every stage but `.fixed` sees.
+    frame,
+    /// Since the last fixed step ran. What `.fixed` sees.
+    fixed,
+};
 
 pub const Pointer = struct {
     x: f32 = 0,
@@ -126,14 +162,17 @@ pub fn isDown(self: *const Input, key: platform.Key) bool {
     return if (indexOf(key)) |i| self.down.isSet(i) else false;
 }
 
-/// Did it go down this frame?
+/// Did it go down this frame - or, in a `.fixed` system, since the last
+/// fixed step? See `clock`.
 pub fn justPressed(self: *const Input, key: platform.Key) bool {
-    return if (indexOf(key)) |i| self.pressed.isSet(i) else false;
+    const edges = if (self.clock == .fixed) &self.fixed_pressed else &self.pressed;
+    return if (indexOf(key)) |i| edges.isSet(i) else false;
 }
 
-/// Did it come up this frame?
+/// Did it come up this frame - or since the last fixed step?
 pub fn justReleased(self: *const Input, key: platform.Key) bool {
-    return if (indexOf(key)) |i| self.released.isSet(i) else false;
+    const edges = if (self.clock == .fixed) &self.fixed_released else &self.released;
+    return if (indexOf(key)) |i| edges.isSet(i) else false;
 }
 
 pub fn buttonDown(self: *const Input, button: platform.MouseButton) bool {
@@ -142,13 +181,15 @@ pub fn buttonDown(self: *const Input, button: platform.MouseButton) bool {
 }
 
 pub fn buttonJustPressed(self: *const Input, button: platform.MouseButton) bool {
+    const edges = if (self.clock == .fixed) &self.fixed_button_pressed else &self.button_pressed;
     const i = @intFromEnum(button);
-    return i < button_span and self.button_pressed.isSet(i);
+    return i < button_span and edges.isSet(i);
 }
 
 pub fn buttonJustReleased(self: *const Input, button: platform.MouseButton) bool {
+    const edges = if (self.clock == .fixed) &self.fixed_button_released else &self.button_released;
     const i = @intFromEnum(button);
-    return i < button_span and self.button_released.isSet(i);
+    return i < button_span and edges.isSet(i);
 }
 
 /// Two keys as one number: -1, 0 or 1.
@@ -185,6 +226,9 @@ pub fn typedThisFrame(self: *const Input) []const Typed {
 
 /// Forget the edges and the per-frame movement. Called once, before any of
 /// the new frame's events are read.
+///
+/// Not the fixed step's edges: a frame that runs no step has to pass them on
+/// to the next one that does. See `endFixedStep`.
 pub fn beginFrame(self: *Input) void {
     self.pressed = .initEmpty();
     self.released = .initEmpty();
@@ -194,6 +238,16 @@ pub fn beginFrame(self: *Input) void {
     self.pointer.dy = 0;
     self.wheel = .{};
     self.typed_len = 0;
+}
+
+/// Forget the edges a fixed step has just seen, so the next step sees only
+/// what happens after this one. Called by `App` after every fixed step, and
+/// on a frame that gave the fixed stage no time at all.
+pub fn endFixedStep(self: *Input) void {
+    self.fixed_pressed = .initEmpty();
+    self.fixed_released = .initEmpty();
+    self.fixed_button_pressed = .initEmpty();
+    self.fixed_button_released = .initEmpty();
 }
 
 /// Fold one platform event in. Events that are not about the user are
@@ -211,10 +265,12 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                     .press => {
                         self.down.set(i);
                         self.pressed.set(i);
+                        self.fixed_pressed.set(i);
                     },
                     .release => {
                         self.down.unset(i);
                         self.released.set(i);
+                        self.fixed_released.set(i);
                     },
                     .repeat => {},
                 }
@@ -235,10 +291,12 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 .press => {
                     self.button_down.set(i);
                     self.button_pressed.set(i);
+                    self.fixed_button_pressed.set(i);
                 },
                 .release => {
                     self.button_down.unset(i);
                     self.button_released.set(i);
+                    self.fixed_button_released.set(i);
                 },
                 .repeat => {},
             }
@@ -266,9 +324,15 @@ pub fn apply(self: *Input, ev: platform.Event) void {
 /// Let go of everything, as if every key and button came up at once.
 pub fn releaseEverything(self: *Input) void {
     var keys = self.down.iterator(.{});
-    while (keys.next()) |i| self.released.set(i);
+    while (keys.next()) |i| {
+        self.released.set(i);
+        self.fixed_released.set(i);
+    }
     var buttons = self.button_down.iterator(.{});
-    while (buttons.next()) |i| self.button_released.set(i);
+    while (buttons.next()) |i| {
+        self.button_released.set(i);
+        self.fixed_button_released.set(i);
+    }
     self.down = .initEmpty();
     self.button_down = .initEmpty();
 }
@@ -333,6 +397,44 @@ test "losing focus lets go of everything" {
 
     try testing.expect(!input.isDown(.w));
     try testing.expect(input.justReleased(.w));
+}
+
+test "a press waits for a fixed step, and only one step hears it" {
+    var input: Input = .{};
+    input.beginFrame();
+    input.apply(keyEvent(.space, .press));
+
+    // A frame that ran no fixed step ends, and the next one begins: the
+    // frame's edge is gone...
+    input.beginFrame();
+    try testing.expect(!input.justPressed(.space));
+
+    // ... but the step that finally runs still hears it,
+    input.clock = .fixed;
+    try testing.expect(input.justPressed(.space));
+    input.endFixedStep();
+
+    // and the step after that does not.
+    try testing.expect(!input.justPressed(.space));
+    try testing.expect(input.isDown(.space));
+}
+
+test "letting go on losing focus reaches the fixed step too" {
+    var input: Input = .{};
+    input.apply(.{ .mouse_button = .{
+        .window = .none,
+        .button = .left,
+        .action = .press,
+        .mods = .{},
+        .x = 0,
+        .y = 0,
+    } });
+    input.endFixedStep();
+    input.apply(.{ .focus = .{ .window = .none, .value = false } });
+
+    input.clock = .fixed;
+    try testing.expect(input.buttonJustReleased(.left));
+    try testing.expect(!input.buttonDown(.left));
 }
 
 test "an unknown key is not an index" {

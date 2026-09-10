@@ -97,9 +97,21 @@ pub const Transform2D = extern struct {
 
     /// Whose space `x` and `y` are in. `.none` is the world.
     ///
-    /// A handle to something that has died leaves this transform where it
-    /// last was, rather than snapping it to the origin: a bullet whose
-    /// shooter is gone should carry on, not fall into the corner.
+    /// **What hangs from something goes with it.** When the parent is
+    /// despawned, so is this - at the end of that frame, before anything is
+    /// drawn - and so is whatever hangs from this in turn. That is Unity's
+    /// rule and Godot's, and it is the one a scene made of parts wants: a
+    /// creature that dies takes its eyes, its shadow and its name plate with
+    /// it, rather than leaving them hanging in the air where it stood. To keep
+    /// something when what it hangs from goes, let go of it first:
+    /// `App.worldTransform` has no parent in it, so writing that over this
+    /// transform keeps the thing exactly where it was.
+    ///
+    /// A parent that is alive and has no `Transform2D` of its own is
+    /// somewhere nobody can say, so it places nothing - these numbers are the
+    /// world's, as if there were no parent - and it still owns this. An entity
+    /// with no transform is therefore a way to say "these belong together"
+    /// without saying where: despawn it, and they all go.
     parent: Entity = .none,
 
     /// Whether this turns with its parent.

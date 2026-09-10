@@ -13,6 +13,7 @@ A window, a world, and the loop between them. For Zig 0.16.
 | `color` | A colour, and the three ways to write one down. |
 | `Window` | The window and the event queue. |
 | `render.sprite` | The 2D layer, in one instanced draw per texture. |
+| `render.view` | What the camera sees, and where the pointer is in the world. |
 | `text.Atlas` | Every glyph the game has drawn, in one texture. |
 | `hierarchy` | Where a thing really is, once its parent has had its say. |
 
@@ -79,7 +80,7 @@ Seven stages, and the list is the frame in order:
 | `fixed` | Zero or more times, at a constant delta. Physics. |
 | `update` | Once, at whatever the frame took. Everything else. |
 | `late` | After `update`, before anything is drawn. Cameras follow here. |
-| `ui` | Inside the interface's own frame. Not wired up yet. |
+| `ui` | Inside the interface's own frame. Not run yet, so `addSystem` refuses it at compile time. |
 | `shutdown` | Once, after the last frame. |
 
 A system is `fn (*App) anyerror!void` - a plain function, not a closure and
@@ -94,6 +95,12 @@ registration order.
 too long to catch up with is dropped rather than chased - so a stall shows up
 as the world running slow for a moment instead of as a loop that never
 finishes.
+
+**A key pressed is one jump, whatever the frame rate.** On a 144 Hz screen
+most frames run no fixed step at all, and on a slow machine one frame runs
+two - so a `.fixed` system asking `justPressed` is answered from edges kept
+since the last *step*, not since the top of the frame. Each press reaches
+exactly one step, and a press made while the world is paused reaches none.
 
 ## The 2D layer
 
@@ -136,7 +143,9 @@ _ = try world.spawnWith(.{
   no parent - which is Unity's `Transform` and Godot's `Node2D`.
   `app.worldTransform(entity)` is the other one, and it costs a walk up the
   chain rather than a field read. `inherit_rotation = false` is the shadow
-  that does not tip over.
+  that does not tip over. **What hangs from something goes with it**: despawn
+  the tank and the turret goes at the end of the frame, and the barrel on the
+  turret with it - Unity's rule and Godot's.
 - **An `Animation` is a sheet and a rate**, and the engine writes the cell it
   lands on into `Sprite.region` once a frame. One sheet holds a walk, an idle
   and an attack; swapping between them is writing two numbers.
@@ -153,6 +162,12 @@ _ = try world.spawnWith(.{
   the origin is the top left corner and one unit is one pixel - the same
   coordinate system the interface layer uses, so a game that has not thought
   about cameras yet can lay things out in screen coordinates.
+- **The pointer is found in the world through the same camera.**
+  `app.pointerInWorld()`, `app.screenToWorld(x, y)` and
+  `app.worldToScreen(x, y)` run the view the renderer draws with, forwards
+  and backwards, and a test holds the arithmetic against the matrix the
+  shader is given - so what is under the mouse is what is drawn under the
+  mouse, zoomed and turned.
 - **The shader is written once**, in
   [Fluxion Shader](https://github.com/kisstp2006/fluxion-shader)'s language,
   and comes out as GLSL and as HLSL. Two hand-written copies would drift, and
@@ -226,10 +241,12 @@ zig build example-creatures -- --frames 300 --capture creatures.png
 **`creatures`** is the renderer's half: one sprite sheet, an `Animation` over
 its cells, and fourteen creatures each made of five entities - a body, two
 eyes, a shadow and a name - where only the body is ever moved. Arrows or WASD
-steer the one with the ring; the camera follows it and stops at the edge of
-the field. The line in the corner is a label parented to the *camera* and
-scaled against its zoom, which is the whole of what a heads-up display is
-until the interface layer arrives.
+steer the one with the ring, and so does holding the left mouse button where
+it should go: that is `app.pointerInWorld()` at work, through a camera that
+follows the creature and stops at the edge of the field. The line in the
+corner is a label parented to the *camera* and scaled against its zoom, which
+is the whole of what a heads-up display is until the interface layer arrives.
+In both examples, F11 fills the screen.
 
 Its sheet is `examples/atlas.png`, and the example is what drew it:
 `-- --write-atlas examples/atlas.png` puts it back, so the one binary file in
@@ -240,14 +257,19 @@ this repository is one the code can account for.
 Here, and checked by the tests:
 
 - The loop, the seven stages, the fixed step and its backlog.
-- Keyboard and mouse as levels and edges, with typing kept in order.
+- Keyboard and mouse as levels and edges, with typing kept in order, and
+  edges that a fixed step hears exactly once.
+- The pointer in world coordinates, through the camera.
+- Fullscreen - borderless, or exclusive at a chosen mode - on whichever
+  monitor the window is on, at `create` or at any time after, and a no-op
+  without a window.
 - Textures loaded from PNG, handed out as generational handles, and a white
   texel for everything untextured.
 - The 2D pass: transforms, regions, tints, pivots, layers, order within a
   layer, visibility, interpolation between fixed steps, and a camera with
   zoom and rotation.
 - Parenting, one entity to another, resolved where it is needed rather than
-  cached into a second component.
+  cached into a second component, and taken down with its parent.
 - Sprite animation over a sheet, looping or one-shot.
 - Text: a shelf-packed glyph atlas per font, kerning, several lines, three
   alignments, and a label that formats into itself. Not here yet: wrapping, an

@@ -23,6 +23,14 @@
 //! the `.fixed` stage slides as smoothly as the body does. Both are blended
 //! in their own space and then put together, which is the only order that
 //! does not make a rotating parent drag its children round in steps.
+//!
+//! **What hangs from something goes with it.** A chain with a dead link in
+//! it cannot be placed - the dead thing's position went with it - so this
+//! file says so with a null, and `App` despawns whatever was hanging there at
+//! the end of the frame. Leaving it in place was the other possibility, and it
+//! would have needed exactly the cache this file refuses to keep: the last
+//! place every child was, written down every frame on the chance its parent
+//! died. See `Transform2D.parent`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -82,12 +90,15 @@ pub fn stepped(snapshots: *const Snapshots, entity: Entity, local: Transform2D, 
 }
 
 /// Where an entity's transform ends up once every parent above it has been
-/// applied.
+/// applied. What comes back has no parent of its own: it is in the world's
+/// space, and composing it again would apply the chain twice.
 ///
-/// Null when a link in the chain leads nowhere - a parent that has died, or
-/// one with no transform - which leaves the caller to decide. The renderer
-/// draws such a thing at its local position, which is where it was before
-/// whatever it was attached to went away.
+/// The chain ends at the first link with no transform to apply: `.none`,
+/// or a parent that is alive and has no `Transform2D` - which is somewhere
+/// nobody can say, and so places nothing. Null when the chain cannot be
+/// followed at all: a link that has died, whose position went with it, or a
+/// chain deeper than `Transform2D.max_depth`, which in practice is one that
+/// loops back on itself. The renderer draws neither.
 pub fn resolve(
     world: *ecs.World,
     snapshots: *const Snapshots,
@@ -101,34 +112,38 @@ pub fn resolve(
     // rather than a list, because `max_depth` is the point at which a chain
     // is a mistake and this must not allocate inside a frame.
     var chain: [Transform2D.max_depth]Transform2D = undefined;
-    var depth: usize = 0;
+    chain[0] = stepped(snapshots, entity, local, alpha);
+    var depth: usize = 1;
 
-    var current_entity = entity;
-    var current = stepped(snapshots, entity, local, alpha);
+    while (true) {
+        const above = chain[depth - 1].parent;
+        if (above.isNone()) break;
 
-    while (depth < chain.len) {
-        chain[depth] = current;
+        const parent_local = world.get(above, Transform2D) orelse {
+            // Dead: the chain is broken, and what hangs from it goes at the
+            // end of the frame. See `App.despawnOrphans`.
+            if (!world.isAlive(above)) return null;
+            // Alive with no transform: the chain stops here, as if this were
+            // the world.
+            break;
+        };
+
+        // Deeper than anyone means to nest, which in practice means a cycle.
+        if (depth == chain.len) return null;
+        chain[depth] = stepped(snapshots, above, parent_local.*, alpha);
         depth += 1;
-
-        const above = current.parent;
-        if (above.isNone()) {
-            // A root: its own transform is already the world one, and the
-            // chain is composed back down from it.
-            var placed = chain[depth - 1];
-            while (depth > 1) {
-                depth -= 1;
-                placed = Transform2D.compose(placed, chain[depth - 1]);
-            }
-            return placed;
-        }
-
-        const parent_local = world.get(above, Transform2D) orelse return null;
-        current_entity = above;
-        current = stepped(snapshots, current_entity, parent_local.*, alpha);
     }
 
-    // Deeper than anyone means to nest, which in practice means a cycle.
-    return null;
+    // Composed back down from the root, whose own numbers are already the
+    // world's. Its parent, if it has one, is the kind that places nothing.
+    var placed = chain[depth - 1];
+    placed.parent = .none;
+    var at = depth - 1;
+    while (at > 0) {
+        at -= 1;
+        placed = Transform2D.compose(placed, chain[at]);
+    }
+    return placed;
 }
 
 /// The same, for an entity whose transform the caller has not already got.
@@ -200,8 +215,41 @@ test "a parent that died leaves the chain unresolvable" {
     const carrier = try world.spawnWith(.{Transform2D.at(60, 60)});
     const held = try world.spawnWith(.{Transform2D.childOf(carrier, 4, 0)});
 
+    // Null rather than the child's own numbers, which are in the space of
+    // something that no longer has one. `App` despawns it at the end of the
+    // frame; until then nothing draws it.
     world.despawn(carrier);
     try testing.expect(resolveEntity(&world, &snapshots, held, 1) == null);
+}
+
+test "a parent with no transform is the end of the chain, not a break in it" {
+    var world: ecs.World = .init(testing.allocator);
+    defer world.deinit();
+    var snapshots: Snapshots = .empty;
+    defer snapshots.deinit(testing.allocator);
+
+    const owner = try world.spawn();
+    const arm = try world.spawnWith(.{Transform2D.childOf(owner, 100, 0)});
+    const hand = try world.spawnWith(.{Transform2D.childOf(arm, 5, 0)});
+
+    // The arm's numbers are the world's, and the hand is still carried by
+    // the arm - the link with no transform is skipped, not the whole chain.
+    const placed = resolveEntity(&world, &snapshots, hand, 1).?;
+    try testing.expectApproxEqAbs(@as(f32, 105), placed.x, 0.0001);
+    try testing.expect(placed.parent.isNone());
+}
+
+test "a chain that loops back on itself cannot be placed" {
+    var world: ecs.World = .init(testing.allocator);
+    defer world.deinit();
+    var snapshots: Snapshots = .empty;
+    defer snapshots.deinit(testing.allocator);
+
+    const a = try world.spawnWith(.{Transform2D.at(1, 0)});
+    const b = try world.spawnWith(.{Transform2D.childOf(a, 1, 0)});
+    world.get(a, Transform2D).?.parent = b;
+
+    try testing.expect(resolveEntity(&world, &snapshots, a, 1) == null);
 }
 
 test "an entity is drawn between its last two steps" {

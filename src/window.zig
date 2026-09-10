@@ -37,6 +37,27 @@ const log = std.log.scoped(.fluxion_engine);
 
 pub const Error = platform.Error;
 
+/// How the window fills the screen.
+///
+/// `fluxion-platform`'s `Fullscreen` with one question taken out of it -
+/// which monitor - because a game should not have to answer it. The answer
+/// here is always the monitor the window is on: the one the player is
+/// looking at, and the one they dragged it to if they have two. A game that
+/// wants a particular monitor moves the window there first.
+pub const Fullscreen = union(enum) {
+    /// A window, at the size and in the place it had before.
+    windowed,
+    /// The whole monitor, at the resolution it already has. What a game
+    /// should use: nothing about the display changes, so alt-tab is instant
+    /// and nothing else on the desktop moves.
+    borderless,
+    /// The whole monitor, after switching it to this mode. Slower to go into
+    /// and out of, and it rearranges every other window on the machine;
+    /// worth it only when a different resolution really is the point. A
+    /// refresh rate of zero keeps whichever the display picks.
+    exclusive: platform.VideoMode,
+};
+
 pub const Desc = struct {
     title: []const u8 = "fluxion",
     width: u32 = 1280,
@@ -104,9 +125,85 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
 }
 
 pub fn close(self: *Window) void {
+    // A display switched for exclusive fullscreen is switched back before the
+    // window goes. The platform does that only when asked to go windowed, and
+    // Windows itself only when the process ends - so a program that closes
+    // the game and carries on, a launcher or a test runner, would otherwise
+    // leave the desktop at the game's resolution.
+    if (self.handle.fullscreen() == .exclusive) {
+        self.handle.setFullscreen(.windowed) catch {};
+    }
     self.handle.destroy();
     self.ctx.deinit();
     self.* = undefined;
+}
+
+/// Fill the monitor the window is on, or go back to being a window. See
+/// `Fullscreen`.
+///
+/// The size is read back straight away, so a caller that asks before the
+/// swapchain exists - `App.create` - makes it at the right size. Where the
+/// window system only gets round to it later, the change arrives as an
+/// ordinary resize on a later pump instead.
+pub fn setFullscreen(self: *Window, wanted: Fullscreen) Error!void {
+    const request: platform.Fullscreen = switch (wanted) {
+        .windowed => .windowed,
+        .borderless => .{ .borderless = self.monitorIndex() orelse return error.Unavailable },
+        .exclusive => |mode| .{ .exclusive = .{
+            .monitor = self.monitorIndex() orelse return error.Unavailable,
+            .mode = mode,
+        } },
+    };
+    try self.handle.setFullscreen(request);
+    self.refreshSize();
+}
+
+/// How the window fills the screen now.
+pub fn fullscreen(self: *const Window) Fullscreen {
+    return switch (self.handle.fullscreen()) {
+        .windowed => .windowed,
+        .borderless => .borderless,
+        .exclusive => |it| .{ .exclusive = it.mode },
+    };
+}
+
+/// Which of the context's monitors the window is on: the one under the
+/// middle of it, or the primary one when it is over none of them - which is
+/// where a minimised window is, parked by Windows at minus thirty-two
+/// thousand. Null only when there are no monitors to be on.
+fn monitorIndex(self: *Window) ?usize {
+    const list = self.ctx.monitors();
+    if (list.len == 0) return null;
+
+    // The middle rather than the corner, because a window straddling two
+    // monitors belongs to the one showing more of it, and the middle is on
+    // that one. Wayland will not say where a window is, so there this comes
+    // out as the first monitor - and its compositor decides for itself.
+    const at = self.handle.position();
+    const middle_x = at[0] +| @as(i32, @intCast(self.width / 2));
+    const middle_y = at[1] +| @as(i32, @intCast(self.height / 2));
+
+    for (list, 0..) |mon, i| {
+        if (mon.bounds.contains(middle_x, middle_y)) return i;
+    }
+    for (list, 0..) |mon, i| {
+        if (mon.primary) return i;
+    }
+    return 0;
+}
+
+/// Read the drawable size back from the platform, and flag a resize if it
+/// moved - the same flag `pump` sets, so `App` resizes the surface the same
+/// way whichever of the two noticed first.
+fn refreshSize(self: *Window) void {
+    const fb = self.handle.framebufferSize();
+    // Zero is a minimised window, which is held at its last real size. See
+    // `pump`.
+    if (fb[0] == 0 or fb[1] == 0) return;
+    if (fb[0] == self.width and fb[1] == self.height) return;
+    self.width = fb[0];
+    self.height = fb[1];
+    self.resized = true;
 }
 
 /// Whether an error means this machine has no display rather than this

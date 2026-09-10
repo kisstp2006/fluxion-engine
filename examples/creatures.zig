@@ -8,7 +8,8 @@
 //! zig build example-creatures -- --frames 300 --capture creatures.png
 //! ```
 //!
-//! Arrow keys or WASD steer the one with the ring round it; the rest wander.
+//! Arrow keys or WASD steer the one with the ring round it, or hold the left
+//! mouse button where it should go; the rest wander. F11 fills the screen,
 //! Escape leaves.
 //!
 //! Where `pong` shows the loop and the world, this shows the three things a
@@ -36,6 +37,12 @@
 //! *camera* - which is the whole of what a heads-up display is here. Every
 //! letter of both comes out of one glyph atlas, so all the text in the window
 //! is one more draw call and not one per label.
+//!
+//! **The pointer is found in the world, not on the screen.** Between the two
+//! is a camera that follows, zooms and stops at the edges of the field, so a
+//! pixel under the mouse is a different place in the field every frame.
+//! `app.pointerInWorld()` runs that camera backwards, and holding the button
+//! walks the ringed creature to wherever it lands.
 //!
 //! The atlas is read from `examples/atlas.png`, and this program is what drew
 //! it: `-- --write-atlas examples/atlas.png` puts it back. That is the same
@@ -320,6 +327,12 @@ const Cameras = fx.Query(.{ Transform2D, Camera2D, Follow });
 
 fn readKeys(app: *App) !void {
     if (app.input.justPressed(.escape)) app.quit();
+
+    // F11 rather than Alt+Enter, which DXGI answers by itself on the `d3d11`
+    // backend. See `pong`.
+    if (app.input.justPressed(.f11)) app.toggleFullscreen() catch |err| {
+        std.log.warn("could not change fullscreen: {t}", .{err});
+    };
 }
 
 /// Everything that wanders picks a new direction now and then, and turns to
@@ -363,27 +376,47 @@ fn wander(app: *App) !void {
     }
 }
 
-/// The keys drive one creature, over the top of its wandering.
+/// The keys drive one creature, over the top of its wandering - and so does
+/// the mouse, held down over wherever it should go.
 fn drive(app: *App) !void {
     const dt = app.time.fixed_delta;
-    const dx = app.input.axis(.a, .d) + app.input.axis(.left, .right);
-    const dy = app.input.axis(.w, .s) + app.input.axis(.up, .down);
-    if (dx == 0 and dy == 0) return;
+    const keys: fx.Vec2 = .init(
+        app.input.axis(.a, .d) + app.input.axis(.left, .right),
+        app.input.axis(.w, .s) + app.input.axis(.up, .down),
+    );
 
-    const length = @sqrt(dx * dx + dy * dy);
+    // Where the pointer is in the *world*. It arrives in pixels, and between
+    // the pixels and the field is a camera that follows, zooms and stops at
+    // the edges - so comparing the pointer with a position directly would be
+    // right only in the middle of the screen at one zoom. Safe to ask in
+    // `.fixed`, because a button held down is a level rather than an edge.
+    const target: ?fx.Vec2 = if (app.input.buttonDown(.left)) app.pointerInWorld() else null;
 
     var it = try Players.over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.slice(Transform2D), chunk.slice(Wander), chunk.slice(Player)) |*place, *drift, player| {
-            place.x += dx / length * player.speed * dt;
-            place.y += dy / length * player.speed * dt;
+            // The keys win when both are in use. The pointer otherwise, until
+            // the creature is close enough to stop rather than dither back
+            // and forth over the spot: four units is more than one step of
+            // walking, so it cannot overshoot and come back.
+            var heading = keys;
+            if (heading.lenSq() == 0) {
+                if (target) |at| {
+                    const to = at.sub(.init(place.x, place.y));
+                    if (to.len() > 4) heading = to;
+                }
+            }
+            const direction = heading.tryNorm() orelse continue;
+
+            place.x += direction.x * player.speed * dt;
+            place.y += direction.y * player.speed * dt;
             place.x = std.math.clamp(place.x, 20, field_width - 20);
             place.y = std.math.clamp(place.y, 20, field_height - 20);
 
             // Keep the wandering pointed the way the player is going, so
             // letting go does not snap it round.
-            drift.dx = dx / length;
-            drift.dy = dy / length;
+            drift.dx = direction.x;
+            drift.dy = direction.y;
             drift.until_turn = 1;
         }
     }
@@ -668,7 +701,7 @@ pub fn main(init: std.process.Init) !void {
     if (options.capture != null) app.time.source = .{ .fixed = 1.0 / 60.0 };
 
     try out.print("{f}\n", .{app.device.info()});
-    try out.print("Arrows or WASD to steer the one with the ring; Escape to leave.\n", .{});
+    try out.print("Arrows, WASD or the held mouse button to steer the one with the ring; F11 to fill the screen; Escape to leave.\n", .{});
     try out.flush();
 
     try app.addNamedSystem(.startup, "spawn", spawn);

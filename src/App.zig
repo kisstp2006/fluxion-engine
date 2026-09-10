@@ -53,6 +53,7 @@ const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
 const rhi = @import("fluxion_rhi");
+const math = @import("fluxion_math");
 
 const Assets = @import("assets.zig");
 const Input = @import("input.zig");
@@ -61,6 +62,7 @@ const Window = @import("window.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
 const sprite = @import("render/sprite.zig");
+const View = @import("render/view.zig").View;
 
 const Color = @import("color.zig").Color;
 const Schedule = schedule_mod.Schedule;
@@ -96,12 +98,20 @@ pub const Backend = enum {
     }
 };
 
+/// How the window fills the screen. See `Window.Fullscreen`.
+pub const Fullscreen = Window.Fullscreen;
+
 pub const Options = struct {
     title: []const u8 = "fluxion",
     width: u32 = 1280,
     height: u32 = 720,
     backend: Backend = .auto,
     vsync: bool = true,
+
+    /// Open filling the screen rather than in a window. `width` and `height`
+    /// are still the size it goes back to when the player asks for a window.
+    /// See `setFullscreen`.
+    fullscreen: Fullscreen = .windowed,
 
     /// What files are read with, and what the clock is read from. Null means
     /// no files and a fixed step - which is what a test wants and what a
@@ -162,6 +172,10 @@ time: Time,
 /// `Transform2D.interpolate`.
 snapshots: hierarchy.Snapshots = .empty,
 
+/// What `despawnOrphans` found this frame. Kept between frames for its
+/// capacity, like `snapshots`, so a settled game stops allocating for it.
+orphans: std.ArrayList(ecs.Entity) = .empty,
+
 input: Input = .{},
 schedule: Schedule = .empty,
 
@@ -205,6 +219,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .sprites = undefined,
         .time = .init(if (options.io) |io| .{ .clock = io } else .{ .fixed = options.fixed_delta }),
         .snapshots = .empty,
+        .orphans = .empty,
         .input = .{},
         .schedule = .empty,
         .background = options.background,
@@ -241,10 +256,26 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     }
     errdefer if (self.window) |*w| w.close();
 
+    // Straight after opening and before anything is sized from the window, so
+    // the swapchain is made at the size it will be drawn at rather than made
+    // and then resized on the first frame. Not fatal: a game that cannot fill
+    // the screen - no monitor to fill, a display that refuses the mode - is
+    // still a game, in a window.
+    if (self.window) |*w| {
+        if (options.fullscreen != .windowed) {
+            w.setFullscreen(options.fullscreen) catch |err| {
+                log.warn("could not open fullscreen: {t}", .{err});
+            };
+        }
+    }
+
     const width = if (self.window) |*w| w.width else options.width;
     const height = if (self.window) |*w| w.height else options.height;
     self.width = width;
     self.height = height;
+    // Whatever size the window settled at is the size the surface is about to
+    // be made at, so there is nothing left for the first frame to resize.
+    if (self.window) |*w| w.resized = false;
 
     self.device = try .init(gpa, .{
         .backend = switch (backend) {
@@ -265,6 +296,13 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             .native_window = w.nativeHandle(),
             .width = width,
             .height = height,
+            // Said here as well as to the window, because the two backends
+            // keep it in different places. OpenGL's swap interval belongs to
+            // the context, and `Window.open` has already set it; Direct3D's
+            // belongs to the swapchain, which reads it from here - and when
+            // this line was missing it defaulted to on, so `.vsync = false`
+            // quietly did nothing on `d3d11`.
+            .vsync = options.vsync,
         });
     } else {
         // No window, so the frame goes into a texture. Not a stub: every
@@ -299,6 +337,7 @@ pub fn destroy(self: *App) void {
 
     self.schedule.deinit(gpa);
     self.snapshots.deinit(gpa);
+    self.orphans.deinit(gpa);
     self.sprites.deinit(gpa);
     self.assets.deinit();
     self.jobs.deinit();
@@ -317,18 +356,40 @@ pub fn destroy(self: *App) void {
 // -------------------------------------------------------------------------
 
 /// Add a system to a stage. See `schedule`.
-pub fn addSystem(self: *App, stage: Stage, system: System) Allocator.Error!void {
+///
+/// **The stage is `comptime`**, and that is what lets a stage the loop does
+/// not run be refused by the compiler rather than accepted and ignored. `.ui`
+/// is such a stage until the interface layer is wired up: a system added to
+/// it used to go into a list nothing ever walked, and say nothing about it.
+/// A parameter the compiler knows the value of can be checked with an `if`
+/// that runs during compilation, and the branch that fails is only analysed
+/// for the one call that takes it - so `.fixed` costs nothing and `.ui` is a
+/// compile error naming the line that asked for it. Every caller passes a
+/// literal anyway; the only thing given up is choosing a stage at run time.
+pub fn addSystem(self: *App, comptime stage: Stage, system: System) Allocator.Error!void {
+    comptime refuseUnrun(stage);
     return self.schedule.add(self.gpa, stage, system);
 }
 
 /// The same, with a name for a profile or a failure message.
 pub fn addNamedSystem(
     self: *App,
-    stage: Stage,
+    comptime stage: Stage,
     name: []const u8,
     system: System,
 ) Allocator.Error!void {
+    comptime refuseUnrun(stage);
     return self.schedule.addNamed(self.gpa, stage, name, system);
+}
+
+/// A compile error for a stage `step` does not run. See `addSystem`.
+fn refuseUnrun(comptime stage: Stage) void {
+    if (stage == .ui) @compileError(
+        "fluxion-engine: nothing runs the .ui stage yet. It belongs to the " ++
+            "interface layer, which is waiting on fluxion-ui (see the README); " ++
+            "until then a heads-up display is a Text2D parented to the camera, " ++
+            "as examples/creatures.zig does.",
+    );
 }
 
 // -------------------------------------------------------------------------
@@ -385,25 +446,45 @@ pub fn step(self: *App) anyerror!bool {
     // makes a stalled frame show up as the world running slow for a moment
     // instead of as the loop never finishing. See `Time.max_fixed_steps`.
     self.time.dropBacklog();
-    while (self.time.takeFixedStep()) |_| {
-        // Where everything was before this step, for drawing the frame
-        // somewhere between this step and the last. See `Previous2D`.
-        try self.snapshotPrevious();
-        try self.schedule.run(.fixed, self);
+    {
+        // A fixed step is asked about the edges since the last step rather
+        // than since the top of this frame, which may have run none. See
+        // `Input.clock`. Put back with `defer` so a step that fails does not
+        // leave every later stage reading the wrong set.
+        self.input.clock = .fixed;
+        defer self.input.clock = .frame;
+
+        while (self.time.takeFixedStep()) |_| {
+            // Where everything was before this step, for drawing the frame
+            // somewhere between this step and the last. See
+            // `Transform2D.interpolate`.
+            try self.snapshotPrevious();
+            try self.schedule.run(.fixed, self);
+            // Seen, so gone: the next step hears only what happens after this
+            // one, which is what makes a press one jump and not two.
+            self.input.endFixedStep();
+        }
     }
+    // A frame that gave the fixed stage no time at all, because the world is
+    // paused, hands it no edges either. Otherwise every key pressed on a
+    // pause menu would reach the first step after the game carried on, and
+    // the button that closed the menu would also jump.
+    if (self.time.delta == 0) self.input.endFixedStep();
 
     try self.schedule.run(.update, self);
     try self.schedule.run(.late, self);
 
-    // The engine's own pass over the world, after everything a game does and
-    // before anything is drawn. Here rather than registered as a system in
+    // The engine's own passes over the world, after everything a game does
+    // and before anything is drawn. Here rather than registered as systems in
     // `.late` on purpose: a system added at `create` would run *before* a
     // game's own late systems.
     //
     // Parented transforms are not resolved here, or anywhere: the renderer
     // works out where a child ended up when it draws it, and
     // `worldTransform` answers the same question for a game that asks. See
-    // `hierarchy`.
+    // `hierarchy`. What is done here is the other half of parenting: whatever
+    // hung from something despawned this frame goes with it.
+    try self.despawnOrphans();
     try self.animate();
 
     try self.render();
@@ -447,16 +528,133 @@ fn animate(self: *App) !void {
     }
 }
 
+/// Despawn everything whose parent has died, and everything hanging from
+/// that in turn. See `Transform2D.parent` for why that is the rule.
+///
+/// Once a frame rather than inside a despawn of the engine's own, because a
+/// game despawns through `world.despawn` and nothing here sees it happen: the
+/// only way to know what hung from a dead thing is to look. The look is one
+/// comparison per transform and one generation check per parented one, and
+/// it goes round again only when it found something, because what hung from
+/// the dead thing may have had things hanging from it - a tank's turret goes
+/// on the first pass, and the barrel on the turret goes on the second.
+fn despawnOrphans(self: *App) !void {
+    while (true) {
+        self.orphans.clearRetainingCapacity();
+
+        var it = try ecs.Query(.{components.Transform2D}).over(&self.world);
+        while (it.next()) |chunk| {
+            for (chunk.slice(components.Transform2D), chunk.entities) |place, entity| {
+                if (place.parent.isNone() or self.world.isAlive(place.parent)) continue;
+                try self.orphans.append(self.gpa, entity);
+            }
+        }
+
+        // Found first and despawned after, because a despawn moves rows and
+        // the slices above point at rows.
+        if (self.orphans.items.len == 0) return;
+        for (self.orphans.items) |orphan| self.world.despawn(orphan);
+    }
+}
+
 /// Where an entity really is, with every parent above it applied.
 ///
 /// Godot's `global_position` and Unity's `transform.position`, and it costs
 /// what those cost: a walk up the chain rather than a field read. Null when
-/// the entity has no transform, or when something it hangs from has died.
+/// the entity has no transform, or when something it hangs from was
+/// despawned this frame - it follows at the end of the frame, and a handle to
+/// it reads as dead from then on.
 ///
 /// A transform with no parent is its own answer, so this is a comparison and
-/// a copy for almost everything in a scene.
+/// a copy for almost everything in a scene. And what comes back has no parent
+/// of its own, which makes it the way to let go of something while keeping it
+/// where it is: write it over the entity's own transform.
 pub fn worldTransform(self: *App, entity: ecs.Entity) ?components.Transform2D {
     return hierarchy.resolveEntity(&self.world, &self.snapshots, entity, self.time.alpha());
+}
+
+// -------------------------------------------------------------------------
+// The screen and the world
+// -------------------------------------------------------------------------
+
+/// Where a point on the screen is in the world, through the camera.
+///
+/// ```zig
+/// const aim = app.screenToWorld(app.input.pointer.x, app.input.pointer.y);
+/// ```
+///
+/// The screen is in framebuffer pixels from the top left, `y` down - the
+/// units of `Input.pointer` and of `width` and `height` - and the world is
+/// whatever the camera makes of it: moved, zoomed and turned. With no camera
+/// in the world the two are the same numbers. See `render.view` for the
+/// arithmetic, which is the renderer's own and not a second copy of it.
+///
+/// **The camera is read as it stands when this is called**, not as it was
+/// when the last frame was drawn. In `.input`, `.fixed` and `.update` that is
+/// the camera the player was looking at when they clicked, which is the one
+/// that should decide what they clicked on. In `.late`, after something has
+/// moved the camera, it is the one the next frame is about to be drawn with.
+pub fn screenToWorld(self: *App, x: f32, y: f32) math.Vec2 {
+    return self.currentView().toWorld(.init(x, y));
+}
+
+/// Where a point in the world lands on the screen, in framebuffer pixels
+/// from the top left. The other half of `screenToWorld`, and what a marker
+/// over somebody's head is placed with.
+///
+/// Nothing is clamped: a point off the screen comes back outside `0..width`
+/// and `0..height`, because how far off and in which direction is exactly
+/// what an arrow at the edge pointing at it needs.
+pub fn worldToScreen(self: *App, x: f32, y: f32) math.Vec2 {
+    return self.currentView().toScreen(.init(x, y));
+}
+
+/// Where the pointer is in the world. `screenToWorld` of `Input.pointer`,
+/// which is what nearly every call to it would be.
+pub fn pointerInWorld(self: *App) math.Vec2 {
+    return self.screenToWorld(self.input.pointer.x, self.input.pointer.y);
+}
+
+/// What the camera sees, at the size of the window.
+fn currentView(self: *App) View {
+    return .of(&self.world, &self.snapshots, @floatFromInt(self.width), @floatFromInt(self.height));
+}
+
+// -------------------------------------------------------------------------
+// The window
+// -------------------------------------------------------------------------
+
+/// Fill the screen, or go back to being a window.
+///
+/// ```zig
+/// try app.setFullscreen(.borderless);
+/// if (app.input.justPressed(.f11)) try app.toggleFullscreen();
+/// ```
+///
+/// On the monitor the window is on, which is the one the player is looking
+/// at - and the one they dragged it to, if they have two. `.borderless` is
+/// what a game should use; `Fullscreen` says when `.exclusive` is worth what
+/// it costs.
+///
+/// The new size arrives the way every resize does: `width` and `height`
+/// change at the top of the next frame, and the view with them. Without a
+/// window - a headless app - there is nothing to fill, and this does nothing.
+pub fn setFullscreen(self: *App, wanted: Fullscreen) Window.Error!void {
+    if (self.window) |*window| try window.setFullscreen(wanted);
+}
+
+/// How the window fills the screen now. `.windowed` when there is no window.
+pub fn fullscreen(self: *const App) Fullscreen {
+    if (self.window) |*window| return window.fullscreen();
+    return .windowed;
+}
+
+/// Borderless if it is a window, a window if it is not. What F11 is for.
+pub fn toggleFullscreen(self: *App) Window.Error!void {
+    try self.setFullscreen(switch (self.fullscreen()) {
+        .windowed => .borderless,
+        else => .windowed,
+    });
 }
 
 /// Remember where every interpolating transform is, before a step moves it.
@@ -749,17 +947,71 @@ test "a grandchild is composed through the whole chain" {
     try testing.expectApproxEqAbs(@as(f32, 17), app.worldTransform(leaf).?.x, 0.0001);
 }
 
-test "a child of something that died has no world position" {
+test "what hangs from something that died goes with it" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();
 
-    const carrier = try app.world.spawnWith(.{components.Transform2D.at(60, 60)});
-    const held = try app.world.spawnWith(.{components.Transform2D.childOf(carrier, 4, 0)});
+    const tank = try app.world.spawnWith(.{
+        components.Transform2D.at(100, 50),
+        components.Sprite.solid(.white, 20, 20),
+    });
+    const turret = try app.world.spawnWith(.{
+        components.Transform2D.childOf(tank, 0, -12),
+        components.Sprite.solid(.white, 8, 8),
+    });
+    const barrel = try app.world.spawnWith(.{
+        components.Transform2D.childOf(turret, 10, 0),
+        components.Sprite.solid(.white, 12, 2),
+    });
+    const bystander = try app.world.spawnWith(.{
+        components.Transform2D.at(20, 20),
+        components.Sprite.solid(.white, 4, 4),
+    });
 
-    app.world.despawn(carrier);
+    app.world.despawn(tank);
+    // Between the despawn and the end of the frame the chain is broken, and
+    // says so rather than inventing a position.
+    try testing.expect(app.worldTransform(turret) == null);
+
     try app.run();
 
-    try testing.expect(app.worldTransform(held) == null);
+    // The turret went because the tank did, and the barrel because the
+    // turret did, one pass later.
+    try testing.expect(!app.world.isAlive(turret));
+    try testing.expect(!app.world.isAlive(barrel));
+    try testing.expect(app.world.isAlive(bystander));
+
+    // And only the bystander was drawn. Before the rule, the turret and the
+    // barrel were drawn at their own numbers as if those were the world's -
+    // up in the top left corner, where nothing had ever been.
+    try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
+}
+
+test "a parent with no transform places nothing and still owns what hangs from it" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+
+    // An entity with no components at all: somewhere nobody can say.
+    const spell = try app.world.spawn();
+    const spark = try app.world.spawnWith(.{
+        components.Transform2D.childOf(spell, 40, 30),
+        components.Sprite.solid(.white, 4, 4),
+    });
+
+    try app.run();
+
+    // Its numbers are the world's, as if it had no parent...
+    const placed = app.worldTransform(spark).?;
+    try testing.expectEqual(@as(f32, 40), placed.x);
+    try testing.expectEqual(@as(f32, 30), placed.y);
+    try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
+
+    // ... and it still goes when its parent does.
+    app.world.despawn(spell);
+    app.running = true;
+    app.frames_left = 1;
+    _ = try app.step();
+    try testing.expect(!app.world.isAlive(spark));
 }
 
 test "an animation moves the sprite's region on" {
@@ -869,4 +1121,164 @@ test "a transform that never asked is not remembered at all" {
     // Nothing in the table, so a scene of static things pays nothing for a
     // feature it does not use.
     try testing.expectEqual(@as(usize, 0), app.snapshots.count());
+}
+
+const platform = @import("fluxion_platform");
+
+/// A key going down, as the platform would deliver it.
+fn pressOf(key: platform.Key) platform.Event {
+    return .{ .key = .{
+        .window = .none,
+        .key = key,
+        .scancode = @enumFromInt(0),
+        .action = .press,
+        .mods = .{},
+    } };
+}
+
+/// One press of space on a chosen frame, and a count of the fixed steps
+/// that heard it. File-scoped rather than a closure, because systems are
+/// plain functions with nothing to capture.
+const Jumps = struct {
+    var heard: u32 = 0;
+    var press_on: u64 = 1;
+
+    fn press(app: *App) anyerror!void {
+        if (app.time.frame == press_on) app.input.apply(pressOf(.space));
+    }
+
+    fn jump(app: *App) anyerror!void {
+        if (app.input.justPressed(.space)) heard += 1;
+    }
+
+    /// Start the world again on the fourth frame. See the pause test.
+    fn wake(app: *App) anyerror!void {
+        if (app.time.frame == 4) app.time.scale = 1;
+    }
+};
+
+test "a press is heard by one fixed step when frames are shorter than steps" {
+    Jumps.heard = 0;
+    Jumps.press_on = 1;
+
+    // A frame is half a step long, so every other frame runs one - and the
+    // frame the press lands on runs none. Powers of two, so the accumulator
+    // is exact and the test is about input rather than about rounding.
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 8,
+        .fixed_delta = 1.0 / 64.0,
+    });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 1.0 / 128.0 };
+
+    try app.addSystem(.input, Jumps.press);
+    try app.addSystem(.fixed, Jumps.jump);
+    try app.run();
+
+    // Before `Input.clock`, this was zero: the edge was gone by the frame
+    // that ran a step. A game on a 144 Hz screen lost more than half its
+    // jumps that way.
+    try testing.expectEqual(@as(u32, 1), Jumps.heard);
+}
+
+test "a press is heard by one fixed step when a frame runs two" {
+    Jumps.heard = 0;
+    Jumps.press_on = 1;
+
+    // A frame is two steps long, so both run inside the frame of the press.
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 4,
+        .fixed_delta = 1.0 / 64.0,
+    });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 1.0 / 32.0 };
+
+    try app.addSystem(.input, Jumps.press);
+    try app.addSystem(.fixed, Jumps.jump);
+    try app.run();
+
+    // Before, this was two: both steps saw the frame's edge, and one press
+    // was a double jump.
+    try testing.expectEqual(@as(u32, 1), Jumps.heard);
+}
+
+test "a press made while the world is paused does not reach the step after it" {
+    Jumps.heard = 0;
+    Jumps.press_on = 2;
+
+    const app = try App.create(testing.allocator, .{
+        .headless = true,
+        .frames = 8,
+        .fixed_delta = 1.0 / 64.0,
+    });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 1.0 / 32.0 };
+    app.time.scale = 0;
+
+    // Pressed on the second frame, paused until the fourth, and then two
+    // steps a frame: none of them should hear a press that was made while
+    // nothing was running.
+    try app.addSystem(.input, Jumps.press);
+    try app.addSystem(.input, Jumps.wake);
+    try app.addSystem(.fixed, Jumps.jump);
+    try app.run();
+
+    try testing.expectEqual(@as(u32, 0), Jumps.heard);
+}
+
+test "with no camera, the screen and the world are the same numbers" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240 });
+    defer app.destroy();
+
+    const at = app.screenToWorld(12, 34);
+    try testing.expectApproxEqAbs(@as(f32, 12), at.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 34), at.y, 0.001);
+
+    const back = app.worldToScreen(12, 34);
+    try testing.expectApproxEqAbs(@as(f32, 12), back.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 34), back.y, 0.001);
+}
+
+test "the pointer is found in the world through the camera" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240 });
+    defer app.destroy();
+
+    // Looking at (100, 50), with everything twice the size.
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(100, 50),
+        components.Camera2D.atZoom(2),
+    });
+
+    // The middle of the screen is where the camera is looking...
+    app.input.pointer = .{ .x = 160, .y = 120 };
+    const middle = app.pointerInWorld();
+    try testing.expectApproxEqAbs(@as(f32, 100), middle.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 50), middle.y, 0.001);
+
+    // ... and the top left corner is half a screen away, halved again by
+    // the zoom: 160 pixels across is 80 units, 120 down is 60.
+    const corner = app.screenToWorld(0, 0);
+    try testing.expectApproxEqAbs(@as(f32, 20), corner.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, -10), corner.y, 0.001);
+
+    // And back again, to the pixel it came from.
+    const again = app.worldToScreen(corner.x, corner.y);
+    try testing.expectApproxEqAbs(@as(f32, 0), again.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0), again.y, 0.001);
+}
+
+test "a headless app has no screen to fill, and says so without failing" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .fullscreen = .borderless });
+    defer app.destroy();
+
+    // Asked for at `create`, and at run time, and toggled: all of it quietly
+    // nothing, because there is no window. A test of a game that goes
+    // fullscreen should not have to know that it is running on a build
+    // server.
+    try testing.expect(app.fullscreen() == .windowed);
+    try app.setFullscreen(.borderless);
+    try app.toggleFullscreen();
+    try testing.expect(app.fullscreen() == .windowed);
 }
