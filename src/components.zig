@@ -15,6 +15,12 @@
 //! memory - so a row moves with a `memcpy` and a world saves to a file. The
 //! coordinate system is the interface's: `+x` right, `+y` down, and a
 //! positive rotation turns `+x` towards `+y`, which is clockwise on screen.
+//!
+//! Each is described to fluxion-reflect as well, for what reads a component
+//! it was not compiled against - an inspector, a console: `reflect_name` is
+//! the name a scene gives it, and `reflect_fields` says what a field's number
+//! means where the name does not - a range, an angle, a unit, layers, a zero
+//! that is not zero. See `attr`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -23,6 +29,7 @@ const ecs = @import("fluxion_ecs");
 const math = @import("fluxion_math");
 const physics = @import("fluxion_physics");
 const assets = @import("assets.zig");
+const attr = @import("attr.zig");
 
 /// Re-exported because a transform names the entity it hangs from.
 pub const Entity = ecs.Entity;
@@ -75,6 +82,13 @@ pub const Transform2D = extern struct {
     /// How many links of a chain are followed before giving up: enough for a
     /// skeleton, few enough that a cycle is caught within a frame.
     pub const max_depth: u8 = 16;
+
+    pub const reflect_name = "Transform2D";
+    pub const reflect_fields = .{
+        .rotation = .{ attr.Angle{}, attr.Doc{ .text = "Clockwise on screen" } },
+        .parent = .{attr.Doc{ .text = "Whose space x and y are in; none is the world's" }},
+    };
+    pub const reflect_methods = .{.translate};
 
     /// A transform at a point, unrotated, unscaled and unparented.
     pub fn at(x: f32, y: f32) Transform2D {
@@ -170,6 +184,9 @@ pub const Region = extern struct {
     /// The whole texture.
     pub const full: Region = .{};
 
+    /// No range on the corners: past one is a texture repeated.
+    pub const reflect_name = "Region";
+
     /// A rectangle of a sprite sheet, in texels, given the size of the sheet.
     pub fn fromPixels(x: f32, y: f32, w: f32, h: f32, sheet_width: f32, sheet_height: f32) Region {
         return .{
@@ -245,6 +262,14 @@ pub const Sprite = extern struct {
 
     pub const Blend = enum(u8) { alpha, additive };
 
+    pub const reflect_name = "Sprite";
+    pub const reflect_fields = .{
+        .width = .{attr.Doc{ .text = "World units; zero is the region's width in texels" }},
+        .height = .{attr.Doc{ .text = "World units; zero is the region's height in texels" }},
+        .pivot_x = .{attr.Range{ .min = 0, .max = 1 }},
+        .pivot_y = .{attr.Range{ .min = 0, .max = 1 }},
+    };
+
     /// A sprite showing the whole of a texture at its own size.
     pub fn of(texture: assets.TextureHandle) Sprite {
         return .{ .texture = texture };
@@ -295,6 +320,14 @@ pub const Animation = extern struct {
     /// Set when a one-shot reaches its end. Cleared by writing a new
     /// animation over the component.
     finished: bool = false,
+
+    pub const reflect_name = "Animation";
+    pub const reflect_fields = .{
+        .fps = .{ attr.Unit{ .text = "/s" }, attr.Doc{ .text = "Cells a second" } },
+        .time = .{ attr.Unit{ .text = "s" }, attr.Doc{ .text = "Into the animation" } },
+        .finished = .{attr.ReadOnly{}},
+    };
+    pub const reflect_methods = .{.frame};
 
     /// The first `length` cells of a single row.
     pub fn strip(length: u16, fps: f32) Animation {
@@ -376,6 +409,21 @@ pub const Text2D = extern struct {
 
     pub const Alignment = enum(u8) { left, center, right };
 
+    /// The buffer is no field to show or to edit: the words are the
+    /// property `text`, read with `slice` and written with `set`, which keep
+    /// the length and the UTF-8 right - and may run over several lines.
+    pub const reflect_name = "Text2D";
+    pub const reflect_attributes = .{attr.Property{ .name = "text", .get = "slice", .set = "set" }};
+    pub const reflect_fields = .{
+        .bytes = .{attr.Hidden{}},
+        .len = .{attr.Hidden{}},
+        .size = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "Per em, before the transform's scale" } },
+    };
+    pub const reflect_methods = .{
+        .set = .{attr.Multiline{}},
+        .slice = .{},
+    };
+
     /// A label with this text in it, cut on a character boundary if it does
     /// not fit.
     pub fn of(run: []const u8) Text2D {
@@ -434,6 +482,13 @@ pub const Camera2D = extern struct {
 
     active: bool = true,
 
+    pub const reflect_name = "Camera2D";
+    pub const reflect_fields = .{
+        .fit_width = .{attr.Doc{ .text = "Always shown whole; zero is no fit" }},
+        .fit_height = .{attr.Doc{ .text = "Always shown whole; zero is no fit" }},
+        .rotation = .{ attr.Angle{}, attr.Doc{ .text = "Clockwise on screen; the world turns the other way" } },
+    };
+
     pub fn atZoom(zoom: f32) Camera2D {
         return .{ .zoom = zoom };
     }
@@ -479,6 +534,13 @@ pub const RigidBody2D = extern struct {
     /// Static never moves; kinematic moves at its velocity and nothing
     /// pushes it; dynamic is pushed by everything.
     pub const Type = physics.BodyType;
+
+    pub const reflect_name = "RigidBody2D";
+    pub const reflect_fields = .{
+        .velocity = .{ attr.Unit{ .text = "/s" }, attr.Doc{ .text = "World units a second" } },
+        .angular_velocity = .{ attr.Angle{}, attr.Unit{ .text = "/s" }, attr.Doc{ .text = "Clockwise on screen" } },
+        .gravity_scale = .{attr.Doc{ .text = "Zero floats, minus one rises" }},
+    };
 };
 
 /// The shape a body collides with. On an entity with a `RigidBody2D` it is
@@ -512,6 +574,19 @@ pub const Collider2D = extern struct {
     group: i16 = 0,
 
     pub const Shape = enum(u8) { box, circle };
+
+    pub const reflect_name = "Collider2D";
+    pub const reflect_fields = .{
+        .width = .{attr.Doc{ .text = "Zero is the sprite's width" }},
+        .height = .{attr.Doc{ .text = "Zero is the sprite's height" }},
+        .radius = .{attr.Doc{ .text = "Zero is half the sprite's width" }},
+        .rotation = .{attr.Angle{}},
+        .friction = .{attr.Range{ .min = 0, .max = 1 }},
+        .restitution = .{attr.Range{ .min = 0, .max = 1 }},
+        .density = .{attr.Doc{ .text = "Mass per square unit" }},
+        .category = .{ attr.Layers{}, attr.Doc{ .text = "The layers it is on" } },
+        .mask = .{ attr.Layers{}, attr.Doc{ .text = "The layers it touches" } },
+    };
 
     pub fn box(width: f32, height: f32) Collider2D {
         return .{ .width = width, .height = height };
@@ -560,6 +635,21 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Text2D);
     ecs.component.check(RigidBody2D);
     ecs.component.check(Collider2D);
+}
+
+test "what an inspector shows a field by is on the field" {
+    const reflect = @import("fluxion_reflect");
+    try testing.expect(reflect.typeOf(Transform2D).field("rotation").?.attribute(attr.Angle) != null);
+    try testing.expect(reflect.typeOf(Transform2D).field("x").?.attribute(attr.Angle) == null);
+    try testing.expect(reflect.typeOf(Collider2D).field("mask").?.attribute(attr.Layers) != null);
+    try testing.expectEqualStrings("px", reflect.typeOf(Text2D).field("size").?.attribute(attr.Unit).?.text);
+    try testing.expectEqual(@as(f64, 1), reflect.typeOf(Collider2D).field("restitution").?.attribute(attr.Range).?.max);
+
+    // The words of a label are its methods' to read and write, and they may
+    // run over several lines.
+    try testing.expect(reflect.typeOf(Text2D).field("bytes").?.attribute(attr.Hidden) != null);
+    try testing.expect(reflect.typeOf(Text2D).method("set").?.attribute(attr.Multiline) != null);
+    try testing.expect(reflect.typeOf(Text2D).method("slice").?.attribute(attr.Multiline) == null);
 }
 
 test "unapply takes a point back to where apply found it" {

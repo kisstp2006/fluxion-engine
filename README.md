@@ -51,6 +51,10 @@
 | `Bodies` | Which body is which entity's: the physics world kept in step with the components. |
 | `Clipboard` | Text copied and pasted: the system's, or the program's own with no window. |
 | `Commands` | Spawns, despawns, adds and removes that wait for the system asking for them to return. |
+| `States` | A game's own states, each an enum with one value at a time, and the systems that run in them. |
+| `Project` | Where a game's files are: `res://` paths from the project's root, and the UUIDs in the `.uid` files beside them. |
+| `DebugViews` | What the engine draws into `app.debug` by itself: colliders, bodies, transforms, sprites, cameras, stats. |
+| `attr` | What a component's field means, for an inspector to show it by: a range, an angle, a unit, layers, several lines, a value behind a getter and a setter. |
 
 ```zig
 const fx = @import("fluxion_engine");
@@ -174,6 +178,49 @@ fn hits(app: *fx.App) !void {
 - **`app.commands.apply()` does it all now**, for a system that needs what it
   asked for before it returns - a body for what it spawned, to join it to
   another - and is not inside a query when it asks.
+
+## 🚦 States
+
+```zig
+const Mode = enum { menu, playing, paused, game_over };
+
+try app.addState(Mode.menu);                                  // its first value otherwise
+try app.addSystemIn(.update, Mode.playing, "move", move);     // only while playing
+try app.onEnter(Mode.paused, "pause menu", showPauseMenu);
+try app.onExit(Mode.paused, "hide pause menu", hidePauseMenu);
+try app.addSystemIf(.update, bossAwake, "boss", boss);        // a condition of the game's own
+
+if (app.input.justPressed(.escape)) try app.setState(Mode.paused);
+if (app.state(Mode) == .game_over) showScore(app);
+```
+
+- **A state is an enum** with one value at a time, and a game has as many as
+  it likes, each changed apart: a `Mode` and a `Weather`.
+- **A change waits for the top of the next frame.** Every system of this
+  frame sees the same value, whichever of them asked; then what leaves the
+  old value runs, the value changes, and what enters the new one runs,
+  before the frame's first stage. The last asked for in a frame wins, asking
+  for the value it has does nothing, and a change asked for while entering
+  waits for the frame after. The first value is entered after `.startup`.
+- **A system in a state, or under a condition, is skipped rather than
+  removed**: it keeps its place in its stage, and its time is its own.
+- **Code that does not know it is being gated can be.**
+  `app.addSystemsIn(value, register)` puts every system and hook `register`
+  adds under that value too, on top of their own conditions. That is how an
+  editor runs a game only in Play, with `time.scale` holding the world still
+  and `time.stepOnce()` moving it on by one fixed step:
+
+  ```zig
+  const Play = enum { editing, playing, paused };
+  try app.addSystemsIn(Play.playing, game.addSystems);
+
+  try app.setState(Play.paused);   // editing and paused: the game's systems are out
+  app.time.scale = 0;              // and the world holds still
+
+  try app.setState(Play.playing);  // Step: one frame of the game,
+  app.time.stepOnce();             // one fixed step of the world,
+  // and back to Play.paused from the frame it ran in
+  ```
 
 ## 🎮 Controllers and the pointer
 
@@ -448,6 +495,38 @@ fn watchBall(app: *fx.App) !void {
   the interface on screen, and into the texture `drawWorld` draws - and with
   `world_on_screen` off the window shows none of it.
 
+**The engine draws some things itself**, each off until asked for:
+
+```zig
+app.debug_views.colliders = true;       // what the physics sees, in its body's colour
+app.debug_views.stats = true;           // fps, frame time and what is in the world
+app.debug_visible = false;              // none of it, the game's own shapes included
+```
+
+| View | What it draws |
+| --- | --- |
+| `colliders` | Every collider's shape: green static, blue kinematic, orange moving, grey asleep, cyan a sensor. |
+| `bodies` | Each moving body's centre of mass, and an arrow a tenth of a second of its travel long. |
+| `transforms` | Each transform's axes, `x` red and `y` green, and a line to what it hangs from. |
+| `sprites` | Each visible sprite's outline. |
+| `cameras` | What the camera shows, and the area a camera fits. |
+| `stats` | The frame's rate and length, entities and bodies, and sprites and draw calls, top left. |
+
+- **A view is drawn where the renderer draws**: a body's outline follows its
+  entity's transform between fixed steps, as its sprite does, so it stays on
+  the sprite on a fast screen.
+- **`debug_visible` is the one switch** for everything `debug` holds, and
+  `Options.debug_key` - F3, say - flips it. Hidden, the views are not even
+  worked out.
+- **An editor lists them by walking the struct**, so a View menu needs no
+  list of its own and gains an entry when a view is added:
+
+  ```zig
+  inline for (std.meta.fields(fx.DebugViews)) |view| {
+      if (menu.checkbox(view.name, @field(app.debug_views, view.name))) |on| @field(app.debug_views, view.name) = on;
+  }
+  ```
+
 ## 💥 Physics
 
 ```zig
@@ -517,49 +596,115 @@ tilemap below rather than an entity a tile.
 Not here yet: polygons, joints as components, and a view of the colliders in
 `debug`.
 
+## 📁 The project's files
+
+```zig
+const hero = try app.assets.loadTexture("res://art/hero.png", .{});  // from the project's root
+try app.saveScene("res://levels/meadow.json", .{});
+const font = try app.assets.loadFont(fx.Assets.systemFontPath(), .{}); // the operating system's
+```
+
+```bash
+game --root ../my-game          # or App.Options.root; the working directory otherwise
+```
+
+- **A `res://` path is the project's**, as in Godot: `res://art/hero.png` is
+  `art/hero.png` under the project's root, whichever directory the program
+  was started in. Any other path is the operating system's, as it always
+  was - a system font, where a screenshot goes - and every call that takes a
+  path takes both: `loadTexture`, `loadFont`, `loadScene`, `saveScene`,
+  `saveCapture`.
+- **A file inside the root is kept by its `res://` path however it was
+  asked for** - `art/hero.png` from the root, its absolute path, `art\hero.png`
+  - so `textureSource` gives the project's name for it, `findTexture` finds
+  it by any spelling, and a scene never holds one machine's directories. A
+  `res://` path that climbs out with `..` is `error.OutsideProject`.
+- **A file can have a UUID**, kept beside it in a `.uid` file -
+  `art/hero.png.uid`, one line, `uid://...` - as Godot 4 keeps its.
+  Saving a scene gives one to every loaded file of the project's that has
+  none, and a scene names each file by its UUID as well as its path; reading
+  goes by the UUID first, so a texture moved or renamed together with its
+  `.uid` file is found where it went (`loaded.moved` counts them). Commit the
+  `.uid` files with the files they sit beside.
+- **`uid://...` is a path too**, anywhere a `res://` one is taken.
+  `app.project.pathOf(uid)` answers from the `.uid` files read so far, and a
+  UUID none of them holds sends it through the project once, passing over
+  hidden directories, `zig-out` and `zig-pkg`; `app.project.rescan()` looks
+  again after files moved while the program ran.
+- **The root is `Options.root`**, or `--root` among the engine's flags, or
+  else the working directory. A project file will say where it is, once
+  there is one.
+
+## 🆔 UUIDs
+
+```zig
+const door = app.findUuid(door_uuid) orelse return;    // the same door after a save and a load
+const uuid = try app.ensureUuid(entity);               // one, if it had none
+try app.setUuid(respawned, uuid);                      // an editor's undo brings it back as it was
+```
+
+- **A handle is new every run; a UUID is for good.** `fx.Uuid` is
+  [Fluxion Id](https://github.com/kisstp2006/fluxion-id)'s: 128 bits, random
+  (version 4) from a generator the operating system seeds, `{f}` to print
+  and `Uuid.parse` to read.
+- **An entity's UUID is its own, not a component** - kept beside the world,
+  as its name is. One living entity has a UUID at a time (`error.UuidTaken`),
+  the nil UUID is no UUID (`error.NilUuid`), and a despawned entity's is free
+  at once and forgotten at the end of the frame. `app.newUuid()` makes one
+  for anything else a game wants named for good.
+- **A scene gives every entity it writes one**, and every entity it reads the
+  one it had - unless an entity in the world has that one already, as when
+  the same scene is loaded twice, and then a new one (`loaded.reassigned`);
+  references inside the scene still find their own.
+
 ## 🎬 Scenes
 
 ```zig
-try app.registerComponents(.{ Wander, Player });                 // the game's own
-try app.saveScene("levels/meadow.json", .{});                    // to read, diff and edit
-try app.saveScene("levels/meadow.scene", .{ .format = .cbor });  // the same, in fewer bytes
-const loaded = try app.loadScene("levels/meadow.scene", .{});    // either: it can tell
+try app.registerComponents(.{ Wander, Player });                       // the game's own
+try app.saveScene("res://levels/meadow.json", .{});                    // to read, diff and edit
+try app.saveScene("res://levels/meadow.scene", .{ .format = .cbor });  // the same, in fewer bytes
+const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either: it can tell
 ```
 
 ```json
 {
-  "fluxion_scene": 1,
+  "fluxion_scene": 2,
   "entities": [
     {
+      "uuid": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c",
       "name": "player",
       "Transform2D": { "x": 320.0, "y": 180.0 },
-      "Sprite": { "texture": "art/hero.png", "width": 48.0, "height": 48.0 }
+      "Sprite": { "texture": "res://art/hero.png", "width": 48.0, "height": 48.0 }
     },
     {
-      "Transform2D": { "y": -6.0, "parent": 0 },
-      "Sprite": { "texture": "art/turret.png" }
+      "uuid": "5c2d7e9f-0a1b-4c3d-8e5f-6a7b8c9d0e1f",
+      "Transform2D": { "y": -6.0, "parent": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c" },
+      "Sprite": { "texture": "res://art/turret.png" }
     }
-  ]
+  ],
+  "assets": {
+    "res://art/hero.png": { "uid": "uid://2f8a1c40-6d3e-4b17-9f22-c1a5e7b90d34", "filter": "linear" },
+    "res://art/turret.png": { "uid": "uid://9d1e4b7a-3c2f-4e8d-a1b6-0f5c7e2d9a83" }
+  }
 }
 ```
 
 - **An entity is an object of its components**, each under its type's name,
-  with the entity's own name beside them. A field that holds its default is
-  left out, so the file says what is particular about each thing - and a
+  with the entity's UUID and name beside them. A field that holds its default
+  is left out, so the file says what is particular about each thing - and a
   field added to a component later reads as its default from every scene
   written before it.
 - **What a handle points at is written, not the handle.** An entity in a
-  field - a transform's `parent`, a game's `leader` - is that entity's place
-  in the list; a texture or a font is the file it was read from, with how a
-  texture is sampled when that is not the default. Loading mints new
-  entities, points every reference at them, and loads the files or finds
-  them already loaded. A texture made from pixels has no file, and is
-  written as `null`.
-- **A file's path is written from the scene's own directory**, with forward
-  slashes: `levels/meadow.json` holds `../art/hero.png`. So a scene opens
-  from whatever directory the program reading it was started in - an editor,
-  a test, the game - and a scene and its art can move together. An absolute
-  path, a system font's, stays as it is.
+  field - a transform's `parent`, a game's `leader` - is that entity's UUID,
+  so adding one at the top changes no other line of the file. A texture or a
+  font is its file's `res://` path, and in `assets` its UUID and, for a
+  texture sampled otherwise than by default, how. Loading mints new
+  entities, points every reference at them - in the scene first, then in the
+  world, so one scene can name an entity another brought - and loads the
+  files or finds them already loaded. A texture made from pixels has no
+  file, and is written as `null`.
+- **A version 1 scene still reads**: references by their place in the list,
+  and paths from the scene file's own directory, as they were written.
 - **JSON and CBOR are one scene in two spellings.**
   [Fluxion JSON](https://github.com/kisstp2006/fluxion-json) writes and reads
   both, and loading tells them apart by the bytes CBOR starts with. CBOR is
@@ -567,9 +712,10 @@ const loaded = try app.loadScene("levels/meadow.scene", .{});    // either: it c
   comments and all.
 - **A scene holds what it has been told about.** The seven engine components
   are registered from the start, and a game's own under their type's name -
-  or a `pub const scene_name`, for two types called the same. A component in
-  a file that nothing here is registered as is passed over and counted in
-  `loaded.skipped`, so a scene from a newer build still opens.
+  or a `pub const scene_name`, for two types called the same, or failing
+  that its `reflect_name`. A component in a file that nothing here is
+  registered as is passed over and counted in `loaded.skipped`, so a scene
+  from a newer build still opens.
 - **A mistake says where it is** - the line and column, or the byte in CBOR,
   and the path to the value - and leaves the world as it was:
 
@@ -578,7 +724,7 @@ const loaded = try app.loadScene("levels/meadow.scene", .{});    // either: it c
   ```
 
 - **A load goes beside what is there.** A level over another is
-  `app.clearWorld()` - every entity and every name gone at once - and then
+  `app.clearWorld()` - every entity, name and UUID gone at once - and then
   the load. The font a `Text2D` with no font of its own is drawn in belongs
   to the program, not the scene: whichever was loaded first.
 - **One entity on its own** is `scene.EntityJson`, for `json.stringify` or
@@ -589,7 +735,100 @@ const loaded = try app.loadScene("levels/meadow.scene", .{});    // either: it c
 `zig build example-creatures -- --frames 1 --save-scene creatures.json` writes
 the example's world - JSON for a path ending in `.json`, CBOR for any other -
 and `-- --scene creatures.json` starts from that file instead of from the code
-that built the world. Its 74 entities take 30 KB as JSON and 13 KB as CBOR.
+that built the world. Its 74 entities take 36 KB as JSON and 19 KB as CBOR -
+a UUID each and one for every reference, 6 KB of either - and the saving
+leaves `examples/atlas.png.uid` beside the sheet it names.
+
+## 🪞 Reflection
+
+```zig
+const place = app.componentOf(player, "Transform2D").?;       // by the name a scene gives it
+try (try place.field("x")).setFloat(320);                      // written where it is
+for (place.type.fields()) |field| inspect(field, try place.field(field.name.slice()));
+
+var found: [16]fx.App.ComponentValue = undefined;
+for (app.componentsOf(player, &found)) |component| show(component.name, component.value);
+_ = try app.addComponentNamed(player, "Collider2D");           // an inspector's Add Component
+
+var title: []const u8 = "Level 2";
+try app.callNamed("setWindowTitle", &.{.of(&title)}, null);    // the engine, called by name
+try app.setStateNamed("Mode", "paused");                       // a state, by its names
+```
+
+An inspector, a console and a script want the game's types while it runs -
+long after Zig's own reflection has finished with them.
+[Fluxion Reflect](https://github.com/kisstp2006/fluxion-reflect) keeps them
+as data, and the engine hands its components and its calls out through it.
+
+- **Every component is described**: its fields, their types, offsets and
+  defaults, and what a number means where its name does not say, from
+  `fx.attr` - a `Range` for a slider on a sprite's pivot, a colour's
+  channels, a collider's friction and bounce; `Angle` on every rotation,
+  kept in radians and shown in degrees; a `Unit` after a number (`px`, `s`,
+  `/s`); `Layers` on a collider's category and mask, a toggle a bit; a `Doc`
+  for a zero that is not zero ("zero is the sprite's width"); `Hidden` on
+  `Text2D`'s buffer, whose words are a `Property` instead - `text`, read
+  with its method `slice` and written with `set`, which keeps the length and
+  the UTF-8 right and is `Multiline`; `ReadOnly` on an animation's
+  `finished`, which only the engine sets. A descriptor is made at compile
+  time and kept in the binary: nothing is registered or allocated to have
+  one.
+- **A component is found by the name a scene gives it**, so a scene, an
+  inspector and a console say the same thing. `componentsOf` lists an
+  entity's in the order they were registered, as many as the buffer holds.
+  What comes back points into the world - writing it is writing the
+  component - and lasts as a `world.get` pointer does, until rows next move.
+  `addComponentNamed` and `removeComponentNamed` move them, so they are for
+  between frames and not for inside a query.
+- **A game's components are described the same way** once
+  `registerComponents` has them, and say more about themselves with the
+  declarations the engine's use:
+
+  ```zig
+  const Health = extern struct {
+      points: f32 = 100,
+      regen: f32 = 0,
+
+      pub const reflect_name = "Health";   // its scene name too, unless it has a scene_name
+      pub const reflect_fields = .{
+          .points = .{fx.attr.Range{ .min = 0, .max = 100 }},
+          .regen = .{ fx.attr.Unit{ .text = "/s" }, fx.attr.Doc{ .text = "Points back a second" } },
+      };
+      pub const reflect_methods = .{.heal};
+
+      pub fn heal(self: *Health, amount: f32) void {
+          self.points = @min(self.points + amount, 100);
+      }
+  };
+  ```
+
+  Two types given one `reflect_name` are `error.ComponentNameTaken`: a name
+  is what a description is found by. A `Property` in `reflect_attributes`
+  is checked when the component is registered: a getter or a setter it
+  names that `reflect_methods` does not list, or a getter that does not
+  return what the setter takes, stops the build.
+- **`App` is described by its calls, not its insides.** `App.reflect_methods`
+  lists the ones that take and give plain values - names, the window, the
+  clipboard, scenes, components and states by name - and `app.callNamed`
+  makes one with values for arguments. An error the call returns is
+  returned, where a bare `reflect.Value.call` would put it in a result, or
+  nowhere. A console finds the call, parses each word into its parameter's
+  type - `Value.parse` reads Zig's own syntax - and calls it.
+- **`app.types` holds every type by name**: the seven components, the values
+  inside them - `Color`, `Region`, the texture and font handles -
+  `DebugViews`, and a game's components as they are registered. A game's own
+  console commands go in beside them with `app.types.addFunction("give", give)`,
+  to be called through `reflect.call`.
+- **`App`'s calls are compiled in only where they are used** - by a
+  `callNamed` somewhere in the program, or by `app.types.add(fx.App)`, which
+  puts it beside the rest - because a listed call comes with everything it
+  reaches. When every `create` registered `App`, that cost a ReleaseSmall
+  `pong` 69 KB (1,247 KB to 1,316 KB), `crates` 64 KB, and `creatures`,
+  which reads scenes already, 33 KB.
+- **States by name, too.** A state is an enum the engine was never compiled
+  against, so `app.stateNamed("Mode")` and `app.setStateNamed("Mode", "paused")`
+  name it as a scene names a component. An editor's state panel walks
+  `app.states.slots`, each with its type and so the names of its values.
 
 ## 🧪 It runs with no window and no GPU
 
@@ -611,7 +850,7 @@ how the screenshot in a pull request gets made.
 Those are the engine's own flags, and a game gets them in two lines:
 
 ```zig
-const flags = try App.parseFlags(App.Flags, arguments);  // --backend --width --height --frames --capture
+const flags = try App.parseFlags(App.Flags, arguments);  // --backend --width --height --frames --capture --root
 const app = try App.create(gpa, flags.apply(.{ .title = "game", .io = io }));
 ```
 
@@ -632,7 +871,7 @@ const fluxion = b.dependency("fluxion_engine", .{ .target = target, .optimize = 
 exe_mod.addImport("fluxion_engine", fluxion.module("fluxion_engine"));
 ```
 
-Twelve dependencies come with it and **none of them is lazy**, which is the
+Thirteen dependencies come with it and **none of them is lazy**, which is the
 difference between an engine and the libraries under it. A library keeps its
 window and its file reading behind `lazy` so a consumer never downloads what
 it does not use; an engine uses all of it by definition.
@@ -647,18 +886,30 @@ it does not use; an engine uses all of it by definition.
 [Debug draw](https://github.com/kisstp2006/fluxion-debugdraw) ·
 [JSON](https://github.com/kisstp2006/fluxion-json) ·
 [Physics](https://github.com/kisstp2006/fluxion-physics) ·
+[Reflect](https://github.com/kisstp2006/fluxion-reflect) ·
 [Math](https://github.com/kisstp2006/fluxion-math) ·
 [Id](https://github.com/kisstp2006/fluxion-id)
 
-**`fluxion-math` and `fluxion-id` are pinned rather than pathed**, and they
-have to be: `Device.clip()` returns a `math.Clip` and `math.orthographic`
-takes one, so the two must be the *same* type - and a Zig package is
-identified by where it came from. A path here and a pin inside `fluxion-rhi`
-makes two copies of one library and a compiler message reading
+**Every dependency is pinned to a pushed commit**, so `zig fetch` builds the
+engine anywhere and not only beside the repositories it is made of. A change
+pushed to one of them reaches the engine when its pin moves:
+
+```bash
+zig fetch --save=fluxion_rhi git+https://github.com/kisstp2006/fluxion-rhi#<commit>
+```
+
+**Some pins have to agree.** `Device.clip()` returns a `math.Clip` and
+`math.orthographic` takes one, so the two must be the *same* type - and a Zig
+package is identified by what it holds. `fluxion-math` and `fluxion-id` are
+pinned where `fluxion-rhi` pins them; another commit would be two copies of
+one library and a compiler message reading
 `expected type 'proj.Clip', found 'proj.Clip'`. The same goes for
 `fluxion-jobs`, which this package never names: `fluxion-physics` pins it
 where `fluxion-ecs` does, so a step runs on the scheduler `app.jobs` already
-is.
+is. And the two renderers that draw with `fluxion-rhi` - fluxion-ui's and
+fluxion-debugdraw's - are built here from their source with this package's
+rhi, because one pins its own at a commit of its choosing and the other names
+it by path.
 
 ## 👾 Examples
 
@@ -711,6 +962,7 @@ accounted for the same way: each is what its example's `--capture` wrote.
 ```bash
 zig build example-crates
 zig build example-crates -- --frames 240 --capture crates.png
+zig build example-crates -- --views on
 ```
 
 **`crates`** is the physics: a floor, walls and a ramp that are colliders
@@ -718,7 +970,8 @@ with no body, a pile of crates, a ball on a rod from a pin, and a basket -
 a sensor - that counts what falls into it from `app.contactsBegun()` and
 `contactsEnded()`. Nothing in it makes a body. Left click drops a crate,
 right click a ball, and space writes a velocity into every crate at once;
-the red line is `app.castRay`, stopped at whatever crosses it first.
+the red line is `app.castRay`, stopped at whatever crosses it first. F3 -
+or `--views on` - turns on the colliders, bodies and stats debug views.
 
 ## ✅ What is here, and what is not
 
@@ -728,6 +981,10 @@ Here, and checked by the tests:
   `time.delta` that is the step inside it.
 - Commands: spawn, despawn, add and remove asked for from inside a query -
   from parallel workers too - and done in order when the system returns.
+- States: enums with one value at a time, changed between frames; systems in
+  a state or under a condition of the game's own; systems run on entering
+  and leaving; code gated by a state it has never heard of; and a paused
+  clock moved on by one step.
 - Keyboard and mouse as levels and edges, with typing kept in order, and
   edges that a fixed step hears exactly once.
 - Controls as data: an `AxisBinding` holds two keys, a second two, a stick
@@ -774,15 +1031,26 @@ Here, and checked by the tests:
   over the 2D layer, fed from the keyboard, the mouse and the pads before the
   game's systems, keeping the wheel it used, and setting the pointer's shape.
 - Debug drawing: lines, shapes and text over the world or in screen pixels,
-  for a frame, for some seconds, or until the next fixed step.
+  for a frame, for some seconds, or until the next fixed step; views of
+  colliders, bodies, transforms, sprites, cameras and frame stats the engine
+  draws itself; one switch for all of it, and a key for the switch.
 - Physics: bodies and colliders as components, made, changed and taken away
   with them; boxes and circles sized by their sprites; compound bodies from
   children; places and speeds written back after each step; contacts once per
   frame or per step; rays, points and boxes asked in entities.
-- Scenes: the world, its names and every registered component written as
-  JSON or CBOR and read back, with entity references rewritten, textures and
-  fonts found again by the file they came from, relative to the scene, and a
-  mistake reported at its line and column.
+- Scenes: the world, its names, its UUIDs and every registered component
+  written as JSON or CBOR and read back, with entity references by UUID -
+  inside the scene first, then in the world - textures and fonts found again
+  by their `.uid` files or their `res://` paths, version 1 scenes still read,
+  and a mistake reported at its line and column.
+- The project's files: `res://` paths from a root the program can be started
+  away from, `uid://` for a file by the UUID beside it, files moved with
+  their `.uid` files found where they went, and entities' UUIDs kept beside
+  the world as names are.
+- Reflection: every component described - fields, defaults, ranges, units -
+  and found on an entity by its scene name, read and written in place, added
+  and taken off; the engine's calls and a game's states made by name, errors
+  and all.
 - The world drawn into a texture through a view of its own, and a window
   that shows only the interface: an editor's scene panel, or a minimap.
 - Headless everything, and `capture` for a picture without a screen.

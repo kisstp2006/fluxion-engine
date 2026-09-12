@@ -3,7 +3,7 @@
 //! What the GPU is holding, and the handles a component points at it with.
 //!
 //! ```zig
-//! const hero = try app.assets.loadTexture("art/hero.png", .{});
+//! const hero = try app.assets.loadTexture("res://art/hero.png", .{});
 //! _ = try app.world.spawnWith(.{
 //!     Transform2D{ .x = 100, .y = 80 },
 //!     Sprite{ .texture = hero },
@@ -16,6 +16,11 @@
 //! untextured sprite is white times its tint - one pipeline, no branch in the
 //! shader. Loading is synchronous: right for a loading screen, not for
 //! streaming.
+//!
+//! A file is named as `Project` names it: `res://` from the project's root,
+//! `uid://` by the UUID beside it, or the operating system's path - and kept
+//! by its `res://` path whenever it lies inside the project, however it was
+//! asked for.
 
 const std = @import("std");
 const testing = std.testing;
@@ -27,8 +32,10 @@ const id = @import("fluxion_id");
 const typeface = @import("fluxion_font");
 
 const Atlas = @import("text/Atlas.zig");
+const Project = @import("Project.zig");
 
 const Assets = @This();
+const log = std.log.scoped(.fluxion_engine);
 
 /// One texture on the device, and what the renderer needs to know about it
 /// without asking the driver.
@@ -39,7 +46,8 @@ pub const Texture = struct {
     /// Per texture, so pixel art and a smooth background can be drawn at once.
     filter: rhi.Filter,
     wrap: rhi.Wrap,
-    /// The file it was read from, as it was asked for, or empty when it was
+    /// The file it was read from - `res://` inside the project, the
+    /// operating system's absolute path outside it - or empty when it was
     /// made from pixels in memory. What a scene writes in the handle's place.
     source: []const u8 = "",
 };
@@ -56,6 +64,10 @@ pub const TextureHandle = extern struct {
     /// No texture. Also what all-zero bytes mean: generation zero is never
     /// handed out.
     pub const none: TextureHandle = .{};
+
+    /// Two numbers that mean something only to this run's `Assets`: a tool
+    /// shows `Assets.textureSource` instead.
+    pub const reflect_name = "TextureHandle";
 
     pub fn isNone(self: TextureHandle) bool {
         return self.generation == 0;
@@ -98,6 +110,9 @@ pub const FontHandle = extern struct {
 
     /// No font of its own, which for a `Text2D` means the default one.
     pub const none: FontHandle = .{};
+
+    /// A tool shows `Assets.fontSource` instead, as for a texture.
+    pub const reflect_name = "FontHandle";
 
     pub fn isNone(self: FontHandle) bool {
         return self.generation == 0;
@@ -143,6 +158,8 @@ pub const LoadOptions = struct {
 gpa: Allocator,
 device: *rhi.Device,
 io: ?std.Io,
+/// What a path is resolved against, and the UUIDs of the files read.
+project: *Project,
 
 textures: Table = .empty,
 fonts: FontTable = .empty,
@@ -156,11 +173,12 @@ white: TextureHandle = .none,
 
 samplers: Samplers,
 
-pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io) Error!Assets {
+pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io, project: *Project) Error!Assets {
     var self: Assets = .{
         .gpa = gpa,
         .device = device,
         .io = io,
+        .project = project,
         .samplers = .initFill(.initFill(.none)),
     };
     errdefer self.deinit();
@@ -242,15 +260,20 @@ fn addTexture(
     }));
 }
 
-/// A texture from a PNG. The path is relative to the working directory.
+/// A texture from a PNG: `res://art/hero.png`, `uid://...`, or the
+/// operating system's path. Loading a file twice makes two textures -
+/// `findTexture` first.
 pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !TextureHandle {
     const io = self.io orelse return Error.NoIo;
-
-    var decoded = try image.png.readFile(self.gpa, io, path, .{});
-    defer decoded.deinit(self.gpa);
-
-    const source = try self.gpa.dupe(u8, path);
+    const source = try self.project.canonical(self.gpa, path);
     errdefer self.gpa.free(source);
+    const file = try self.project.osPath(self.gpa, source);
+    defer self.gpa.free(file);
+
+    var decoded = try image.png.readFile(self.gpa, io, file, .{});
+    defer decoded.deinit(self.gpa);
+    self.learnUid(source);
+
     return self.addTexture(
         decoded.width,
         decoded.height,
@@ -258,20 +281,47 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
         .{
             .filter = options.filter,
             .wrap = options.wrap,
-            .label = if (options.label.len == 0) path else options.label,
+            .label = if (options.label.len == 0) source else options.label,
         },
         source,
     );
 }
 
-/// The texture already read from `path`, if one was. The path is compared
-/// as it was spelt, so `art/a.png` and `art\a.png` are two textures.
+/// The texture already read from `path`, if one was: the same file, however
+/// either was spelt - `res://art/a.png`, `art/a.png` from the root, its
+/// absolute path.
 pub fn findTexture(self: *Assets, path: []const u8) ?TextureHandle {
+    const named = self.project.canonical(self.gpa, path) catch null;
+    defer if (named) |text| self.gpa.free(text);
+    const wanted = named orelse path;
     var it = self.textures.iterator();
     while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry.value.source, path)) return .fromId(entry.handle);
+        if (std.mem.eql(u8, entry.value.source, wanted)) return .fromId(entry.handle);
     }
     return null;
+}
+
+/// Remember the UUID beside a project's file, for the scene that names it.
+/// A `.uid` file that does not read is said so, and the file loads without.
+fn learnUid(self: *Assets, source: []const u8) void {
+    if (!Project.isProjectPath(source)) return;
+    _ = self.project.uidOf(source) catch |err| {
+        log.warn("the {s} file beside {s} does not read: {t}", .{ Project.uid_extension, source, err });
+    };
+}
+
+/// Give every file of the project's that is loaded, and has no UUID, one -
+/// in a `.uid` file beside it. Saving a scene does it, so the scene can name
+/// its files by their UUIDs.
+pub fn ensureUids(self: *Assets) !void {
+    var textures = self.textures.iterator();
+    while (textures.next()) |entry| {
+        if (Project.isProjectPath(entry.value.source)) _ = try self.project.ensureUid(entry.value.source);
+    }
+    var faces = self.fonts.iterator();
+    while (faces.next()) |entry| {
+        if (Project.isProjectPath(entry.value.*.source)) _ = try self.project.ensureUid(entry.value.*.source);
+    }
 }
 
 /// Open a font from bytes in memory. The bytes are copied, because the
@@ -324,26 +374,32 @@ pub fn systemFontPath() []const u8 {
     };
 }
 
-/// Open a TrueType file from the disc.
+/// Open a TrueType file from the disc, named as `loadTexture` names one.
 pub fn loadFont(self: *Assets, path: []const u8, options: FontOptions) !FontHandle {
     const io = self.io orelse return Error.NoIo;
-
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(32 << 20));
-    defer self.gpa.free(bytes);
-
-    const source = try self.gpa.dupe(u8, path);
+    const source = try self.project.canonical(self.gpa, path);
     errdefer self.gpa.free(source);
+    const file = try self.project.osPath(self.gpa, source);
+    defer self.gpa.free(file);
+
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .limited(32 << 20));
+    defer self.gpa.free(bytes);
+    self.learnUid(source);
+
     return self.addFont(bytes, .{
         .atlas = options.atlas,
-        .label = if (options.label.len == 0) path else options.label,
+        .label = if (options.label.len == 0) source else options.label,
     }, source);
 }
 
 /// The font already read from `path`, if one was. See `findTexture`.
 pub fn findFont(self: *Assets, path: []const u8) ?FontHandle {
+    const named = self.project.canonical(self.gpa, path) catch null;
+    defer if (named) |text| self.gpa.free(text);
+    const wanted = named orelse path;
     var it = self.fonts.iterator();
     while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry.value.*.source, path)) return .fromId(entry.handle);
+        if (std.mem.eql(u8, entry.value.*.source, wanted)) return .fromId(entry.handle);
     }
     return null;
 }
@@ -423,7 +479,9 @@ test "a handle stops resolving when what it named is unloaded" {
     var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
     defer device.deinit();
 
-    var assets: Assets = try .init(testing.allocator, &device, null);
+    var project: Project = try .init(testing.allocator, null, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, null, &project);
     defer assets.deinit();
 
     const handle = try assets.textureFromPixels(2, 2, &(.{255} ** 16), .{});
@@ -442,7 +500,9 @@ test "there is a white texel before anything is loaded" {
     var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
     defer device.deinit();
 
-    var assets: Assets = try .init(testing.allocator, &device, null);
+    var project: Project = try .init(testing.allocator, null, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, null, &project);
     defer assets.deinit();
 
     try testing.expect(!assets.white.isNone());
@@ -453,7 +513,9 @@ test "the first font opened becomes the default" {
     var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
     defer device.deinit();
 
-    var assets: Assets = try .init(testing.allocator, &device, null);
+    var project: Project = try .init(testing.allocator, null, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, null, &project);
     defer assets.deinit();
 
     try testing.expect(assets.default_font.isNone());
@@ -464,7 +526,9 @@ test "a font keeps its address when more are loaded" {
     var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
     defer device.deinit();
 
-    var assets: Assets = try .init(testing.allocator, &device, testing.io);
+    var project: Project = try .init(testing.allocator, testing.io, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, testing.io, &project);
     defer assets.deinit();
 
     const first = assets.loadFont(systemFontPath(), .{ .atlas = 64 }) catch return error.SkipZigTest;
@@ -478,7 +542,9 @@ test "every filter and wrap has a sampler of its own" {
     var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
     defer device.deinit();
 
-    var assets: Assets = try .init(testing.allocator, &device, null);
+    var project: Project = try .init(testing.allocator, null, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, null, &project);
     defer assets.deinit();
 
     const tile = try assets.textureFromPixels(1, 1, &.{ 255, 255, 255, 255 }, .{ .wrap = .repeat });
@@ -491,8 +557,44 @@ test "reading a file without an Io says so rather than crashing" {
     var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
     defer device.deinit();
 
-    var assets: Assets = try .init(testing.allocator, &device, null);
+    var project: Project = try .init(testing.allocator, null, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, null, &project);
     defer assets.deinit();
 
     try testing.expectError(Error.NoIo, assets.loadTexture("nothing.png", .{}));
+}
+
+test "a file inside the project is kept by its res:// path, and found by any spelling of it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDirPath(testing.io, "art");
+    var png_buffer: [160]u8 = undefined;
+    const png = try std.fmt.bufPrint(&png_buffer, "{s}/art/hero.png", .{root});
+    try image.png.writeFile(testing.allocator, testing.io, png, .{ .width = 1, .height = 1, .pixels = &.{ 255, 255, 255, 255 }, .row_pitch = 4 }, .{});
+
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+    var project: Project = try .init(testing.allocator, testing.io, root);
+    defer project.deinit();
+    const uid = try project.ensureUid("res://art/hero.png");
+
+    // Another run, which learns the UUID from the file beside the texture.
+    var fresh: Project = try .init(testing.allocator, testing.io, root);
+    defer fresh.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, testing.io, &fresh);
+    defer assets.deinit();
+
+    const hero = try assets.loadTexture(png, .{});
+    try testing.expectEqualStrings("res://art/hero.png", assets.textureSource(hero).?);
+    try testing.expect(fresh.knownUid("res://art/hero.png").?.eql(uid));
+
+    try testing.expect(assets.findTexture("res://art/hero.png").?.eql(hero));
+    try testing.expect(assets.findTexture("res://art/./hero.png").?.eql(hero));
+    try testing.expect(assets.findTexture(png).?.eql(hero));
+    var by_uid: [64]u8 = undefined;
+    try testing.expect(assets.findTexture(try std.fmt.bufPrint(&by_uid, "uid://{f}", .{uid})).?.eql(hero));
+    try testing.expect(assets.findTexture("res://art/villain.png") == null);
 }

@@ -29,6 +29,7 @@ const Allocator = std.mem.Allocator;
 
 const App = @import("App.zig");
 const Commands = @import("commands.zig");
+const States = @import("states.zig");
 
 /// What a system is: a function that gets the whole application. Declaring
 /// queries in the signature, as Bevy does, waits for a scheduler that could
@@ -48,24 +49,63 @@ pub const Stage = enum {
     pub const count = @typeInfo(Stage).@"enum".fields.len;
 };
 
+/// When a system may run, besides its stage coming round.
+pub const Condition = union(enum) {
+    /// While a state has this value. See `App.addSystemIn`.
+    state: States.Value,
+    /// While this says so. See `App.addSystemIf`.
+    custom: *const fn (app: *App) bool,
+
+    pub fn holds(self: Condition, app: *App) bool {
+        return switch (self) {
+            .state => |wanted| app.states.is(wanted),
+            .custom => |check| check(app),
+        };
+    }
+};
+
 /// One registered system, and what to call it in a message.
 pub const Entry = struct {
     name: []const u8,
     run: System,
     time_this_frame: std.Io.Duration = .zero,
     time_last_frame: std.Io.Duration = .zero,
+    /// Its own, from `App.addSystemIn` or `App.addSystemIf`.
+    condition: ?Condition = null,
+    /// The one it was added under, from `App.addSystemsIn`.
+    gate: ?Condition = null,
+
+    fn mayRun(self: *const Entry, app: *App) bool {
+        if (self.condition) |condition| if (!condition.holds(app)) return false;
+        if (self.gate) |gate| if (!gate.holds(app)) return false;
+        return true;
+    }
+};
+
+/// A system run when a state takes a value, or leaves it.
+pub const Hook = struct {
+    on: On,
+    state: States.Value,
+    entry: Entry,
+
+    pub const On = enum { enter, exit };
 };
 
 /// What went wrong, and where. See `Schedule.failed`.
 pub const Failure = struct {
-    stage: Stage,
+    /// Null for a system run on a change of state.
+    stage: ?Stage,
     name: []const u8,
     err: anyerror,
 
     /// Prints `the 'move ball' system in stage .fixed failed: OutOfMemory`
     /// with `{f}`.
     pub fn format(self: Failure, w: *std.Io.Writer) std.Io.Writer.Error!void {
-        try w.print("the '{s}' system in stage .{t} failed: {t}", .{ self.name, self.stage, self.err });
+        if (self.stage) |stage| {
+            try w.print("the '{s}' system in stage .{t} failed: {t}", .{ self.name, stage, self.err });
+        } else {
+            try w.print("the '{s}' system, run on a change of state, failed: {t}", .{ self.name, self.err });
+        }
     }
 };
 
@@ -83,10 +123,14 @@ pub const Schedule = struct {
     /// `app.commands`, done after each system. Null runs the systems alone.
     commands: ?*Commands = null,
 
+    /// The systems run on entering and leaving states' values.
+    hooks: std.ArrayList(Hook) = .empty,
+
     pub const empty: Schedule = .{};
 
     pub fn deinit(self: *Schedule, gpa: Allocator) void {
         for (&self.stages) |*list| list.deinit(gpa);
+        self.hooks.deinit(gpa);
         self.* = undefined;
     }
 
@@ -99,27 +143,58 @@ pub const Schedule = struct {
         name: []const u8,
         system: System,
     ) Allocator.Error!void {
-        try self.stages[@intFromEnum(stage)].append(gpa, .{ .name = name, .run = system });
+        try self.addEntry(gpa, stage, .{ .name = name, .run = system });
     }
 
-    /// Run one stage's systems in order, and stop at the first that fails:
-    /// the ones after it usually read what it should have written. What a
-    /// system asked of `app.commands` is done when it returns, and counted in
-    /// its time.
+    /// `add`, with the conditions it runs under.
+    pub fn addEntry(self: *Schedule, gpa: Allocator, stage: Stage, entry: Entry) Allocator.Error!void {
+        try self.stages[@intFromEnum(stage)].append(gpa, entry);
+    }
+
+    pub fn addHook(self: *Schedule, gpa: Allocator, hook: Hook) Allocator.Error!void {
+        try self.hooks.append(gpa, hook);
+    }
+
+    /// Run one stage's systems in order - those whose conditions hold - and
+    /// stop at the first that fails: the ones after it usually read what it
+    /// should have written. What a system asked of `app.commands` is done
+    /// when it returns, and counted in its time.
     pub fn run(self: *Schedule, stage: Stage, app: *App) anyerror!void {
-        for (self.stages[@intFromEnum(stage)].items) |*entry| {
-            const started = if (self.io) |io| std.Io.Timestamp.now(io, .awake) else null;
-            entry.run(app) catch |err| {
-                if (self.commands) |commands| commands.clear();
-                self.failed = .{ .stage = stage, .name = entry.name, .err = err };
-                return err;
-            };
-            if (self.commands) |commands| commands.apply() catch |err| {
-                self.failed = .{ .stage = stage, .name = entry.name, .err = err };
-                return err;
-            };
-            if (started) |then| entry.time_this_frame.nanoseconds += then.durationTo(.now(self.io.?, .awake)).nanoseconds;
+        // By index: a system may add systems, and the list may move.
+        var at: usize = 0;
+        while (at < self.stages[@intFromEnum(stage)].items.len) : (at += 1) {
+            const entry = &self.stages[@intFromEnum(stage)].items[at];
+            if (!entry.mayRun(app)) continue;
+            const took = try self.call(stage, entry.*, app);
+            self.stages[@intFromEnum(stage)].items[at].time_this_frame.nanoseconds += took;
         }
+    }
+
+    /// Run the systems hooked on entering, or on leaving, one state's value.
+    pub fn runHooks(self: *Schedule, on: Hook.On, state: States.Value, app: *App) anyerror!void {
+        var at: usize = 0;
+        while (at < self.hooks.items.len) : (at += 1) {
+            const hook = self.hooks.items[at];
+            if (hook.on != on or !hook.state.eql(state) or !hook.entry.mayRun(app)) continue;
+            const took = try self.call(null, hook.entry, app);
+            self.hooks.items[at].entry.time_this_frame.nanoseconds += took;
+        }
+    }
+
+    /// One system, and the commands it asked for. How long it took.
+    fn call(self: *Schedule, stage: ?Stage, entry: Entry, app: *App) anyerror!i96 {
+        const started = if (self.io) |io| std.Io.Timestamp.now(io, .awake) else null;
+        entry.run(app) catch |err| {
+            if (self.commands) |commands| commands.clear();
+            self.failed = .{ .stage = stage, .name = entry.name, .err = err };
+            return err;
+        };
+        if (self.commands) |commands| commands.apply() catch |err| {
+            self.failed = .{ .stage = stage, .name = entry.name, .err = err };
+            return err;
+        };
+        const then = started orelse return 0;
+        return then.durationTo(.now(self.io.?, .awake)).nanoseconds;
     }
 
     pub fn beginFrame(self: *Schedule) void {

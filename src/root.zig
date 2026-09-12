@@ -42,6 +42,24 @@ pub const Clipboard = @import("clipboard.zig");
 /// them to return: `app.commands`.
 pub const Commands = @import("commands.zig");
 
+/// What the engine draws into `app.debug` by itself - colliders, bodies,
+/// transforms, sprites, cameras, stats - each off until asked for:
+/// `app.debug_views`.
+pub const DebugViews = @import("debug_views.zig");
+
+/// A game's own states, each an enum with one value at a time: `app.state`,
+/// `app.setState`, `app.addSystemIn`, `app.onEnter`.
+pub const States = @import("states.zig");
+
+/// Where a game's files are: `res://` paths from the project's root, and
+/// files known by the UUID in the `.uid` file beside them: `app.project`.
+pub const Project = @import("Project.zig");
+
+/// A 128-bit name for a thing, unique everywhere: what an entity is known by
+/// in a scene - `app.uuidOf`, `app.findUuid` - and a project's file by in its
+/// `.uid` file.
+pub const Uuid = @import("fluxion_id").Uuid;
+
 pub const assets = @import("assets.zig");
 pub const components = @import("components.zig");
 pub const color = @import("color.zig");
@@ -179,6 +197,15 @@ pub const json = @import("fluxion_json");
 /// anything else a body can do.
 pub const physics = @import("fluxion_physics");
 
+/// Types read and written at run time: what `App.componentOf` hands out, what
+/// `App.types` holds, and what `App.callNamed` calls through.
+pub const reflect = @import("fluxion_reflect");
+
+/// What a component's field means, for an inspector to show it by: a range,
+/// an angle, a unit, layers, several lines, a value behind a getter and a
+/// setter. `reflect.attr`'s five and five more, in one namespace.
+pub const attr = @import("attr.zig");
+
 /// A physical key, by its position on a US layout.
 pub const Key = platform.Key;
 
@@ -199,6 +226,10 @@ test {
     _ = Interface;
     _ = Clipboard;
     _ = Commands;
+    _ = DebugViews;
+    _ = States;
+    _ = Project;
+    _ = attr;
     _ = assets;
     _ = components;
     _ = color;

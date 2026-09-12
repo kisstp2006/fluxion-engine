@@ -32,11 +32,17 @@ const debugdraw_rhi = @import("fluxion_debugdraw_rhi");
 const ui_lib = @import("fluxion_ui");
 const typeface = @import("fluxion_font");
 const physics_lib = @import("fluxion_physics");
+const reflect = @import("fluxion_reflect");
+const Uuid = @import("fluxion_id").Uuid;
 
 const Assets = @import("assets.zig");
+const attr = @import("attr.zig");
 const Bodies = @import("bodies.zig");
 const Clipboard = @import("clipboard.zig");
 const Commands = @import("commands.zig");
+const DebugViews = @import("debug_views.zig");
+const Project = @import("Project.zig");
+const States = @import("states.zig");
 const Interface = @import("interface.zig");
 const Input = @import("input.zig");
 const Time = @import("time.zig");
@@ -62,7 +68,7 @@ pub const Error = error{
     /// `Window.isAbsent`.
     NoDisplay,
 } || Allocator.Error || rhi.Error || Window.Error || Assets.Error ||
-    sprite.Error || ecs.Jobs.Error || debugdraw_rhi.Error;
+    sprite.Error || ecs.Jobs.Error || debugdraw_rhi.Error || Project.InitError;
 
 /// Which drawing API to open.
 pub const Backend = enum {
@@ -118,6 +124,10 @@ pub const Options = struct {
     /// files and a fixed step, as in a test.
     io: ?std.Io = null,
 
+    /// The project's root directory, which `res://` paths are from. Null is
+    /// the working directory. See `Project`.
+    root: ?[]const u8 = null,
+
     /// Every frame counts as exactly this many seconds, whatever the clock
     /// says, so every run is the same. `Flags.apply` sets it for `--capture`.
     frame_time: ?f32 = null,
@@ -129,6 +139,10 @@ pub const Options = struct {
     /// A key that toggles borderless fullscreen, handled the same way. F11
     /// rather than Alt+Enter, which DXGI answers on its own on `d3d11`.
     fullscreen_key: ?platform.Key = null,
+
+    /// A key that shows and hides everything `debug` draws, handled the same
+    /// way: F3, say. See `App.debug_visible`.
+    debug_key: ?platform.Key = null,
 
     /// No window, no display, no GPU: the `none` backend, drawing into a
     /// texture.
@@ -171,6 +185,9 @@ pub const Flags = struct {
     /// `--capture shot.png`: where `saveCapture` puts the last frame. See
     /// `apply`.
     capture: ?[]const u8 = null,
+    /// `--root ../my-game`: the project's root, which `res://` paths are
+    /// from.
+    root: ?[]const u8 = null,
 
     /// How long a capture runs when `--frames` does not say: two seconds.
     pub const capture_frames = 120;
@@ -184,6 +201,7 @@ pub const Flags = struct {
         if (self.width) |width| out.width = width;
         if (self.height) |height| out.height = height;
         if (self.frames) |frames| out.frames = frames;
+        if (self.root) |root| out.root = root;
         if (self.capture != null) {
             out.frames = out.frames orelse capture_frames;
             out.frame_time = out.fixed_delta;
@@ -291,6 +309,10 @@ physics: physics_lib.World,
 /// Which body is which entity's. See `bodies.zig`.
 bodies: Bodies = .{},
 
+/// Where the game's files are - `res://` - and the UUIDs of the ones that
+/// have them. See `Project`.
+project: Project,
+
 assets: Assets,
 sprites: sprite.Renderer,
 
@@ -301,6 +323,12 @@ debug: debugdraw.Pen,
 debug_frame: debugdraw.Canvas,
 debug_steps: debugdraw.Canvas,
 debug_renderer: debugdraw_rhi.Renderer,
+/// Whether anything `debug` holds is drawn - a game's own shapes and the
+/// views below. `Options.debug_key` flips it.
+debug_visible: bool = true,
+/// What the engine draws into `debug` by itself, each off until asked for.
+/// See `debug_views.zig`.
+debug_views: DebugViews = .{},
 
 /// What `.ui` systems declare the interface into.
 ui: ui_lib.Ui,
@@ -326,13 +354,38 @@ orphans: std.ArrayList(ecs.Entity) = .empty,
 names: std.AutoArrayHashMapUnmanaged(ecs.Entity, []const u8) = .empty,
 by_name: std.StringHashMapUnmanaged(ecs.Entity) = .empty,
 
+/// Every entity given a UUID, and every UUID's entity: kept beside the world
+/// as names are, and written into a scene with it. An array map, for the same
+/// reason as `names`.
+uuids: std.AutoArrayHashMapUnmanaged(ecs.Entity, Uuid) = .empty,
+by_uuid: std.AutoHashMapUnmanaged(Uuid, ecs.Entity) = .empty,
+/// What `newUuid` draws from: seeded by the operating system, or with no
+/// `Io` by a constant, so a test makes the same ones every run.
+uuid_source: std.Random.DefaultCsprng,
+
 /// What a scene can hold, and what each component is called in one: the
 /// engine's own from the start, and a game's once `registerComponents` has
 /// been told about them.
 scene_components: scene.Registry = .{},
 
+/// Every type described at run time, by name: the components, the values in
+/// them, and `DebugViews`. A game's components join when they are
+/// registered, and its own functions with `types.addFunction`, for a console
+/// to find. See `componentOf`.
+///
+/// `App` is not in it until something adds it - `app.types.add(App)` - since
+/// its descriptor lists calls, and listing a call compiles it, and what it
+/// reaches, into the program: the scene reader and writer among them, 60 KB
+/// and more of a small game that never asked for them.
+types: reflect.Registry,
+
 input: Input = .{},
 schedule: Schedule = .empty,
+
+/// The game's own states: menu, playing, paused. See `states.zig`.
+states: States = .{},
+/// What `addSystemsIn` is adding under, while it runs.
+gate: ?schedule_mod.Condition = null,
 
 background: Color,
 
@@ -353,6 +406,7 @@ resized: bool = false,
 /// The engine's own shortcuts, from `Options`. Null is off.
 quit_key: ?platform.Key = null,
 fullscreen_key: ?platform.Key = null,
+debug_key: ?platform.Key = null,
 
 vsync_on: bool = true,
 
@@ -381,12 +435,15 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .jobs = undefined,
         .physics = .init(gpa, options.physics),
         .bodies = .{},
+        .project = undefined,
         .assets = undefined,
         .sprites = undefined,
         .debug = undefined,
         .debug_frame = .init(gpa),
         .debug_steps = .init(gpa),
         .debug_renderer = undefined,
+        .debug_visible = true,
+        .debug_views = .{},
         .ui = .init(gpa),
         .interface = .{},
         .clipboard = .{},
@@ -401,9 +458,15 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .orphans = .empty,
         .names = .empty,
         .by_name = .empty,
+        .uuids = .empty,
+        .by_uuid = .empty,
+        .uuid_source = undefined,
         .scene_components = .{},
+        .types = .init(gpa),
         .input = .{},
         .schedule = .{ .io = options.io, .commands = &self.commands },
+        .states = .{},
+        .gate = null,
         .background = options.background,
         .world_on_screen = true,
         .width = options.width,
@@ -411,6 +474,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .resized = false,
         .quit_key = options.quit_key,
         .fullscreen_key = options.fullscreen_key,
+        .debug_key = options.debug_key,
         .vsync_on = options.vsync,
         .running = true,
         .frames_left = options.frames,
@@ -422,8 +486,15 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     errdefer self.physics.deinit();
     self.time.fixed_delta = options.fixed_delta;
 
+    var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = @splat(0x5E);
+    if (options.io) |io| io.random(&seed);
+    self.uuid_source = .init(seed);
+    self.project = try .init(gpa, options.io, options.root);
+    errdefer self.project.deinit();
+
     errdefer self.scene_components.deinit(gpa);
-    inline for (.{
+    errdefer self.types.deinit();
+    self.registerComponents(.{
         components.Transform2D,
         components.Sprite,
         components.Text2D,
@@ -431,12 +502,14 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Camera2D,
         components.RigidBody2D,
         components.Collider2D,
-    }) |T| {
-        self.scene_components.add(gpa, T, comptime scene.nameOf(T)) catch |err| switch (err) {
-            error.ComponentNameTaken => unreachable,
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-    }
+    }) catch |err| switch (err) {
+        error.ComponentNameTaken => unreachable,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable,
+    };
 
     const backend = if (options.headless) .none else options.backend.resolve();
 
@@ -525,7 +598,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     });
     errdefer self.jobs.deinit();
 
-    self.assets = try .init(gpa, &self.device, options.io);
+    self.assets = try .init(gpa, &self.device, options.io, &self.project);
     errdefer self.assets.deinit();
 
     self.sprites = try .init(gpa, &self.device);
@@ -542,12 +615,16 @@ pub fn destroy(self: *App) void {
     const gpa = self.gpa;
 
     self.schedule.deinit(gpa);
+    self.states.deinit(gpa);
     self.snapshots.deinit(gpa);
     self.orphans.deinit(gpa);
     for (self.names.values()) |name| gpa.free(name);
     self.names.deinit(gpa);
     self.by_name.deinit(gpa);
+    self.uuids.deinit(gpa);
+    self.by_uuid.deinit(gpa);
     self.scene_components.deinit(gpa);
+    self.types.deinit();
     self.bodies.deinit(gpa);
     self.physics.deinit();
     self.debug_renderer.deinit();
@@ -558,6 +635,7 @@ pub fn destroy(self: *App) void {
     self.ui.deinit();
     self.sprites.deinit(gpa);
     self.assets.deinit();
+    self.project.deinit();
     self.jobs.deinit();
     self.commands.deinit();
     self.world.deinit();
@@ -584,7 +662,153 @@ pub fn destroy(self: *App) void {
 /// Zig cannot recover a function's name from a pointer. It is `comptime` so
 /// that it outlives the schedule, which keeps it uncopied.
 pub fn addSystem(self: *App, stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
-    return self.schedule.add(self.gpa, stage, name, system);
+    return self.schedule.addEntry(self.gpa, stage, .{ .name = name, .run = system, .gate = self.gate });
+}
+
+/// Add a system that runs only while `value`'s state has that value.
+///
+/// ```zig
+/// const Mode = enum { menu, playing, paused };
+/// try app.addSystemIn(.update, Mode.playing, "move", move);
+/// ```
+pub fn addSystemIn(self: *App, stage: Stage, value: anytype, comptime name: []const u8, system: System) Allocator.Error!void {
+    _ = try self.states.slotFor(self.gpa, @TypeOf(value));
+    return self.schedule.addEntry(self.gpa, stage, .{
+        .name = name,
+        .run = system,
+        .condition = .{ .state = .of(value) },
+        .gate = self.gate,
+    });
+}
+
+/// Add a system that runs only while `condition` says so, asked each time
+/// its stage comes round.
+pub fn addSystemIf(
+    self: *App,
+    stage: Stage,
+    condition: *const fn (app: *App) bool,
+    comptime name: []const u8,
+    system: System,
+) Allocator.Error!void {
+    return self.schedule.addEntry(self.gpa, stage, .{
+        .name = name,
+        .run = system,
+        .condition = .{ .custom = condition },
+        .gate = self.gate,
+    });
+}
+
+/// Every system `register` adds - to stages and to states - runs only while
+/// `value`'s state has that value. For code that does not know it is being
+/// gated: an editor adds a game's systems so, and they run in Play and not
+/// while it is editing.
+///
+/// ```zig
+/// const Play = enum { editing, playing, paused };
+/// try app.addSystemsIn(Play.playing, game.addSystems);
+/// ```
+pub fn addSystemsIn(self: *App, value: anytype, register: *const fn (app: *App) anyerror!void) anyerror!void {
+    _ = try self.states.slotFor(self.gpa, @TypeOf(value));
+    const outer = self.gate;
+    defer self.gate = outer;
+    self.gate = .{ .state = .of(value) };
+    try register(self);
+}
+
+// -------------------------------------------------------------------------
+// States
+// -------------------------------------------------------------------------
+
+/// Start a state at `initial` rather than at its first value. Before `run`;
+/// after it, this is `setState`.
+pub fn addState(self: *App, initial: anytype) Allocator.Error!void {
+    if (self.started) return self.setState(initial);
+    const slot = try self.states.slotFor(self.gpa, @TypeOf(initial));
+    slot.current = @intFromEnum(initial);
+}
+
+/// A state's value now. One nothing has named yet is at its first value.
+pub fn state(self: *const App, comptime T: type) T {
+    return self.states.get(T);
+}
+
+/// Change a state at the top of the next frame: the systems for leaving the
+/// old value run, then those for entering this one. The last asked for in a
+/// frame wins, and asking for the value it has does nothing.
+pub fn setState(self: *App, value: anytype) Allocator.Error!void {
+    try self.states.set(self.gpa, value);
+}
+
+/// What `setStateNamed` can refuse.
+pub const StateError = error{
+    /// Nothing has named a state type of that name. See `States.Slot.name`.
+    NoSuchState,
+    /// The state type has no value of that name.
+    NoSuchValue,
+};
+
+/// The name of the value a state has now, the state given by its type's name
+/// - `Mode`, not `game.Mode`. For a console or an editor's state panel,
+/// which were not compiled against the game's enums. Null for a state nothing
+/// has named.
+pub fn stateNamed(self: *const App, state_name: []const u8) ?[]const u8 {
+    const at = self.states.named(state_name) orelse return null;
+    return self.states.slots.items[at].currentName();
+}
+
+/// `setState`, by names: `app.setStateNamed("Mode", "paused")`.
+pub fn setStateNamed(self: *App, state_name: []const u8, value_name: []const u8) StateError!void {
+    const at = self.states.named(state_name) orelse return error.NoSuchState;
+    const slot = &self.states.slots.items[at];
+    const member = slot.type.member(value_name) orelse return error.NoSuchValue;
+    slot.pending = @intCast(member.value);
+}
+
+/// Run `system` whenever `value`'s state takes that value - and after
+/// `.startup`, for the value a state starts at.
+pub fn onEnter(self: *App, value: anytype, comptime name: []const u8, system: System) Allocator.Error!void {
+    try self.addHook(.enter, value, name, system);
+}
+
+/// Run `system` whenever `value`'s state leaves that value.
+pub fn onExit(self: *App, value: anytype, comptime name: []const u8, system: System) Allocator.Error!void {
+    try self.addHook(.exit, value, name, system);
+}
+
+fn addHook(self: *App, on: schedule_mod.Hook.On, value: anytype, comptime name: []const u8, system: System) Allocator.Error!void {
+    _ = try self.states.slotFor(self.gpa, @TypeOf(value));
+    try self.schedule.addHook(self.gpa, .{
+        .on = on,
+        .state = .of(value),
+        .entry = .{ .name = name, .run = system, .gate = self.gate },
+    });
+}
+
+/// Do the changes `setState` asked for. At the top of each frame.
+fn changeStates(self: *App) anyerror!void {
+    // By index: a hook may name a new state, and the list may move.
+    var at: usize = 0;
+    while (at < self.states.slots.items.len) : (at += 1) {
+        const slot = self.states.slots.items[at];
+        const next = slot.pending orelse continue;
+        self.states.slots.items[at].pending = null;
+        if (next == slot.current) continue;
+        try self.schedule.runHooks(.exit, .{ .key = slot.key, .value = slot.current }, self);
+        self.states.slots.items[at].current = next;
+        try self.schedule.runHooks(.enter, .{ .key = slot.key, .value = next }, self);
+    }
+}
+
+/// Enter every state at its first value, or the one `.startup` asked for.
+fn enterFirstStates(self: *App) anyerror!void {
+    var at: usize = 0;
+    while (at < self.states.slots.items.len) : (at += 1) {
+        const slot = &self.states.slots.items[at];
+        if (slot.pending) |chosen| slot.current = chosen;
+        slot.pending = null;
+        const entered: States.Value = .{ .key = slot.key, .value = slot.current };
+        try self.schedule.runHooks(.enter, entered, self);
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -599,11 +823,13 @@ pub fn run(self: *App) anyerror!void {
     try self.stop();
 }
 
-/// Run the `.startup` stage, once. Doing it twice does nothing.
+/// Run the `.startup` stage, once, and enter each state's first value.
+/// Doing it twice does nothing.
 pub fn startup(self: *App) anyerror!void {
     if (self.started) return;
     self.started = true;
     try self.schedule.run(.startup, self);
+    try self.enterFirstStates();
 }
 
 /// One frame. Says whether there should be another. Public for a game that
@@ -633,8 +859,10 @@ pub fn step(self: *App) anyerror!bool {
     if (self.hasInterface()) try self.feedInterface();
 
     // What was asked for outside any system - between frames, by a tool -
-    // is done before the first system of this one.
+    // is done before the first system of this one, and then the states
+    // change that the last frame asked to.
     try self.commands.apply();
+    try self.changeStates();
 
     // Bodies are synced before each fixed step. A paused frame - and the
     // first, which has no time to step - is synced here instead, so the
@@ -682,7 +910,9 @@ pub fn step(self: *App) anyerror!bool {
     // the names of everything that died are given back.
     try self.despawnOrphans();
     self.forgetDeadNames();
+    self.forgetDeadUuids();
     try self.animate();
+    if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
 
     if (self.hasInterface()) try self.layOutInterface();
 
@@ -723,6 +953,9 @@ fn shortcuts(self: *App) void {
         if (self.input.justPressed(key)) self.toggleFullscreen() catch |err| {
             log.warn("could not change fullscreen: {t}", .{err});
         };
+    }
+    if (self.debug_key) |key| {
+        if (self.input.justPressed(key)) self.debug_visible = !self.debug_visible;
     }
 }
 
@@ -929,6 +1162,102 @@ fn forgetName(self: *App, entity: ecs.Entity) void {
 }
 
 // -------------------------------------------------------------------------
+// UUIDs
+// -------------------------------------------------------------------------
+
+/// What `setUuid` can refuse.
+pub const UuidError = error{
+    /// Another living entity has it. A UUID picks out one thing.
+    UuidTaken,
+    /// All zeroes: what a UUID nobody set looks like, and so not one.
+    NilUuid,
+    /// The entity has been despawned, or never was.
+    NoSuchEntity,
+} || Allocator.Error;
+
+/// A new random UUID - version 4 - for an entity, or for anything else a
+/// game wants named once and for good.
+pub fn newUuid(self: *App) Uuid {
+    return .random(self.uuid_source.random());
+}
+
+/// Give an entity this UUID: what it is known by from one save and load to
+/// the next, when its handle is new each time. An editor's undo gives an
+/// entity it brings back the UUID it had.
+///
+/// ```zig
+/// const door = app.findUuid(door_uuid) orelse return;
+/// ```
+///
+/// Like a name it is the entity's own, not a component, and one living
+/// entity has a UUID at a time - another is `error.UuidTaken`. A despawned
+/// entity's is free at once. A scene gives every entity it writes one, and
+/// every entity it reads the one it had.
+pub fn setUuid(self: *App, entity: ecs.Entity, uuid: Uuid) UuidError!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    if (uuid.isNil()) return error.NilUuid;
+
+    var stale: ?ecs.Entity = null;
+    if (self.by_uuid.get(uuid)) |holder| {
+        if (holder.eql(entity)) return;
+        if (self.world.isAlive(holder)) return error.UuidTaken;
+        stale = holder;
+    }
+    // Everything that can fail first, so a refused change changes nothing.
+    try self.uuids.ensureUnusedCapacity(self.gpa, 1);
+    try self.by_uuid.ensureUnusedCapacity(self.gpa, 1);
+
+    if (stale) |holder| self.forgetUuid(holder);
+    const slot = self.uuids.getOrPutAssumeCapacity(entity);
+    if (slot.found_existing) _ = self.by_uuid.remove(slot.value_ptr.*);
+    slot.value_ptr.* = uuid;
+    self.by_uuid.putAssumeCapacityNoClobber(uuid, entity);
+}
+
+/// An entity's UUID, or null when it has none or is not alive.
+pub fn uuidOf(self: *const App, entity: ecs.Entity) ?Uuid {
+    if (!self.world.isAlive(entity)) return null;
+    return self.uuids.get(entity);
+}
+
+/// An entity's UUID, made for it now if it has none.
+pub fn ensureUuid(self: *App, entity: ecs.Entity) (error{NoSuchEntity} || Allocator.Error)!Uuid {
+    if (self.uuidOf(entity)) |held| return held;
+    while (true) {
+        const fresh = self.newUuid();
+        self.setUuid(entity, fresh) catch |err| switch (err) {
+            // A hundred and twenty-two random bits, drawn twice alike.
+            error.UuidTaken => continue,
+            error.NilUuid => unreachable,
+            error.NoSuchEntity, error.OutOfMemory => |e| return e,
+        };
+        return fresh;
+    }
+}
+
+/// The living entity with this UUID, or null.
+pub fn findUuid(self: *const App, uuid: Uuid) ?ecs.Entity {
+    const entity = self.by_uuid.get(uuid) orelse return null;
+    return if (self.world.isAlive(entity)) entity else null;
+}
+
+fn forgetUuid(self: *App, entity: ecs.Entity) void {
+    const held = self.uuids.fetchSwapRemove(entity) orelse return;
+    _ = self.by_uuid.remove(held.value);
+}
+
+/// Give back the UUIDs of everything that has died, as `forgetDeadNames`
+/// does the names.
+fn forgetDeadUuids(self: *App) void {
+    var at = self.uuids.count();
+    while (at > 0) {
+        at -= 1;
+        const entity = self.uuids.keys()[at];
+        if (!self.world.isAlive(entity)) self.forgetUuid(entity);
+    }
+}
+
+// -------------------------------------------------------------------------
 // Scenes
 // -------------------------------------------------------------------------
 
@@ -940,9 +1269,30 @@ fn forgetName(self: *App, entity: ecs.Entity) void {
 ///
 /// Each is written under its own name - `Wander`, not `creatures.Wander` -
 /// or under its `pub const scene_name`, which is how two types of one name
-/// are told apart. Registering one twice does nothing.
-pub fn registerComponents(self: *App, comptime types: anytype) scene.Registry.Error!void {
-    inline for (types) |T| try self.scene_components.add(self.gpa, T, comptime scene.nameOf(T));
+/// are told apart, or its `reflect_name`. Registering one twice does
+/// nothing. Each is described in `types` as well, so `componentOf` can find
+/// it by that name, and an `attr.Property` it declares is checked.
+pub fn registerComponents(self: *App, comptime list: anytype) scene.Registry.Error!void {
+    inline for (list) |T| {
+        comptime attr.check(T);
+        // Described first: a description nothing uses is harmless, and a
+        // component a scene holds and nothing can describe is not.
+        //
+        // The registry takes two descriptors of one name, kind and size for
+        // one type described twice - by another binary, say - so two types
+        // given one `reflect_name` would pass it. In one program a type has
+        // one descriptor, and another under the name is another type.
+        const described = reflect.typeOf(T);
+        if (self.types.find(described.name.slice())) |held| {
+            if (held != described) return error.ComponentNameTaken;
+        }
+        self.types.addType(described) catch |err| return switch (err) {
+            error.NameTaken => error.ComponentNameTaken,
+            error.OutOfMemory => error.OutOfMemory,
+            else => unreachable,
+        };
+        try self.scene_components.add(self.gpa, T, comptime scene.nameOf(T));
+    }
 }
 
 /// Write the world to a file: every entity, its name, and every registered
@@ -967,7 +1317,7 @@ pub fn loadScene(self: *App, path: []const u8, options: scene.LoadOptions) !scen
     return scene.load(self, io, path, options);
 }
 
-/// Everything out of the world at once - every entity and every name - and
+/// Everything out of the world at once - every entity, name and UUID - and
 /// an empty world in its place: a level loaded over another is this and then
 /// `loadScene`. Not from inside a query, which is walking the world it
 /// throws away.
@@ -981,6 +1331,8 @@ pub fn clearWorld(self: *App) void {
     for (self.names.values()) |name| self.gpa.free(name);
     self.names.clearRetainingCapacity();
     self.by_name.clearRetainingCapacity();
+    self.uuids.clearRetainingCapacity();
+    self.by_uuid.clearRetainingCapacity();
 }
 
 /// Give back the names of everything that has died. Once a frame, after
@@ -994,6 +1346,157 @@ fn forgetDeadNames(self: *App) void {
         const entity = self.names.keys()[at];
         if (!self.world.isAlive(entity)) self.forgetName(entity);
     }
+}
+
+// -------------------------------------------------------------------------
+// Reflection
+// -------------------------------------------------------------------------
+//
+// For code that was not compiled against the game: an editor's inspector
+// walks a component's fields, a console calls the engine by name. Both go
+// through fluxion-reflect's descriptors, and a component is found by the
+// name a scene gives it.
+
+/// One of an entity's components, as `componentsOf` lists them.
+pub const ComponentValue = struct {
+    /// What a scene calls it.
+    name: []const u8,
+    value: reflect.Value,
+};
+
+pub const ComponentError = error{
+    /// No component is registered under that name. See `registerComponents`.
+    NoSuchComponent,
+    /// The entity has been despawned, or never was.
+    NoSuchEntity,
+} || ecs.World.Error;
+
+/// The component called `name` on an entity, as a value whose type is known
+/// only at run time: read and written in place, field by field. Null when
+/// nothing is registered under that name, or the entity has none of it.
+///
+/// ```zig
+/// const place = app.componentOf(player, "Transform2D") orelse return;
+/// try (try place.field("x")).setFloat(320);
+/// for (place.type.fields()) |field| inspect(field.name.slice(), try place.field(field.name.slice()));
+/// ```
+///
+/// It points into the world, so it lasts as a `World.get` pointer does: until
+/// rows next move.
+pub fn componentOf(self: *App, entity: ecs.Entity, name: []const u8) ?reflect.Value {
+    const entry = self.scene_components.find(name) orelse return null;
+    return self.valueOf(entity, entry);
+}
+
+/// Every registered component an entity has, in the order they were
+/// registered - the engine's first - as many as `found` holds.
+pub fn componentsOf(self: *App, entity: ecs.Entity, found: []ComponentValue) []ComponentValue {
+    var count: usize = 0;
+    for (self.scene_components.entries.items) |*entry| {
+        if (count == found.len) break;
+        const value = self.valueOf(entity, entry) orelse continue;
+        found[count] = .{ .name = entry.name, .value = value };
+        count += 1;
+    }
+    return found[0..count];
+}
+
+/// Put the component called `name` on an entity, holding its defaults, and
+/// hand it back to fill in: an inspector's Add Component. One the entity has
+/// already is handed back as it is. Not from inside a query, since it moves
+/// the entity; `commands` is for that.
+pub fn addComponentNamed(self: *App, entity: ecs.Entity, name: []const u8) ComponentError!reflect.Value {
+    const entry = self.scene_components.find(name) orelse return error.NoSuchComponent;
+    if (self.valueOf(entity, entry)) |held| return held;
+    try entry.addTo(&self.world, entity);
+    return self.valueOf(entity, entry).?;
+}
+
+/// Take the component called `name` off an entity. One it has not got does
+/// nothing. Not from inside a query either.
+pub fn removeComponentNamed(self: *App, entity: ecs.Entity, name: []const u8) ComponentError!void {
+    const entry = self.scene_components.find(name) orelse return error.NoSuchComponent;
+    try entry.removeFrom(&self.world, entity);
+}
+
+fn valueOf(self: *App, entity: ecs.Entity, entry: *const scene.Registry.Entry) ?reflect.Value {
+    const id = entry.findIdIn(&self.world) orelse return null;
+    const cell = self.world.cellOf(entity, id) orelse return null;
+    return .init(entry.type, cell);
+}
+
+/// `App` as fluxion-reflect sees it: no insides, and the calls a console, a
+/// script or an editor's command palette may make by name - see `callNamed`.
+/// A call is listed when it takes and gives plain values: the ones taking a
+/// type or a function, or holding an allocator, are for Zig to call. Only a
+/// program that asks for this descriptor has them compiled in; see `types`.
+pub const reflect_name = "App";
+pub const reflect_opaque = true;
+pub const reflect_methods = .{
+    .quit,
+    .setName,
+    .nameOf,
+    .find,
+    .clearWorld,
+    .addComponentNamed,
+    .removeComponentNamed,
+    .stateNamed,
+    .setStateNamed,
+    .saveScene,
+    .loadScene,
+    .worldTransform,
+    .screenToWorld,
+    .worldToScreen,
+    .pointerInWorld,
+    .overlapPoint,
+    .setFullscreen,
+    .fullscreen,
+    .toggleFullscreen,
+    .setWindowTitle,
+    .setWindowSize,
+    .setWindowPosition,
+    .windowPosition,
+    .setWindowState,
+    .windowState,
+    .setVsync,
+    .vsync,
+    .setCursor,
+    .cursor,
+    .setCursorShape,
+    .setClipboardText,
+    .clipboardText,
+    .hasClipboardText,
+};
+
+/// Call one of the calls `reflect_methods` lists, by name, with values for
+/// its arguments - what a console does with a line it has read. An error the
+/// call returns is returned from here; otherwise what it gives back is
+/// written into `result`, when there is one, converted as numbers are.
+///
+/// ```zig
+/// var title: []const u8 = "Level 2";
+/// try app.callNamed("setWindowTitle", &.{.of(&title)}, null);
+///
+/// var hero: ?fx.Entity = null;
+/// try app.callNamed("find", &.{.of(&name)}, .of(&hero));
+/// ```
+///
+/// `reflect.typeOf(App).methods` lists them, with each one's parameters.
+pub fn callNamed(self: *App, name: []const u8, args: []const reflect.Value, result: ?reflect.Value) anyerror!void {
+    const receiver: reflect.Value = .of(self);
+    const method = receiver.type.method(name) orelse return error.NoSuchMethod;
+    const returns = method.type.info.function.return_type;
+    if (returns.kind != .error_union) return receiver.call(name, args, result);
+
+    // Taken whole - error or value - so that an error comes back as one,
+    // rather than going into `result` or nowhere.
+    var held: [64]u8 align(16) = undefined;
+    if (returns.size > held.len or returns.alignment > 16) return error.Unsupported;
+    const returned: reflect.Value = .init(returns, &held);
+    try receiver.call(name, args, returned);
+    const code = returns.info.error_union.ops.code(&held);
+    if (code != 0) return @errorFromInt(@as(std.meta.Int(.unsigned, @bitSizeOf(anyerror)), @intCast(code)));
+    if (result) |into| try into.convertFrom(returned.unwrap().?);
 }
 
 // -------------------------------------------------------------------------
@@ -1294,7 +1797,7 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
 
     // 4. `debug`, over all of it: the world through the 2D camera, and the
     //    screen in pixels.
-    if (self.world_on_screen) try self.drawDebug(into, view);
+    if (self.world_on_screen and self.debug_visible) try self.drawDebug(into, view);
 }
 
 /// Draw the world - its sprites, its text and `debug` - through `view` into
@@ -1315,7 +1818,7 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
 /// interface it wants its `source` turned over; see `drawnUpsideDown`.
 pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
     try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, .{ .texture = into }, view, self.background, self.time.alpha());
-    try self.drawDebug(.{ .texture = into }, view);
+    if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
 }
 
 /// Whether a texture `drawWorld` drew into comes out upside down when drawn
@@ -1361,14 +1864,17 @@ pub fn capture(self: *App, gpa: Allocator, width: u32, height: u32) ![]u8 {
 }
 
 /// Draw one frame at the target's size into a PNG file: what `--capture`
-/// asks for. `error.NoIo` without `Options.io`.
+/// asks for. `res://` is taken, as everywhere. `error.NoIo` without
+/// `Options.io`.
 pub fn saveCapture(self: *App, path: []const u8) !void {
     const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
 
     const pixels = try self.capture(self.gpa, self.width, self.height);
     defer self.gpa.free(pixels);
 
-    try image.png.writeFile(self.gpa, io, path, .{
+    try image.png.writeFile(self.gpa, io, file, .{
         .width = self.width,
         .height = self.height,
         .pixels = pixels,
@@ -1399,11 +1905,11 @@ fn spawnOne(app: *App) anyerror!void {
 }
 
 fn countFrames(app: *App) anyerror!void {
-    const state = struct {
+    const counted = struct {
         var frames: u32 = 0;
     };
-    state.frames += 1;
-    if (state.frames >= 3) app.quit();
+    counted.frames += 1;
+    if (counted.frames >= 3) app.quit();
 }
 
 test "a headless app runs its stages and draws" {
@@ -2549,6 +3055,37 @@ test "a lasting debug shape stays for its seconds of game time" {
     try testing.expectEqual(@as(u32, 4), frames_with_it);
 }
 
+test "with debug hidden nothing of it is drawn, a game's own shapes nor the engine's views" {
+    Scribble.every_frame = true;
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addSystem(.update, "line", Scribble.line);
+    app.debug_views.transforms = true;
+    _ = try app.world.spawnWith(.{components.Transform2D.at(1, 1)});
+    app.debug_visible = false;
+
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.debug_renderer.stats.lines);
+    try testing.expectEqual(@as(u32, 1), app.debug_frame.count(.world).lines);
+
+    app.debug_visible = true;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1 + 2), app.debug_renderer.stats.lines);
+}
+
+/// F3 pressed on the second frame.
+fn debugKeyOnSecond(app: *App) anyerror!void {
+    if (app.time.frame == 2) app.input.apply(pressOf(.f3));
+}
+
+test "the debug key shows and hides what debug draws" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 3, .debug_key = .f3 });
+    defer app.destroy();
+    try app.addSystem(.input, "f3 on second", debugKeyOnSecond);
+    try app.run();
+    try testing.expect(!app.debug_visible);
+}
+
 test "what a system asks of the commands is done before the next system runs" {
     const Seen = struct {
         var by_itself: usize = 99;
@@ -2612,4 +3149,209 @@ test "with no window the clipboard is the program's own, and the game and the in
     try testing.expect(app.hasClipboardText());
     try testing.expectEqualStrings("level 3", try app.clipboardText());
     try testing.expectError(error.Unavailable, app.setClipboardText("\xc3"));
+}
+
+test "every engine component is described under the name a scene gives it" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    try testing.expectEqual(@as(usize, 7), app.scene_components.entries.items.len);
+    for (app.scene_components.entries.items) |entry| {
+        try testing.expectEqualStrings(entry.name, entry.type.name.slice());
+        try testing.expect(app.types.find(entry.name).? == entry.type);
+    }
+
+    const drawn = app.types.find("Sprite").?;
+    try testing.expectEqual(@as(f64, 1), drawn.field("pivot_x").?.attribute(reflect.attr.Range).?.max);
+    try testing.expect(drawn.field("tint").?.type == app.types.find("Color").?);
+    try testing.expect(app.types.find("Text2D").?.field("bytes").?.attribute(reflect.attr.Hidden) != null);
+    try testing.expect(app.types.find("DebugViews").?.field("colliders") != null);
+
+    // Described, and left out until asked for: see `types`.
+    try testing.expect(reflect.typeOf(App).method("setWindowTitle") != null);
+    try testing.expect(app.types.find("App") == null);
+    _ = try app.types.add(App);
+    try testing.expect(app.types.find("App").? == reflect.typeOf(App));
+}
+
+test "a component is found by its name, and read and written where it is" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const thing = try app.world.spawnWith(.{ components.Transform2D.at(1, 2), components.Sprite.solid(.white, 4, 4) });
+
+    const place = app.componentOf(thing, "Transform2D").?;
+    try (try place.field("x")).setFloat(320);
+    try (try place.path("scale_y")).setFloat(2);
+    try testing.expectEqual(@as(f32, 320), app.world.get(thing, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 2), app.world.get(thing, components.Transform2D).?.scale_y);
+
+    // A method of the component's own, called through the value.
+    var by: f32 = 5;
+    try place.call("translate", &.{ .of(&by), .of(&by) }, null);
+    try testing.expectEqual(@as(f32, 325), app.world.get(thing, components.Transform2D).?.x);
+
+    try testing.expect(app.componentOf(thing, "Camera2D") == null);
+    try testing.expect(app.componentOf(thing, "Mystery") == null);
+    app.world.despawn(thing);
+    try testing.expect(app.componentOf(thing, "Transform2D") == null);
+}
+
+test "a label's words are a property, written and read through its methods, not its buffer" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const label = try app.world.spawnWith(.{ components.Transform2D{}, components.Text2D.of("Score") });
+
+    // As an inspector that has never heard of `Text2D` finds them.
+    const words = app.componentOf(label, "Text2D").?;
+    const property = words.type.attribute(attr.Property).?;
+    try testing.expectEqualStrings("text", property.name);
+    var over: []const u8 = "Game over";
+    try words.call(property.set, &.{.of(&over)}, null);
+    var shown: []const u8 = "";
+    try words.call(property.get, &.{}, .of(&shown));
+    try testing.expectEqualStrings("Game over", shown);
+    try testing.expectEqualStrings("Game over", app.world.get(label, components.Text2D).?.slice());
+    try testing.expect(words.type.method(property.set).?.attribute(attr.Multiline) != null);
+}
+
+/// A game's component with a field that declares no default.
+const Heading = extern struct {
+    angle: f32,
+    speed: f32 = 3,
+};
+
+test "an entity's components are listed in the order they were registered" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.registerComponents(.{Tally});
+    const thing = try app.world.spawnWith(.{ Tally{ .points = 3 }, components.Sprite{}, components.Transform2D{} });
+
+    var found: [8]ComponentValue = undefined;
+    const listed = app.componentsOf(thing, &found);
+    try testing.expectEqual(@as(usize, 3), listed.len);
+    try testing.expectEqualStrings("Transform2D", listed[0].name);
+    try testing.expectEqualStrings("Sprite", listed[1].name);
+    try testing.expectEqualStrings("Tally", listed[2].name);
+    try testing.expectEqual(@as(?u32, 3), (try listed[2].value.field("points")).get(u32));
+    try testing.expect(app.types.find(@typeName(Tally)) == listed[2].value.type);
+
+    // As many as there is room for.
+    try testing.expectEqual(@as(usize, 1), app.componentsOf(thing, found[0..1]).len);
+}
+
+test "a component is added by its name holding its defaults, and taken off by it" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.registerComponents(.{Heading});
+    const thing = try app.world.spawnWith(.{components.Transform2D{}});
+
+    const collider = try app.addComponentNamed(thing, "Collider2D");
+    try testing.expectEqual(@as(?f32, 0.6), (try collider.field("friction")).get(f32));
+    try (try collider.field("friction")).setFloat(0.25);
+
+    // One it has is handed back as it is, not started again.
+    const again = try app.addComponentNamed(thing, "Collider2D");
+    try testing.expectEqual(@as(?f32, 0.25), (try again.field("friction")).get(f32));
+    try testing.expectEqual(@as(f32, 0.25), app.world.get(thing, components.Collider2D).?.friction);
+
+    // A field with no default of its own starts at zero.
+    _ = try app.addComponentNamed(thing, "Heading");
+    try testing.expectEqual(Heading{ .angle = 0, .speed = 3 }, app.world.get(thing, Heading).?.*);
+
+    try app.removeComponentNamed(thing, "Collider2D");
+    try testing.expect(!app.world.has(thing, components.Collider2D));
+    try app.removeComponentNamed(thing, "Collider2D");
+    try testing.expect(app.world.has(thing, Heading));
+
+    try testing.expectError(error.NoSuchComponent, app.addComponentNamed(thing, "Mystery"));
+    try testing.expectError(error.NoSuchComponent, app.removeComponentNamed(thing, "Mystery"));
+    app.world.despawn(thing);
+    try testing.expectError(error.NoSuchEntity, app.addComponentNamed(thing, "Sprite"));
+}
+
+test "the engine's calls are made by name, and what they return comes back, errors too" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    const door = try app.world.spawn();
+    const other = try app.world.spawn();
+
+    var name: []const u8 = "door";
+    try app.callNamed("setName", &.{ .of(&door), .of(&name) }, null);
+    var answer: ?ecs.Entity = null;
+    try app.callNamed("find", &.{.of(&name)}, .of(&answer));
+    try testing.expect(answer.?.eql(door));
+
+    // An error is returned, not dropped.
+    try testing.expectError(error.NameTaken, app.callNamed("setName", &.{ .of(&other), .of(&name) }, null));
+    var path: []const u8 = "no/such/scene.json";
+    var options: scene.LoadOptions = .{};
+    try testing.expectError(error.FileNotFound, app.callNamed("loadScene", &.{ .of(&path), .of(&options) }, null));
+
+    // And a value that comes with the chance of one.
+    var copied: []const u8 = "level 3";
+    try app.callNamed("setClipboardText", &.{.of(&copied)}, null);
+    var pasted: []const u8 = "";
+    try app.callNamed("clipboardText", &.{}, .of(&pasted));
+    try testing.expectEqualStrings("level 3", pasted);
+
+    try testing.expectError(error.NoSuchMethod, app.callNamed("launchMissiles", &.{}, null));
+    try testing.expectError(error.ArgumentCount, app.callNamed("quit", &.{.of(&name)}, null));
+    try app.callNamed("quit", &.{}, null);
+    try testing.expect(!app.running);
+}
+
+test "a UUID belongs to one living entity at a time, and is free again when it dies" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const door = try app.world.spawn();
+    const gate = try app.world.spawn();
+    const uuid = app.newUuid();
+    try testing.expectEqual(@as(u4, 4), uuid.version());
+    try testing.expect(!uuid.eql(app.newUuid()));
+
+    try app.setUuid(door, uuid);
+    try testing.expect(app.findUuid(uuid).?.eql(door));
+    try testing.expect(app.uuidOf(door).?.eql(uuid));
+    try testing.expectError(error.UuidTaken, app.setUuid(gate, uuid));
+    try app.setUuid(door, uuid);
+    try testing.expectError(error.NilUuid, app.setUuid(gate, .nil));
+
+    // Another for the door, and the first is anybody's.
+    const other = app.newUuid();
+    try app.setUuid(door, other);
+    try testing.expect(app.findUuid(uuid) == null);
+    try app.setUuid(gate, uuid);
+    try testing.expect(app.findUuid(uuid).?.eql(gate));
+
+    // Despawned: free at once, before the end of the frame.
+    app.world.despawn(gate);
+    try testing.expect(app.findUuid(uuid) == null);
+    try testing.expect(app.uuidOf(gate) == null);
+    try app.setUuid(door, uuid);
+    try testing.expectError(error.NoSuchEntity, app.setUuid(gate, other));
+    try testing.expectError(error.NoSuchEntity, app.ensureUuid(gate));
+}
+
+test "an entity given a UUID keeps it, and the dead ones are forgotten at the end of the frame" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const thing = try app.world.spawn();
+    const given = try app.ensureUuid(thing);
+    try testing.expect(given.eql(try app.ensureUuid(thing)));
+
+    app.world.despawn(thing);
+    try testing.expectEqual(@as(usize, 1), app.uuids.count());
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.uuids.count());
+    try testing.expectEqual(@as(usize, 0), app.by_uuid.count());
+
+    _ = try app.ensureUuid(try app.world.spawn());
+    app.clearWorld();
+    try testing.expectEqual(@as(usize, 0), app.uuids.count());
+}
+
+test "the project's root is an option and a flag, and one that is not there stops the start" {
+    const flags = try App.parseFlags(App.Flags, &.{ "game", "--root", "games/pong" });
+    try testing.expectEqualStrings("games/pong", flags.apply(.{}).root.?);
+    try testing.expectError(error.FileNotFound, App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = "no/such/project" }));
 }

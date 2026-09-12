@@ -14,14 +14,18 @@ pub fn build(b: *std.Build) void {
     const shader = b.dependency("fluxion_shader", .{ .target = target, .optimize = optimize });
     const math = b.dependency("fluxion_math", .{ .target = target, .optimize = optimize });
     const id = b.dependency("fluxion_id", .{ .target = target, .optimize = optimize });
-    const debugdraw = b.dependency("fluxion_debugdraw", .{ .target = target, .optimize = optimize });
+    // Without its renderer: that module's rhi and shader are paths to the
+    // repositories beside it, which a fetched copy has not got.
+    const debugdraw = b.dependency("fluxion_debugdraw", .{ .target = target, .optimize = optimize, .renderer = false });
     const ui = b.dependency("fluxion_ui", .{ .target = target, .optimize = optimize });
     const json = b.dependency("fluxion_json", .{ .target = target, .optimize = optimize });
     const physics = b.dependency("fluxion_physics", .{ .target = target, .optimize = optimize });
+    const reflect = b.dependency("fluxion_reflect", .{ .target = target, .optimize = optimize });
 
-    // fluxion-ui's own renderer module pins rhi and font by URL, and a pin and
-    // the paths above would be two packages. Built from its source with this
-    // package's rhi, font and shader, a `Device` stays one type.
+    // The two renderers below are built from their packages' source with this
+    // package's rhi, font and shader, so that a `Device` stays one type:
+    // fluxion-ui pins its own rhi and font, at commits of its choosing, and
+    // fluxion-debugdraw names them by path.
     const ui_rhi = b.createModule(.{
         .root_source_file = ui.path("src/render/rhi.zig"),
         .target = target,
@@ -30,6 +34,17 @@ pub fn build(b: *std.Build) void {
             .{ .name = "fluxion_ui", .module = ui.module("fluxion_ui") },
             .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
             .{ .name = "fluxion_font", .module = typeface.module("fluxion_font") },
+            .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
+        },
+    });
+    const debugdraw_rhi = b.createModule(.{
+        .root_source_file = debugdraw.path("src/render/rhi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fluxion_debugdraw", .module = debugdraw.module("fluxion_debugdraw") },
+            .{ .name = "fluxion_math", .module = math.module("fluxion_math") },
+            .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
             .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
         },
     });
@@ -53,11 +68,12 @@ pub fn build(b: *std.Build) void {
             .{ .name = "fluxion_math", .module = math.module("fluxion_math") },
             .{ .name = "fluxion_id", .module = id.module("fluxion_id") },
             .{ .name = "fluxion_debugdraw", .module = debugdraw.module("fluxion_debugdraw") },
-            .{ .name = "fluxion_debugdraw_rhi", .module = debugdraw.module("fluxion_debugdraw_rhi") },
+            .{ .name = "fluxion_debugdraw_rhi", .module = debugdraw_rhi },
             .{ .name = "fluxion_ui", .module = ui.module("fluxion_ui") },
             .{ .name = "fluxion_ui_rhi", .module = ui_rhi },
             .{ .name = "fluxion_json", .module = json.module("fluxion_json") },
             .{ .name = "fluxion_physics", .module = physics.module("fluxion_physics") },
+            .{ .name = "fluxion_reflect", .module = reflect.module("fluxion_reflect") },
         },
     });
 

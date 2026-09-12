@@ -61,6 +61,9 @@ max_fps: ?f32 = null,
 
 next_frame: std.Io.Timestamp = .zero,
 
+/// Set by `stepOnce`, and spent by the next frame.
+step_once: bool = false,
+
 /// A countdown that lives in a component: a serve after a pause, a cooldown.
 ///
 /// ```zig
@@ -103,10 +106,17 @@ pub fn init(source: Source) Time {
     return .{ .source = source };
 }
 
+/// Make the next frame exactly one fixed step long, whatever the clock says
+/// and even with `scale` at zero: a paused game moved on by one step, for a
+/// Step button in an editor or a debugger.
+pub fn stepOnce(self: *Time) void {
+    self.step_once = true;
+}
+
 /// Read the clock and work out this frame's length. Called once a frame, by
 /// `App.step`.
 pub fn tick(self: *Time) void {
-    const raw = switch (self.source) {
+    var raw = switch (self.source) {
         .fixed => |seconds| seconds,
         .clock => |io| blk: {
             const now: std.Io.Timestamp = .now(io, .awake);
@@ -118,9 +128,15 @@ pub fn tick(self: *Time) void {
             break :blk @as(f32, @floatFromInt(@as(i64, @intCast(ns)))) / std.time.ns_per_s;
         },
     };
+    var scale = self.scale;
+    if (self.step_once) {
+        self.step_once = false;
+        raw = self.fixed_delta;
+        scale = 1;
+    }
 
     self.unscaled_delta = @min(raw, self.max_delta);
-    self.delta = self.unscaled_delta * self.scale;
+    self.delta = self.unscaled_delta * scale;
     self.elapsed += self.delta;
     self.frame += 1;
     self.accumulator += self.delta;
@@ -204,6 +220,22 @@ test "scale slows the simulation and leaves the unscaled delta alone" {
 
     try std.testing.expectApproxEqAbs(@as(f32, 0.05), time.delta, 0.0001);
     try std.testing.expectApproxEqAbs(@as(f32, 0.1), time.unscaled_delta, 0.0001);
+}
+
+test "a paused clock moves on by exactly one fixed step when asked" {
+    var time: Time = .init(.{ .fixed = 1.0 / 60.0 });
+    time.scale = 0;
+    time.tick();
+    try std.testing.expect(time.takeFixedStep() == null);
+
+    time.stepOnce();
+    time.tick();
+    try std.testing.expectEqual(time.fixed_delta, time.delta);
+    try std.testing.expect(time.takeFixedStep() != null);
+    try std.testing.expect(time.takeFixedStep() == null);
+
+    time.tick();
+    try std.testing.expectEqual(@as(f32, 0), time.delta);
 }
 
 test "a timer goes off once, in the tick it runs out in" {

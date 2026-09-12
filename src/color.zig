@@ -15,6 +15,8 @@
 const std = @import("std");
 const testing = std.testing;
 
+const attr = @import("attr.zig");
+
 pub const Color = extern struct {
     r: f32 = 0,
     g: f32 = 0,
@@ -24,6 +26,14 @@ pub const Color = extern struct {
     pub const transparent: Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
     pub const black: Color = .{ .r = 0, .g = 0, .b = 0, .a = 1 };
     pub const white: Color = .{ .r = 1, .g = 1, .b = 1, .a = 1 };
+
+    pub const reflect_name = "Color";
+    pub const reflect_fields = .{
+        .r = .{attr.Range{ .min = 0, .max = 1 }},
+        .g = .{attr.Range{ .min = 0, .max = 1 }},
+        .b = .{attr.Range{ .min = 0, .max = 1 }},
+        .a = .{attr.Range{ .min = 0, .max = 1 }},
+    };
 
     /// `0xRRGGBB`, opaque.
     pub inline fn hex(value: u24) Color {

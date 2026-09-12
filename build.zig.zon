@@ -5,44 +5,65 @@
     .version = "0.1.0",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x2e5b6a99e50b4a48,
+    // Every one pinned to a pushed commit, so `zig fetch` builds this
+    // anywhere and not only beside the other repositories. A change pushed to
+    // one of them reaches the engine when its pin moves:
+    //   zig fetch --save=fluxion_rhi git+https://github.com/kisstp2006/fluxion-rhi#<commit>
     .dependencies = .{
         // The world, and everything in it. An entity is what a Godot node
         // would be, minus the inheritance and the virtual call.
-        .fluxion_ecs = .{ .path = "../fluxion-ecs" },
+        .fluxion_ecs = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-ecs#2c15c6462892ed7797c931d3f68f0fc747eefd04",
+            .hash = "fluxion_ecs-0.1.0-YgvFeCwAAgAVlX7zVleHEfI60BNwdhGLyvBtRDqiy5Q4",
+        },
 
         // One way to draw, on whichever API the machine has. Every layer -
         // the 3D one that is not written yet, the 2D one, the interface -
         // goes through this and through nothing else.
-        .fluxion_rhi = .{ .path = "../fluxion-rhi" },
+        .fluxion_rhi = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-rhi#7dd0ca471432fd731692f3bf0cd02a33551ca0d1",
+            .hash = "fluxion_rhi-0.1.0--pvwD_GzBAAKb_E-29Dpa6F5jLTAMWP8PCXFnAOzb4tL",
+        },
 
         // Windows, input and the event loop. A library may not depend on
         // this; an engine is exactly the thing that may, because opening the
         // window is its job.
-        .fluxion_platform = .{ .path = "../fluxion-platform" },
+        .fluxion_platform = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-platform#a67f2d00fa8768b4fab689840fd599e454899afb",
+            .hash = "fluxion_platform-0.1.0-WsOjUcpyEQBCr0jsSshLNU2j5pS1woH0ZuPU-JAsma2C",
+        },
 
         // The interface layer: the layout `.ui` systems declare into, and the
         // renderer that draws it over the 2D layer.
-        .fluxion_ui = .{ .path = "../fluxion-ui" },
+        .fluxion_ui = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-ui#7639eefff7c339172cee3b16b555273fd36ad8fa",
+            .hash = "fluxion_ui-0.1.0-lw4Ws9LnDQAA0U-MmePyEDsx1riMk_mF8W-7Ij780OtE",
+        },
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.
-        .fluxion_image = .{ .path = "../fluxion-image" },
+        .fluxion_image = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-image#79463ef201f11e15ada014467c0ad1d58b2a882d",
+            .hash = "fluxion_image-0.1.0-fyJkdS7vAAB1p43VSutvpxQB32hIcvJb3fGSZbo_qeha",
+        },
 
         // The sprite shader, written once and emitted as GLSL and as HLSL.
         // Without this the same shader would be in this repository twice, in
         // two languages, drifting apart.
-        .fluxion_shader = .{ .path = "../fluxion-shader" },
+        .fluxion_shader = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-shader#929418fd6bcdd887414d3cda2328684b50368bd8",
+            .hash = "fluxion_shader-0.1.0-FqFMEmaMAwA0kjWxXizOFk30I7U5UDuPgk-063ElX_5X",
+        },
 
         // Projections and matrices, and the one type that knows OpenGL's
         // clip space from Direct3D's.
         //
-        // **Pinned rather than a path, and it has to be.** `Device.clip()`
-        // returns a `math.Clip` and `math.orthographic` takes one, so the two
-        // have to be the *same* type - and a package is identified by where it
-        // came from. A path here and a pin inside `fluxion-rhi` would be two
+        // **The commit every package names.** `Device.clip()` returns a
+        // `math.Clip` and `math.orthographic` takes one, so the two have to
+        // be the *same* type - and a package is identified by what it holds.
+        // Another commit here than the one inside `fluxion-rhi` would be two
         // copies of one library, and the compiler would say
         // "expected type 'proj.Clip', found 'proj.Clip'", which is the most
-        // confusing message in Zig and always means this. Every package below
-        // that names `fluxion-math` names this commit.
+        // confusing message in Zig and always means this.
         .fluxion_math = .{
             .url = "git+https://github.com/kisstp2006/fluxion-math#92afdbddbf930369265d24136402c7eb5dd8f70e",
             .hash = "fluxion_math-0.1.0-dfpZBeNUBAAwUMriLKaOTRBWGFmfY53_jyYuMUxkPYek",
@@ -50,25 +71,46 @@
 
         // TrueType, rasterised into the glyph atlas the 2D pass draws text
         // from.
-        .fluxion_font = .{ .path = "../fluxion-font" },
+        .fluxion_font = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-font#38615f1e07dcb7ddaa0959ef4ea27a1ea115ac2d",
+            .hash = "fluxion_font-0.1.0-f3pT4n3pAwChQk8rk88uwmL4cZDTLTwWBXcu-VUqvM5K",
+        },
 
         // Lines, shapes and text over the world, for looking at what a game
-        // is doing: `app.debug`. Its renderer is drawn after the 2D pass.
-        .fluxion_debugdraw = .{ .path = "../fluxion-debugdraw" },
+        // is doing: `app.debug`. Its renderer is drawn after the 2D pass, and
+        // built by `build.zig` from its source with this package's rhi.
+        .fluxion_debugdraw = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-debugdraw#398174da668e745687a31509d20e5a6fce6f1084",
+            .hash = "fluxion_debugdraw-0.1.0--_Mjkk4fAgBHb8vMpwpFWFPYc_fYJ-ccXumM5Nm-3wzU",
+        },
 
         // What a scene is written in: JSON to read and diff, or CBOR, the
         // same values in fewer bytes.
-        .fluxion_json = .{ .path = "../fluxion-json" },
+        .fluxion_json = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-json#1d8cb5bb6184636dc3dd0b07a5b4fbe3af41a8b4",
+            .hash = "fluxion_json-0.1.0-sFlLPe9uBQDchSsbl8_C6tWxkEDIgARGF-SziCP3_P_h",
+        },
 
         // Rigid bodies, stepped in `.fixed` on the same scheduler as the
         // queries: `fluxion-physics` pins `fluxion-jobs` where `fluxion-ecs`
         // does, so the two share one `Jobs`.
-        .fluxion_physics = .{ .path = "../fluxion-physics" },
+        .fluxion_physics = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-physics#f88083de8ffba5100ca0eef056d4035807a9a21e",
+            .hash = "fluxion_physics-0.1.0-dovcrpwcBwBpImy8L3eiHE8XzhLoP15DjVYgmC8E7A-V",
+        },
+
+        // The components and the engine's calls, described at run time: what
+        // an editor's inspector reads and writes, and what a console calls by
+        // name. Its fluxion-json is the one above, so its JSON is the scenes'.
+        .fluxion_reflect = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-reflect#07c7efbd04be742d0a44c4c83f89cfb72092ef1b",
+            .hash = "fluxion_reflect-0.1.0-Aw2l_yWFBQAb5Js-wIcSOqHOsInw5YBn0StLvdqagJ-h",
+        },
 
         // Generational handles: what the asset tables hand out, and what a
-        // component holds instead of a pointer. Pinned for the same reason as
-        // the maths above - `fluxion-rhi`'s resource handles are this
-        // package's.
+        // component holds instead of a pointer. The commit every package
+        // names, for the same reason as the maths above - `fluxion-rhi`'s
+        // resource handles are this package's.
         .fluxion_id = .{
             .url = "git+https://github.com/kisstp2006/fluxion-id#a52c29dfe5ac0a49a5d5469cdc1a4fb96b799ccc",
             .hash = "fluxion_id-0.1.0--9Hv-nGFAQAW36SvJvMB6L1nUNErZzh7JC0-nRPlrotw",

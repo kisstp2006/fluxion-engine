@@ -6,10 +6,12 @@
 //! ```bash
 //! zig build example-crates
 //! zig build example-crates -- --frames 240 --capture crates.png
+//! zig build example-crates -- --views on
 //! ```
 //!
 //! Left click drops a crate where the pointer is, right click a ball. Space
-//! throws everything up. F11 fills the screen, Escape leaves.
+//! throws everything up. F3 shows what the physics sees, F11 fills the
+//! screen, Escape leaves.
 //!
 //! **Nothing here makes a body.** Every entity says what it is - a
 //! `RigidBody2D` to fall, a `Collider2D` for its shape - and the engine makes
@@ -30,6 +32,10 @@
 //! pin by a distance joint, made from the two bodies' handles once
 //! `app.syncBodies()` has made them. The red line is `app.castRay`, stopped
 //! at whatever crosses it first.
+//!
+//! **F3 turns on three of the engine's debug views** - every collider in its
+//! body's colour, where the moving bodies are heading, and the frame's
+//! numbers - by writing `app.debug_views`, as an editor's View menu would.
 
 const std = @import("std");
 const fx = @import("fluxion_engine");
@@ -116,7 +122,9 @@ fn spawn(app: *App) !void {
     label.font = font;
     label.size = 18;
     label.color = theme.text;
-    const counter = try app.world.spawnWith(.{ Transform2D.at(34, 30), label });
+    label.alignment = .right;
+    // The top left is where the stats view writes.
+    const counter = try app.world.spawnWith(.{ Transform2D.at(field_width - 34, 30), label });
     try app.setName(counter, "count");
 }
 
@@ -209,6 +217,22 @@ fn laser(app: *App) !void {
     }
 }
 
+fn toggleViews(app: *App) !void {
+    if (app.input.justPressed(.f3)) showViews(app, !app.debug_views.colliders);
+}
+
+fn showViews(app: *App, on: bool) void {
+    app.debug_views.colliders = on;
+    app.debug_views.bodies = on;
+    app.debug_views.stats = on;
+}
+
+const Flags = struct {
+    app: App.Flags = .{},
+    /// `--views on`: start with F3's views showing.
+    views: ?enum { on, off } = null,
+};
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
 
@@ -216,8 +240,8 @@ pub fn main(init: std.process.Init) !void {
     var stdout: std.Io.File.Writer = .init(.stdout(), init.io, &buffer);
     const out = &stdout.interface;
 
-    const flags = try App.parseFlags(App.Flags, try init.minimal.args.toSlice(init.arena.allocator()));
-    const app = App.create(gpa, flags.apply(.{
+    const flags = try App.parseFlags(Flags, try init.minimal.args.toSlice(init.arena.allocator()));
+    const app = App.create(gpa, flags.app.apply(.{
         .title = "Crates - Fluxion Engine",
         .width = 960,
         .height = 540,
@@ -236,11 +260,13 @@ pub fn main(init: std.process.Init) !void {
     defer app.destroy();
 
     try out.print("{f}\n", .{app.device.info()});
-    try out.print("Left click drops a crate, right click a ball, space throws them up. F11 fills the screen, Escape leaves.\n", .{});
+    try out.print("Left click drops a crate, right click a ball, space throws them up. F3 shows what the physics sees, F11 fills the screen, Escape leaves.\n", .{});
     try out.flush();
 
+    if (flags.views == .on) showViews(app, true);
     try app.registerComponents(.{ Basket, Art });
     try app.addSystem(.startup, "spawn", spawn);
+    try app.addSystem(.input, "views", toggleViews);
     try app.addSystem(.fixed, "throw", throw);
     try app.addSystem(.update, "drop", drop);
     try app.addSystem(.update, "count", count);
@@ -255,7 +281,7 @@ pub fn main(init: std.process.Init) !void {
     try out.print("{d} frames, {d} bodies, {d} awake\n", .{ app.time.frame, app.physics.bodyCount(), app.physics.awakeCount() });
     try out.print("time per system on the last frame:\n{f}", .{app.schedule});
 
-    if (flags.capture) |path| {
+    if (flags.app.capture) |path| {
         try app.saveCapture(path);
         try out.print("wrote {s}\n", .{path});
     }
