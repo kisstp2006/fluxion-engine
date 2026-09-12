@@ -17,12 +17,11 @@
 //! | `fixed` | Zero or more times, at a constant delta. Physics. |
 //! | `update` | Once, at whatever the frame took. Everything else. |
 //! | `late` | After `update`, before anything is drawn. Cameras follow here. |
-//! | `ui` | Inside the interface's own frame. Not run yet. |
+//! | `ui` | Last before drawing, inside the interface's frame: declare it into `app.ui`. |
 //! | `shutdown` | Once, after the last frame. |
 //!
-//! Until the interface is wired up, `App.addSystem` refuses `ui` at compile
-//! time. Within a stage, systems run in the order they were added, on one
-//! thread - the parallelism is inside a system, in `Query.each`.
+//! Within a stage, systems run in the order they were added, on one thread -
+//! the parallelism is inside a system, in `Query.each`.
 
 const std = @import("std");
 const testing = std.testing;

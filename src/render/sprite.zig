@@ -241,7 +241,9 @@ pub const Renderer = struct {
         self.* = undefined;
     }
 
-    /// Draw every sprite and label in the world into `target`.
+    /// Draw every sprite and label in the world into `target`, through
+    /// `view` - the world's own camera, `View.of`, or anyone else's - at the
+    /// view's size.
     ///
     /// `clear` is the colour to start from, or null to draw over what is
     /// there - for when a 3D pass has drawn first. `alpha` is `Time.alpha`,
@@ -253,15 +255,12 @@ pub const Renderer = struct {
         assets: *Assets,
         snapshots: *const hierarchy.Snapshots,
         target: rhi.RenderTarget,
-        width: f32,
-        height: f32,
+        view: View,
         clear: ?Color,
         alpha: f32,
     ) !void {
-        // The camera, found once: the box that culls and the matrix that
-        // draws are two readings of the same view.
-        const view: View = .of(world, snapshots, width, height);
-
+        // The box that culls and the matrix that draws are two readings of
+        // the same view.
         try self.gather(gpa, world, assets, snapshots, alpha, view.bounds());
 
         // Gathering the text may have rasterised new letters, so the atlases
@@ -288,7 +287,7 @@ pub const Renderer = struct {
             .load = if (clear == null) .load else .clear,
             .clear_color = if (clear) |c| c.array() else .{ 0, 0, 0, 1 },
         } });
-        try list.setViewport(.{ .width = width, .height = height });
+        try list.setViewport(.{ .width = view.width, .height = view.height });
         var bound_blend: Sprite.Blend = .alpha;
         try list.setPipeline(self.pipelines.get(bound_blend));
         try list.setVertexBuffer(0, self.quad, 0);
@@ -591,6 +590,29 @@ inline fn spriteRadius(width: f32, height: f32) f32 {
     return @abs(width) + @abs(height);
 }
 
+/// Where a sprite's four corners land in the world, round from the one at
+/// the texture's top left: the vertex shader's arithmetic, on the CPU. What
+/// an editor outlines and what a click is tested against. `placed` is the
+/// sprite's world transform, and `texture` what its handle resolves to.
+pub fn cornersOf(sprite: Sprite, placed: Transform2D, texture: *const Assets.Texture) [4]math.Vec2 {
+    const size = spriteSize(sprite, texture);
+    const width = size.width * placed.scale_x;
+    const height = size.height * placed.scale_y;
+    const c = @cos(placed.rotation);
+    const s = @sin(placed.rotation);
+    var out: [4]math.Vec2 = undefined;
+    for (quad_round, &out) |corner, *point| {
+        const x = (corner[0] - sprite.pivot_x) * width;
+        const y = (corner[1] - sprite.pivot_y) * height;
+        point.* = .init(placed.x + x * c - y * s, placed.y + x * s + y * c);
+    }
+    return out;
+}
+
+/// The unit square's corners in order round it, rather than in the strip's
+/// order.
+const quad_round = [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } };
+
 /// How big a sprite is, falling back to the size of its own artwork.
 fn spriteSize(sprite: Sprite, texture: *const Assets.Texture) struct { width: f32, height: f32 } {
     const region_width = @abs(sprite.region.u1 - sprite.region.u0) * @as(f32, @floatFromInt(texture.width));
@@ -676,6 +698,34 @@ test "a sprite with no size of its own takes the texture's" {
     // Half the texture is half the size.
     const half = spriteSize(.{ .region = .{ .u0 = 0, .v0 = 0, .u1 = 0.5, .v1 = 1 } }, &texture);
     try testing.expectEqual(@as(f32, 16), half.width);
+}
+
+test "the corners an editor outlines are where the vertex shader puts them" {
+    const texture: Assets.Texture = .{ .gpu = .none, .width = 32, .height = 16, .filter = .nearest, .wrap = .clamp_to_edge };
+    const sprite: Sprite = .{ .width = 20, .height = 10, .pivot_x = 0.25, .pivot_y = 0.75 };
+    const placed: Transform2D = .{ .x = 100, .y = 50, .rotation = 0.6, .scale_x = 2, .scale_y = -1 };
+    const corners = cornersOf(sprite, placed, &texture);
+
+    // `sprite.fxs`, line for line, fed what `gather` gives it.
+    const c = @cos(placed.rotation);
+    const s = @sin(placed.rotation);
+    const placement = [4]f32{ placed.x, placed.y, 20 * placed.scale_x, 10 * placed.scale_y };
+    const spin = [4]f32{ sprite.pivot_x, sprite.pivot_y, c, s };
+    for (quad_round, corners) |corner, got| {
+        const local_x = (corner[0] - spin[0]) * placement[2];
+        const local_y = (corner[1] - spin[1]) * placement[3];
+        const turned_x = local_x * spin[2] - local_y * spin[3];
+        const turned_y = local_x * spin[3] + local_y * spin[2];
+        try testing.expectApproxEqAbs(placement[0] + turned_x, got.x, 0.0001);
+        try testing.expectApproxEqAbs(placement[1] + turned_y, got.y, 0.0001);
+    }
+
+    // And unturned, the box it should be.
+    const upright = cornersOf(.{ .width = 20, .height = 10 }, .at(100, 50), &texture);
+    try testing.expectApproxEqAbs(@as(f32, 90), upright[0].x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 45), upright[0].y, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 110), upright[2].x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 55), upright[2].y, 0.0001);
 }
 
 test "a mirrored region is not a negative size" {

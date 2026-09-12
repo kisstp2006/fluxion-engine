@@ -25,8 +25,8 @@
 //! A scene is a world and a node is an entity: Godot's shape, with
 //! [Fluxion ECS](https://github.com/kisstp2006/fluxion-ecs) in the middle.
 //! Three layers - 3D, 2D, interface - are drawn back to front into one
-//! target; only the 2D pass is written so far. This is the one package in the
-//! stack that may open a window.
+//! target; the 2D layer and the interface are written, the 3D one is not. This
+//! is the one package in the stack that may open a window.
 
 const std = @import("std");
 
@@ -35,6 +35,7 @@ pub const Window = @import("window.zig");
 pub const Input = @import("input.zig");
 pub const Time = @import("time.zig");
 pub const Assets = @import("assets.zig");
+pub const Interface = @import("interface.zig");
 
 pub const assets = @import("assets.zig");
 pub const components = @import("components.zig");
@@ -43,6 +44,10 @@ pub const schedule = @import("schedule.zig");
 
 /// Where a thing really is, once its parent has had its say.
 pub const hierarchy = @import("hierarchy.zig");
+
+/// A world written down and read back, as JSON or as CBOR: `App.saveScene`
+/// and `App.loadScene`.
+pub const scene = @import("scene.zig");
 
 pub const render = struct {
     pub const sprite = @import("render/sprite.zig");
@@ -75,6 +80,10 @@ pub const Animation = components.Animation;
 
 /// What the 2D pass looks through.
 pub const Camera2D = components.Camera2D;
+
+/// What a camera sees, as a point, a zoom, a turn and a size: what
+/// `App.drawWorld` draws the world through.
+pub const View = render.view.View;
 
 /// How the window fills the screen.
 pub const Fullscreen = Window.Fullscreen;
@@ -134,6 +143,17 @@ pub const math = @import("fluxion_math");
 /// PNG reading and writing.
 pub const image = @import("fluxion_image");
 
+/// Lines, shapes and text for seeing what a game is doing: what `App.debug`
+/// draws with.
+pub const debugdraw = @import("fluxion_debugdraw");
+
+/// The layout a `.ui` system declares with; `app.ui` is one.
+pub const ui = @import("fluxion_ui");
+
+/// JSON and CBOR, read and written: what a scene is kept in, and what a
+/// game's own settings and saves can be.
+pub const json = @import("fluxion_json");
+
 /// A physical key, by its position on a US layout.
 pub const Key = platform.Key;
 
@@ -151,11 +171,13 @@ test {
     _ = Window;
     _ = Input;
     _ = Time;
+    _ = Interface;
     _ = assets;
     _ = components;
     _ = color;
     _ = schedule;
     _ = hierarchy;
+    _ = scene;
     _ = render.sprite;
     _ = render.view;
     _ = text.Atlas;

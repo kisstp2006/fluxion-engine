@@ -6,6 +6,8 @@
 //! zig build example-creatures
 //! zig build example-creatures -- --backend d3d11
 //! zig build example-creatures -- --frames 300 --capture creatures.png
+//! zig build example-creatures -- --frames 1 --save-scene creatures.json
+//! zig build example-creatures -- --scene creatures.json
 //! ```
 //!
 //! Arrow keys, WASD or a controller's left stick steer the one with the ring
@@ -58,6 +60,13 @@
 //! GameObject's does, and is not a component - so naming the camera does not
 //! move it to another table, and `find` hands back the one thing called that
 //! rather than the first thing a query happened to reach.
+//!
+//! **The world can be written down.** `--save-scene` writes everything in it
+//! when the run ends - every entity, its name, and its components, the
+//! game's own among them once `registerComponents` knows them - as JSON for
+//! a path ending in `.json` and as CBOR for any other. `--scene` starts from
+//! such a file instead of from `spawn`: edit a creature's colour in the JSON,
+//! and it is that colour when the program starts.
 //!
 //! The atlas is read from `examples/atlas.png`, and this program is what drew
 //! it: `-- --write-atlas examples/atlas.png` puts it back. That is the same
@@ -190,12 +199,7 @@ fn spawn(app: *App) !void {
         );
     };
 
-    // The first font opened becomes the default. Without one the labels do
-    // not draw, and everything else is still spawned.
-    _ = app.assets.loadFont(fx.Assets.systemFontPath(), .{}) catch |err| blk: {
-        std.log.warn("no font ({t}); the labels will not draw", .{err});
-        break :blk .none;
-    };
+    openFont(app);
 
     // Named, so the systems below can find it without a query that assumes
     // there is only one. The name is the entity's own, not a component: it
@@ -342,6 +346,16 @@ fn spawn(app: *App) !void {
             plate,
         });
     }
+}
+
+/// The first font opened becomes the default, which is what every label here
+/// is drawn in - a scene writes no font for them. Without one the labels do
+/// not draw, and everything else still runs.
+fn openFont(app: *App) void {
+    _ = app.assets.loadFont(fx.Assets.systemFontPath(), .{}) catch |err| blk: {
+        std.log.warn("no font ({t}); the labels will not draw", .{err});
+        break :blk .none;
+    };
 }
 
 // -------------------------------------------------------------------------
@@ -664,11 +678,13 @@ fn coverage(signed: f32, softness: f32) f32 {
 // The program
 // -------------------------------------------------------------------------
 
-/// The engine's flags, and the one this example adds: write the sheet this
-/// repository ships and stop.
+/// The engine's flags, and the ones this example adds: write the sheet this
+/// repository ships and stop; start from a scene; write one at the end.
 const Flags = struct {
     app: App.Flags = .{},
     write_atlas: ?[]const u8 = null,
+    scene: ?[]const u8 = null,
+    save_scene: ?[]const u8 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -721,7 +737,21 @@ pub fn main(init: std.process.Init) !void {
     try out.print("drag with the right mouse button to look around; F11 to fill the screen; Escape to leave.\n", .{});
     try out.flush();
 
-    try app.addSystem(.startup, "spawn", spawn);
+    // The engine's own components are known to scenes already; these are
+    // the game's.
+    try app.registerComponents(.{ Wander, Player, Heading, Follow });
+
+    if (flags.scene) |path| {
+        openFont(app);
+        var diagnostics: fx.json.Diagnostics = .{};
+        const loaded = app.loadScene(path, .{ .diagnostics = &diagnostics }) catch |err| {
+            try out.print("{f}\n", .{diagnostics});
+            try out.flush();
+            return err;
+        };
+        try out.print("read {d} entities from {s}\n", .{ loaded.entities, path });
+    } else try app.addSystem(.startup, "spawn", spawn);
+
     try app.addSystem(.fixed, "wander", wander);
     try app.addSystem(.fixed, "drive", drive);
     try app.addSystem(.update, "look around", lookAround);
@@ -742,6 +772,11 @@ pub fn main(init: std.process.Init) !void {
 
     if (flags.app.capture) |path| {
         try app.saveCapture(path);
+        try out.print("wrote {s}\n", .{path});
+    }
+
+    if (flags.save_scene) |path| {
+        try app.saveScene(path, .{ .format = if (std.mem.endsWith(u8, path, ".json")) .json else .cbor });
         try out.print("wrote {s}\n", .{path});
     }
 

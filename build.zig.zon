@@ -20,10 +20,9 @@
         // window is its job.
         .fluxion_platform = .{ .path = "../fluxion-platform" },
 
-        // TrueType, rasterised into the glyph atlas the 2D pass draws text
-        // from. `fluxion-ui` is still absent, and that absence is a decision:
-        // the interface layer comes back when its renderer can be asked to
-        // load a pass rather than clear it.
+        // The interface layer: the layout `.ui` systems declare into, and the
+        // renderer that draws it over the 2D layer.
+        .fluxion_ui = .{ .path = "../fluxion-ui" },
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.
         .fluxion_image = .{ .path = "../fluxion-image" },
@@ -49,7 +48,17 @@
             .hash = "fluxion_math-0.1.0-dfpZBeNUBAAwUMriLKaOTRBWGFmfY53_jyYuMUxkPYek",
         },
 
+        // TrueType, rasterised into the glyph atlas the 2D pass draws text
+        // from.
         .fluxion_font = .{ .path = "../fluxion-font" },
+
+        // Lines, shapes and text over the world, for looking at what a game
+        // is doing: `app.debug`. Its renderer is drawn after the 2D pass.
+        .fluxion_debugdraw = .{ .path = "../fluxion-debugdraw" },
+
+        // What a scene is written in: JSON to read and diff, or CBOR, the
+        // same values in fewer bytes.
+        .fluxion_json = .{ .path = "../fluxion-json" },
 
         // Generational handles: what the asset tables hand out, and what a
         // component holds instead of a pointer. Pinned for the same reason as

@@ -14,8 +14,10 @@ A window, a world, and the loop between them. For Zig 0.16.
 | `Window` | The window and the event queue. |
 | `render.sprite` | The 2D layer, in one instanced draw per texture. |
 | `render.view` | What the camera sees, and where the pointer is in the world. |
+| `Interface` | The interface layer: fed from `Input`, laid out by `.ui` systems, drawn on top. |
 | `text.Atlas` | Every glyph the game has drawn, in one texture. |
 | `hierarchy` | Where a thing really is, once its parent has had its say. |
+| `scene` | A world written down and read back, as JSON or as CBOR. |
 
 ```zig
 const fx = @import("fluxion_engine");
@@ -61,13 +63,8 @@ top of both, each its own render pass into the same surface. The first pass
 clears and the rest load what the one before them left, which is the whole of
 what layering costs - no extra textures, no compositing pass.
 
-Today **the 2D layer is the only one written**. The 3D pass has its place in
-`App.render` and nothing in it. The interface layer is waiting on one argument
-in `fluxion-ui`: its renderer opens its pass with the load operation left at
-`.clear`, so it can only ever be the *first* thing in a target - draw a scene
-and then an interface, and the interface wipes the scene. A `clear: ?Color`
-that loads when it is null is the whole of the change, and a `Color` coerces to
-the optional on its own, so no existing caller reads any differently.
+Today **the 2D layer and the interface are written**. The 3D pass has its
+place in `App.render` and nothing in it.
 
 ## The frame
 
@@ -80,7 +77,7 @@ Seven stages, and the list is the frame in order:
 | `fixed` | Zero or more times, at a constant delta. Physics. |
 | `update` | Once, at whatever the frame took. Everything else. |
 | `late` | After `update`, before anything is drawn. Cameras follow here. |
-| `ui` | Inside the interface's own frame. Not run yet, so `addSystem` refuses it at compile time. |
+| `ui` | Last before drawing, inside the interface's frame: declare it into `app.ui`. |
 | `shutdown` | Once, after the last frame. |
 
 A system is `fn (*App) anyerror!void` - a plain function, not a closure and
@@ -266,11 +263,138 @@ _ = try world.spawnWith(.{
   `app.worldToScreen(x, y)` run the view the renderer draws with, forwards
   and backwards, and a test holds the arithmetic against the matrix the
   shader is given - so what is under the mouse is what is drawn under the
-  mouse, zoomed and turned.
+  mouse, zoomed and turned. `app.spriteCorners(entity)` is where a sprite's
+  four corners land in the world, by the vertex shader's own arithmetic,
+  for asking whether a click hit it.
+- **The world can be drawn through another camera, somewhere else.**
+  `app.drawWorld(texture, view)` draws the sprites, the text and `debug` into
+  a texture through any `fx.View` - a minimap, a picture-in-picture, an
+  editor's scene panel. With `app.world_on_screen = false` the window shows
+  only the background and the interface, and a texture is the one place the
+  world appears. Drawn into on OpenGL, a texture comes out with its bottom row
+  first, and `app.drawnUpsideDown()` says when a picture of it wants turning.
 - **The shader is written once**, in
   [Fluxion Shader](https://github.com/kisstp2006/fluxion-shader)'s language,
   and comes out as GLSL and as HLSL. Two hand-written copies would drift, and
   the drift shows up as one backend drawing correctly and the other not.
+
+## The interface
+
+```zig
+fn pauseMenu(app: *fx.App) !void {
+    app.ui.open(.{ .id = "resume", .padding = .all(12), .background_color = .hex(0x2E343D), .focus = .{} });
+    defer app.ui.close();
+    app.ui.text("Resume", .{ .font_size = 24 });
+    if (app.ui.justReleased()) app.time.scale = 1;
+}
+
+fn shoot(app: *fx.App) !void {
+    if (app.ui.wantsPointer()) return;   // that click was the interface's
+    // ...
+}
+
+try app.addSystem(.ui, "pause menu", pauseMenu);
+```
+
+- **`app.ui` is a [Fluxion UI](https://github.com/kisstp2006/fluxion-ui)
+  layout.** Every `.ui` system declares into one root the size of the window,
+  after `.late`, every frame. It is drawn in the default font -
+  `app.interface.font` names another - over the 2D layer, in a pass that loads
+  what that one left. With no font loaded it is laid out and not drawn, as a
+  `Text2D` is.
+- **It hears the input before the game does**, so an `.input` or `.update`
+  system can ask `app.ui.wantsPointer()` and `wantsKeyboard()` about this
+  frame. The wheel goes to the list under the pointer first, and only what the
+  interface did not use reaches `input.wheel`.
+- **The keys it takes.** Tab always moves the focus. The arrows, a d-pad and
+  the left stick move it only once something has it, so a game keeps them
+  until a menu takes the focus with `app.ui.setFocus`. Enter, Space and a
+  pad's A press what has it, and typing and the editing keys reach a text
+  input that has it. Copy and paste reach no further than the program:
+  fluxion-platform has no clipboard yet.
+- **The pointer's shape is the interface's** once there is a `.ui` system: an
+  I-beam over a text input, the arrows over a resize handle, and
+  `app.ui.setCursor` for a game that wants its own. A locked pointer points at
+  nothing in it.
+- **`app.interface.scale` and `safe_area`** are fluxion-ui's surface: twice
+  the size on a 4K screen, clear of a television's edges. A picture on an
+  element names one of `app.interface.textures` by its index.
+- **Without a `.ui` system none of this happens.** Nothing is fed, laid out or
+  drawn, and a game that never asks for an interface runs as it did.
+
+## Scenes
+
+```zig
+try app.registerComponents(.{ Wander, Player });                 // the game's own
+try app.saveScene("levels/meadow.json", .{});                    // to read, diff and edit
+try app.saveScene("levels/meadow.scene", .{ .format = .cbor });  // the same, in fewer bytes
+const loaded = try app.loadScene("levels/meadow.scene", .{});    // either: it can tell
+```
+
+```json
+{
+  "fluxion_scene": 1,
+  "entities": [
+    {
+      "name": "player",
+      "Transform2D": { "x": 320.0, "y": 180.0 },
+      "Sprite": { "texture": "art/hero.png", "width": 48.0, "height": 48.0 }
+    },
+    {
+      "Transform2D": { "y": -6.0, "parent": 0 },
+      "Sprite": { "texture": "art/turret.png" }
+    }
+  ]
+}
+```
+
+- **An entity is an object of its components**, each under its type's name,
+  with the entity's own name beside them. A field that holds its default is
+  left out, so the file says what is particular about each thing - and a
+  field added to a component later reads as its default from every scene
+  written before it.
+- **What a handle points at is written, not the handle.** An entity in a
+  field - a transform's `parent`, a game's `leader` - is that entity's place
+  in the list; a texture or a font is the file it was read from, with how a
+  texture is sampled when that is not the default. Loading mints new
+  entities, points every reference at them, and loads the files or finds
+  them already loaded. A texture made from pixels has no file, and is
+  written as `null`.
+- **A file's path is written from the scene's own directory**, with forward
+  slashes: `levels/meadow.json` holds `../art/hero.png`. So a scene opens
+  from whatever directory the program reading it was started in - an editor,
+  a test, the game - and a scene and its art can move together. An absolute
+  path, a system font's, stays as it is.
+- **JSON and CBOR are one scene in two spellings.**
+  [Fluxion JSON](https://github.com/kisstp2006/fluxion-json) writes and reads
+  both, and loading tells them apart by the bytes CBOR starts with. CBOR is
+  the smaller file; JSON is the one to read, to diff, and to edit by hand,
+  comments and all.
+- **A scene holds what it has been told about.** The five engine components
+  are registered from the start, and a game's own under their type's name -
+  or a `pub const scene_name`, for two types called the same. A component in
+  a file that nothing here is registered as is passed over and counted in
+  `loaded.skipped`, so a scene from a newer build still opens.
+- **A mistake says where it is** - the line and column, or the byte in CBOR,
+  and the path to the value - and leaves the world as it was:
+
+  ```
+  meadow.json:3:32: there is no entity 7 in this scene, which has 2 (at /entities/1/Transform2D/parent)
+  ```
+
+- **A load goes beside what is there.** A level over another is
+  `app.clearWorld()` - every entity and every name gone at once - and then
+  the load. The font a `Text2D` with no font of its own is drawn in belongs
+  to the program, not the scene: whichever was loaded first.
+- **One entity on its own** is `scene.EntityJson`, for `json.stringify` or
+  `json.Document.from`: the same object a scene holds, and with
+  `.every_field = true` every field, which is what an editor's inspector
+  shows.
+
+`zig build example-creatures -- --frames 1 --save-scene creatures.json` writes
+the example's world - JSON for a path ending in `.json`, CBOR for any other -
+and `-- --scene creatures.json` starts from that file instead of from the code
+that built the world. Its 74 entities take 30 KB as JSON and 13 KB as CBOR.
 
 ## It runs with no window and no GPU
 
@@ -313,7 +437,7 @@ const fluxion = b.dependency("fluxion_engine", .{ .target = target, .optimize = 
 exe_mod.addImport("fluxion_engine", fluxion.module("fluxion_engine"));
 ```
 
-Seven dependencies come with it and **none of them is lazy**, which is the
+Eleven dependencies come with it and **none of them is lazy**, which is the
 difference between an engine and the libraries under it. A library keeps its
 window and its file reading behind `lazy` so a consumer never downloads what
 it does not use; an engine uses all of it by definition.
@@ -321,8 +445,12 @@ it does not use; an engine uses all of it by definition.
 [ECS](https://github.com/kisstp2006/fluxion-ecs) ·
 [RHI](https://github.com/kisstp2006/fluxion-rhi) ·
 [Platform](https://github.com/kisstp2006/fluxion-platform) ·
+[UI](https://github.com/kisstp2006/fluxion-ui) ·
 [Shader](https://github.com/kisstp2006/fluxion-shader) ·
 [Image](https://github.com/kisstp2006/fluxion-image) ·
+[Font](https://github.com/kisstp2006/fluxion-font) ·
+[Debug draw](https://github.com/kisstp2006/fluxion-debugdraw) ·
+[JSON](https://github.com/kisstp2006/fluxion-json) ·
 [Math](https://github.com/kisstp2006/fluxion-math) ·
 [Id](https://github.com/kisstp2006/fluxion-id)
 
@@ -359,8 +487,8 @@ the left mouse button where it should go: that is `app.pointerInWorld()` at
 work, through a camera that follows the creature and stops at the edge of the
 field. Dragging with the right button locks the pointer and pulls the view
 around. The line in the corner is a label parented to the *camera* and scaled
-against its zoom, which is the whole of what a heads-up display is until the
-interface layer arrives. The camera and the player are found by name -
+against its zoom: a heads-up display drawn by the 2D layer rather than by the
+interface. The camera and the player are found by name -
 `app.find("camera")` - rather than by a query that happens to match only one.
 In both examples F11 fills the screen, and in `pong` a controller each drives
 the bats.
@@ -414,6 +542,15 @@ Here, and checked by the tests:
   outline, more than sixty-three bytes in one label, and more than one font in
   one label.
 - Culling against the camera, sprites and labels alike.
+- The interface: fluxion-ui laid out by `.ui` systems into one root, drawn
+  over the 2D layer, fed from the keyboard, the mouse and the pads before the
+  game's systems, keeping the wheel it used, and setting the pointer's shape.
+- Scenes: the world, its names and every registered component written as
+  JSON or CBOR and read back, with entity references rewritten, textures and
+  fonts found again by the file they came from, relative to the scene, and a
+  mistake reported at its line and column.
+- The world drawn into a texture through a view of its own, and a window
+  that shows only the interface: an editor's scene panel, or a minimap.
 - Headless everything, and `capture` for a picture without a screen.
 
 ## What comes next
@@ -444,34 +581,21 @@ axes bound to it, and `input.action("jump")`. `fluxion-platform` already reads
 gamepads and this engine ignores them entirely, which is the other half of the
 same job.
 
-### 3. A world that survives being closed
-
-`fluxion-ecs` writes a world to bytes and reads it back, and the engine does
-not offer it. The one real problem is that a `TextureHandle` means nothing in
-the next process: saving has to write the *name* a texture was loaded from and
-loading has to resolve it again, which means the asset table has to remember
-its own paths. Entity names are the same problem, smaller: they are kept
-beside the world rather than in it, so a save has to write them too, and a
-load has to hand them to the new handles it mints. Everything else is two
-calls.
-
-### 4. Tilemaps
+### 3. Tilemaps
 
 A `Tilemap` component holding a grid of indices into one sheet, drawn in
 chunks so a level larger than the screen is a handful of instanced draws
 rather than one per tile. It wants nothing that is not already here, and it is
 what makes the difference between demonstrations and levels.
 
-### 5. The interface layer
+### 4. Interface anchored to the world
 
-One argument away in `fluxion-ui` - see the note under "Three layers, one
-target" - and then the things a game's interface wants that an application's
-does not: a frame-level "did the interface take this click", focus that moves
-with a d-pad, interface anchored to a point in the world, per-element state so
-a menu can animate, and pictures on elements rather than only rounded
-rectangles.
+The layer is here. What a game's interface still wants from fluxion-ui is
+interface floating over a point in the world - health bars, name plates -
+which needs an id scope so forty of them can share one declaration, state per
+element so a menu can animate, and nine-slice pictures.
 
-### 6. The 3D pass
+### 5. The 3D pass
 
 Meshes, a depth attachment, a `Camera3D`, and the pass drawn before the 2D one
 into the same target. The place it goes is marked in `App.render`, and
@@ -492,8 +616,8 @@ before this package existed - the seam was cut for it deliberately.
   wait until there is a game slow enough to want it.
 - **Hot reload**, which is what [Fluxion VFS](https://github.com/kisstp2006/fluxion-vfs)
   is for and is not wired up.
-- **An editor.** A separate program, one licence tier up, and a long way
-  after all of the above.
+- **An editor.** A separate program one licence tier up, `fluxion-editor`,
+  begun on the interface layer; what it needs from here is its own list.
 
 ### Two things that will catch you once
 

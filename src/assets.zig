@@ -39,6 +39,9 @@ pub const Texture = struct {
     /// Per texture, so pixel art and a smooth background can be drawn at once.
     filter: rhi.Filter,
     wrap: rhi.Wrap,
+    /// The file it was read from, as it was asked for, or empty when it was
+    /// made from pixels in memory. What a scene writes in the handle's place.
+    source: []const u8 = "",
 };
 
 /// What a `Sprite` holds: eight bytes, safe in a component or a save file.
@@ -84,6 +87,8 @@ pub const Font = struct {
     atlas: Atlas,
     /// One texture per font, so each font's text is one draw call.
     texture: rhi.Texture,
+    /// The file it was read from, or empty. See `Texture.source`.
+    source: []const u8 = "",
 };
 
 /// What a `Text2D` holds. Shaped like `TextureHandle`, for the same reasons.
@@ -107,8 +112,10 @@ pub const FontHandle = extern struct {
     }
 };
 
-const FontId = id.handle.Handle(Font);
-const FontTable = id.handle.Table(Font);
+// Boxed, so a font keeps its address when the table grows: the interface's
+// renderer holds on to the face.
+const FontId = id.handle.Handle(*Font);
+const FontTable = id.handle.Table(*Font);
 
 const Samplers = std.EnumArray(rhi.Filter, std.EnumArray(rhi.Wrap, rhi.Sampler));
 
@@ -175,14 +182,20 @@ pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io) Error!Assets {
 
 pub fn deinit(self: *Assets) void {
     var it = self.textures.iterator();
-    while (it.next()) |entry| self.device.destroyTexture(entry.value.gpu);
+    while (it.next()) |entry| {
+        self.device.destroyTexture(entry.value.gpu);
+        self.gpa.free(entry.value.source);
+    }
     self.textures.deinit(self.gpa);
 
     var faces = self.fonts.iterator();
     while (faces.next()) |entry| {
-        entry.value.atlas.deinit();
-        self.gpa.free(entry.value.bytes);
-        self.device.destroyTexture(entry.value.texture);
+        const font = entry.value.*;
+        font.atlas.deinit();
+        self.gpa.free(font.bytes);
+        self.gpa.free(font.source);
+        self.device.destroyTexture(font.texture);
+        self.gpa.destroy(font);
     }
     self.fonts.deinit(self.gpa);
     for (self.samplers.values) |by_wrap| {
@@ -199,6 +212,18 @@ pub fn textureFromPixels(
     rgba: []const u8,
     options: LoadOptions,
 ) Error!TextureHandle {
+    return self.addTexture(width, height, rgba, options, "");
+}
+
+/// Takes `source`, which is freed with the texture.
+fn addTexture(
+    self: *Assets,
+    width: u32,
+    height: u32,
+    rgba: []const u8,
+    options: LoadOptions,
+    source: []const u8,
+) Error!TextureHandle {
     const gpu = try self.device.createTexture(.{
         .width = width,
         .height = height,
@@ -213,6 +238,7 @@ pub fn textureFromPixels(
         .height = height,
         .filter = options.filter,
         .wrap = options.wrap,
+        .source = source,
     }));
 }
 
@@ -223,7 +249,9 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
     var decoded = try image.png.readFile(self.gpa, io, path, .{});
     defer decoded.deinit(self.gpa);
 
-    return self.textureFromPixels(
+    const source = try self.gpa.dupe(u8, path);
+    errdefer self.gpa.free(source);
+    return self.addTexture(
         decoded.width,
         decoded.height,
         decoded.pixels,
@@ -232,12 +260,28 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
             .wrap = options.wrap,
             .label = if (options.label.len == 0) path else options.label,
         },
+        source,
     );
+}
+
+/// The texture already read from `path`, if one was. The path is compared
+/// as it was spelt, so `art/a.png` and `art\a.png` are two textures.
+pub fn findTexture(self: *Assets, path: []const u8) ?TextureHandle {
+    var it = self.textures.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.value.source, path)) return .fromId(entry.handle);
+    }
+    return null;
 }
 
 /// Open a font from bytes in memory. The bytes are copied, because the
 /// parsed font keeps views into them.
 pub fn fontFromBytes(self: *Assets, bytes: []const u8, options: FontOptions) !FontHandle {
+    return self.addFont(bytes, options, "");
+}
+
+/// Takes `source`, which is freed with the font.
+fn addFont(self: *Assets, bytes: []const u8, options: FontOptions, source: []const u8) !FontHandle {
     const owned = try self.gpa.dupe(u8, bytes);
     errdefer self.gpa.free(owned);
 
@@ -254,12 +298,17 @@ pub fn fontFromBytes(self: *Assets, bytes: []const u8, options: FontOptions) !Fo
     });
     errdefer self.device.destroyTexture(texture);
 
-    const handle: FontHandle = .fromId(try self.fonts.add(self.gpa, .{
+    const font = try self.gpa.create(Font);
+    errdefer self.gpa.destroy(font);
+    font.* = .{
         .face = face,
         .bytes = owned,
         .atlas = atlas,
         .texture = texture,
-    }));
+        .source = source,
+    };
+
+    const handle: FontHandle = .fromId(try self.fonts.add(self.gpa, font));
 
     if (self.default_font.isNone()) self.default_font = handle;
     return handle;
@@ -282,18 +331,37 @@ pub fn loadFont(self: *Assets, path: []const u8, options: FontOptions) !FontHand
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, self.gpa, .limited(32 << 20));
     defer self.gpa.free(bytes);
 
-    return self.fontFromBytes(bytes, .{
+    const source = try self.gpa.dupe(u8, path);
+    errdefer self.gpa.free(source);
+    return self.addFont(bytes, .{
         .atlas = options.atlas,
         .label = if (options.label.len == 0) path else options.label,
-    });
+    }, source);
+}
+
+/// The font already read from `path`, if one was. See `findTexture`.
+pub fn findFont(self: *Assets, path: []const u8) ?FontHandle {
+    var it = self.fonts.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.value.*.source, path)) return .fromId(entry.handle);
+    }
+    return null;
+}
+
+/// The file a font handle's font was read from. Null for `.none`, for an
+/// expired handle, and for a font opened from bytes.
+pub fn fontSource(self: *Assets, handle: FontHandle) ?[]const u8 {
+    const font = self.fonts.get(handle.toId()) orelse return null;
+    return if (font.*.source.len == 0) null else font.*.source;
 }
 
 /// What a font handle points at, or the default font when it points at
 /// nothing. Null only when there is no font at all.
 pub fn fontOf(self: *Assets, handle: FontHandle) ?*Font {
-    if (self.fonts.get(handle.toId())) |found| return found;
+    if (self.fonts.get(handle.toId())) |found| return found.*;
     if (handle.isNone() and !self.default_font.isNone()) {
-        return self.fonts.get(self.default_font.toId());
+        const default = self.fonts.get(self.default_font.toId()) orelse return null;
+        return default.*;
     }
     return null;
 }
@@ -303,13 +371,10 @@ pub fn fontOf(self: *Assets, handle: FontHandle) ?*Font {
 pub fn flushFonts(self: *Assets) !void {
     var it = self.fonts.iterator();
     while (it.next()) |entry| {
-        if (!entry.value.atlas.dirty) continue;
-        try self.device.updateTexture(
-            entry.value.texture,
-            entry.value.atlas.pixels,
-            entry.value.atlas.rowPitch(),
-        );
-        entry.value.atlas.markClean();
+        const font = entry.value.*;
+        if (!font.atlas.dirty) continue;
+        try self.device.updateTexture(font.texture, font.atlas.pixels, font.atlas.rowPitch());
+        font.atlas.markClean();
     }
 }
 
@@ -317,7 +382,15 @@ pub fn flushFonts(self: *Assets) !void {
 pub fn unload(self: *Assets, handle: TextureHandle) void {
     if (self.textures.remove(handle.toId())) |texture| {
         self.device.destroyTexture(texture.gpu);
+        self.gpa.free(texture.source);
     }
+}
+
+/// The file a texture handle's texture was read from. Null for `.none`,
+/// for an expired handle, and for a texture made from pixels.
+pub fn textureSource(self: *Assets, handle: TextureHandle) ?[]const u8 {
+    const texture = self.textures.get(handle.toId()) orelse return null;
+    return if (texture.source.len == 0) null else texture.source;
 }
 
 /// What a handle points at, or null if it points at nothing any more.
@@ -385,6 +458,20 @@ test "the first font opened becomes the default" {
 
     try testing.expect(assets.default_font.isNone());
     try testing.expect(assets.fontOf(.none) == null);
+}
+
+test "a font keeps its address when more are loaded" {
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+
+    var assets: Assets = try .init(testing.allocator, &device, testing.io);
+    defer assets.deinit();
+
+    const first = assets.loadFont(systemFontPath(), .{ .atlas = 64 }) catch return error.SkipZigTest;
+    const face = &assets.fontOf(first).?.face;
+    for (0..8) |_| _ = try assets.loadFont(systemFontPath(), .{ .atlas = 64 });
+
+    try testing.expectEqual(face, &assets.fontOf(first).?.face);
 }
 
 test "every filter and wrap has a sampler of its own" {

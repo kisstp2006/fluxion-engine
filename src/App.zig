@@ -27,13 +27,19 @@ const rhi = @import("fluxion_rhi");
 const math = @import("fluxion_math");
 const platform = @import("fluxion_platform");
 const image = @import("fluxion_image");
+const debugdraw = @import("fluxion_debugdraw");
+const debugdraw_rhi = @import("fluxion_debugdraw_rhi");
+const ui_lib = @import("fluxion_ui");
+const typeface = @import("fluxion_font");
 
 const Assets = @import("assets.zig");
+const Interface = @import("interface.zig");
 const Input = @import("input.zig");
 const Time = @import("time.zig");
 const Window = @import("window.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
+const scene = @import("scene.zig");
 const sprite = @import("render/sprite.zig");
 const View = @import("render/view.zig").View;
 
@@ -52,7 +58,7 @@ pub const Error = error{
     /// `Window.isAbsent`.
     NoDisplay,
 } || Allocator.Error || rhi.Error || Window.Error || Assets.Error ||
-    sprite.Error || ecs.Jobs.Error;
+    sprite.Error || ecs.Jobs.Error || debugdraw_rhi.Error;
 
 /// Which drawing API to open.
 pub const Backend = enum {
@@ -271,6 +277,19 @@ jobs: ecs.Jobs,
 assets: Assets,
 sprites: sprite.Renderer,
 
+/// Lines, shapes and text drawn over everything, for one frame unless its
+/// style says for how many seconds. Inside `.fixed` they last until the next
+/// step instead, so a step's shapes are there in the frames between steps.
+debug: debugdraw.Pen,
+debug_frame: debugdraw.Canvas,
+debug_steps: debugdraw.Canvas,
+debug_renderer: debugdraw_rhi.Renderer,
+
+/// What `.ui` systems declare the interface into.
+ui: ui_lib.Ui,
+/// How the interface is fed and drawn: its font, scale and safe area.
+interface: Interface = .{},
+
 time: Time,
 
 /// Where each interpolating transform was before the last fixed step: the
@@ -286,10 +305,20 @@ orphans: std.ArrayList(ecs.Entity) = .empty,
 names: std.AutoArrayHashMapUnmanaged(ecs.Entity, []const u8) = .empty,
 by_name: std.StringHashMapUnmanaged(ecs.Entity) = .empty,
 
+/// What a scene can hold, and what each component is called in one: the
+/// engine's own from the start, and a game's once `registerComponents` has
+/// been told about them.
+scene_components: scene.Registry = .{},
+
 input: Input = .{},
 schedule: Schedule = .empty,
 
 background: Color,
+
+/// Whether the frame draws the world under the interface. An editor turns it
+/// off and shows the world in a panel of its own, through `drawWorld`; the
+/// frame is then the background and the interface.
+world_on_screen: bool = true,
 
 /// The size of the target, in pixels. Kept here, because a headless app has
 /// no window to ask.
@@ -330,6 +359,12 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .jobs = undefined,
         .assets = undefined,
         .sprites = undefined,
+        .debug = undefined,
+        .debug_frame = .init(gpa),
+        .debug_steps = .init(gpa),
+        .debug_renderer = undefined,
+        .ui = .init(gpa),
+        .interface = .{},
         // A fixed frame time wins over the clock, and the clock over nothing.
         .time = .init(if (options.frame_time) |seconds|
             .{ .fixed = seconds }
@@ -341,9 +376,11 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .orphans = .empty,
         .names = .empty,
         .by_name = .empty,
+        .scene_components = .{},
         .input = .{},
         .schedule = .{ .io = options.io },
         .background = options.background,
+        .world_on_screen = true,
         .width = options.width,
         .height = options.height,
         .resized = false,
@@ -355,7 +392,16 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .started = false,
     };
     errdefer self.world.deinit();
+    errdefer self.ui.deinit();
     self.time.fixed_delta = options.fixed_delta;
+
+    errdefer self.scene_components.deinit(gpa);
+    inline for (.{ components.Transform2D, components.Sprite, components.Text2D, components.Animation, components.Camera2D }) |T| {
+        self.scene_components.add(gpa, T, comptime scene.nameOf(T)) catch |err| switch (err) {
+            error.ComponentNameTaken => unreachable,
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+    }
 
     const backend = if (options.headless) .none else options.backend.resolve();
 
@@ -449,6 +495,10 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.sprites = try .init(gpa, &self.device);
     errdefer self.sprites.deinit(gpa);
 
+    self.debug_renderer = try .init(gpa, &self.device, .{});
+    errdefer self.debug_renderer.deinit();
+    self.debug = self.debug_frame.pen();
+
     return self;
 }
 
@@ -461,6 +511,12 @@ pub fn destroy(self: *App) void {
     for (self.names.values()) |name| gpa.free(name);
     self.names.deinit(gpa);
     self.by_name.deinit(gpa);
+    self.scene_components.deinit(gpa);
+    self.debug_renderer.deinit();
+    self.debug_steps.deinit();
+    self.debug_frame.deinit();
+    self.interface.deinit(gpa);
+    self.ui.deinit();
     self.sprites.deinit(gpa);
     self.assets.deinit();
     self.jobs.deinit();
@@ -485,22 +541,10 @@ pub fn destroy(self: *App) void {
 /// ```
 ///
 /// The name is what a failure is reported by - see `Schedule.failed` - since
-/// Zig cannot recover a function's name from a pointer. Both are `comptime`:
-/// the stage so that `.ui`, which nothing runs yet, is a compile error, and
-/// the name so that it outlives the schedule, which keeps it uncopied.
-pub fn addSystem(self: *App, comptime stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
-    comptime refuseUnrun(stage);
+/// Zig cannot recover a function's name from a pointer. It is `comptime` so
+/// that it outlives the schedule, which keeps it uncopied.
+pub fn addSystem(self: *App, stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
     return self.schedule.add(self.gpa, stage, name, system);
-}
-
-/// A compile error for a stage `step` does not run. See `addSystem`.
-fn refuseUnrun(comptime stage: Stage) void {
-    if (stage == .ui) @compileError(
-        "fluxion-engine: nothing runs the .ui stage yet. It belongs to the " ++
-            "interface layer, which is waiting on fluxion-ui (see the README); " ++
-            "until then a heads-up display is a Text2D parented to the camera, " ++
-            "as examples/creatures.zig does.",
-    );
 }
 
 // -------------------------------------------------------------------------
@@ -545,6 +589,8 @@ pub fn step(self: *App) anyerror!bool {
     }
 
     self.time.tick();
+    self.debug_frame.advance(self.time.delta);
+    if (self.hasInterface()) try self.feedInterface();
 
     try self.schedule.run(.input, self);
     self.shortcuts();
@@ -561,8 +607,11 @@ pub fn step(self: *App) anyerror!bool {
         const frame_delta = self.time.delta;
         self.time.delta = self.time.fixed_delta;
         defer self.time.delta = frame_delta;
+        self.debug.canvas = &self.debug_steps;
+        defer self.debug.canvas = &self.debug_frame;
 
         while (self.time.takeFixedStep()) |_| {
+            self.debug_steps.advance(self.time.fixed_delta);
             // Where everything was before this step, to draw between steps.
             try self.snapshotPrevious();
             try self.schedule.run(.fixed, self);
@@ -583,6 +632,8 @@ pub fn step(self: *App) anyerror!bool {
     try self.despawnOrphans();
     self.forgetDeadNames();
     try self.animate();
+
+    if (self.hasInterface()) try self.layOutInterface();
 
     const minimized = self.windowState() == .minimized;
     if (!minimized) try self.render();
@@ -614,6 +665,37 @@ fn shortcuts(self: *App) void {
             log.warn("could not change fullscreen: {t}", .{err});
         };
     }
+}
+
+fn hasInterface(self: *const App) bool {
+    return self.schedule.systemsIn(.ui).len != 0;
+}
+
+/// Before the `.input` stage, so a game system can ask `app.ui.wantsPointer()`
+/// about this frame.
+fn feedInterface(self: *App) !void {
+    if (self.interfaceFace()) |face| self.ui.setMeasurer(Interface.measurer(face));
+    try self.interface.feed(self.gpa, &self.ui, &self.input, self.time.unscaled_delta);
+}
+
+fn layOutInterface(self: *App) !void {
+    self.interface.commands = &.{};
+    self.ui.begin(self.interface.surface(@floatFromInt(self.width), @floatFromInt(self.height)));
+    {
+        // One root for every `.ui` system: fluxion-ui makes the first element
+        // the root, so a second system's would land beside it. `.grow`,
+        // because fluxion-ui gives a `.fit` root its content's height.
+        self.ui.open(.{ .width = .grow, .height = .grow });
+        defer self.ui.close();
+        try self.schedule.run(.ui, self);
+    }
+    self.interface.commands = try self.ui.end();
+    if (self.window) |*window| self.interface.applyCursor(&self.ui, window);
+}
+
+fn interfaceFace(self: *App) ?*const typeface.Font {
+    const font = self.assets.fontOf(self.interface.font) orelse return null;
+    return &font.face;
 }
 
 /// Take a new size from the window: the numbers, the flag, and the swapchain.
@@ -787,6 +869,59 @@ fn forgetName(self: *App, entity: ecs.Entity) void {
     self.gpa.free(named.value);
 }
 
+// -------------------------------------------------------------------------
+// Scenes
+// -------------------------------------------------------------------------
+
+/// Let scenes hold these components as well as the engine's own.
+///
+/// ```zig
+/// try app.registerComponents(.{ Wander, Player });
+/// ```
+///
+/// Each is written under its own name - `Wander`, not `creatures.Wander` -
+/// or under its `pub const scene_name`, which is how two types of one name
+/// are told apart. Registering one twice does nothing.
+pub fn registerComponents(self: *App, comptime types: anytype) scene.Registry.Error!void {
+    inline for (types) |T| try self.scene_components.add(self.gpa, T, comptime scene.nameOf(T));
+}
+
+/// Write the world to a file: every entity, its name, and every registered
+/// component on it. JSON unless `.format = .cbor`. See `scene`.
+pub fn saveScene(self: *App, path: []const u8, options: scene.SaveOptions) !void {
+    const io = self.io orelse return error.NoIo;
+    return scene.save(self, io, path, options);
+}
+
+/// Read a scene into the world, beside whatever is in it already, and say
+/// what came of it. See `scene`.
+///
+/// ```zig
+/// var diagnostics: fx.json.Diagnostics = .{};
+/// _ = app.loadScene("levels/meadow.json", .{ .diagnostics = &diagnostics }) catch |err| {
+///     std.log.err("{f}", .{diagnostics});
+///     return err;
+/// };
+/// ```
+pub fn loadScene(self: *App, path: []const u8, options: scene.LoadOptions) !scene.Loaded {
+    const io = self.io orelse return error.NoIo;
+    return scene.load(self, io, path, options);
+}
+
+/// Everything out of the world at once - every entity and every name - and
+/// an empty world in its place: a level loaded over another is this and then
+/// `loadScene`. Not from inside a query, which is walking the world it
+/// throws away.
+pub fn clearWorld(self: *App) void {
+    self.world.deinit();
+    self.world = .init(self.gpa);
+    self.snapshots.clearRetainingCapacity();
+    self.orphans.clearRetainingCapacity();
+    for (self.names.values()) |name| self.gpa.free(name);
+    self.names.clearRetainingCapacity();
+    self.by_name.clearRetainingCapacity();
+}
+
 /// Give back the names of everything that has died. Once a frame, after
 /// `despawnOrphans`, for the same reason.
 fn forgetDeadNames(self: *App) void {
@@ -826,6 +961,17 @@ pub fn worldToScreen(self: *App, x: f32, y: f32) math.Vec2 {
 /// Where the pointer is in the world.
 pub fn pointerInWorld(self: *App) math.Vec2 {
     return self.screenToWorld(self.input.pointer.x, self.input.pointer.y);
+}
+
+/// Where an entity's sprite is drawn, as its four corners in the world, round
+/// from the texture's top left - turned, scaled and carried by its parents
+/// as the renderer does it. Null for an entity with no sprite, or none that
+/// can be placed. What a click on a sprite is tested against.
+pub fn spriteCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
+    const drawn = (self.world.get(entity, components.Sprite) orelse return null).*;
+    const placed = self.worldTransform(entity) orelse return null;
+    const texture = self.assets.get(drawn.texture) orelse self.assets.get(self.assets.white) orelse return null;
+    return sprite.cornersOf(drawn, placed, texture);
 }
 
 /// What the camera sees, at the size of the window.
@@ -982,21 +1128,65 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
     //    yet; when it is, the 2D pass below stops clearing.
 
     // 2. The 2D layer: sprites and text, sorted back to front, blended, no
-    //    depth.
-    try self.sprites.draw(
-        self.gpa,
-        &self.world,
-        &self.assets,
-        &self.snapshots,
-        into,
-        width,
-        height,
-        self.background,
-        self.time.alpha(),
-    );
+    //    depth - or, with the world off the screen, only the clearing.
+    const view: View = .of(&self.world, &self.snapshots, width, height);
+    if (self.world_on_screen) {
+        try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, into, view, self.background, self.time.alpha());
+    } else try self.clearTarget(into);
 
-    // 3. The interface layer, on top. Not here yet: fluxion-ui's renderer
-    //    cannot be asked to load the pass rather than clear it.
+    // 3. The interface, on top, loading what the 2D layer left.
+    try self.interface.draw(self.gpa, &self.device, self.interfaceFace(), into, width, height);
+
+    // 4. `debug`, over all of it: the world through the 2D camera, and the
+    //    screen in pixels.
+    if (self.world_on_screen) try self.drawDebug(into, view);
+}
+
+/// Draw the world - its sprites, its text and `debug` - through `view` into
+/// `into`, a texture made with `.render_target = true` at the view's size,
+/// cleared to the background first. An editor's scene view is this, and so
+/// is a minimap; with `world_on_screen` off, it is the only place the world
+/// is drawn.
+///
+/// ```zig
+/// var view: fx.View = .screen(640, 360);
+/// view.x = player.x;
+/// view.zoom_x = 2;
+/// view.zoom_y = 2;
+/// try app.drawWorld(minimap, view);
+/// ```
+///
+/// On OpenGL a texture drawn into is read bottom row first, so shown in the
+/// interface it wants its `source` turned over; see `drawnUpsideDown`.
+pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
+    try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, .{ .texture = into }, view, self.background, self.time.alpha());
+    try self.drawDebug(.{ .texture = into }, view);
+}
+
+/// Whether a texture `drawWorld` drew into comes out upside down when drawn
+/// as a picture: true on OpenGL, whose framebuffers count rows from the
+/// bottom.
+pub fn drawnUpsideDown(self: *const App) bool {
+    return switch (self.device.backendTag()) {
+        .gl, .webgl => true,
+        .d3d11, .none => false,
+    };
+}
+
+fn drawDebug(self: *App, into: rhi.RenderTarget, view: View) !void {
+    try self.debug_renderer.draw(&.{ &self.debug_steps, &self.debug_frame }, .{ .color = into }, .{
+        .view_projection = view.matrix(self.device.clip()),
+        .width = view.width,
+        .height = view.height,
+    });
+}
+
+/// Start a frame from the background, for a frame that draws no world.
+fn clearTarget(self: *App, into: rhi.RenderTarget) !void {
+    const list = self.device.begin();
+    try list.beginPass(.{ .color = .{ .target = into, .clear_color = self.background.array() } });
+    try list.endPass();
+    try self.device.submit();
 }
 
 /// Draw one frame into a texture of its own and hand back the pixels: four
@@ -1103,6 +1293,68 @@ test "a sprite nowhere near the camera is not drawn" {
 
     try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
     try testing.expectEqual(@as(u32, 1), app.sprites.culled);
+}
+
+test "the world is drawn into a texture through a view of its own" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240 });
+    defer app.destroy();
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(1000, 1000),
+        components.Sprite.solid(.white, 16, 16),
+    });
+    const panel = try app.device.createTexture(.{
+        .width = 64,
+        .height = 64,
+        .usage = .{ .sampled = true, .render_target = true },
+    });
+    defer app.device.destroyTexture(panel);
+
+    // The window's view is nowhere near it; this one is right over it.
+    var view: View = .screen(64, 64);
+    view.x = 1000;
+    view.y = 1000;
+    try app.drawWorld(panel, view);
+    try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
+
+    view.x = 0;
+    try app.drawWorld(panel, view);
+    try testing.expectEqual(@as(u32, 0), app.sprites.drawn);
+    try testing.expectEqual(@as(u32, 1), app.sprites.culled);
+    try testing.expect(!app.drawnUpsideDown());
+}
+
+test "with the world off the screen, a frame draws none of it" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 320, .height = 240 });
+    defer app.destroy();
+    app.world_on_screen = false;
+    _ = try app.world.spawnWith(.{
+        components.Transform2D.at(160, 120),
+        components.Sprite.solid(.white, 16, 16),
+    });
+
+    try app.run();
+    try testing.expectEqual(@as(u32, 0), app.sprites.drawn);
+    try testing.expectEqual(@as(u32, 0), app.sprites.draw_calls);
+}
+
+test "clearing the world leaves nothing in it, and frees every name" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const door = try app.world.spawnWith(.{components.Transform2D.at(1, 2)});
+    try app.setName(door, "door");
+    _ = try app.world.spawnWith(.{components.Transform2D.childOf(door, 0, 1)});
+
+    app.clearWorld();
+    try testing.expectEqual(@as(usize, 0), app.world.count());
+    try testing.expect(app.find("door") == null);
+
+    // A fresh world hands out the same handles again, and none of them may
+    // come with an old name.
+    const again = try app.world.spawnWith(.{components.Transform2D.at(3, 4)});
+    try testing.expect(again.eql(door));
+    try testing.expect(app.nameOf(again) == null);
+    try app.setName(again, "door");
+    try testing.expect(app.find("door").?.eql(again));
 }
 
 test "a sprite half off the edge is still drawn" {
@@ -1962,6 +2214,97 @@ test "a repeating texture tiles across a region past its edge" {
     try testing.expectEqual(@as(f32, 4), drawn.instance.placement[3]);
 }
 
+const Panel = struct {
+    fn declare(app: *App) anyerror!void {
+        app.ui.empty(.{ .id = "panel", .width = .fixed(100), .height = .fixed(50), .background_color = .white });
+    }
+
+    fn another(app: *App) anyerror!void {
+        app.ui.empty(.{ .id = "other", .width = .fixed(60), .height = .fixed(50), .background_color = .white });
+    }
+
+    fn tall(app: *App) anyerror!void {
+        app.ui.empty(.{ .id = "tall", .width = .fixed(10), .height = .grow });
+    }
+
+    fn label(app: *App) anyerror!void {
+        app.ui.open(.{});
+        defer app.ui.close();
+        app.ui.text("Hi", .{ .font_size = 16 });
+    }
+};
+
+test "every .ui system declares into one root the size of the window" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240, .frames = 2 });
+    defer app.destroy();
+    try app.addSystem(.ui, "panel", Panel.declare);
+    try app.addSystem(.ui, "another", Panel.another);
+    try app.addSystem(.ui, "tall", Panel.tall);
+    try app.run();
+
+    try testing.expectEqual(@as(f32, 100), app.ui.boxOf("panel").?.width);
+    try testing.expectEqual(@as(f32, 100), app.ui.boxOf("other").?.x);
+    try testing.expectEqual(@as(f32, 240), app.ui.boxOf("tall").?.height);
+    try testing.expectEqual(@as(usize, 2), app.interface.commands.len);
+}
+
+test "the interface is drawn over the 2D layer, in the default font" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .io = testing.io });
+    defer app.destroy();
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch return error.SkipZigTest;
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(10, 10), components.Sprite.solid(.white, 8, 8) });
+    try app.addSystem(.ui, "label", Panel.label);
+    try app.run();
+
+    try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
+    try testing.expectEqual(&app.assets.fontOf(.none).?.face, app.interface.face.?);
+    try testing.expectEqual(@as(usize, 2), app.interface.renderer.?.instances.items.len);
+}
+
+const Clicks = struct {
+    var released: u32 = 0;
+    var wanted = false;
+
+    fn button(app: *App) anyerror!void {
+        app.ui.open(.{ .id = "ok", .width = .fixed(40), .height = .fixed(20), .background_color = .white });
+        defer app.ui.close();
+        if (app.ui.justReleased()) released += 1;
+    }
+
+    fn game(app: *App) anyerror!void {
+        wanted = app.ui.wantsPointer();
+    }
+};
+
+fn leftButton(down: bool, x: f64, y: f64) platform.Event {
+    return .{ .mouse_button = .{
+        .window = .none,
+        .button = .left,
+        .action = if (down) .press else .release,
+        .mods = .{},
+        .x = x,
+        .y = y,
+    } };
+}
+
+test "a click presses what the interface drew under it, and the game is told" {
+    Clicks.released = 0;
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100 });
+    defer app.destroy();
+    try app.addSystem(.ui, "button", Clicks.button);
+    try app.addSystem(.update, "game", Clicks.game);
+    try app.startup();
+
+    _ = try app.step();
+    app.input.apply(leftButton(true, 20, 10));
+    _ = try app.step();
+    try testing.expect(Clicks.wanted);
+
+    app.input.apply(leftButton(false, 20, 10));
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), Clicks.released);
+}
+
 const Nap = struct {
     fn run(_: *App) anyerror!void {
         try testing.io.sleep(.fromMilliseconds(1), .awake);
@@ -1986,4 +2329,67 @@ test "a frame cap slows the loop down to it" {
 
     try app.run();
     try testing.expect(app.time.elapsed >= 0.03);
+}
+
+const Scribble = struct {
+    var every_frame: bool = true;
+
+    fn line(app: *App) anyerror!void {
+        if (every_frame) app.debug.line2d(.init(0, 0), .init(10, 10), .red);
+    }
+
+    fn circle(app: *App) anyerror!void {
+        app.debug.with(.{ .segments = 16 }).circle2d(.init(20, 20), 5, .green);
+    }
+
+    fn lasting(app: *App) anyerror!void {
+        if (app.time.frame == 1) app.debug.with(.{ .seconds = 0.05 }).cross2d(.init(5, 5), 4, .white);
+    }
+};
+
+test "a debug shape is drawn in the frame it was drawn in, and not in the next" {
+    Scribble.every_frame = true;
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addSystem(.update, "line", Scribble.line);
+
+    try app.startup();
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.debug_renderer.stats.lines);
+
+    Scribble.every_frame = false;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.debug_renderer.stats.lines);
+}
+
+test "a debug shape drawn in a fixed step is there in every frame until the next step" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .fixed_delta = 1.0 / 64.0 });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 1.0 / 256.0 };
+    try app.addSystem(.fixed, "circle", Scribble.circle);
+
+    try app.startup();
+    for (1..13) |frame| {
+        _ = try app.step();
+        try testing.expectEqual(@as(u32, if (frame < 4) 0 else 16), app.debug_renderer.stats.lines);
+    }
+
+    app.time.source = .{ .fixed = 1.0 / 32.0 };
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 16), app.debug_renderer.stats.lines);
+}
+
+test "a lasting debug shape stays for its seconds of game time" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 1.0 / 64.0 };
+    try app.addSystem(.update, "lasting", Scribble.lasting);
+
+    try app.startup();
+    var frames_with_it: u32 = 0;
+    for (0..10) |_| {
+        _ = try app.step();
+        if (app.debug_renderer.stats.lines > 0) frames_with_it += 1;
+    }
+    try testing.expectEqual(@as(u32, 4), frames_with_it);
 }
