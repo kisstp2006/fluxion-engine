@@ -60,8 +60,12 @@
 //! registered from the start, and a game adds its own with
 //! `App.registerComponents`. A component in a file that nothing registered
 //! is passed over and counted in `Loaded.skipped`, so a scene from a newer
-//! build still opens. A version 1 scene - references by place in the list,
-//! paths from the scene file's own directory - reads as it always did.
+//! build still opens. A scene of another version is refused, and the
+//! refusal says which version it is.
+//!
+//! **A scene that is wrong is an error, never a crash**: what the file holds
+//! is checked as it is read, and a mistake is returned with where it is,
+//! leaving the world as it was - an editor shows it and goes on.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -85,7 +89,7 @@ const FontHandle = Assets.FontHandle;
 const Text2D = components.Text2D;
 const Uuid = @import("fluxion_id").Uuid;
 
-/// The version this writes, and the newest it reads.
+/// The version this writes, and the only one it reads.
 pub const version = 2;
 
 pub const SaveOptions = struct {
@@ -98,11 +102,6 @@ pub const LoadOptions = struct {
     /// Where reading went wrong and why: a line and a column, or a byte of
     /// CBOR, and the path to the value, such as `/entities/3/Sprite/texture`.
     diagnostics: ?*json.Diagnostics = null,
-    /// The directory a version 1 scene's texture and font paths are relative
-    /// to. `load` gives the scene file's own; null reads them from the
-    /// working directory, as they are. A version 2 scene names its files as
-    /// `Project` does, and needs none.
-    directory: ?[]const u8 = null,
 };
 
 /// What a load did.
@@ -503,9 +502,7 @@ pub fn load(app: *App, io: std.Io, path: []const u8, options: LoadOptions) anyer
         return err;
     };
     defer app.gpa.free(bytes);
-    var from_file = options;
-    from_file.directory = std.fs.path.dirname(file) orelse ".";
-    return read(app, bytes, from_file);
+    return read(app, bytes, options);
 }
 
 /// Read a scene from memory into `app`'s world. If anything in it is wrong,
@@ -552,7 +549,6 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
             .diagnostics = options.diagnostics,
             .entities = spawned.items,
             .told = &told,
-            .directory = options.directory,
         };
         try l.fill();
         loaded.moved = l.moved;
@@ -562,16 +558,13 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
 
 /// What the first pass learns for the second. Kept in the arena.
 const Told = struct {
-    version: u32 = version,
     skipped: usize = 0,
     /// Each entity's UUID in the file, at its place in the list.
     uuids: std.ArrayList(?Uuid) = .empty,
     /// Each UUID's place in the list: what a reference inside the scene
     /// finds, whatever UUID the entity was given in the end.
     places: std.AutoHashMapUnmanaged(Uuid, usize) = .empty,
-    /// Version 1's table of how textures are sampled, by path.
-    textures: std.StringHashMapUnmanaged(TextureOptions) = .empty,
-    /// Version 2's `assets`, by path.
+    /// `assets`, by path.
     files: std.StringHashMapUnmanaged(FileInfo) = .empty,
 };
 
@@ -593,9 +586,6 @@ const Loading = struct {
     entities: []const Entity = &.{},
     /// What the first pass learnt. Null during it.
     told: ?*const Told = null,
-    /// What a version 1 scene's paths are relative to. See
-    /// `LoadOptions.directory`.
-    directory: ?[]const u8 = null,
     /// Textures found or loaded already, by the path the file gives.
     textures: std.StringHashMapUnmanaged(TextureHandle) = .empty,
     fonts: std.StringHashMapUnmanaged(FontHandle) = .empty,
@@ -619,8 +609,8 @@ const Loading = struct {
                     .number => |n| n.asInt(u32),
                     else => null,
                 } orelse return l.fail(error.NotAScene, "\"fluxion_scene\" is the version of the scene, and this is {f}", .{found(token)});
-                if (number > version) return l.fail(error.UnsupportedVersion, "this scene is version {d}, and this engine reads up to version {d}", .{ number, version });
-                told.version = number;
+                if (number < version) return l.fail(error.UnsupportedVersion, "this scene is version {d}, an older one this engine no longer reads: it reads version {d}", .{ number, version });
+                if (number > version) return l.fail(error.UnsupportedVersion, "this scene is version {d}, newer than this engine, which reads version {d}", .{ number, version });
                 versioned = true;
             } else if (std.mem.eql(u8, name, "entities")) {
                 if (listed) return l.fail(error.NotAScene, "a scene has one list of entities, and this is a second", .{});
@@ -657,16 +647,6 @@ const Loading = struct {
                     l.path.pop(mark);
                 }
                 _ = try l.next();
-            } else if (std.mem.eql(u8, name, "textures")) {
-                try l.open(.object_begin, "the table of how textures are sampled, which is an object");
-                while (try l.key()) |path| {
-                    const owned = try l.arena.dupe(u8, path);
-                    const mark = l.path.push("textures/{s}", .{owned});
-                    var options: TextureOptions = undefined;
-                    try readComponent(l, TextureOptions, &options);
-                    try told.textures.put(l.arena, owned, options);
-                    l.path.pop(mark);
-                }
             } else if (std.mem.eql(u8, name, "assets")) {
                 try l.open(.object_begin, "the table of the files the scene names, which is an object");
                 while (try l.key()) |path| {
@@ -793,25 +773,11 @@ const Loading = struct {
         return err;
     }
 
-    /// Where a version 1 scene's path is from the working directory: joined
-    /// to the scene's directory, with forward slashes.
-    fn located(l: *Loading, path: []const u8) Allocator.Error![]const u8 {
-        const directory = l.directory orelse return path;
-        if (std.fs.path.isAbsolute(path)) return path;
-        const joined = try std.fs.path.resolve(l.arena, &.{ directory, path });
-        std.mem.replaceScalar(u8, joined, '\\', '/');
-        return joined;
-    }
-
     /// Where a file the scene names is now, and what `assets` says of it:
     /// by its UUID first - counted in `moved` when that is somewhere else -
     /// and by its path when no `.uid` file holds the UUID.
     fn file(l: *Loading, path: []const u8) anyerror!struct { []const u8, FileInfo } {
         const told = l.told.?;
-        if (told.version == 1) {
-            const sampled = told.textures.get(path) orelse TextureOptions{};
-            return .{ try l.located(path), .{ .filter = sampled.filter, .wrap = sampled.wrap } };
-        }
         const info = told.files.get(path) orelse return .{ path, .{} };
         const uid = info.uid orelse return .{ path, info };
         const now = (try l.app.project.pathOf(uid)) orelse return .{ path, info };
@@ -917,13 +883,7 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
                 break :blk l.app.findUuid(uuid) orelse
                     return l.fail(error.NoSuchEntity, "no entity in this scene or in the world has the UUID {s}", .{text});
             },
-            // As version 1 wrote them, and as a hand may still.
-            .number => |n| blk: {
-                const place = n.asInt(usize) orelse return l.fail(error.WrongType, "an entity is written as its place in the list, and {s} is not one", .{n.text});
-                if (place >= l.entities.len) return l.fail(error.NoSuchEntity, "there is no entity {d} in this scene, which has {d}", .{ place, l.entities.len });
-                break :blk l.entities[place];
-            },
-            else => return l.wrong("an entity's UUID, its place in the list, or null", token),
+            else => return l.wrong("an entity's UUID, or null", token),
         };
         return;
     }
@@ -1318,27 +1278,25 @@ test "a project's file is written by its res:// path and its UUID, and found by 
     try testing.expectEqualStrings("res://art/people/ada.png", copy.assets.textureSource(sheet).?);
 }
 
-test "a version 1 scene reads as it did: references by place, paths from its own directory" {
-    var game: Game = try .init();
-    defer game.tmp.cleanup();
-    _ = try game.at();
-    try game.picture("art/hero.png");
-    try game.tmp.dir.createDirPath(testing.io, "levels");
-    try game.tmp.dir.writeFile(testing.io, .{ .sub_path = "levels/old.json", .data =
-        \\{ "fluxion_scene": 1, "entities": [
-        \\  { "name": "tank", "Sprite": { "texture": "../art/hero.png" } },
-        \\  { "Transform2D": { "parent": 0 } }
-        \\], "textures": { "../art/hero.png": { "filter": "linear" } } }
-    });
-
-    const app = try game.app();
+test "a version 1 scene is refused, and says so, rather than read another way" {
+    const app = try headless();
     defer app.destroy();
-    _ = try app.loadScene("res://levels/old.json", .{});
-    const tank = app.find("tank").?;
-    try testing.expect(app.single(Transform2D).?.parent.eql(tank));
-    const sheet = app.world.get(tank, Sprite).?.texture;
-    try testing.expectEqualStrings("res://art/hero.png", app.assets.textureSource(sheet).?);
-    try testing.expectEqual(rhi.Filter.linear, app.assets.get(sheet).?.filter);
+    var diagnostics: json.Diagnostics = .{};
+    try testing.expectError(error.UnsupportedVersion, read(app,
+        \\{ "fluxion_scene": 1, "entities": [
+        \\  { "name": "tank" },
+        \\  { "Transform2D": { "parent": 0 } }
+        \\] }
+    , .{ .diagnostics = &diagnostics }));
+    try testing.expectEqualStrings("this scene is version 1, an older one this engine no longer reads: it reads version 2", diagnostics.message());
+    try testing.expectEqual(@as(usize, 0), app.world.count());
+
+    // Nor is an entity named by its place in the list any more.
+    try testing.expectError(error.WrongType, read(app,
+        \\{ "fluxion_scene": 2, "entities": [{ "name": "tank" }, { "Transform2D": { "parent": 0 } }] }
+    , .{ .diagnostics = &diagnostics }));
+    try testing.expectEqualStrings("expected an entity's UUID, or null, found the number 0", diagnostics.message());
+    try testing.expectEqual(@as(usize, 0), app.world.count());
 }
 
 test "a scene loaded twice gives the second copy UUIDs of its own, and its references stay inside it" {
@@ -1429,7 +1387,7 @@ test "what a scene has that nothing here knows is passed over, and what it lacks
     const app = try headless();
     defer app.destroy();
     const loaded = try read(app,
-        \\{ "fluxion_scene": 1, "entities": [
+        \\{ "fluxion_scene": 2, "entities": [
         \\  { "Transform2D": { "x": 5, "wobble": 3 }, "Mystery": { "a": [1, 2] } },
         \\  { "name": "empty" }
         \\], "future": true }
@@ -1450,14 +1408,14 @@ test "a mistake in a scene says where it is, and leaves the world as it was" {
     _ = try app.world.spawnWith(.{Transform2D.at(1, 1)});
 
     const text =
-        \\{ "fluxion_scene": 1, "entities": [
+        \\{ "fluxion_scene": 2, "entities": [
         \\  { "name": "first", "Transform2D": { "x": 5 } },
-        \\  { "Transform2D": { "parent": 7 } }
+        \\  { "Transform2D": { "parent": "77777777-7777-4777-8777-777777777777" } }
         \\] }
     ;
     var diagnostics: json.Diagnostics = .{};
     try testing.expectError(error.NoSuchEntity, read(app, text, .{ .diagnostics = &diagnostics }));
-    try testing.expectEqualStrings("there is no entity 7 in this scene, which has 2", diagnostics.message());
+    try testing.expectEqualStrings("no entity in this scene or in the world has the UUID 77777777-7777-4777-8777-777777777777", diagnostics.message());
     try testing.expectEqualStrings("/entities/1/Transform2D/parent", diagnostics.path());
     try testing.expectEqual(@as(u32, 3), diagnostics.line);
     try testing.expectEqual(@as(u32, 32), diagnostics.column);
@@ -1472,11 +1430,52 @@ test "a mistake in a scene says where it is, and leaves the world as it was" {
     try testing.expectEqualStrings("/entities/1/Transform2D/parent", diagnostics.path());
 
     try testing.expectError(error.WrongType, read(app,
-        \\{ "fluxion_scene": 1, "entities": [{ "Sprite": { "width": "wide" } }] }
+        \\{ "fluxion_scene": 2, "entities": [{ "Sprite": { "width": "wide" } }] }
     , .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("expected a number, found the string \"wide\"", diagnostics.message());
     try testing.expectEqualStrings("/entities/0/Sprite/width", diagnostics.path());
     try testing.expectEqual(@as(usize, 1), app.world.count());
+}
+
+test "numbers no hand would give load, and the frames after them do not crash" {
+    const app = try headless();
+    defer app.destroy();
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 }) catch {};
+    const loaded = try read(app,
+        \\{ "fluxion_scene": 2, "entities": [
+        \\  { "Transform2D": { "x": NaN, "y": Infinity, "scale_x": 0 }, "Sprite": { "width": NaN },
+        \\    "Animation": { "columns": 0, "rows": 0, "length": 4, "fps": 1e39, "time": NaN } },
+        \\  { "Transform2D": {}, "Sprite": {}, "Animation": { "columns": 0, "rows": 0, "length": 0, "fps": 1e39 } },
+        \\  { "Transform2D": { "x": 1 }, "Camera2D": { "zoom": 0, "fit_width": NaN, "fit_height": Infinity } },
+        \\  { "Transform2D": { "rotation": NaN }, "RigidBody2D": { "velocity": { "x": NaN, "y": 1 } },
+        \\    "Collider2D": { "shape": "circle", "radius": -1 } },
+        \\  { "Transform2D": {}, "RigidBody2D": { "gravity_scale": NaN },
+        \\    "Collider2D": { "width": 10, "height": 10, "rotation": NaN } },
+        \\  { "Transform2D": {}, "RigidBody2D": {}, "Collider2D": { "shape": "circle", "radius": -1, "offset_x": Infinity } },
+        \\  { "Transform2D": { "x": Infinity }, "Collider2D": { "width": 4, "height": 4 } },
+        \\  { "Transform2D": { "x": 5 }, "Text2D": { "text": "Hi", "size": 1e30, "line_spacing": NaN } },
+        \\  { "Transform2D": { "x": 5 }, "Text2D": { "text": "Hi", "size": NaN } },
+        \\  { "Transform2D": { "y": 50 },
+        \\    "RigidBody2D": { "velocity": { "x": NaN, "y": Infinity }, "angular_velocity": NaN, "linear_damping": NaN, "gravity_scale": Infinity },
+        \\    "Collider2D": { "width": 4, "height": 4, "density": NaN, "friction": NaN, "restitution": NaN } },
+        \\  { "Transform2D": { "y": 51 }, "RigidBody2D": { "type": "static" }, "Collider2D": { "width": 40, "height": 4, "density": -1 } }
+        \\] }
+    , .{});
+    try testing.expectEqual(@as(usize, 11), loaded.entities);
+
+    // Words that are not UTF-8: a lone surrogate written as an escape, and a
+    // byte no UTF-8 has.
+    _ = read(app,
+        \\{ "fluxion_scene": 2, "entities": [{ "Transform2D": {}, "Text2D": { "text": "a\uD800b" } }] }
+    , .{}) catch {};
+    _ = read(app, "{ \"fluxion_scene\": 2, \"entities\": [{ \"Transform2D\": {}, \"Text2D\": { \"text\": \"a\xffb\" } }] }", .{}) catch {};
+
+    // Edited, and paused: bodies are made at the top of every frame.
+    app.time.scale = 0;
+    for (0..3) |_| _ = try app.step();
+    // Played.
+    app.time.scale = 1;
+    for (0..5) |_| _ = try app.step();
 }
 
 test "a file that is not a scene, or a newer one, is refused" {
@@ -1488,7 +1487,7 @@ test "a file that is not a scene, or a newer one, is refused" {
     try testing.expectEqualStrings("this is not a scene: it has no \"fluxion_scene\" version", diagnostics.message());
 
     try testing.expectError(error.UnsupportedVersion, read(app, "{ \"fluxion_scene\": 3, \"entities\": [] }", .{ .diagnostics = &diagnostics }));
-    try testing.expectEqualStrings("this scene is version 3, and this engine reads up to version 2", diagnostics.message());
+    try testing.expectEqualStrings("this scene is version 3, newer than this engine, which reads version 2", diagnostics.message());
 
     try testing.expectError(error.WrongType, read(app, "[1, 2]", .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("expected a scene, which is an object, found a list", diagnostics.message());

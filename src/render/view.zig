@@ -185,9 +185,10 @@ pub const Bounds = struct {
     }
 };
 
-/// A zoom that can be divided by: zero or less is taken as one.
+/// A zoom that can be divided by and divided into: zero or less, NaN and an
+/// infinity are taken as one.
 fn positive(zoom: f32) f32 {
-    return if (zoom > 0) zoom else 1;
+    return if (zoom > 0 and std.math.isFinite(zoom)) zoom else 1;
 }
 
 /// Pixels per world unit before the camera's own scale: `zoom`, times the

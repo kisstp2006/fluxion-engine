@@ -354,7 +354,7 @@ fn reshape(self: *Bodies, app: *App, link: *ShapeLink, e: Entity, body: BodyId, 
     if (!link.entity.isNone()) try self.take(app, link.shape, link.entity);
     link.* = .{ .entity = e, .body = body, .made_from = inputs };
     const def = shapeOf(inputs, e) orelse {
-        log.warn("the collider on {f} has no size, and no sprite to take one from", .{e});
+        log.warn("the collider on {f} makes no shape: it has no size and no sprite to take one from, or a number in it is not finite", .{e});
         return;
     };
     link.shape = try app.physics.addShape(body, def);
@@ -372,8 +372,11 @@ fn shapeOf(inputs: Inputs, e: Entity) ?physics.Shape {
             }
             const half_width = @abs((if (c.width != 0) c.width else inputs.sprite[0]) * place.scale_x) / 2;
             const half_height = @abs((if (c.height != 0) c.height else inputs.sprite[1]) * place.scale_y) / 2;
+            const centre = centreOf(place, offset);
+            const turn = place.rotation + c.rotation;
             if (!(half_width > least_size and half_height > least_size)) return null;
-            break :blk .{ .polygon = .offsetBox(half_width, half_height, centreOf(place, offset), place.rotation + c.rotation) };
+            if (!finite(&.{ half_width, half_height, centre.x, centre.y, turn })) return null;
+            break :blk .{ .polygon = .offsetBox(half_width, half_height, centre, turn) };
         },
         .circle => blk: {
             if (c.radius == 0) {
@@ -382,8 +385,9 @@ fn shapeOf(inputs: Inputs, e: Entity) ?physics.Shape {
             }
             const radius = @abs(if (c.radius != 0) c.radius else inputs.sprite[0] / 2) *
                 @max(@abs(place.scale_x), @abs(place.scale_y));
-            if (!(radius > least_size)) return null;
-            break :blk .{ .circle = .{ .center = centreOf(place, offset), .radius = radius } };
+            const centre = centreOf(place, offset);
+            if (!(radius > least_size) or !finite(&.{ radius, centre.x, centre.y })) return null;
+            break :blk .{ .circle = .{ .center = centre, .radius = radius } };
         },
     };
     return .{
@@ -393,6 +397,16 @@ fn shapeOf(inputs: Inputs, e: Entity) ?physics.Shape {
         .sensor = c.sensor,
         .user_data = e.toInt(),
     };
+}
+
+/// Whether every one of these is a number, and not an infinity. A shape made
+/// of a NaN - a scene edited by hand, a component written wrong - has no area
+/// the physics can divide by, and it stops there; it gets no shape instead.
+fn finite(values: []const f32) bool {
+    for (values) |value| {
+        if (!std.math.isFinite(value)) return false;
+    }
+    return true;
 }
 
 fn centreOf(place: Pose, offset: [2]f32) Vec2 {
@@ -434,8 +448,12 @@ fn moved(was: Transform2D, now: Transform2D) bool {
         was.inherit_rotation != now.inherit_rotation or was.inherit_scale != now.inherit_scale;
 }
 
+/// Where a body goes, or null when it cannot be placed - its chain is broken,
+/// or a number on the way is not finite, and a body there would be NaN from
+/// its first step.
 fn placed(app: *App, e: Entity, place: Transform2D) ?Pose {
-    return .of(hierarchy.resolve(&app.world, &still, e, place, 1) orelse return null);
+    const at: Pose = .of(hierarchy.resolve(&app.world, &still, e, place, 1) orelse return null);
+    return if (finite(&.{ at.x, at.y, at.rotation, at.scale_x, at.scale_y })) at else null;
 }
 
 /// Write each moving body's place and speed into its components, and hear

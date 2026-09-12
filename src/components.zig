@@ -201,12 +201,16 @@ pub const Region = extern struct {
         return .{ .u1 = across, .v1 = down };
     }
 
-    /// One cell of a grid, counted left to right and then down.
+    /// One cell of a grid, counted left to right and then down. A grid of no
+    /// columns or no rows - a number from a file, not from a sheet - is taken
+    /// as one, rather than divided by.
     pub fn cell(index: u32, columns: u32, rows: u32) Region {
-        const cw = 1 / @as(f32, @floatFromInt(columns));
-        const ch = 1 / @as(f32, @floatFromInt(rows));
-        const cx = @as(f32, @floatFromInt(index % columns)) * cw;
-        const cy = @as(f32, @floatFromInt((index / columns) % rows)) * ch;
+        const across = @max(columns, 1);
+        const down = @max(rows, 1);
+        const cw = 1 / @as(f32, @floatFromInt(across));
+        const ch = 1 / @as(f32, @floatFromInt(down));
+        const cx = @as(f32, @floatFromInt(index % across)) * cw;
+        const cy = @as(f32, @floatFromInt((index / across) % down)) * ch;
         return .{ .u0 = cx, .v0 = cy, .u1 = cx + cw, .v1 = cy + ch };
     }
 
@@ -334,10 +338,15 @@ pub const Animation = extern struct {
         return .{ .length = length, .columns = length, .rows = 1, .fps = fps };
     }
 
-    /// Which cell of the sheet is showing.
+    /// Which cell of the sheet is showing. A time or a rate no clock reaches -
+    /// NaN, an infinity, more cells than a `u32` counts - shows the first.
     pub fn frame(self: Animation) u32 {
-        if (self.length <= 1 or self.fps <= 0) return self.first;
-        const step: u32 = @intFromFloat(@max(self.time, 0) * self.fps);
+        if (self.length <= 1 or !(self.fps > 0)) return self.first;
+        const cells = @max(self.time, 0) * self.fps;
+        // Two to the 32nd, which an `f32` holds exactly; everything below it
+        // a `u32` holds.
+        if (!(cells < 4294967296.0)) return self.first;
+        const step: u32 = @intFromFloat(cells);
         const within = if (self.looping)
             step % self.length
         else
@@ -347,13 +356,19 @@ pub const Animation = extern struct {
 
     /// Move it on by `delta` seconds, and say which cell to show. The clock is
     /// wound back by whole loops, so it stays precise however long it runs.
+    ///
+    /// Numbers no time passing could give - a clock of NaN or an infinity, a
+    /// rate so high a loop takes no time at all - come from a file, and start
+    /// the animation again rather than spinning here.
     pub fn advance(self: *Animation, delta: f32) Region {
         if (self.playing and self.length > 1 and self.fps > 0) {
             self.time += delta;
 
             const loop = @as(f32, @floatFromInt(self.length)) / self.fps;
-            if (self.looping) {
-                while (self.time >= loop) self.time -= loop;
+            if (!std.math.isFinite(self.time) or !(loop > 0)) {
+                self.time = 0;
+            } else if (self.looping) {
+                if (self.time >= loop) self.time = @mod(self.time, loop);
             } else if (self.time >= loop) {
                 self.time = loop;
                 self.finished = true;
@@ -737,6 +752,28 @@ test "a one-shot stops on its last cell and says so" {
     try testing.expectEqual(@as(u32, 2), animation.frame());
     try testing.expect(animation.finished);
     try testing.expect(!animation.playing);
+}
+
+test "an animation whose numbers no clock could give neither stops the frame nor spins" {
+    // No cells to count, and a rate past what an `f32` holds.
+    var odd: Animation = .{ .length = 0, .columns = 0, .rows = 0, .fps = std.math.inf(f32) };
+    try testing.expectEqual(Region.cell(0, 1, 1), odd.advance(0.1));
+
+    var endless: Animation = .{ .length = 4, .columns = 4, .fps = std.math.inf(f32), .time = std.math.nan(f32) };
+    _ = endless.advance(0.1);
+    try testing.expectEqual(@as(u32, 0), endless.frame());
+    try testing.expectEqual(@as(f32, 0), endless.time);
+
+    // A clock a year of frames could not wind back one loop at a time.
+    var old: Animation = .{ .length = 4, .columns = 4, .fps = 10, .time = 1e30 };
+    const region = old.advance(0.1);
+    try testing.expect(old.time >= 0 and old.time < 0.4);
+    try testing.expect(std.math.isFinite(region.u0) and std.math.isFinite(region.u1));
+
+    // And one that is not playing, so nothing winds it back at all.
+    var stopped: Animation = .{ .first = 2, .length = 4, .columns = 4, .fps = 10, .time = 1e30, .playing = false };
+    _ = stopped.advance(0.1);
+    try testing.expectEqual(@as(u32, 2), stopped.frame());
 }
 
 test "an animation with one cell never moves" {

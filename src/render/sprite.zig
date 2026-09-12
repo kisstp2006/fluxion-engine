@@ -436,8 +436,17 @@ pub const Renderer = struct {
         bounds: Bounds,
         sequence: *u32,
     ) !void {
-        // Whole pixels, as the atlas is keyed.
-        const pixels: u16 = @intFromFloat(@max(1, @round(label.size)));
+        // Whole pixels, as the atlas is keyed - and no taller than the atlas,
+        // which could not keep a bigger glyph anyway: a size read from a file
+        // is not always one a hand would give, and NaN is the smallest.
+        const tallest: f32 = @floatFromInt(@min(face.atlas.height, std.math.maxInt(u16)));
+        const rounded = @round(label.size);
+        const pixels: u16 = if (rounded >= 1 and rounded <= tallest)
+            @intFromFloat(rounded)
+        else if (rounded > tallest)
+            @intFromFloat(tallest)
+        else
+            1;
         const scaled = face.face.at(@floatFromInt(pixels));
         const line_height = scaled.lineHeight() * label.line_spacing;
 
