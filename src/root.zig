@@ -49,6 +49,10 @@ pub const hierarchy = @import("hierarchy.zig");
 /// and `App.loadScene`.
 pub const scene = @import("scene.zig");
 
+/// Which body is which entity's: `RigidBody2D` and `Collider2D` kept in step
+/// with `App.physics`.
+pub const Bodies = @import("bodies.zig");
+
 pub const render = struct {
     pub const sprite = @import("render/sprite.zig");
     /// What the camera sees, and where the pointer is in the world.
@@ -80,6 +84,18 @@ pub const Animation = components.Animation;
 
 /// What the 2D pass looks through.
 pub const Camera2D = components.Camera2D;
+
+/// Something that falls, is pushed and bounces.
+pub const RigidBody2D = components.RigidBody2D;
+
+/// The shape a body collides with, or a static body of its own.
+pub const Collider2D = components.Collider2D;
+
+/// Two colliders that began or stopped touching: `App.contactsBegun`.
+pub const Contact = Bodies.Contact;
+
+/// What `App.castRay` hit.
+pub const RayHit = Bodies.RayHit;
 
 /// What a camera sees, as a point, a zoom, a turn and a size: what
 /// `App.drawWorld` draws the world through.
@@ -154,6 +170,10 @@ pub const ui = @import("fluxion_ui");
 /// game's own settings and saves can be.
 pub const json = @import("fluxion_json");
 
+/// Rigid bodies in the plane: what `App.physics` is, for joints, gravity and
+/// anything else a body can do.
+pub const physics = @import("fluxion_physics");
+
 /// A physical key, by its position on a US layout.
 pub const Key = platform.Key;
 
@@ -178,6 +198,7 @@ test {
     _ = schedule;
     _ = hierarchy;
     _ = scene;
+    _ = Bodies;
     _ = render.sprite;
     _ = render.view;
     _ = text.Atlas;

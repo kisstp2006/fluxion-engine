@@ -17,6 +17,7 @@ pub fn build(b: *std.Build) void {
     const debugdraw = b.dependency("fluxion_debugdraw", .{ .target = target, .optimize = optimize });
     const ui = b.dependency("fluxion_ui", .{ .target = target, .optimize = optimize });
     const json = b.dependency("fluxion_json", .{ .target = target, .optimize = optimize });
+    const physics = b.dependency("fluxion_physics", .{ .target = target, .optimize = optimize });
 
     // fluxion-ui's own renderer module pins rhi and font by URL, and a pin and
     // the paths above would be two packages. Built from its source with this
@@ -56,6 +57,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "fluxion_ui", .module = ui.module("fluxion_ui") },
             .{ .name = "fluxion_ui_rhi", .module = ui_rhi },
             .{ .name = "fluxion_json", .module = json.module("fluxion_json") },
+            .{ .name = "fluxion_physics", .module = physics.module("fluxion_physics") },
         },
     });
 
@@ -105,6 +107,11 @@ pub fn build(b: *std.Build) void {
             .name = "creatures",
             .step = "example-creatures",
             .about = "A sprite sheet, animation, and things attached to other things",
+        },
+        .{
+            .name = "crates",
+            .step = "example-crates",
+            .about = "Rigid bodies: crates, a ramp, a ball on a rod, and a basket that counts",
         },
     };
 

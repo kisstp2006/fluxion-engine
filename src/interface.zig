@@ -23,10 +23,12 @@ const platform = @import("fluxion_platform");
 const typeface = @import("fluxion_font");
 
 const Assets = @import("assets.zig");
+const Clipboard = @import("clipboard.zig");
 const Input = @import("input.zig");
 const Window = @import("window.zig");
 
 const Interface = @This();
+const log = std.log.scoped(.fluxion_engine);
 
 /// How far one notch of the wheel scrolls, in pixels.
 pub const pixels_per_notch = 40;
@@ -55,19 +57,14 @@ face: ?*const typeface.Font = null,
 /// This frame's, from `ui.end`.
 commands: []const ui.RenderCommand = &.{},
 
-/// What Ctrl+C and Ctrl+X took, for Ctrl+V: fluxion-platform has no clipboard
-/// yet, so it only reaches as far as this program.
-clipboard: std.ArrayList(u8) = .empty,
-
 /// The pointer shape last put on the window.
 shape: ui.CursorShape = .arrow,
 
 /// Unscaled seconds since the first frame: what animated text moves on.
 seconds: f64 = 0,
 
-pub fn deinit(self: *Interface, gpa: Allocator) void {
+pub fn deinit(self: *Interface) void {
     if (self.renderer) |*renderer| renderer.deinit();
-    self.clipboard.deinit(gpa);
     self.* = undefined;
 }
 
@@ -81,9 +78,17 @@ pub fn surface(self: *const Interface, width: f32, height: f32) ui.Surface {
 ///
 /// Tab always moves the focus. The arrows, a d-pad and the left stick move it
 /// only once something has it, so a game keeps them until a menu takes the
-/// focus. Characters and editing keys reach a text input that has the focus;
-/// Enter, Space and a pad's A press whatever else has it.
-pub fn feed(self: *Interface, gpa: Allocator, layout: *ui.Ui, input: *Input, dt: f32) Allocator.Error!void {
+/// focus. Characters and editing keys reach a text input that has the focus,
+/// copying and pasting through `clipboard`; Enter, Space and a pad's A press
+/// whatever else has it.
+pub fn feed(
+    self: *Interface,
+    gpa: Allocator,
+    layout: *ui.Ui,
+    input: *Input,
+    clipboard: *Clipboard,
+    dt: f32,
+) Allocator.Error!void {
     layout.tick(dt);
     self.seconds += dt;
 
@@ -95,7 +100,7 @@ pub fn feed(self: *Interface, gpa: Allocator, layout: *ui.Ui, input: *Input, dt:
         layout.setPointer(input.pointer.x, input.pointer.y, down);
     }
 
-    for (input.typedThisFrame()) |typed| try self.receive(gpa, layout, typed);
+    for (input.typedThisFrame()) |typed| try receive(gpa, layout, clipboard, typed);
 
     if (input.wheel.x != 0 or input.wheel.y != 0) {
         const dx = input.wheel.x * pixels_per_notch;
@@ -110,7 +115,7 @@ pub fn feed(self: *Interface, gpa: Allocator, layout: *ui.Ui, input: *Input, dt:
     layout.setActivate(accept and !layout.wantsKeyboard());
 }
 
-fn receive(self: *Interface, gpa: Allocator, layout: *ui.Ui, typed: Input.Typed) Allocator.Error!void {
+fn receive(gpa: Allocator, layout: *ui.Ui, clipboard: *Clipboard, typed: Input.Typed) Allocator.Error!void {
     switch (typed) {
         .character => |codepoint| {
             var utf8: [4]u8 = undefined;
@@ -121,7 +126,7 @@ fn receive(self: *Interface, gpa: Allocator, layout: *ui.Ui, typed: Input.Typed)
             if (k.key == .tab) {
                 _ = layout.navigate(if (k.mods.shift) .previous else .next);
             } else if (layout.wantsKeyboard()) {
-                try self.edit(gpa, layout, k);
+                try edit(gpa, layout, clipboard, k);
             } else if (layout.focus != 0) {
                 if (arrow(k.key)) |toward| _ = layout.navigate(toward);
             }
@@ -129,15 +134,22 @@ fn receive(self: *Interface, gpa: Allocator, layout: *ui.Ui, typed: Input.Typed)
     }
 }
 
-fn edit(self: *Interface, gpa: Allocator, layout: *ui.Ui, k: platform.event.KeyEvent) Allocator.Error!void {
+/// A clipboard that says no costs the paste or the copy, not the frame.
+fn edit(gpa: Allocator, layout: *ui.Ui, clipboard: *Clipboard, k: platform.event.KeyEvent) Allocator.Error!void {
     if (k.virtual == .v and command(k)) {
-        _ = layout.textAction(.{ .paste = self.clipboard.items });
+        const pasted = clipboard.read() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return log.warn("could not paste: {t}", .{err}),
+        };
+        _ = layout.textAction(.{ .paste = pasted });
         return;
     }
     const action = textAction(k) orelse return;
     const taken = layout.textAction(action) orelse return;
-    self.clipboard.clearRetainingCapacity();
-    try self.clipboard.appendSlice(gpa, taken);
+    clipboard.set(gpa, taken) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => log.warn("could not copy: {t}", .{err}),
+    };
 }
 
 /// The keys no layout moves by where they are, and the letters by the name
@@ -295,6 +307,9 @@ const Fixture = struct {
     layout: ui.Ui,
     interface: Interface = .{},
     input: Input = .{},
+    /// The program's own, as with no window: a test never overwrites what
+    /// the person running it had copied.
+    clipboard: Clipboard = .{},
 
     fn init() Fixture {
         var layout: ui.Ui = .init(testing.allocator);
@@ -303,12 +318,17 @@ const Fixture = struct {
     }
 
     fn deinit(self: *Fixture) void {
-        self.interface.deinit(testing.allocator);
+        self.interface.deinit();
+        self.clipboard.deinit(testing.allocator);
         self.layout.deinit();
     }
 
+    fn feed(self: *Fixture, dt: f32) !void {
+        try self.interface.feed(testing.allocator, &self.layout, &self.input, &self.clipboard, dt);
+    }
+
     fn frame(self: *Fixture, declare: *const fn (*ui.Ui) void) !void {
-        try self.interface.feed(testing.allocator, &self.layout, &self.input, 1.0 / 60.0);
+        try self.feed(1.0 / 60.0);
         self.input.beginFrame();
         self.layout.begin(.init(200, 100));
         self.layout.open(.{});
@@ -410,12 +430,12 @@ test "a wheel the interface scrolled with does not reach the game" {
     try fixture.frame(longList);
     fixture.input.apply(pointerAt(10, 10));
     fixture.input.apply(wheelTurned(-1));
-    try fixture.interface.feed(testing.allocator, &fixture.layout, &fixture.input, 0);
+    try fixture.feed(0);
     try testing.expectEqual(@as(f32, 0), fixture.input.wheel.y);
 
     fixture.input.apply(pointerAt(150, 80));
     fixture.input.apply(wheelTurned(-1));
-    try fixture.interface.feed(testing.allocator, &fixture.layout, &fixture.input, 0);
+    try fixture.feed(0);
     try testing.expectEqual(@as(f32, -1), fixture.input.wheel.y);
 }
 

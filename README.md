@@ -1,6 +1,36 @@
-# Fluxion Engine
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/images/fluxion-logo-white.png">
+    <img src=".github/images/fluxion-logo-black.png" width="460" alt="Fluxion">
+  </picture>
+</p>
 
-A window, a world, and the loop between them. For Zig 0.16.
+<h1 align="center">Fluxion Engine</h1>
+
+<p align="center">
+  <strong>A window, a world, and the loop between them.</strong><br>
+  A game engine for Zig 0.16: an ECS in the middle, a 2D renderer, an interface layer, physics, and scenes kept as JSON or CBOR.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Zig-0.16-F7A41D?logo=zig&logoColor=white" alt="Zig 0.16">
+  <img src="https://img.shields.io/badge/licence-BSD--3--Clause-blue" alt="Licence: BSD-3-Clause">
+  <img src="https://img.shields.io/badge/renderer-OpenGL%20%7C%20Direct3D%2011-5c6bc0" alt="Renderer: OpenGL or Direct3D 11">
+  <img src="https://img.shields.io/badge/tests-no%20window%2C%20no%20GPU-2ea44f" alt="Tests run with no window and no GPU">
+  <img src="https://img.shields.io/badge/status-early%20development-orange" alt="Status: early development">
+</p>
+
+<p align="center">
+  <a href="#-the-frame">The frame</a> ·
+  <a href="#-the-2d-layer">The 2D layer</a> ·
+  <a href="#-physics">Physics</a> ·
+  <a href="#-scenes">Scenes</a> ·
+  <a href="#-install">Install</a> ·
+  <a href="#-examples">Examples</a> ·
+  <a href="#-what-comes-next">What comes next</a>
+</p>
+
+![The creatures example: fourteen creatures with their names over them, the one the player steers ringed, and a heads-up line in the corner](.github/images/creatures.png)
 
 | Module | What it is |
 | --- | --- |
@@ -18,6 +48,7 @@ A window, a world, and the loop between them. For Zig 0.16.
 | `text.Atlas` | Every glyph the game has drawn, in one texture. |
 | `hierarchy` | Where a thing really is, once its parent has had its say. |
 | `scene` | A world written down and read back, as JSON or as CBOR. |
+| `Bodies` | Which body is which entity's: the physics world kept in step with the components. |
 
 ```zig
 const fx = @import("fluxion_engine");
@@ -56,17 +87,18 @@ plain slices with no branch in it asking what this one is. That is
 [Fluxion ECS](https://github.com/kisstp2006/fluxion-ecs)' doing, not this
 package's; what this package adds is the frame around it.
 
-## Three layers, one target
+## 🥞 Three layers, one target
 
 3D first with a depth test, then 2D blended with none, then the interface on
 top of both, each its own render pass into the same surface. The first pass
 clears and the rest load what the one before them left, which is the whole of
-what layering costs - no extra textures, no compositing pass.
+what layering costs - no extra textures, no compositing pass. What
+`app.debug` draws goes over all three, last.
 
 Today **the 2D layer and the interface are written**. The 3D pass has its
-place in `App.render` and nothing in it.
+place in `App.drawLayers` and nothing in it.
 
-## The frame
+## 🔁 The frame
 
 Seven stages, and the list is the frame in order:
 
@@ -74,7 +106,7 @@ Seven stages, and the list is the frame in order:
 | --- | --- |
 | `startup` | Once, before the first frame. Spawn the world. |
 | `input` | After the events are in. Turn keys into intent. |
-| `fixed` | Zero or more times, at a constant delta. Physics. |
+| `fixed` | Zero or more times, at a constant delta, each followed by the physics step. Forces and steering. |
 | `update` | Once, at whatever the frame took. Everything else. |
 | `late` | After `update`, before anything is drawn. Cameras follow here. |
 | `ui` | Last before drawing, inside the interface's frame: declare it into `app.ui`. |
@@ -109,7 +141,7 @@ std.debug.print("{f}", .{app.schedule});
 // fixed     move ball                21.4us
 ```
 
-## Controllers and the pointer
+## 🎮 Controllers and the pointer
 
 ```zig
 const pad = app.input.anyPad();            // or app.input.pad(1) for player two
@@ -143,7 +175,7 @@ const turn = app.input.pointer.dx;
   their mouse back, and the lock is still a lock when they come back to it. A
   lock asked for while the window is in the background waits for it.
 
-## The window
+## 🪟 The window
 
 ```zig
 try app.setWindowTitle("Level 3");
@@ -172,7 +204,7 @@ if (app.resized) layOutAgain(app.width, app.height);
   when the window is made. Without a window - headless - all of this is
   nothing, and says so without failing.
 
-## Frame pacing
+## ⌛ Frame pacing
 
 ```zig
 try app.setVsync(false);
@@ -190,7 +222,7 @@ if (!app.input.focused) pause(app);
 - **On `d3d11`, vsync off does not yet go past the refresh rate**: the
   flip-model swapchain in fluxion-rhi has two buffers and no tearing support.
 
-## The 2D layer
+## 🎨 The 2D layer
 
 One quad in a vertex buffer and a second buffer stepping once per instance
 with where each sprite goes, how big, which way round, what colour and which
@@ -278,7 +310,7 @@ _ = try world.spawnWith(.{
   and comes out as GLSL and as HLSL. Two hand-written copies would drift, and
   the drift shows up as one backend drawing correctly and the other not.
 
-## The interface
+## 🔘 The interface
 
 ```zig
 fn pauseMenu(app: *fx.App) !void {
@@ -310,8 +342,9 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   the left stick move it only once something has it, so a game keeps them
   until a menu takes the focus with `app.ui.setFocus`. Enter, Space and a
   pad's A press what has it, and typing and the editing keys reach a text
-  input that has it. Copy and paste reach no further than the program:
-  fluxion-platform has no clipboard yet.
+  input that has it. Copy and paste reach no further than the program: what
+  is copied stays in a buffer of the interface's own, not yet on the system
+  clipboard fluxion-platform has.
 - **The pointer's shape is the interface's** once there is a `.ui` system: an
   I-beam over a text input, the arrows over a resize handle, and
   `app.ui.setCursor` for a game that wants its own. A locked pointer points at
@@ -322,7 +355,108 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
 - **Without a `.ui` system none of this happens.** Nothing is fed, laid out or
   drawn, and a game that never asks for an interface runs as it did.
 
-## Scenes
+## 🐞 Debug drawing
+
+```zig
+fn watchBall(app: *fx.App) !void {
+    const ball = app.find("ball") orelse return;
+    const place = app.worldTransform(ball) orelse return;
+    const at: fx.Vec2 = .init(place.x, place.y);
+
+    app.debug.circle2d(at, 12, .green);
+    app.debug.with(.{ .seconds = 2 }).cross2d(at, 6, .red);   // stays for two seconds
+    app.debug.screen().print2d(.init(8, 8), "{d:.0} fps", .{app.time.fps()}, .white);
+}
+```
+
+- **`app.debug` is a [Fluxion Debug Draw](https://github.com/kisstp2006/fluxion-debugdraw)
+  pen**: lines, shapes and text, seen through the same camera as the 2D
+  layer. The functions ending in `2d` take a `Vec2`, and the filled ones start
+  with `solid`.
+- **A shape lasts one frame**, or as many seconds as its style says. Drawn
+  inside `.fixed` it lasts until the next step instead, so what a step drew
+  is still there in the frames between steps rather than flickering on a fast
+  screen.
+- **`screen()` draws in pixels** from the top left, for a readout that stays
+  where it is while the camera moves; `within2d(at, angle)` draws in
+  something's own frame.
+- **Drawing never fails.** No `try`: a shape there is no memory for is
+  counted and dropped rather than stopping the frame.
+- **It has its own font**, ASCII at a fixed size in pixels, so a number on
+  the screen needs nothing loaded. It is drawn wherever the world is - over
+  the interface on screen, and into the texture `drawWorld` draws - and with
+  `world_on_screen` off the window shows none of it.
+
+## 💥 Physics
+
+```zig
+fn spawn(app: *fx.App) !void {
+    _ = try app.world.spawnWith(.{                     // a floor: a static body of its own
+        fx.Transform2D.at(480, 520),
+        fx.Sprite.solid(.hex(0x2B3442), 960, 40),
+        fx.Collider2D{},                               // the size of its sprite
+    });
+    _ = try app.world.spawnWith(.{
+        fx.Transform2D.at(480, 100).interpolated(),
+        fx.Sprite.of(crate),
+        fx.RigidBody2D{},
+        fx.Collider2D{ .restitution = 0.3 },
+    });
+}
+
+fn jump(app: *fx.App) !void {                          // a .fixed system
+    const player = app.find("player") orelse return;
+    const body = app.world.get(player, fx.RigidBody2D) orelse return;
+    if (app.input.justPressed(.space)) body.velocity.y = -500;
+}
+```
+
+- **A `RigidBody2D` is a body and a `Collider2D` its shape**, both plain
+  data. The engine makes the body in
+  [Fluxion Physics](https://github.com/kisstp2006/fluxion-physics), changes it
+  when the components change, and takes it away with the entity. The handle
+  is kept beside the world, as a name is, so a scene saves bodies like any
+  other component and an editor's inspector shows them.
+- **A collider on its own is a static body**: a floor, a wall, a tile. On an
+  entity hanging from a body it is part of that body, where the entity is -
+  a compound shape is a body and a few children.
+- **A collider with no size is its sprite's**, pivot and all, and the
+  transform's scale scales it; `.box(w, h)` and `.circle(r)` say otherwise.
+- **The world steps after each `.fixed` stage**, on the same scheduler as the
+  queries, so what a `.fixed` system wrote is in that step. Then each moving
+  body's place goes into its transform and its speed into `velocity`; set
+  `interpolate` on the transform to draw it between steps.
+- **Writing is moving.** A transform the game writes puts the body there,
+  and a `velocity` it writes sets the body going. For a force or an impulse,
+  `app.bodyOf(entity)` is the body itself. A body is in the world's space: a
+  moving parent does not carry it, and its place is written back in the
+  parent's space.
+- **Contacts come back as entities, once.** `app.contactsBegun()` and
+  `contactsEnded()` list what touched and what parted in this frame's steps,
+  each once however many steps ran; a `.fixed` system hears those of the
+  step before. A sensor pushes nothing and is still heard. An ended contact
+  may name a despawned entity - often that is why it ended.
+- **The three questions, answered in entities**: `app.castRay(from, to, .{})`,
+  `app.overlapPoint(point)` and `app.overlapBox(min, max, &buffer)`.
+- **Everything else is `app.physics`**: gravity, settings, and joints between
+  the handles `app.bodyIdOf` gives. `Options.physics` starts at a hundred
+  units a metre, for a world measured in pixels.
+
+**When the bodies catch up.** Before every fixed step the engine compares
+each body and collider with what it last made, and on a paused frame - and
+the first, which has no time to step - at the top of the frame. So a query
+sees what was spawned as of the last step, a static collider moved is found
+where it went after the next one, and a system that needs a body at once -
+to join it to another just spawned - calls `app.syncBodies()`. The
+comparison is one pass over every collider, about 17 ns each on the machine
+this was measured on: 131 us a step for 7,500, where the step itself takes
+75 us resting and 267 us falling. A level of thousands of tiles wants the
+tilemap below rather than an entity a tile.
+
+Not here yet: polygons, joints as components, and a view of the colliders in
+`debug`.
+
+## 🎬 Scenes
 
 ```zig
 try app.registerComponents(.{ Wander, Player });                 // the game's own
@@ -370,7 +504,7 @@ const loaded = try app.loadScene("levels/meadow.scene", .{});    // either: it c
   both, and loading tells them apart by the bytes CBOR starts with. CBOR is
   the smaller file; JSON is the one to read, to diff, and to edit by hand,
   comments and all.
-- **A scene holds what it has been told about.** The five engine components
+- **A scene holds what it has been told about.** The seven engine components
   are registered from the start, and a game's own under their type's name -
   or a `pub const scene_name`, for two types called the same. A component in
   a file that nothing here is registered as is passed over and counted in
@@ -396,7 +530,7 @@ the example's world - JSON for a path ending in `.json`, CBOR for any other -
 and `-- --scene creatures.json` starts from that file instead of from the code
 that built the world. Its 74 entities take 30 KB as JSON and 13 KB as CBOR.
 
-## It runs with no window and no GPU
+## 🧪 It runs with no window and no GPU
 
 ```zig
 const app = try fx.App.create(gpa, .{ .headless = true, .frames = 60 });
@@ -426,7 +560,7 @@ const app = try App.create(gpa, flags.apply(.{ .title = "game", .io = io }));
 and makes a capture reproducible: every frame one fixed step, whatever the
 clock says, so the same flags draw the same picture on every machine.
 
-## Install
+## 📦 Install
 
 ```bash
 zig fetch --save git+https://github.com/kisstp2006/fluxion-engine
@@ -437,7 +571,7 @@ const fluxion = b.dependency("fluxion_engine", .{ .target = target, .optimize = 
 exe_mod.addImport("fluxion_engine", fluxion.module("fluxion_engine"));
 ```
 
-Eleven dependencies come with it and **none of them is lazy**, which is the
+Twelve dependencies come with it and **none of them is lazy**, which is the
 difference between an engine and the libraries under it. A library keeps its
 window and its file reading behind `lazy` so a consumer never downloads what
 it does not use; an engine uses all of it by definition.
@@ -451,6 +585,7 @@ it does not use; an engine uses all of it by definition.
 [Font](https://github.com/kisstp2006/fluxion-font) ·
 [Debug draw](https://github.com/kisstp2006/fluxion-debugdraw) ·
 [JSON](https://github.com/kisstp2006/fluxion-json) ·
+[Physics](https://github.com/kisstp2006/fluxion-physics) ·
 [Math](https://github.com/kisstp2006/fluxion-math) ·
 [Id](https://github.com/kisstp2006/fluxion-id)
 
@@ -459,9 +594,23 @@ have to be: `Device.clip()` returns a `math.Clip` and `math.orthographic`
 takes one, so the two must be the *same* type - and a Zig package is
 identified by where it came from. A path here and a pin inside `fluxion-rhi`
 makes two copies of one library and a compiler message reading
-`expected type 'proj.Clip', found 'proj.Clip'`.
+`expected type 'proj.Clip', found 'proj.Clip'`. The same goes for
+`fluxion-jobs`, which this package never names: `fluxion-physics` pins it
+where `fluxion-ecs` does, so a step runs on the scheduler `app.jobs` already
+is.
 
-## Examples
+## 👾 Examples
+
+<table>
+  <tr>
+    <td width="50%"><img src=".github/images/pong.png" alt="pong: two bats, a ball, a dashed line down the middle and the score in small squares"></td>
+    <td width="50%"><img src=".github/images/crates.png" alt="crates: a pile of crates, a ramp, a ball on a rod, a sensor basket with two balls in it and a red ray"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub><b>pong</b> - <code>--frames 420 --capture</code> drew it</sub></td>
+    <td align="center"><sub><b>crates</b> - <code>--frames 240 --capture</code> drew it</sub></td>
+  </tr>
+</table>
 
 ```bash
 zig build example-pong
@@ -494,10 +643,23 @@ In both examples F11 fills the screen, and in `pong` a controller each drives
 the bats.
 
 Its sheet is `examples/atlas.png`, and the example is what drew it:
-`-- --write-atlas examples/atlas.png` puts it back, so the one binary file in
-this repository is one the code can account for.
+`-- --write-atlas examples/atlas.png` puts it back, so the one binary file the
+code reads is one the code can account for. The screenshots on this page are
+accounted for the same way: each is what its example's `--capture` wrote.
 
-## What is here, and what is not
+```bash
+zig build example-crates
+zig build example-crates -- --frames 240 --capture crates.png
+```
+
+**`crates`** is the physics: a floor, walls and a ramp that are colliders
+with no body, a pile of crates, a ball on a rod from a pin, and a basket -
+a sensor - that counts what falls into it from `app.contactsBegun()` and
+`contactsEnded()`. Nothing in it makes a body. Left click drops a crate,
+right click a ball, and space writes a velocity into every crate at once;
+the red line is `app.castRay`, stopped at whatever crosses it first.
+
+## ✅ What is here, and what is not
 
 Here, and checked by the tests:
 
@@ -545,6 +707,12 @@ Here, and checked by the tests:
 - The interface: fluxion-ui laid out by `.ui` systems into one root, drawn
   over the 2D layer, fed from the keyboard, the mouse and the pads before the
   game's systems, keeping the wheel it used, and setting the pointer's shape.
+- Debug drawing: lines, shapes and text over the world or in screen pixels,
+  for a frame, for some seconds, or until the next fixed step.
+- Physics: bodies and colliders as components, made, changed and taken away
+  with them; boxes and circles sized by their sprites; compound bodies from
+  children; places and speeds written back after each step; contacts once per
+  frame or per step; rays, points and boxes asked in entities.
 - Scenes: the world, its names and every registered component written as
   JSON or CBOR and read back, with entity references rewritten, textures and
   fonts found again by the file they came from, relative to the scene, and a
@@ -553,56 +721,46 @@ Here, and checked by the tests:
   that shows only the interface: an editor's scene panel, or a minimap.
 - Headless everything, and `capture` for a picture without a screen.
 
-## What comes next
+## 🧭 What comes next
 
 In order, and the order is an argument rather than a wish list: each of these
 either unblocks the one after it or is the thing most missed by somebody
 trying to finish a game with what is here.
 
-### 1. Things touching other things
-
-`pong` works out where its ball is with eight lines of arithmetic, which is
-the honest amount for a game that size. A bigger one needs the engine to
-answer three questions: what is at this point, what does this box overlap, and
-what does this ray hit first.
-
-That is a `Collider2D` component - a box or a circle - a uniform grid to sort
-them into so the answer is not every pair, and three functions on `App`. Not a
-physics engine: no solver, no restitution, no joints. A game that wants those
-can build them on the queries, and most 2D games only ever wanted the
-queries.
-
-### 2. Controls a player can change
+### 1. Controls a player can change
 
 The keys are written into the game today - `pong` puts them in a component,
 which is better than most and still means the game knows what a key is. What
 belongs in the engine is an action map: a name, the keys and buttons and stick
-axes bound to it, and `input.action("jump")`. `fluxion-platform` already reads
-gamepads and this engine ignores them entirely, which is the other half of the
-same job.
+axes bound to it, and `input.action("jump")`. The controllers are read
+already, and an `AxisBinding` takes a stick and a d-pad beside its keys; what
+is missing is the name between a control and what it does, and a way for the
+player to change it.
 
-### 3. Tilemaps
+### 2. Tilemaps
 
 A `Tilemap` component holding a grid of indices into one sheet, drawn in
 chunks so a level larger than the screen is a handful of instanced draws
-rather than one per tile. It wants nothing that is not already here, and it is
-what makes the difference between demonstrations and levels.
+rather than one per tile - and its solid tiles one static body of many
+shapes, which the physics compares as one entity rather than thousands. It
+wants nothing that is not already here, and it is what makes the difference
+between demonstrations and levels.
 
-### 4. Interface anchored to the world
+### 3. Interface anchored to the world
 
 The layer is here. What a game's interface still wants from fluxion-ui is
 interface floating over a point in the world - health bars, name plates -
 which needs an id scope so forty of them can share one declaration, state per
 element so a menu can animate, and nine-slice pictures.
 
-### 5. The 3D pass
+### 4. The 3D pass
 
 Meshes, a depth attachment, a `Camera3D`, and the pass drawn before the 2D one
-into the same target. The place it goes is marked in `App.render`, and
+into the same target. The place it goes is marked in `App.drawLayers`, and
 `fluxion-rhi` has had depth states, cull modes and depth attachments since
 before this package existed - the seam was cut for it deliberately.
 
-## Not on the list yet
+## 💭 Not on the list yet
 
 - **Audio.** There is no `fluxion-audio`, and it is a library and a set of
   platform backends rather than an afternoon in this repository.
@@ -619,23 +777,17 @@ before this package existed - the seam was cut for it deliberately.
 - **An editor.** A separate program one licence tier up, `fluxion-editor`,
   begun on the interface layer; what it needs from here is its own list.
 
-### Two things that will catch you once
+## 🧩 What counts as a component
 
-**Writing a texture back out as a PNG drops its alpha.** `fluxion-image`'s
-`Options.keep_alpha` defaults to false, because a screenshot has no alpha
-worth keeping and a texture has nothing but. A sheet written without it draws
-as a row of black squares, which is exactly what it looks like.
-
-### What counts as a component
-
-Five: `Transform2D`, `Sprite`, `Text2D`, `Animation` and `Camera2D`. Each one
-is something a person making a game would name, which is the test.
+Seven: `Transform2D`, `Sprite`, `Text2D`, `Animation`, `Camera2D`,
+`RigidBody2D` and `Collider2D`. Each one is something a person making a game
+would name, which is the test.
 
 Two things that used to be on that list are not any more, and the reason is
 the same for both. `Parent` was a component holding a link and an offset; it
-is a field of `Transform2D` now, because parenting is what a transform *does*
-- Unity puts it on `Transform`, Godot puts it in the tree - and nobody
-building a scene thinks "I will add a Parent to this". `Previous2D` held where
+is a field of `Transform2D` now, because parenting is what a transform *does* -
+Unity puts it on `Transform`, Godot puts it in the tree - and nobody building
+a scene thinks "I will add a Parent to this". `Previous2D` held where
 something was a step ago; that is the engine's own bookkeeping and a game
 should never have to declare it, so it is a flag on the transform and a table
 beside the world.
@@ -668,9 +820,20 @@ match it. And a name picks out one living entity at a time - a second one is
 sometimes choose the wrong one. Many things of one kind are a component and a
 query; a name is for the camera, the player, the door to the next room.
 
-### One thing to know about components
+**Nor is a body's handle.** `RigidBody2D` says that something falls and
+how, and `Collider2D` what shape it is - what a game means. The body
+`fluxion-physics` makes from them is the engine's business, so its handle is
+kept beside the world with the names, and the components stay what a scene
+can write down and an inspector can show.
 
-A component may not contain a `packed struct`. Not by rule - by accident:
+## 🪤 Two things that will catch you once
+
+**Writing a texture back out as a PNG drops its alpha.** `fluxion-image`'s
+`Options.keep_alpha` defaults to false, because a screenshot has no alpha
+worth keeping and a texture has nothing but. A sheet written without it draws
+as a row of black squares, which is exactly what it looks like.
+
+**A component may not contain a `packed struct`.** Not by rule - by accident:
 `fluxion-ecs` walks a component's fields by pointer to remap entities, and a
 field of a packed struct cannot have an ordinary pointer taken to it, so it
 fails to compile inside the ECS with a message about pointer host sizes. It is
@@ -678,7 +841,7 @@ one line to fix there (skip packed layouts, which cannot hold an `Entity`
 anyway); until then, this package's `TextureHandle` is an `extern struct` for
 that reason and a game's components should be too.
 
-## Licence
+## 📜 Licence
 
 BSD-3-Clause. Tier four of [the ladder](../licensing/README.md): the same as
 `fluxion-ecs`, one rung above the subsystems it is built from, and one below

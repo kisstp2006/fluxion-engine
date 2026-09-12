@@ -31,8 +31,10 @@ const debugdraw = @import("fluxion_debugdraw");
 const debugdraw_rhi = @import("fluxion_debugdraw_rhi");
 const ui_lib = @import("fluxion_ui");
 const typeface = @import("fluxion_font");
+const physics_lib = @import("fluxion_physics");
 
 const Assets = @import("assets.zig");
+const Bodies = @import("bodies.zig");
 const Interface = @import("interface.zig");
 const Input = @import("input.zig");
 const Time = @import("time.zig");
@@ -142,6 +144,10 @@ pub const Options = struct {
 
     /// Worker threads for parallel queries. Null is one fewer than the cores.
     workers: ?u32 = null,
+
+    /// A hundred units to the metre, for a world measured in pixels: gravity
+    /// pulls at 981 units a second squared.
+    physics: physics_lib.Settings = .{ .units_per_metre = 100 },
 };
 
 /// The command-line flags the engine understands, read with `parseFlags` and
@@ -274,6 +280,12 @@ world: ecs.World,
 /// What a parallel query runs on. See `ecs.Query.each`.
 jobs: ecs.Jobs,
 
+/// Rigid bodies, stepped after each `.fixed` stage. The engine makes one for
+/// every `RigidBody2D`; gravity, joints and the rest are here.
+physics: physics_lib.World,
+/// Which body is which entity's. See `bodies.zig`.
+bodies: Bodies = .{},
+
 assets: Assets,
 sprites: sprite.Renderer,
 
@@ -357,6 +369,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .offscreen = null,
         .world = .init(gpa),
         .jobs = undefined,
+        .physics = .init(gpa, options.physics),
+        .bodies = .{},
         .assets = undefined,
         .sprites = undefined,
         .debug = undefined,
@@ -393,10 +407,19 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     };
     errdefer self.world.deinit();
     errdefer self.ui.deinit();
+    errdefer self.physics.deinit();
     self.time.fixed_delta = options.fixed_delta;
 
     errdefer self.scene_components.deinit(gpa);
-    inline for (.{ components.Transform2D, components.Sprite, components.Text2D, components.Animation, components.Camera2D }) |T| {
+    inline for (.{
+        components.Transform2D,
+        components.Sprite,
+        components.Text2D,
+        components.Animation,
+        components.Camera2D,
+        components.RigidBody2D,
+        components.Collider2D,
+    }) |T| {
         self.scene_components.add(gpa, T, comptime scene.nameOf(T)) catch |err| switch (err) {
             error.ComponentNameTaken => unreachable,
             error.OutOfMemory => return error.OutOfMemory,
@@ -512,6 +535,8 @@ pub fn destroy(self: *App) void {
     self.names.deinit(gpa);
     self.by_name.deinit(gpa);
     self.scene_components.deinit(gpa);
+    self.bodies.deinit(gpa);
+    self.physics.deinit();
     self.debug_renderer.deinit();
     self.debug_steps.deinit();
     self.debug_frame.deinit();
@@ -592,6 +617,12 @@ pub fn step(self: *App) anyerror!bool {
     self.debug_frame.advance(self.time.delta);
     if (self.hasInterface()) try self.feedInterface();
 
+    // Bodies are synced before each fixed step. A paused frame - and the
+    // first, which has no time to step - is synced here instead, so the
+    // queries find what was spawned.
+    self.bodies.beginFrame();
+    if (self.time.delta == 0) try self.bodies.sync(self);
+
     try self.schedule.run(.input, self);
     self.shortcuts();
 
@@ -615,6 +646,7 @@ pub fn step(self: *App) anyerror!bool {
             // Where everything was before this step, to draw between steps.
             try self.snapshotPrevious();
             try self.schedule.run(.fixed, self);
+            try self.stepPhysics();
             // Seen, so gone: the next step hears only what comes after.
             self.input.endFixedStep();
         }
@@ -648,6 +680,14 @@ pub fn step(self: *App) anyerror!bool {
 
     if (self.running) try self.waitForNextFrame(minimized);
     return self.running;
+}
+
+/// After the game's `.fixed` systems, so what they wrote into the components
+/// is in this step.
+fn stepPhysics(self: *App) !void {
+    try self.bodies.sync(self);
+    try self.physics.step(self.time.fixed_delta, &self.jobs);
+    try self.bodies.afterStep(self);
 }
 
 fn waitForNextFrame(self: *App, minimized: bool) !void {
@@ -913,6 +953,7 @@ pub fn loadScene(self: *App, path: []const u8, options: scene.LoadOptions) !scen
 /// `loadScene`. Not from inside a query, which is walking the world it
 /// throws away.
 pub fn clearWorld(self: *App) void {
+    self.bodies.clear(self);
     self.world.deinit();
     self.world = .init(self.gpa);
     self.snapshots.clearRetainingCapacity();
@@ -977,6 +1018,68 @@ pub fn spriteCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
 /// What the camera sees, at the size of the window.
 fn currentView(self: *App) View {
     return .of(&self.world, &self.snapshots, @floatFromInt(self.width), @floatFromInt(self.height));
+}
+
+// -------------------------------------------------------------------------
+// Physics
+// -------------------------------------------------------------------------
+
+/// The body an entity is, or is part of, to push: its `RigidBody2D`'s, or
+/// the one its `Collider2D` belongs to. Bodies are made at the top of each
+/// frame and before each fixed step, so this is null until then - see
+/// `syncBodies`. The pointer lasts until the next body is made.
+///
+/// ```zig
+/// if (app.bodyOf(player)) |body| body.applyImpulse(.init(0, -300 * body.mass), body.center);
+/// ```
+pub fn bodyOf(self: *App, entity: ecs.Entity) ?*physics_lib.Body {
+    return self.physics.body(self.bodies.idOf(entity) orelse return null);
+}
+
+/// The handle of the same body, for `physics.createJoint`.
+pub fn bodyIdOf(self: *const App, entity: ecs.Entity) ?physics_lib.BodyId {
+    return self.bodies.idOf(entity);
+}
+
+/// Make, change and take away bodies to match the components now, not at
+/// the next frame or step: for joining two things just spawned.
+pub fn syncBodies(self: *App) !void {
+    try self.bodies.sync(self);
+}
+
+/// The first collider on the line from `from` to `to` whose filter agrees
+/// with `filter`; `.{}` agrees with everything.
+pub fn castRay(self: *App, from: math.Vec2, to: math.Vec2, filter: physics_lib.Filter) ?Bodies.RayHit {
+    return self.bodies.castRay(self, from, to, filter);
+}
+
+/// A collider under a point.
+pub fn overlapPoint(self: *App, point: math.Vec2) ?ecs.Entity {
+    return self.bodies.overlapPoint(self, point);
+}
+
+/// The colliders whose bounding boxes overlap the box between two corners,
+/// as many as `found` holds.
+pub fn overlapBox(self: *App, min: math.Vec2, max: math.Vec2, found: []ecs.Entity) []ecs.Entity {
+    return self.bodies.overlapBox(self, min, max, found);
+}
+
+/// The contacts that began in this frame's steps, each once however many
+/// steps ran - or, in a `.fixed` system, in the step before this one.
+///
+/// ```zig
+/// for (app.contactsBegun()) |contact| {
+///     if (contact.other(player)) |thing| if (app.world.has(thing, Coin)) collect(app, thing);
+/// }
+/// ```
+pub fn contactsBegun(self: *const App) []const Bodies.Contact {
+    return self.bodies.began(self.input.clock == .fixed);
+}
+
+/// The same for contacts that ended - including because one of the two was
+/// despawned, so the entity named may be dead.
+pub fn contactsEnded(self: *const App) []const Bodies.Contact {
+    return self.bodies.ended(self.input.clock == .fixed);
 }
 
 // -------------------------------------------------------------------------

@@ -60,6 +60,11 @@
         // same values in fewer bytes.
         .fluxion_json = .{ .path = "../fluxion-json" },
 
+        // Rigid bodies, stepped in `.fixed` on the same scheduler as the
+        // queries: `fluxion-physics` pins `fluxion-jobs` where `fluxion-ecs`
+        // does, so the two share one `Jobs`.
+        .fluxion_physics = .{ .path = "../fluxion-physics" },
+
         // Generational handles: what the asset tables hand out, and what a
         // component holds instead of a pointer. Pinned for the same reason as
         // the maths above - `fluxion-rhi`'s resource handles are this

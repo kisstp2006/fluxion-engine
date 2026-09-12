@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! The components the engine itself reads: `Transform2D`, `Sprite`,
-//! `Text2D`, `Animation` and `Camera2D`. A game declares its own beside them.
+//! `Text2D`, `Animation`, `Camera2D`, `RigidBody2D` and `Collider2D`. A game
+//! declares its own beside them.
 //!
 //! ```zig
 //! _ = try app.world.spawnWith(.{
@@ -19,6 +20,8 @@ const std = @import("std");
 const testing = std.testing;
 
 const ecs = @import("fluxion_ecs");
+const math = @import("fluxion_math");
+const physics = @import("fluxion_physics");
 const assets = @import("assets.zig");
 
 /// Re-exported because a transform names the entity it hangs from.
@@ -113,6 +116,21 @@ pub const Transform2D = extern struct {
         return .{
             .x = self.x + sx * c - sy * s,
             .y = self.y + sx * s + sy * c,
+        };
+    }
+
+    /// `apply` undone: a point in the parent's space, in this transform's own.
+    /// A scale of zero is left out rather than divided by.
+    pub fn unapply(self: Transform2D, x: f32, y: f32) struct { x: f32, y: f32 } {
+        const dx = x - self.x;
+        const dy = y - self.y;
+        const c = @cos(self.rotation);
+        const s = @sin(self.rotation);
+        const rx = dx * c + dy * s;
+        const ry = dy * c - dx * s;
+        return .{
+            .x = if (self.scale_x != 0) rx / self.scale_x else rx,
+            .y = if (self.scale_y != 0) ry / self.scale_y else ry,
         };
     }
 
@@ -426,6 +444,84 @@ pub const Camera2D = extern struct {
     }
 };
 
+/// Something that moves as a solid object: it falls, is pushed and bounces.
+/// What it collides with is its `Collider2D`, on this entity or on the ones
+/// hanging from it.
+///
+/// ```zig
+/// _ = try world.spawnWith(.{
+///     Transform2D.at(320, 0).interpolated(),
+///     Sprite.of(crate),
+///     RigidBody2D{},
+///     Collider2D{}, // the size of the sprite
+/// });
+/// ```
+///
+/// The body is in the world's space, so a moving parent does not carry it.
+/// After every fixed step its place goes into the transform and its speed
+/// into `velocity`; writing either moves the body or sets it going.
+pub const RigidBody2D = extern struct {
+    /// Changing it makes the body anew, and the joints to the old one go.
+    type: Type = .dynamic,
+    /// Units a second.
+    velocity: math.Vec2 = .zero,
+    /// Radians a second, clockwise on screen.
+    angular_velocity: f32 = 0,
+    linear_damping: f32 = 0,
+    angular_damping: f32 = 0,
+    /// Zero floats, minus one rises.
+    gravity_scale: f32 = 1,
+    fixed_rotation: bool = false,
+    can_sleep: bool = true,
+    /// Swept against other moving bodies too, not only the static ones.
+    bullet: bool = false,
+
+    /// Static never moves; kinematic moves at its velocity and nothing
+    /// pushes it; dynamic is pushed by everything.
+    pub const Type = physics.BodyType;
+};
+
+/// The shape a body collides with. On an entity with a `RigidBody2D` it is
+/// that body's, and on one hanging from such an entity it is part of that
+/// body, where the entity is. Anywhere else it is a static body of its own:
+/// a wall, a floor tile.
+pub const Collider2D = extern struct {
+    shape: Shape = .box,
+    /// A box's size before the transform's scale. Zero takes the sprite's,
+    /// and centres the shape on the sprite.
+    width: f32 = 0,
+    height: f32 = 0,
+    /// Zero is half the sprite's width, centred on the sprite.
+    radius: f32 = 0,
+    /// From the entity's origin, before its scale.
+    offset_x: f32 = 0,
+    offset_y: f32 = 0,
+    /// A box's turn on the entity.
+    rotation: f32 = 0,
+    friction: f32 = 0.6,
+    /// How much of the speed a hit gives back: zero a beanbag, one a
+    /// superball.
+    restitution: f32 = 0,
+    /// Mass per square unit.
+    density: f32 = 1,
+    /// Reports what overlaps it and pushes nothing: a trigger, a pickup.
+    sensor: bool = false,
+    /// Who touches whom; see `physics.Filter`.
+    category: u16 = 1,
+    mask: u16 = 0xFFFF,
+    group: i16 = 0,
+
+    pub const Shape = enum(u8) { box, circle };
+
+    pub fn box(width: f32, height: f32) Collider2D {
+        return .{ .width = width, .height = height };
+    }
+
+    pub fn circle(radius: f32) Collider2D {
+        return .{ .shape = .circle, .radius = radius };
+    }
+};
+
 test "a transform maps its own space into the world" {
     const t: Transform2D = .{ .x = 10, .y = 20, .rotation = std.math.pi / 2.0, .scale_x = 2, .scale_y = 2 };
     const p = t.apply(1, 0);
@@ -462,6 +558,16 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Camera2D);
     ecs.component.check(Animation);
     ecs.component.check(Text2D);
+    ecs.component.check(RigidBody2D);
+    ecs.component.check(Collider2D);
+}
+
+test "unapply takes a point back to where apply found it" {
+    const t: Transform2D = .{ .x = 10, .y = -4, .rotation = 0.7, .scale_x = 2, .scale_y = 0.5 };
+    const out = t.apply(3, 5);
+    const back = t.unapply(out.x, out.y);
+    try testing.expectApproxEqAbs(@as(f32, 3), back.x, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 5), back.y, 0.0001);
 }
 
 test "a child is carried round by its parent" {
