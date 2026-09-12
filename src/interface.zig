@@ -446,10 +446,29 @@ test "a locked pointer points at nothing in the interface" {
     try fixture.frame(longList);
     fixture.input.apply(pointerAt(10, 10));
     fixture.input.pointer.locked = true;
-    try fixture.interface.feed(testing.allocator, &fixture.layout, &fixture.input, 0);
+    try fixture.feed(0);
     try testing.expect(!fixture.layout.wantsPointer());
 
     fixture.input.pointer.locked = false;
-    try fixture.interface.feed(testing.allocator, &fixture.layout, &fixture.input, 0);
+    try fixture.feed(0);
     try testing.expect(fixture.layout.wantsPointer());
+}
+
+test "the interface pastes what the game put on the clipboard, and the game reads what it copied" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+
+    try fixture.frame(nameField);
+    fixture.layout.setFocus("name");
+    try fixture.clipboard.set(testing.allocator, "Kovács");
+    fixture.input.apply(keyDown(.v, .{ .control = true }));
+    try fixture.frame(nameField);
+    try testing.expectEqualStrings("Kovács", fixture.layout.textValueOf("name").?);
+
+    fixture.input.apply(keyDown(.left, .{ .shift = true }));
+    fixture.input.apply(keyDown(.left, .{ .shift = true }));
+    fixture.input.apply(keyDown(.x, .{ .control = true }));
+    try fixture.frame(nameField);
+    try testing.expectEqualStrings("Kova", fixture.layout.textValueOf("name").?);
+    try testing.expectEqualStrings("cs", try fixture.clipboard.read());
 }
