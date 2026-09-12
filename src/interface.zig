@@ -469,6 +469,6 @@ test "the interface pastes what the game put on the clipboard, and the game read
     fixture.input.apply(keyDown(.left, .{ .shift = true }));
     fixture.input.apply(keyDown(.x, .{ .control = true }));
     try fixture.frame(nameField);
-    try testing.expectEqualStrings("Kova", fixture.layout.textValueOf("name").?);
+    try testing.expectEqualStrings("Ková", fixture.layout.textValueOf("name").?);
     try testing.expectEqualStrings("cs", try fixture.clipboard.read());
 }

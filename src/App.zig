@@ -35,6 +35,7 @@ const physics_lib = @import("fluxion_physics");
 
 const Assets = @import("assets.zig");
 const Bodies = @import("bodies.zig");
+const Clipboard = @import("clipboard.zig");
 const Interface = @import("interface.zig");
 const Input = @import("input.zig");
 const Time = @import("time.zig");
@@ -302,6 +303,10 @@ ui: ui_lib.Ui,
 /// How the interface is fed and drawn: its font, scale and safe area.
 interface: Interface = .{},
 
+/// The system's clipboard, or the program's own without a window. See
+/// `setClipboardText`.
+clipboard: Clipboard = .{},
+
 time: Time,
 
 /// Where each interpolating transform was before the last fixed step: the
@@ -379,6 +384,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .debug_renderer = undefined,
         .ui = .init(gpa),
         .interface = .{},
+        .clipboard = .{},
         // A fixed frame time wins over the clock, and the clock over nothing.
         .time = .init(if (options.frame_time) |seconds|
             .{ .fixed = seconds }
@@ -446,6 +452,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             if (Window.isAbsent(err)) return Error.NoDisplay;
             return err;
         };
+        self.clipboard.system = &self.window.?.ctx;
     }
     errdefer if (self.window) |*w| w.close();
 
@@ -540,7 +547,8 @@ pub fn destroy(self: *App) void {
     self.debug_renderer.deinit();
     self.debug_steps.deinit();
     self.debug_frame.deinit();
-    self.interface.deinit(gpa);
+    self.interface.deinit();
+    self.clipboard.deinit(gpa);
     self.ui.deinit();
     self.sprites.deinit(gpa);
     self.assets.deinit();
@@ -715,7 +723,7 @@ fn hasInterface(self: *const App) bool {
 /// about this frame.
 fn feedInterface(self: *App) !void {
     if (self.interfaceFace()) |face| self.ui.setMeasurer(Interface.measurer(face));
-    try self.interface.feed(self.gpa, &self.ui, &self.input, self.time.unscaled_delta);
+    try self.interface.feed(self.gpa, &self.ui, &self.input, &self.clipboard, self.time.unscaled_delta);
 }
 
 fn layOutInterface(self: *App) !void {
@@ -1196,6 +1204,38 @@ pub fn setCursorShape(self: *App, shape: CursorShape) Window.Error!void {
 pub fn addGamepadMappings(self: *App, text: []const u8) Window.Error!usize {
     const window = if (self.window) |*w| w else return 0;
     return window.ctx.updateGamepadMappings(text);
+}
+
+// -------------------------------------------------------------------------
+// The clipboard
+// -------------------------------------------------------------------------
+
+/// Put text on the system clipboard, for every other program to paste - or,
+/// with no window, on the program's own. Copied.
+///
+/// ```zig
+/// try app.setClipboardText(seed);
+/// ```
+///
+/// `error.Unavailable` for text that is not UTF-8, and for a system that will
+/// not take it: Wayland takes the clipboard only from the window with the
+/// keyboard.
+pub fn setClipboardText(self: *App, text: []const u8) Clipboard.Error!void {
+    return self.clipboard.set(self.gpa, text);
+}
+
+/// The text on the clipboard, empty when it holds none: UTF-8 with `\n`
+/// between lines, whatever put it there. Lent until the next read - the
+/// interface's paste is one - so keep a copy. Read it when it is wanted, not
+/// every frame: on X11 and Wayland a read waits on the program that owns it.
+pub fn clipboardText(self: *App) Clipboard.Error![]const u8 {
+    return self.clipboard.read();
+}
+
+/// Whether the clipboard holds text, asked without reading it: for a Paste
+/// entry that greys out.
+pub fn hasClipboardText(self: *App) bool {
+    return self.clipboard.has();
 }
 
 /// Remember where every interpolating transform is, before a step moves it.

@@ -36,6 +36,7 @@ pub const Input = @import("input.zig");
 pub const Time = @import("time.zig");
 pub const Assets = @import("assets.zig");
 pub const Interface = @import("interface.zig");
+pub const Clipboard = @import("clipboard.zig");
 
 pub const assets = @import("assets.zig");
 pub const components = @import("components.zig");
@@ -192,6 +193,7 @@ test {
     _ = Input;
     _ = Time;
     _ = Interface;
+    _ = Clipboard;
     _ = assets;
     _ = components;
     _ = color;
