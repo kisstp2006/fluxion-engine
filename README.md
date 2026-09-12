@@ -49,6 +49,8 @@
 | `hierarchy` | Where a thing really is, once its parent has had its say. |
 | `scene` | A world written down and read back, as JSON or as CBOR. |
 | `Bodies` | Which body is which entity's: the physics world kept in step with the components. |
+| `Clipboard` | Text copied and pasted: the system's, or the program's own with no window. |
+| `Commands` | Spawns, despawns, adds and removes that wait for the system asking for them to return. |
 
 ```zig
 const fx = @import("fluxion_engine");
@@ -141,6 +143,38 @@ std.debug.print("{f}", .{app.schedule});
 // fixed     move ball                21.4us
 ```
 
+## 🧾 Commands
+
+```zig
+fn hits(app: *fx.App) !void {
+    var it = try fx.Query(.{ Bullet, fx.Transform2D }).over(&app.world);
+    while (it.next()) |chunk| {
+        for (chunk.entities, chunk.slice(fx.Transform2D)) |bullet, place| {
+            if (!struck(app, place)) continue;
+            try app.commands.despawn(bullet);                    // when this system returns
+            const spark = try app.commands.spawn(.{ place, Spark{} });
+            _ = try app.commands.spawn(.{ fx.Transform2D.childOf(spark, 0, -8), Glow{} });
+        }
+    }
+}
+```
+
+- **A despawn, an `add` or a `remove` moves rows**, and a query is a walk
+  over rows: done in the middle of one, it skips entities or visits them
+  twice. `app.commands` keeps them instead, and the engine does them all, in
+  the order they were asked for, when the system returns - so the next
+  system sees them, and a system that failed leaves none of its own behind.
+- **`spawn` hands back an entity that is alive at once** with nothing on it,
+  and its components arrive with the rest: it can be named, hung from and
+  kept in a component straight away.
+- **A command for an entity that has died since is passed over**: two
+  bullets despawning the enemy they both hit is not a mistake.
+- **A parallel `Query.each` can ask too**, from every worker at once -
+  `despawn`, `add` and `remove`; `spawn` only from the system's own thread.
+- **`app.commands.apply()` does it all now**, for a system that needs what it
+  asked for before it returns - a body for what it spawned, to join it to
+  another - and is not inside a query when it asks.
+
 ## 🎮 Controllers and the pointer
 
 ```zig
@@ -203,6 +237,33 @@ if (app.resized) layOutAgain(app.width, app.height);
 - **`Options.resizable` and `Options.maximized`** say what can only be said
   when the window is made. Without a window - headless - all of this is
   nothing, and says so without failing.
+
+## 📋 The clipboard
+
+```zig
+try app.setClipboardText(seed);                     // for the player to paste anywhere
+const pasted = try app.clipboardText();             // what they copied, anywhere
+const can_paste = app.hasClipboardText();           // a Paste entry that greys out
+```
+
+- **It is the system's**, through
+  [Fluxion Platform](https://github.com/kisstp2006/fluxion-platform): what a
+  game copies reaches every other program and what they copied reaches the
+  game, as UTF-8 with `\n` between lines whatever put it there. The
+  interface's Ctrl+C, Ctrl+X and Ctrl+V go through the same one.
+- **What `clipboardText` gives is lent** until the next read - the
+  interface's paste is one - so a game that keeps it keeps a copy. Read it
+  when it is wanted rather than every frame: on X11 and Wayland a read waits
+  on the program that owns the clipboard.
+- **`hasClipboardText` asks without reading**, which is also the quiet way on
+  Android, where every read shows the player a notice.
+- **A system may refuse** with `error.Unavailable`: text that is not UTF-8,
+  Wayland asked by a window without the keyboard, a page with no clipboard.
+  The interface warns and carries on; a copy that failed is lost, not the
+  frame.
+- **Without a window - headless, in a test - the clipboard is the program's
+  own**, so copying and pasting still work inside it, and a test never
+  overwrites what the person running it had copied.
 
 ## ⌛ Frame pacing
 
@@ -342,9 +403,9 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   the left stick move it only once something has it, so a game keeps them
   until a menu takes the focus with `app.ui.setFocus`. Enter, Space and a
   pad's A press what has it, and typing and the editing keys reach a text
-  input that has it. Copy and paste reach no further than the program: what
-  is copied stays in a buffer of the interface's own, not yet on the system
-  clipboard fluxion-platform has.
+  input that has it. Ctrl+C, Ctrl+X and Ctrl+V go through the system
+  clipboard - see [the clipboard](#-the-clipboard) - so text moves between a
+  text input and every other program.
 - **The pointer's shape is the interface's** once there is a `.ui` system: an
   I-beam over a text input, the arrows over a resize handle, and
   `app.ui.setCursor` for a game that wants its own. A locked pointer points at
@@ -665,6 +726,8 @@ Here, and checked by the tests:
 
 - The loop, the seven stages, the fixed step and its backlog, and
   `time.delta` that is the step inside it.
+- Commands: spawn, despawn, add and remove asked for from inside a query -
+  from parallel workers too - and done in order when the system returns.
 - Keyboard and mouse as levels and edges, with typing kept in order, and
   edges that a fixed step hears exactly once.
 - Controls as data: an `AxisBinding` holds two keys, a second two, a stick
@@ -686,6 +749,9 @@ Here, and checked by the tests:
   without a window.
 - The window changed while it runs: title, size, position, size limits,
   maximised and minimised, and `resized` for the frame the size changed in.
+- The system clipboard, for the interface's copy and paste and for the
+  game's own - `setClipboardText`, `clipboardText`, `hasClipboardText` - and
+  the program's own clipboard when there is no window.
 - Frame pacing: vsync switched while running, a frame cap that holds its
   average, and a minimised window that sleeps instead of drawing.
 - Every system timed, under the name it was added with: its time over the

@@ -28,6 +28,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const App = @import("App.zig");
+const Commands = @import("commands.zig");
 
 /// What a system is: a function that gets the whole application. Declaring
 /// queries in the signature, as Bevy does, waits for a scheduler that could
@@ -79,6 +80,9 @@ pub const Schedule = struct {
 
     io: ?std.Io = null,
 
+    /// `app.commands`, done after each system. Null runs the systems alone.
+    commands: ?*Commands = null,
+
     pub const empty: Schedule = .{};
 
     pub fn deinit(self: *Schedule, gpa: Allocator) void {
@@ -99,11 +103,18 @@ pub const Schedule = struct {
     }
 
     /// Run one stage's systems in order, and stop at the first that fails:
-    /// the ones after it usually read what it should have written.
+    /// the ones after it usually read what it should have written. What a
+    /// system asked of `app.commands` is done when it returns, and counted in
+    /// its time.
     pub fn run(self: *Schedule, stage: Stage, app: *App) anyerror!void {
         for (self.stages[@intFromEnum(stage)].items) |*entry| {
             const started = if (self.io) |io| std.Io.Timestamp.now(io, .awake) else null;
             entry.run(app) catch |err| {
+                if (self.commands) |commands| commands.clear();
+                self.failed = .{ .stage = stage, .name = entry.name, .err = err };
+                return err;
+            };
+            if (self.commands) |commands| commands.apply() catch |err| {
                 self.failed = .{ .stage = stage, .name = entry.name, .err = err };
                 return err;
             };

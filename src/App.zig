@@ -36,6 +36,7 @@ const physics_lib = @import("fluxion_physics");
 const Assets = @import("assets.zig");
 const Bodies = @import("bodies.zig");
 const Clipboard = @import("clipboard.zig");
+const Commands = @import("commands.zig");
 const Interface = @import("interface.zig");
 const Input = @import("input.zig");
 const Time = @import("time.zig");
@@ -278,6 +279,9 @@ offscreen: ?rhi.Texture = null,
 
 /// Everything in the game.
 world: ecs.World,
+/// Spawns, despawns, adds and removes that wait for the system asking for
+/// them to return, so a query can ask. See `commands.zig`.
+commands: Commands,
 /// What a parallel query runs on. See `ecs.Query.each`.
 jobs: ecs.Jobs,
 
@@ -373,6 +377,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .surface = null,
         .offscreen = null,
         .world = .init(gpa),
+        .commands = .init(gpa, &self.world),
         .jobs = undefined,
         .physics = .init(gpa, options.physics),
         .bodies = .{},
@@ -398,7 +403,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .by_name = .empty,
         .scene_components = .{},
         .input = .{},
-        .schedule = .{ .io = options.io },
+        .schedule = .{ .io = options.io, .commands = &self.commands },
         .background = options.background,
         .world_on_screen = true,
         .width = options.width,
@@ -412,6 +417,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .started = false,
     };
     errdefer self.world.deinit();
+    errdefer self.commands.deinit();
     errdefer self.ui.deinit();
     errdefer self.physics.deinit();
     self.time.fixed_delta = options.fixed_delta;
@@ -553,6 +559,7 @@ pub fn destroy(self: *App) void {
     self.sprites.deinit(gpa);
     self.assets.deinit();
     self.jobs.deinit();
+    self.commands.deinit();
     self.world.deinit();
 
     if (self.offscreen) |t| self.device.destroyTexture(t);
@@ -624,6 +631,10 @@ pub fn step(self: *App) anyerror!bool {
     self.time.tick();
     self.debug_frame.advance(self.time.delta);
     if (self.hasInterface()) try self.feedInterface();
+
+    // What was asked for outside any system - between frames, by a tool -
+    // is done before the first system of this one.
+    try self.commands.apply();
 
     // Bodies are synced before each fixed step. A paused frame - and the
     // first, which has no time to step - is synced here instead, so the
@@ -962,6 +973,7 @@ pub fn loadScene(self: *App, path: []const u8, options: scene.LoadOptions) !scen
 /// throws away.
 pub fn clearWorld(self: *App) void {
     self.bodies.clear(self);
+    self.commands.clear();
     self.world.deinit();
     self.world = .init(self.gpa);
     self.snapshots.clearRetainingCapacity();
@@ -2535,4 +2547,69 @@ test "a lasting debug shape stays for its seconds of game time" {
         if (app.debug_renderer.stats.lines > 0) frames_with_it += 1;
     }
     try testing.expectEqual(@as(u32, 4), frames_with_it);
+}
+
+test "what a system asks of the commands is done before the next system runs" {
+    const Seen = struct {
+        var by_itself: usize = 99;
+        var by_the_next: usize = 99;
+
+        fn spawnTwo(a: *App) anyerror!void {
+            _ = try a.commands.spawn(.{components.Transform2D.at(1, 2)});
+            _ = try a.commands.spawn(.{components.Transform2D.at(3, 4)});
+            by_itself = try ecs.Query(.{components.Transform2D}).count(&a.world);
+        }
+
+        fn count(a: *App) anyerror!void {
+            by_the_next = try ecs.Query(.{components.Transform2D}).count(&a.world);
+        }
+    };
+
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+    try app.addSystem(.update, "spawn", Seen.spawnTwo);
+    try app.addSystem(.update, "count", Seen.count);
+    try app.run();
+    try testing.expectEqual(@as(usize, 0), Seen.by_itself);
+    try testing.expectEqual(@as(usize, 2), Seen.by_the_next);
+}
+
+test "a system that fails leaves nothing of what it asked the commands for" {
+    const Failing = struct {
+        fn run(a: *App) anyerror!void {
+            _ = try a.commands.spawn(.{components.Transform2D.at(1, 2)});
+            return error.Deliberate;
+        }
+    };
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+    try app.addSystem(.update, "fail", Failing.run);
+    try testing.expectError(error.Deliberate, app.run());
+    try testing.expectEqual(@as(usize, 0), app.commands.count());
+    try testing.expectEqual(@as(usize, 0), try ecs.Query(.{components.Transform2D}).count(&app.world));
+}
+
+test "commands asked for between frames are done at the top of the next" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const e = try app.commands.spawn(.{components.Transform2D.at(5, 6)});
+    try testing.expect(app.world.get(e, components.Transform2D) == null);
+    _ = try app.step();
+    try testing.expectEqual(@as(f32, 5), app.world.get(e, components.Transform2D).?.x);
+
+    try app.commands.despawn(e);
+    app.clearWorld();
+    try testing.expectEqual(@as(usize, 0), app.commands.count());
+}
+
+test "with no window the clipboard is the program's own, and the game and the interface share it" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try testing.expect(app.clipboard.system == null);
+    try testing.expect(!app.hasClipboardText());
+
+    try app.setClipboardText("level 3");
+    try testing.expect(app.hasClipboardText());
+    try testing.expectEqualStrings("level 3", try app.clipboardText());
+    try testing.expectError(error.Unavailable, app.setClipboardText("\xc3"));
 }

@@ -38,6 +38,10 @@ pub const Assets = @import("assets.zig");
 pub const Interface = @import("interface.zig");
 pub const Clipboard = @import("clipboard.zig");
 
+/// Spawns, despawns, adds and removes that wait for the system asking for
+/// them to return: `app.commands`.
+pub const Commands = @import("commands.zig");
+
 pub const assets = @import("assets.zig");
 pub const components = @import("components.zig");
 pub const color = @import("color.zig");
@@ -194,6 +198,7 @@ test {
     _ = Time;
     _ = Interface;
     _ = Clipboard;
+    _ = Commands;
     _ = assets;
     _ = components;
     _ = color;
