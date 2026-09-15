@@ -1387,6 +1387,30 @@ pub fn loadScene(self: *App, path: []const u8, options: scene.LoadOptions) !scen
     return scene.load(self, io, path, options);
 }
 
+/// Write a scene with nothing in it to `path`: a new level, for an editor to
+/// open and fill. Never over a file already there - that is
+/// `error.PathAlreadyExists` - and the folder it goes in has to be there.
+pub fn createScene(self: *App, path: []const u8, options: scene.SaveOptions) !void {
+    const io = self.io orelse return error.NoIo;
+    const bytes = try scene.writeEmpty(self.gpa, options);
+    defer self.gpa.free(bytes);
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes, .flags = .{ .exclusive = true } });
+}
+
+/// What the scene at `path` says of itself - its version, its format, how
+/// many entities and which files - read without loading it. Null for a file
+/// that is not a scene. Free it with `Info.deinit`. See `scene.readInfo`.
+pub fn sceneInfo(self: *App, path: []const u8, diagnostics: ?*json.Diagnostics) !?scene.Info {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .unlimited);
+    defer self.gpa.free(bytes);
+    return scene.readInfo(self.gpa, bytes, diagnostics);
+}
+
 /// Everything out of the world at once - every entity, name and UUID - and
 /// an empty world in its place: a level loaded over another is this and then
 /// `loadScene`. Not from inside a query, which is walking the world it
@@ -3636,4 +3660,52 @@ test "files dropped on the window reach that frame's systems, and only that fram
     try testing.expectEqualStrings("C:/Art/tree.png", Seen.last);
     _ = try app.step();
     try testing.expectEqual(@as(usize, 1), Seen.drops);
+}
+
+/// A project of a test's own, with a PNG in it: see `scene.zig`'s `Game`.
+const Files = struct {
+    tmp: testing.TmpDir,
+    buffer: [128]u8 = undefined,
+    root: []const u8 = "",
+
+    fn init() !Files {
+        var files: Files = .{ .tmp = testing.tmpDir(.{}) };
+        try files.tmp.dir.createDirPath(testing.io, "art");
+        return files;
+    }
+
+    /// The root, from the working directory. Made where the struct has come
+    /// to rest, since it points into `buffer`.
+    fn at(files: *Files) ![]const u8 {
+        files.root = try std.fmt.bufPrint(&files.buffer, ".zig-cache/tmp/{s}", .{files.tmp.sub_path});
+        return files.root;
+    }
+
+    fn picture(files: *Files, path: []const u8) !void {
+        var buffer: [192]u8 = undefined;
+        const file = try std.fmt.bufPrint(&buffer, "{s}/{s}", .{ try files.at(), path });
+        try image.png.writeFile(testing.allocator, testing.io, file, .{ .width = 1, .height = 1, .pixels = &.{ 255, 255, 255, 255 }, .row_pitch = 4 }, .{});
+    }
+
+    fn app(files: *Files) !*App {
+        return App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = try files.at() });
+    }
+};
+
+test "a new scene is written empty, never over another, and says what it is without being loaded" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    const app = try files.app();
+    defer app.destroy();
+
+    try app.createScene("res://levels.json", .{});
+    try testing.expectError(error.PathAlreadyExists, app.createScene("res://levels.json", .{ .format = .cbor }));
+    var said = (try app.sceneInfo("res://levels.json", null)).?;
+    defer said.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, scene.version), said.version);
+    try testing.expectEqual(@as(usize, 0), said.entities);
+    try testing.expectEqual(@as(usize, 0), (try app.loadScene("res://levels.json", .{})).entities);
+
+    try files.tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.json", .data = "{ \"hello\": 1 }" });
+    try testing.expect(try app.sceneInfo("res://notes.json", null) == null);
 }

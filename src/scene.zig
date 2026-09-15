@@ -262,10 +262,30 @@ pub fn write(app: *App, gpa: Allocator, options: SaveOptions) json.StringifyErro
     return json.stringify(gpa, Document{ .app = app }, writeOptions(options));
 }
 
+/// A scene with nothing in it, into fresh memory: what a new level starts as,
+/// written before anything is put in it. The caller frees it. See
+/// `App.createScene`, which writes one to a file.
+pub fn writeEmpty(gpa: Allocator, options: SaveOptions) json.StringifyError![]u8 {
+    return json.stringify(gpa, Empty{}, writeOptions(options));
+}
+
 fn writeOptions(options: SaveOptions) json.WriteOptions {
     // NaN and the infinities as themselves: JSON5 in text, floats in CBOR.
     return .{ .format = options.format, .indent = options.indent, .non_finite = .literal };
 }
+
+/// A scene of no entities, as `Document` writes one: the version, and an
+/// empty list rather than none, so it reads as a scene by hand too.
+const Empty = struct {
+    pub fn toJson(_: Empty, w: *json.Writer) json.Writer.Error!void {
+        try w.beginObject();
+        try w.field("fluxion_scene", @as(u32, version));
+        try w.key("entities");
+        try w.beginArray();
+        try w.endArray();
+        try w.endObject();
+    }
+};
 
 /// The world as fluxion-json writes it.
 const Document = struct {
@@ -555,6 +575,170 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     }
     return loaded;
 }
+
+/// What a scene says of itself, read without loading it: see `readInfo`.
+pub const Info = struct {
+    /// The version the file says it is. Only `version` loads; another is told
+    /// rather than refused, so a tool can say which it is.
+    version: u32,
+    format: json.Format,
+    /// How many entities it lists.
+    entities: usize = 0,
+    /// The files its `assets` table lists, in the file's order: for a scene
+    /// `save` wrote, every file of the project's that it names.
+    files: []File = &.{},
+
+    pub const File = struct {
+        /// As the scene gives it: `res://` for a file of the project's.
+        path: []const u8,
+        /// The UUID the scene knows it by, which finds it where it moved.
+        uid: ?Uuid = null,
+    };
+
+    pub fn deinit(self: *Info, gpa: Allocator) void {
+        for (self.files) |named| gpa.free(named.path);
+        gpa.free(self.files);
+        self.* = undefined;
+    }
+};
+
+/// What starts every CBOR scene: the self-described tag, which is also how
+/// the reader tells the two formats apart.
+const cbor_start = "\xD9\xD9\xF7";
+
+/// What the scene in `bytes` says of itself - its version, its format, how
+/// many entities and which files - with no world to load it into: what an
+/// editor shows of a scene it has not opened. Null when the bytes are not a
+/// scene, which is anything that has not said `fluxion_scene` before it
+/// stops making sense. A scene damaged after that is an error, and where
+/// is in `diagnostics`. Free it with `Info.deinit`.
+pub fn readInfo(gpa: Allocator, bytes: []const u8, diagnostics: ?*json.Diagnostics) !?Info {
+    var reader: json.Reader = .init(gpa, bytes, .{ .syntax = .json5, .diagnostics = diagnostics });
+    defer reader.deinit();
+
+    var glance: Glance = .{
+        .gpa = gpa,
+        .reader = &reader,
+        .said = .{ .version = 0, .format = if (std.mem.startsWith(u8, bytes, cbor_start)) .cbor else .json },
+    };
+    defer glance.deinit();
+    glance.scene() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.SyntaxError, error.TooDeep => if (glance.versioned) return err else return null,
+    };
+    if (!glance.versioned) return null;
+
+    var said = glance.said;
+    said.files = try glance.files.toOwnedSlice(gpa);
+    return said;
+}
+
+/// `readInfo`'s one pass: the members it wants, and the rest passed over.
+/// Nothing a scene holds is checked but its shape where `readInfo` looks, so a
+/// scene of another version is told as far as it can be.
+const Glance = struct {
+    gpa: Allocator,
+    reader: *json.Reader,
+    said: Info,
+    /// Whether the scene has said its version: from then on, it is one.
+    versioned: bool = false,
+    files: std.ArrayList(Info.File) = .empty,
+
+    fn deinit(g: *Glance) void {
+        for (g.files.items) |named| g.gpa.free(named.path);
+        g.files.deinit(g.gpa);
+    }
+
+    fn scene(g: *Glance) json.Reader.Error!void {
+        if (try g.next() != .object_begin) return;
+        while (try g.key()) |name| {
+            // Told apart before the next token, which the name does not
+            // outlive.
+            const member = std.meta.stringToEnum(enum { fluxion_scene, entities, assets }, name) orelse {
+                try g.reader.skipValue();
+                continue;
+            };
+            switch (member) {
+                .fluxion_scene => {
+                    const number = switch (try g.next()) {
+                        .number => |n| n.asInt(u32),
+                        else => null,
+                    } orelse return;
+                    g.said.version = number;
+                    g.versioned = true;
+                },
+                .entities => {
+                    if (try g.peek() != .array_begin) {
+                        try g.reader.skipValue();
+                        continue;
+                    }
+                    _ = try g.next();
+                    while (try g.peek() != .array_end) {
+                        try g.reader.skipValue();
+                        g.said.entities += 1;
+                    }
+                    _ = try g.next();
+                },
+                .assets => {
+                    if (try g.peek() != .object_begin) {
+                        try g.reader.skipValue();
+                        continue;
+                    }
+                    _ = try g.next();
+                    while (try g.key()) |path| {
+                        try g.files.ensureUnusedCapacity(g.gpa, 1);
+                        g.files.appendAssumeCapacity(.{ .path = try g.gpa.dupe(u8, path) });
+                        g.files.items[g.files.items.len - 1].uid = try g.uid();
+                    }
+                },
+            }
+        }
+    }
+
+    /// The UUID in what `assets` says of one file, when it says one that
+    /// reads.
+    fn uid(g: *Glance) json.Reader.Error!?Uuid {
+        if (try g.peek() != .object_begin) {
+            try g.reader.skipValue();
+            return null;
+        }
+        _ = try g.next();
+        var found_uid: ?Uuid = null;
+        while (try g.key()) |field| {
+            if (!std.mem.eql(u8, field, "uid") or try g.peek() != .string) {
+                try g.reader.skipValue();
+                continue;
+            }
+            const text = (try g.next()).string;
+            const body = if (std.mem.startsWith(u8, text, Project.uid_scheme)) text[Project.uid_scheme.len..] else text;
+            found_uid = Uuid.parse(body) catch null;
+        }
+        return found_uid;
+    }
+
+    /// The next token. The input ending where a value should be is a
+    /// mistake, never the end of a loop.
+    fn next(g: *Glance) json.Reader.Error!Token {
+        return (try g.reader.next()) orelse g.endsTooSoon();
+    }
+
+    fn peek(g: *Glance) json.Reader.Error!json.Reader.Kind {
+        return (try g.reader.peek()) orelse g.endsTooSoon();
+    }
+
+    fn endsTooSoon(g: *Glance) json.Reader.Error {
+        g.reader.report("the scene ends too soon", .{});
+        return error.SyntaxError;
+    }
+
+    /// The next member's name, or null at the end of the object.
+    fn key(g: *Glance) json.Reader.Error!?[]const u8 {
+        return switch (try g.next()) {
+            .key => |name| name,
+            else => null,
+        };
+    }
+};
 
 /// What the first pass learns for the second. Kept in the arena.
 const Told = struct {
@@ -1510,6 +1694,93 @@ test "a file that is not a scene, or a newer one, is refused" {
 
     try testing.expectError(error.WrongType, read(app, "[1, 2]", .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("expected a scene, which is an object, found a list", diagnostics.message());
+}
+
+test "a scene says what it is and which files it names, without being loaded" {
+    const text =
+        \\{
+        \\  // By hand, with what nothing here knows beside what it does.
+        \\  "fluxion_scene": 2,
+        \\  "made_by": { "tool": "an editor", "entities": [1, 2, 3] },
+        \\  "entities": [
+        \\    { "uuid": "00000000-0000-4000-8000-000000000001", "Sprite": { "texture": "res://art/hero.png" } },
+        \\    { "Sprite": { "texture": "res://art/tree.png" } }
+        \\  ],
+        \\  "assets": {
+        \\    "res://art/hero.png": { "uid": "uid://2f8a1c40-6d3e-4b17-9f22-c1a5e7b90d34", "filter": "linear" },
+        \\    "res://art/tree.png": { "wrap": "repeat" },
+        \\    "res://art/odd.png": { "uid": "not a uuid" }
+        \\  }
+        \\}
+    ;
+    var said = (try readInfo(testing.allocator, text, null)).?;
+    defer said.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 2), said.version);
+    try testing.expectEqual(json.Format.json, said.format);
+    try testing.expectEqual(@as(usize, 2), said.entities);
+    try testing.expectEqual(@as(usize, 3), said.files.len);
+    try testing.expectEqualStrings("res://art/hero.png", said.files[0].path);
+    try testing.expect(said.files[0].uid.?.eql(.parseComptime("2f8a1c40-6d3e-4b17-9f22-c1a5e7b90d34")));
+    try testing.expectEqualStrings("res://art/tree.png", said.files[1].path);
+    try testing.expect(said.files[1].uid == null);
+    try testing.expect(said.files[2].uid == null);
+}
+
+test "a scene in CBOR, or of another version, is told as it is" {
+    const app = try headless();
+    defer app.destroy();
+    for (0..3) |_| _ = try app.world.spawnWith(.{Transform2D.at(1, 2)});
+    const bytes = try write(app, testing.allocator, .{ .format = .cbor });
+    defer testing.allocator.free(bytes);
+
+    var binary = (try readInfo(testing.allocator, bytes, null)).?;
+    defer binary.deinit(testing.allocator);
+    try testing.expectEqual(json.Format.cbor, binary.format);
+    try testing.expectEqual(@as(usize, 3), binary.entities);
+    try testing.expectEqual(@as(u32, version), binary.version);
+
+    // Refused by `read`, and told here, so a tool can say which it is.
+    var old = (try readInfo(testing.allocator, "{ \"fluxion_scene\": 1, \"entities\": [{}, {}] }", null)).?;
+    defer old.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 1), old.version);
+    try testing.expectEqual(@as(usize, 2), old.entities);
+}
+
+test "what is not a scene is null, and a scene damaged past its version is a mistake that says where" {
+    const gpa = testing.allocator;
+    try testing.expect(try readInfo(gpa, "", null) == null);
+    try testing.expect(try readInfo(gpa, "not JSON at all", null) == null);
+    try testing.expect(try readInfo(gpa, "[1, 2]", null) == null);
+    try testing.expect(try readInfo(gpa, "{ \"entities\": [] }", null) == null);
+    try testing.expect(try readInfo(gpa, "{ \"fluxion_scene\": \"two\" }", null) == null);
+    // Broken before it said it was a scene: as far as can be told, it is not.
+    try testing.expect(try readInfo(gpa, "{ \"entities\": [ { , ], \"fluxion_scene\": 2 }", null) == null);
+
+    var diagnostics: json.Diagnostics = .{};
+    try testing.expectError(error.SyntaxError, readInfo(gpa, "{ \"fluxion_scene\": 2, \"entities\": [{}, ", &diagnostics));
+    try testing.expectError(error.SyntaxError, readInfo(gpa, "{ \"fluxion_scene\": 2, \"assets\": { \"res://a.png\": { \"uid\": ", null));
+    try testing.expect(diagnostics.message().len > 0);
+}
+
+test "an empty scene is a scene, with nothing in it, in either format" {
+    const app = try headless();
+    defer app.destroy();
+    for ([_]json.Format{ .json, .cbor }) |format| {
+        const bytes = try writeEmpty(testing.allocator, .{ .format = format });
+        defer testing.allocator.free(bytes);
+
+        var said = (try readInfo(testing.allocator, bytes, null)).?;
+        defer said.deinit(testing.allocator);
+        try testing.expectEqual(format, said.format);
+        try testing.expectEqual(@as(usize, 0), said.entities);
+
+        const loaded = try read(app, bytes, .{});
+        try testing.expectEqual(@as(usize, 0), loaded.entities);
+        // An empty list rather than none, for a person reading it.
+        if (format == .json) try testing.expect(std.mem.indexOf(u8, bytes, "\"entities\": []") != null);
+    }
+    try testing.expectEqual(@as(usize, 0), app.world.count());
 }
 
 /// Two components called the same, in two places.

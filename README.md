@@ -865,6 +865,13 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   `json.Document.from`: the same object a scene holds, and with
   `.every_field = true` every field, which is what an editor's inspector
   shows.
+- **A scene can be asked what it is without loading it.**
+  `app.sceneInfo(path, null)` reads its version, its format, how many
+  entities it has and the files its `assets` names, with their UUIDs - what
+  an editor lists of a scene it has not opened - and is null for a file that
+  is not a scene; a scene of another version is told, not refused.
+  `scene.readInfo` does the same from memory, with no `App`.
+  `app.createScene(path, .{})` writes an empty one, never over another.
 
 `zig build example-creatures -- --frames 1 --save-scene creatures.json` writes
 the example's world - JSON for a path ending in `.json`, CBOR for any other -
