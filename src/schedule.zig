@@ -29,6 +29,7 @@ const Allocator = std.mem.Allocator;
 
 const App = @import("App.zig");
 const Commands = @import("commands.zig");
+const Signals = @import("signals.zig").Signals;
 const States = @import("states.zig");
 
 /// What a system is: a function that gets the whole application. Declaring
@@ -123,6 +124,10 @@ pub const Schedule = struct {
     /// `app.commands`, done after each system. Null runs the systems alone.
     commands: ?*Commands = null,
 
+    /// `app.signals`, whose calls are made after each system, as its
+    /// commands are done. Null too for systems alone.
+    signals: ?*Signals = null,
+
     /// The systems run on entering and leaving states' values.
     hooks: std.ArrayList(Hook) = .empty,
 
@@ -190,6 +195,12 @@ pub const Schedule = struct {
             return err;
         };
         if (self.commands) |commands| commands.apply() catch |err| {
+            self.failed = .{ .stage = stage, .name = entry.name, .err = err };
+            return err;
+        };
+        // The signals it emitted, heard now that it has returned - and
+        // counted in its time, as its commands are.
+        if (self.signals) |signals| signals.drain(app) catch |err| {
             self.failed = .{ .stage = stage, .name = entry.name, .err = err };
             return err;
         };

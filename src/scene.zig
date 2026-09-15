@@ -77,6 +77,7 @@ const reflect = @import("fluxion_reflect");
 const rhi = @import("fluxion_rhi");
 
 const App = @import("App.zig");
+const signals = @import("signals.zig");
 const Assets = @import("assets.zig");
 const Project = @import("Project.zig");
 const components = @import("components.zig");
@@ -88,6 +89,8 @@ const TextureHandle = Assets.TextureHandle;
 const FontHandle = Assets.FontHandle;
 const Text2D = components.Text2D;
 const Uuid = @import("fluxion_id").Uuid;
+const math = @import("fluxion_math");
+const Color = @import("color.zig").Color;
 
 /// The version this writes, and the only one it reads.
 pub const version = 2;
@@ -119,6 +122,13 @@ pub const Loaded = struct {
     /// or renamed with their `.uid` files. Saving the scene again writes
     /// where they are now.
     moved: usize = 0,
+    /// Connections made to a signal no component of this build declares, or
+    /// to a method the target has not got: kept, saved back as they were,
+    /// and never heard. An editor without the game's components meets these.
+    connections_unknown: usize = 0,
+    /// Connections passed over because one of their two ends is in neither
+    /// the scene nor the world.
+    connections_skipped: usize = 0,
 };
 
 /// What `assets` says of one file: its UUID, and how a texture is sampled
@@ -146,6 +156,8 @@ pub const Registry = struct {
         /// What the component is made of, for a value of it whose type is
         /// known only at run time. See `App.componentOf`.
         type: *const reflect.Type,
+        /// What it can say: its `pub const signals`. See `App.signal`.
+        signals: []const signals.Decl,
         idIn: *const fn (world: *World) World.Error!ComponentId,
         findIdIn: *const fn (world: *const World) ?ComponentId,
         /// Put one holding its defaults on an entity, or overwrite the one
@@ -184,6 +196,7 @@ pub const Registry = struct {
                 .name = name,
                 .key = ecs.component.keyOf(T),
                 .type = reflect.typeOf(T),
+                .signals = signals.declsOf(T),
                 .idIn = Shim.idIn,
                 .findIdIn = Shim.findIdIn,
                 .addTo = Shim.addTo,
@@ -303,6 +316,7 @@ const Document = struct {
         try w.beginArray();
         for (s.order.items) |e| try s.writeEntity(w, e);
         try w.endArray();
+        try s.writeConnections(w);
         try s.writeFiles(w);
         try w.endObject();
     }
@@ -370,6 +384,88 @@ const Saving = struct {
             try entry.write(s, w, cell);
         }
         try w.endObject();
+    }
+
+    /// `connections`: every one made with `persist` from an entity written,
+    /// to one written, in the order each entity's are heard - known to this
+    /// build or not - and nothing at all when there are none. Godot's
+    /// `[connection]` lines.
+    fn writeConnections(s: *Saving, w: *json.Writer) json.Writer.Error!void {
+        var any = false;
+        for (s.order.items) |source| {
+            const list = s.app.signals.from.getPtr(source) orelse continue;
+            for (list.items) |c| {
+                if (!c.options.flags.persist or c.callable != .named) continue;
+                const from = s.app.uuidOf(source) orelse continue;
+                const to = s.app.uuidOf(c.callable.named.target) orelse continue;
+                if (!any) {
+                    try w.key("connections");
+                    try w.beginArray();
+                    any = true;
+                }
+                try w.beginObject();
+                const from_text = from.toString();
+                try w.field("from", @as([]const u8, &from_text));
+                try w.field("signal", s.app.signalWritten(c));
+                const to_text = to.toString();
+                try w.field("to", @as([]const u8, &to_text));
+                try w.field("method", c.callable.named.name);
+                // Every flag but `persist`, which every one written has.
+                var flags = c.options.flags;
+                flags.persist = false;
+                if (@as(u8, @bitCast(flags)) != 0) {
+                    try w.key("flags");
+                    try w.beginArray();
+                    inline for (.{ "deferred", "one_shot", "reference_counted", "append_source" }) |name| {
+                        if (@field(flags, name)) try w.writeString(name);
+                    }
+                    try w.endArray();
+                }
+                if (c.options.unbinds != 0) try w.field("unbinds", c.options.unbinds);
+                if (c.options.binds.len != 0) {
+                    try w.key("binds");
+                    try w.beginArray();
+                    for (c.options.binds) |b| try s.writeBind(w, b);
+                    try w.endArray();
+                }
+                try w.endObject();
+            }
+        }
+        if (any) try w.endArray();
+    }
+
+    /// A bind: the plain JSON value it is, or an object saying which of the
+    /// others it is.
+    fn writeBind(s: *Saving, w: *json.Writer, b: signals.Bind) json.Writer.Error!void {
+        switch (b) {
+            .bool => |v| try w.writeBool(v),
+            .int => |v| try w.writeInt(v),
+            .float => |v| try w.writeFloat(v),
+            .string => |v| try w.writeString(v),
+            .vec2 => |v| {
+                try w.beginObject();
+                try w.key("vec2");
+                try w.beginArray();
+                try w.writeFloat(v.x);
+                try w.writeFloat(v.y);
+                try w.endArray();
+                try w.endObject();
+            },
+            .color => |v| {
+                try w.beginObject();
+                try w.key("color");
+                try w.beginArray();
+                inline for (.{ v.r, v.g, v.b, v.a }) |part| try w.writeFloat(part);
+                try w.endArray();
+                try w.endObject();
+            },
+            .entity => |e| {
+                try w.beginObject();
+                try w.key("entity");
+                try writeValue(s, w, Entity, &e);
+                try w.endObject();
+            },
+        }
     }
 
     /// `assets`: each file the scene named that there is something to say
@@ -580,6 +676,8 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
         };
         try l.fill();
         loaded.moved = l.moved;
+        loaded.connections_unknown = l.connections_unknown;
+        loaded.connections_skipped = l.connections_skipped;
     }
     return loaded;
 }
@@ -783,6 +881,9 @@ const Loading = struct {
     fonts: std.StringHashMapUnmanaged(FontHandle) = .empty,
     /// Files found by their UUIDs somewhere other than the scene says.
     moved: usize = 0,
+    /// See `Loaded`.
+    connections_unknown: usize = 0,
+    connections_skipped: usize = 0,
     path: Path = .{},
 
     /// The first pass: an entity for every object in `entities`, with every
@@ -897,6 +998,12 @@ const Loading = struct {
         const app = l.app;
         _ = try l.next();
         while (try l.key()) |name| {
+            if (std.mem.eql(u8, name, "connections")) {
+                const mark = l.path.push("connections", .{});
+                try l.connections();
+                l.path.pop(mark);
+                continue;
+            }
             if (!std.mem.eql(u8, name, "entities")) {
                 try l.reader.skipValue();
                 continue;
@@ -933,8 +1040,139 @@ const Loading = struct {
                 }
                 l.path.pop(entity_mark);
             }
-            return;
+            // Past the list's end, for what comes after it: the connections.
+            try l.open(.array_end, "the end of the entities");
         }
+    }
+
+    /// `connections`: each made again, with `persist`, whether this build
+    /// knows its signal and its method or not - an editor that has not got
+    /// the game's components saves them back as they were. One whose `from`
+    /// or `to` is in neither the scene nor the world is passed over.
+    fn connections(l: *Loading) anyerror!void {
+        try l.open(.array_begin, "the connections, which are a list");
+        var place: usize = 0;
+        while (true) : (place += 1) {
+            const token = try l.next();
+            if (token == .array_end) return;
+            if (token != .object_begin) return l.wrong("a connection, which is an object", token);
+            const mark = l.path.push("{d}", .{place});
+            defer l.path.pop(mark);
+
+            var from: ?Entity = null;
+            var to: ?Entity = null;
+            var signal: ?[]const u8 = null;
+            var method: ?[]const u8 = null;
+            var options: signals.Options = .{ .flags = .{ .persist = true } };
+            var binds: std.ArrayList(signals.Bind) = .empty;
+            while (try l.key()) |field| {
+                if (std.mem.eql(u8, field, "from") or std.mem.eql(u8, field, "to")) {
+                    const end = try l.connectionEnd();
+                    if (field[0] == 'f') from = end else to = end;
+                } else if (std.mem.eql(u8, field, "signal") or std.mem.eql(u8, field, "method")) {
+                    const text = switch (try l.next()) {
+                        .string => |text| try l.arena.dupe(u8, text),
+                        else => |other| return l.wrong("a name", other),
+                    };
+                    if (field[0] == 's') signal = text else method = text;
+                } else if (std.mem.eql(u8, field, "flags")) {
+                    try l.open(.array_begin, "the flags, which are a list");
+                    while (true) {
+                        const flag = switch (try l.next()) {
+                            .array_end => break,
+                            .string => |text| text,
+                            else => |other| return l.wrong("a flag's name", other),
+                        };
+                        // A flag, not a `break`: control flow that leaves an
+                        // `inline for` under a run-time test is refused.
+                        var matched = false;
+                        inline for (.{ "deferred", "persist", "one_shot", "reference_counted", "append_source" }) |known| {
+                            if (!matched and std.mem.eql(u8, flag, known)) {
+                                @field(options.flags, known) = true;
+                                matched = true;
+                            }
+                        }
+                        if (!matched) return l.fail(error.WrongType, "\"{s}\" is not a flag: the flags are deferred, persist, one_shot, reference_counted and append_source", .{flag});
+                    }
+                } else if (std.mem.eql(u8, field, "unbinds")) {
+                    try readValue(l, u8, &options.unbinds);
+                } else if (std.mem.eql(u8, field, "binds")) {
+                    try l.open(.array_begin, "the binds, which are a list");
+                    while (try l.bind()) |b| try binds.append(l.arena, b);
+                } else try l.reader.skipValue();
+            }
+            const named = signal orelse return l.fail(error.WrongType, "a connection names its \"signal\"", .{});
+            const called = method orelse return l.fail(error.WrongType, "a connection names its \"method\"", .{});
+            if (from == null or to == null) {
+                l.connections_skipped += 1;
+                continue;
+            }
+            options.binds = binds.items;
+            const callable: signals.Callable = .method(to.?, called);
+            // A signal nothing declares, or a bare name two components
+            // declare now, is kept as written and never heard.
+            const heard: ?signals.Signal = l.app.signalNamed(from.?, named) catch null;
+            const made = if (heard) |s| s.connect(callable, options) else l.app.signals.connect(from.?, .{ .name = named }, callable, options);
+            made catch |err| switch (err) {
+                // The same scene's connection read twice keeps the one.
+                error.AlreadyConnected => {},
+                else => return err,
+            };
+            if (heard == null or !l.app.hasMethod(to.?, called)) l.connections_unknown += 1;
+        }
+    }
+
+    /// A connection's `from` or `to`: the entity with that UUID, in the
+    /// scene first and then the world, or null when neither has it.
+    fn connectionEnd(l: *Loading) anyerror!?Entity {
+        const text = switch (try l.next()) {
+            .string => |text| text,
+            else => |other| return l.wrong("an entity's UUID", other),
+        };
+        const uuid = Uuid.parse(text) catch return l.fail(error.WrongType, "an entity is named by its UUID, and \"{s}\" is not one", .{text});
+        if (l.told.?.places.get(uuid)) |place| return l.entities[place];
+        return l.app.findUuid(uuid);
+    }
+
+    /// One of a connection's binds, or null at the list's end: a bool, a
+    /// number, text, or `{ "vec2": [x, y] }`, `{ "color": [r, g, b, a] }`,
+    /// `{ "entity": uuid }`.
+    fn bind(l: *Loading) anyerror!?signals.Bind {
+        return switch (try l.next()) {
+            .array_end => null,
+            .bool => |b| .{ .bool = b },
+            .number => |n| if (n.isInteger())
+                .{ .int = n.asInt(i64) orelse return l.fail(error.WrongType, "{s} is too big for a bind", .{n.text}) }
+            else
+                .{ .float = n.asFloat(f64) },
+            .string => |text| .{ .string = try l.arena.dupe(u8, text) },
+            .object_begin => blk: {
+                const kind = (try l.key()) orelse return l.fail(error.WrongType, "a bind's object names what it is", .{});
+                const made: signals.Bind = if (std.mem.eql(u8, kind, "vec2")) vec: {
+                    var v: math.Vec2 = undefined;
+                    try l.numbers(&.{ &v.x, &v.y });
+                    break :vec .{ .vec2 = v };
+                } else if (std.mem.eql(u8, kind, "color")) colour: {
+                    var c: Color = undefined;
+                    try l.numbers(&.{ &c.r, &c.g, &c.b, &c.a });
+                    break :colour .{ .color = c };
+                } else if (std.mem.eql(u8, kind, "entity")) entity: {
+                    var e: Entity = .none;
+                    try readValue(l, Entity, &e);
+                    break :entity .{ .entity = e };
+                } else return l.fail(error.WrongType, "\"{s}\" is not a bind: they are vec2, color and entity, besides bools, numbers and text", .{kind});
+                try l.open(.object_end, "the end of the bind");
+                break :blk made;
+            },
+            else => |other| l.wrong("a bind", other),
+        };
+    }
+
+    /// A list of exactly these numbers.
+    fn numbers(l: *Loading, into: []const *f32) anyerror!void {
+        try l.open(.array_begin, "a list of numbers");
+        for (into) |out| try readValue(l, f32, out);
+        try l.open(.array_end, "the end of the list");
     }
 
     fn next(l: *Loading) anyerror!Token {

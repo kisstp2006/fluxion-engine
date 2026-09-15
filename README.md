@@ -223,6 +223,142 @@ if (app.state(Mode) == .game_over) showScore(app);
   // and back to Play.paused from the frame it ran in
   ```
 
+## 📨 Events
+
+```zig
+const Damage = struct { to: fx.Entity, amount: f32 };
+
+fn hits(app: *fx.App) !void {
+    // ... inside a query, as often as it likes:
+    try app.send(Damage{ .to = enemy, .amount = 5 });
+}
+
+fn hurt(app: *fx.App) !void {
+    const Place = struct { var damage: fx.EventReader(Damage) = .{} };
+    var it = Place.damage.read(app.events(Damage));
+    while (it.next()) |d| {
+        if (app.world.get(d.to, Health)) |health| health.hp -= d.amount;
+    }
+}
+```
+
+- **An event is a value of any type**, and whoever reads that type hears it:
+  the sender names no receiver and the reader no sender. Bevy's events.
+- **Sending only appends**, so a system can send from inside its own query's
+  loop. Only from its own thread, though: a parallel `Query.each` worker
+  cannot send.
+- **An event lives two frames**, the one it was sent in and the next. A
+  reader that runs before the sender still sees it once, a frame later. A
+  reader that does not read for two frames misses what went by.
+- **A reader is a place, not a queue.** An `fx.EventReader(T)` is a count of
+  what it has read, kept wherever the system keeps its state. Two readers
+  each see every event, once each.
+
+## 📡 Signals
+
+```zig
+pub const Health = extern struct {
+    hp: f32 = 100,
+    pub const signals = .{ .died = struct {}, .hit = struct { damage: f32, by: fx.Entity } };
+};
+
+try app.addMethod("_on_player_hit", onPlayerHit);
+fn onPlayerHit(app: *fx.App, self: fx.Entity, damage: f32, by: fx.Entity) !void { ... }
+fn shake(app: *fx.App, args: struct { damage: f32, by: fx.Entity }) !void { ... }
+
+const hit = app.signal(player, Health, .hit);                        // Godot: player.hit
+try hit.connect(.method(hud, "_on_player_hit"), .{});                // Callable(hud, "_on_player_hit")
+try hit.connectFn(shake, .{ .flags = .{ .one_shot = true } });       // a lambda
+try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked as it is compiled
+```
+
+- **A component declares what it can say** as `pub const signals`: each
+  signal's name, and the struct of its arguments. An entity has the signals
+  of all its components. When two of them declare the same name, the signal
+  is written `Health.hit`.
+- **A connection is to one component's signal.** If a component that
+  declares the same name is added later - a `Shield` that also has `hit` -
+  the connection is only written differently, as `Health.hit`, and still
+  hears only `Health`.
+- **A connection is data, kept beside the world** as names and UUIDs are,
+  never in a component. `app.connectionsFrom`, `app.connectionsTo` and
+  `signal.connections` list them, and `app.connectionCount` counts them.
+- **An emit is heard when the emitting system returns.** The calls run at the
+  same sync point as `app.commands`, in the order the connections were
+  made, and never under the emitting system's query. **This is where it
+  differs from Godot**, whose emit calls at once.
+  - The arguments are copied as the emit happens, text included, so a
+    handler reads what was said.
+  - What a handler emits is heard in the same round.
+  - Ten thousand calls in one round is taken as a loop: it is stopped and
+    returns `error.TooManyCalls`.
+- **A `.deferred` connection is heard at the end of the frame**, after
+  `.late`, which is Godot's idle time.
+- **The rest of the flags are Godot's too**:
+  - `.persist`: saved with the scene;
+  - `.one_shot`: gone as it is emitted;
+  - `.reference_counted`: a second connect counts up, and each disconnect
+    counts down;
+  - `.append_source`, from 4.5.
+
+  `unbinds` and `binds` are `Callable.unbind` and `Callable.bind`, and an
+  `fx.Bind` is a bool, an integer, a float, text, a `Vec2`, a colour or an
+  entity.
+- **A method is found by name when it is called, not when it is connected.**
+  The engine looks first among the methods the target's components list in
+  `reflect_methods`, then among those the game gave `app.addMethod`. Godot's
+  connect does not check either, and that is what lets a tool connect to
+  methods it cannot see.
+  - A failed call is logged, counted in `app.signals.failures`, and the other
+    connections are still heard. A call fails when the method is missing,
+    the arguments are wrong, or the method returns an error.
+  - Until scripts have methods of their own, those two lists are where
+    methods come from. `app.methodsOf(entity, &buffer)` lists both, with what
+    each method takes.
+- **Death undoes connections.** A call to an entity that has died since the
+  emit is not made. The connections from and to the dead go at the end of
+  the frame.
+- **A Zig function is never saved**, as Godot's lambdas are not.
+  `connectFn` with `.persist` returns `error.NotPersistable`.
+- **By name, for code that was not compiled against the game** - an editor, a
+  console, a scene:
+  - `app.signalNamed(entity, "hit")`, `app.emitNamed`, `app.hasSignal`;
+  - `app.signalsOf(entity, &buffer)` and `app.signalsOfComponent("Health", &buffer)`,
+    each signal with its arguments' names and types;
+  - `app.connectNamed` and `app.disconnectNamed`, which keep a connection
+    whether or not any component declares its signal;
+  - `app.hasMethod` and `app.callMethodOn`.
+- **An editor turns them off.** With `app.signals.dispatch = false`, every
+  connection is kept, saved and listed, and none is called.
+  `app.setBlockSignals(entity, true)` silences one entity, as Godot's
+  `set_block_signals` does.
+
+A scene keeps the connections made with `.persist`, by UUID, in a list of
+their own:
+
+```json
+"connections": [
+  { "from": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c", "signal": "hit",
+    "to": "5c2d7e9f-0a1b-4c3d-8e5f-6a7b8c9d0e1f", "method": "_on_player_hit" },
+  { "from": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c", "signal": "died",
+    "to": "5c2d7e9f-0a1b-4c3d-8e5f-6a7b8c9d0e1f", "method": "_game_over",
+    "flags": ["deferred", "one_shot"], "binds": [3, "easy", { "vec2": [1.0, 2.0] }] }
+]
+```
+
+`signal` is the bare name, or `Component.name` when the bare one is
+ambiguous on that entity, and reading takes either.
+
+A connection whose signal or method this build does not know is kept, and
+written back as it was read; `loaded.connections_unknown` counts them. An
+editor without the game's components must not lose the game's connections.
+- **Such a connection is never heard**, even after its component arrives.
+  Connecting the same thing again makes it a known one, in the same place.
+- **A bare name that two of the entity's components now declare** is kept
+  the same way, and heard by neither.
+- **One whose `from` or `to` is nowhere** is passed over, and counted in
+  `loaded.connections_skipped`.
+
 ## 🎮 Controllers and the pointer
 
 ```zig
@@ -924,6 +1060,9 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   `app.clearWorld()` - every entity, name and UUID gone at once - and then
   the load. The font a `Text2D` with no font of its own is drawn in belongs
   to the program, not the scene: whichever was loaded first.
+- **The connections a game made with `.persist` go with it**, in a
+  `connections` list after the entities, by UUID, including the ones this
+  build does not know. See [Signals](#-signals).
 - **One entity on its own** is `scene.EntityJson`, for `json.stringify` or
   `json.Document.from`: the same object a scene holds, and with
   `.every_field = true` every field, which is what an editor's inspector
@@ -1189,6 +1328,15 @@ Here, and checked by the tests:
   a state or under a condition of the game's own; systems run on entering
   and leaving; code gated by a state it has never heard of; and a paused
   clock moved on by one step.
+- Events of any type, sent from inside a query and read once by each
+  reader over the two frames they live.
+- Signals on components, as Godot 4 has them:
+  - connections to methods by name or to Zig functions, heard when the
+    emitting system returns or, deferred, at the end of the frame;
+  - Godot's flags, unbinds and binds;
+  - loops stopped, failures counted, and the dead let go;
+  - everything by name for an editor;
+  - connections kept in scenes, including ones this build does not know.
 - Keyboard and mouse as levels and edges, with typing kept in order, and
   edges that a fixed step hears exactly once.
 - Controls as data: an `AxisBinding` holds two keys, a second two, a stick

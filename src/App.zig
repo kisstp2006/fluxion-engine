@@ -53,6 +53,8 @@ const Window = @import("window.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
 const scene = @import("scene.zig");
+const signals_mod = @import("signals.zig");
+const events_mod = @import("events.zig");
 const sprite = @import("render/sprite.zig");
 const View = @import("render/view.zig").View;
 
@@ -404,6 +406,13 @@ uuid_source: std.Random.DefaultCsprng,
 /// been told about them.
 scene_components: scene.Registry = .{},
 
+/// Every signal's connections, the calls waiting for their sync point, and
+/// `dispatch`, the switch that makes none. See `signal`.
+signals: signals_mod.Signals,
+
+/// Every type of event sent, by type. See `send` and `events`.
+event_channels: std.AutoArrayHashMapUnmanaged(usize, EventChannel) = .empty,
+
 /// Every type described at run time, by name: the components, the values in
 /// them, and `DebugViews`. A game's components join when they are
 /// registered, and its own functions with `types.addFunction`, for a console
@@ -500,9 +509,11 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .by_uuid = .empty,
         .uuid_source = undefined,
         .scene_components = .{},
+        .signals = .init(gpa),
+        .event_channels = .empty,
         .types = .init(gpa),
         .input = .{},
-        .schedule = .{ .io = options.io, .commands = &self.commands },
+        .schedule = .{ .io = options.io, .commands = &self.commands, .signals = &self.signals },
         .states = .{},
         .gate = null,
         .background = options.background,
@@ -694,6 +705,9 @@ pub fn destroy(self: *App) void {
     self.uuids.deinit(gpa);
     self.by_uuid.deinit(gpa);
     self.scene_components.deinit(gpa);
+    self.signals.deinit();
+    for (self.event_channels.values()) |channel| channel.deinit(channel.events, gpa);
+    self.event_channels.deinit(gpa);
     self.types.deinit();
     self.bodies.deinit(gpa);
     self.physics.deinit();
@@ -918,6 +932,8 @@ pub fn step(self: *App) anyerror!bool {
     // that is gone.
     defer self.input.endFrame();
     self.schedule.beginFrame();
+    // Last frame's events go, and this frame's become last frame's.
+    for (self.event_channels.values()) |channel| channel.update(channel.events);
     self.resized = false;
 
     if (self.window) |*window| {
@@ -992,6 +1008,9 @@ pub fn step(self: *App) anyerror!bool {
 
     try self.schedule.run(.update, self);
     try self.schedule.run(.late, self);
+    // Deferred signal calls, Godot's idle time: after `.late`, before the
+    // engine's own passes, so what they despawn is gone by the draw.
+    try self.signals.flushDeferred(self);
 
     // The engine's own passes, after the game's `.late` systems and before
     // drawing: whatever hung from something despawned goes with it, and then
@@ -999,6 +1018,7 @@ pub fn step(self: *App) anyerror!bool {
     try self.despawnOrphans();
     self.forgetDeadNames();
     self.forgetDeadUuids();
+    self.signals.forgetDead(&self.world);
     try self.animate();
     if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
 
@@ -1465,6 +1485,7 @@ pub fn clearWorld(self: *App) void {
     self.by_name.clearRetainingCapacity();
     self.uuids.clearRetainingCapacity();
     self.by_uuid.clearRetainingCapacity();
+    self.signals.clear();
 }
 
 /// Give back the names of everything that has died. Once a frame, after
@@ -1700,7 +1721,11 @@ pub const reflect_methods = .{
 ///
 /// `reflect.typeOf(App).methods` lists them, with each one's parameters.
 pub fn callNamed(self: *App, name: []const u8, args: []const reflect.Value, result: ?reflect.Value) anyerror!void {
-    const receiver: reflect.Value = .of(self);
+    return callValue(.of(self), name, args, result);
+}
+
+/// Call a method of `receiver`'s type by name, its error coming back as one.
+fn callValue(receiver: reflect.Value, name: []const u8, args: []const reflect.Value, result: ?reflect.Value) anyerror!void {
     const method = receiver.type.method(name) orelse return error.NoSuchMethod;
     const returns = method.type.info.function.return_type;
     if (returns.kind != .error_union) return receiver.call(name, args, result);
@@ -1714,6 +1739,330 @@ pub fn callNamed(self: *App, name: []const u8, args: []const reflect.Value, resu
     const code = returns.info.error_union.ops.code(&held);
     if (code != 0) return @errorFromInt(@as(std.meta.Int(.unsigned, @bitSizeOf(anyerror)), @intCast(code)));
     if (result) |into| try into.convertFrom(returned.unwrap().?);
+}
+
+// -------------------------------------------------------------------------
+// Signals and events
+// -------------------------------------------------------------------------
+//
+// Godot's signals, on components, and the typed events the engine's own
+// are made from. See `signals.zig` and `events.zig`.
+
+pub const Signal = signals_mod.Signal;
+
+/// The signal `name` that `C` declares, of `entity`: Godot's
+/// `entity.name`, checked as it is compiled.
+///
+/// ```zig
+/// try app.signal(player, Health, .hit).connect(.method(hud, "_on_player_hit"), .{});
+/// ```
+pub fn signal(self: *App, entity: ecs.Entity, comptime C: type, comptime name: @EnumLiteral()) Signal {
+    comptime {
+        if (!@hasDecl(C, "signals") or !@hasField(@TypeOf(C.signals), @tagName(name)))
+            @compileError("fluxion-engine: " ++ @typeName(C) ++ " declares no signal ." ++ @tagName(name));
+    }
+    return .{ .app = self, .source = entity, .component = comptime scene.nameOf(C), .name = @tagName(name) };
+}
+
+/// Emit `name` of `entity`, its arguments checked against what `C` declares
+/// as it is compiled. See `Signal.emit`.
+pub fn emit(self: *App, entity: ecs.Entity, comptime C: type, comptime name: @EnumLiteral(), args: @field(C.signals, @tagName(name))) signals_mod.Error!void {
+    return self.signal(entity, C, name).emit(args);
+}
+
+/// A signal of `entity` by the name one of its components declares it
+/// under - `hit`, or `Health.hit` when two of them declare `hit` - for what
+/// was not compiled against the game: an editor, a console, a scene.
+pub fn signalNamed(self: *App, entity: ecs.Entity, name: []const u8) signals_mod.Error!Signal {
+    if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
+        const entry = self.scene_components.find(name[0..dot]) orelse return error.NoSuchSignal;
+        if (self.valueOf(entity, entry) == null) return error.NoSuchSignal;
+        for (entry.signals) |decl| {
+            if (std.mem.eql(u8, decl.name, name[dot + 1 ..])) return .{ .app = self, .source = entity, .component = entry.name, .name = decl.name };
+        }
+        return error.NoSuchSignal;
+    }
+    var found: ?Signal = null;
+    var held: [64]ComponentValue = undefined;
+    for (self.componentsOf(entity, &held)) |component| {
+        const entry = self.scene_components.find(component.name) orelse continue;
+        for (entry.signals) |decl| {
+            if (!std.mem.eql(u8, decl.name, name)) continue;
+            if (found != null) return error.AmbiguousSignal;
+            found = .{ .app = self, .source = entity, .component = entry.name, .name = decl.name };
+        }
+    }
+    return found orelse error.NoSuchSignal;
+}
+
+/// `signalNamed`, emitted with values: what a console or a script emits.
+pub fn emitNamed(self: *App, entity: ecs.Entity, name: []const u8, values: []const reflect.Value) signals_mod.Error!void {
+    return (try self.signalNamed(entity, name)).emitValues(values);
+}
+
+/// Whether one of `entity`'s components declares a signal by that name.
+/// Godot's `has_signal`.
+pub fn hasSignal(self: *App, entity: ecs.Entity, name: []const u8) bool {
+    _ = self.signalNamed(entity, name) catch |err| return err == error.AmbiguousSignal;
+    return true;
+}
+
+/// Every signal `entity` has, component by component in the order they
+/// were registered, as many as `found` holds. Godot's `get_signal_list`.
+pub fn signalsOf(self: *App, entity: ecs.Entity, found: []signals_mod.Info) []signals_mod.Info {
+    var count: usize = 0;
+    var held: [64]ComponentValue = undefined;
+    for (self.componentsOf(entity, &held)) |component| {
+        const entry = self.scene_components.find(component.name) orelse continue;
+        for (entry.signals) |decl| {
+            if (count == found.len) return found[0..count];
+            found[count] = .{ .component = entry.name, .name = decl.name, .args = decl.args };
+            count += 1;
+        }
+    }
+    return found[0..count];
+}
+
+/// The signals the component a scene calls `name` declares, whether any
+/// entity has it or not: what an editor lists before one is added.
+pub fn signalsOfComponent(self: *App, name: []const u8, found: []signals_mod.Info) []signals_mod.Info {
+    const entry = self.scene_components.find(name) orelse return found[0..0];
+    const count = @min(found.len, entry.signals.len);
+    for (entry.signals[0..count], found[0..count]) |decl, *into| {
+        into.* = .{ .component = entry.name, .name = decl.name, .args = decl.args };
+    }
+    return found[0..count];
+}
+
+/// Connect to a signal of `source` by name, whether this build knows it or
+/// not: one no component declares is kept, saved and listed as written,
+/// and never heard - how a scene or an editor holds a game's connections
+/// without the game's components. A bare name two components declare is
+/// `error.AmbiguousSignal`: name one.
+pub fn connectNamed(self: *App, source: ecs.Entity, name: []const u8, callable: signals_mod.Callable, options: signals_mod.Options) signals_mod.Error!void {
+    const known = self.signalNamed(source, name) catch |err| switch (err) {
+        error.NoSuchSignal => return self.signals.connect(source, .{ .name = name }, callable, options),
+        else => return err,
+    };
+    return known.connect(callable, options);
+}
+
+/// Take away a connection `connectNamed` could have made, by the name a
+/// listing gives it.
+pub fn disconnectNamed(self: *App, source: ecs.Entity, name: []const u8, callable: signals_mod.Callable) void {
+    if (self.signalNamed(source, name)) |known| {
+        if (self.signals.disconnect(source, known.key(), callable)) return;
+    } else |_| {}
+    // Kept as written: one this build did not know when it was made.
+    _ = self.signals.disconnect(source, .{ .name = name }, callable);
+}
+
+/// Every connection of `source`'s signals, known or not, in the order they
+/// were made: the order they are heard in, and the order a scene keeps and
+/// reads back. A disconnect and a connect again puts one last, as Godot's
+/// Edit Connection does. Godot's `get_signal_connection_list`, over all.
+pub fn connectionsFrom(self: *App, source: ecs.Entity, found: []signals_mod.Connection) []signals_mod.Connection {
+    const listed = self.signals.connectionsFrom(source, found);
+    for (listed) |*c| c.signal = self.signalWritten(c.*);
+    return listed;
+}
+
+/// Every connection to a method of `receiver`. Godot's
+/// `get_incoming_connections`.
+pub fn connectionsTo(self: *App, receiver: ecs.Entity, found: []signals_mod.Connection) []signals_mod.Connection {
+    const listed = self.signals.connectionsTo(receiver, found);
+    for (listed) |*c| c.signal = self.signalWritten(c.*);
+    return listed;
+}
+
+/// How many connections `source`'s signals have, known or not, with no
+/// list to fill: what a hierarchy's signal icon asks.
+pub fn connectionCount(self: *const App, source: ecs.Entity) usize {
+    const list = self.signals.from.getPtr(source) orelse return 0;
+    return list.items.len;
+}
+
+/// Whether `entity`'s emits do nothing. Godot's `set_block_signals`.
+pub fn setBlockSignals(self: *App, entity: ecs.Entity, on: bool) Allocator.Error!void {
+    if (on) try self.signals.blocked.put(self.gpa, entity, {}) else _ = self.signals.blocked.remove(entity);
+}
+
+pub fn isBlockingSignals(self: *const App, entity: ecs.Entity) bool {
+    return self.signals.blocked.contains(entity);
+}
+
+/// Let a signal's connection call `f` by `name`, when no component of the
+/// target has a method by it: `fn (app: *App, self: fx.Entity, ...) !void`,
+/// `self` the entity connected to - Godot's implicit one - and after it what
+/// the connection hands on. The values are converted to the parameters as
+/// it is called, and a call with the wrong number is that call's error.
+///
+/// ```zig
+/// try app.addMethod("_on_player_hit", onPlayerHit);
+/// fn onPlayerHit(app: *fx.App, self: fx.Entity, damage: f32, by: fx.Entity) !void { ... }
+/// ```
+pub fn addMethod(self: *App, name: []const u8, comptime f: anytype) Allocator.Error!void {
+    const entry = try self.signals.methods.getOrPut(self.gpa, name);
+    if (!entry.found_existing) {
+        entry.key_ptr.* = self.gpa.dupe(u8, name) catch |err| {
+            self.signals.methods.removeByPtr(entry.key_ptr);
+            return err;
+        };
+    }
+    entry.value_ptr.* = signals_mod.registered(f);
+}
+
+/// Every method a connection to `receiver` can name, with what each takes:
+/// its components' `reflect_methods`, then what the game gave `addMethod`
+/// by name, as many as `found` holds. What an editor's method picker lists,
+/// and filters by a signal's arguments. `Entity.none` lists the game's own
+/// alone.
+pub fn methodsOf(self: *App, receiver: ecs.Entity, found: []signals_mod.MethodInfo) []signals_mod.MethodInfo {
+    var count: usize = 0;
+    var held: [64]ComponentValue = undefined;
+    for (self.componentsOf(receiver, &held)) |component| {
+        for (component.value.type.methods.slice()) |*m| {
+            if (count == found.len) return found[0..count];
+            // The first is the component itself.
+            const params = m.type.info.function.params.slice();
+            found[count] = .{ .component = component.name, .name = m.name.slice(), .params = params[@min(1, params.len)..] };
+            count += 1;
+        }
+    }
+    const own = count;
+    var it = self.signals.methods.iterator();
+    while (it.next()) |entry| {
+        if (count == found.len) break;
+        found[count] = .{ .component = "", .name = entry.key_ptr.*, .params = entry.value_ptr.params };
+        count += 1;
+    }
+    std.mem.sort(signals_mod.MethodInfo, found[own..count], {}, struct {
+        fn less(_: void, a: signals_mod.MethodInfo, b: signals_mod.MethodInfo) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.less);
+    return found[0..count];
+}
+
+/// Call the method a connection names, on `receiver`: a method one of its
+/// components lists in `reflect_methods` - `Text2D.set` names the one -
+/// else one given to `addMethod`.
+pub fn callMethodOn(self: *App, receiver: ecs.Entity, name: []const u8, args: []const reflect.Value) anyerror!void {
+    const dot = std.mem.indexOfScalar(u8, name, '.');
+    const component: ?[]const u8 = if (dot) |at| name[0..at] else null;
+    const method = if (dot) |at| name[at + 1 ..] else name;
+
+    var owner: ?reflect.Value = null;
+    var held: [64]ComponentValue = undefined;
+    for (self.componentsOf(receiver, &held)) |found| {
+        if (component) |wanted| {
+            if (!std.mem.eql(u8, found.name, wanted)) continue;
+        }
+        if (found.value.type.method(method) == null) continue;
+        if (owner != null) return error.AmbiguousMethod;
+        owner = found.value;
+    }
+    if (owner) |value| return callValue(value, method, args, null);
+    if (component == null) {
+        if (self.signals.methods.get(name)) |m| return m.call(self, receiver, args);
+    }
+    return error.NoSuchMethod;
+}
+
+/// Whether a connection naming `name` would find a method on `receiver`:
+/// one of its components', or one given to `addMethod`.
+pub fn hasMethod(self: *App, receiver: ecs.Entity, name: []const u8) bool {
+    const dot = std.mem.indexOfScalar(u8, name, '.');
+    const method = if (dot) |at| name[at + 1 ..] else name;
+    var held: [64]ComponentValue = undefined;
+    for (self.componentsOf(receiver, &held)) |found| {
+        if (dot) |at| {
+            if (!std.mem.eql(u8, found.name, name[0..at])) continue;
+        }
+        if (found.value.type.method(method) != null) return true;
+    }
+    return dot == null and self.signals.methods.contains(name);
+}
+
+/// A connection's signal as the listings give it and a scene writes it: the
+/// bare name, unless another of the source's components declares the same
+/// name or the source has not got the one that declares it; and one this
+/// build did not know when it was made, as it was written.
+pub fn signalWritten(self: *App, c: signals_mod.Connection) []const u8 {
+    if (!c.known) return c.signal;
+    const dot = std.mem.lastIndexOfScalar(u8, c.signal, '.') orelse return c.signal;
+    const component = c.signal[0..dot];
+    const name = c.signal[dot + 1 ..];
+    if (self.componentOf(c.source, component) == null) return c.signal;
+    var held: [64]ComponentValue = undefined;
+    for (self.componentsOf(c.source, &held)) |found| {
+        if (std.mem.eql(u8, found.name, component)) continue;
+        const entry = self.scene_components.find(found.name) orelse continue;
+        for (entry.signals) |decl| {
+            if (std.mem.eql(u8, decl.name, name)) return c.signal;
+        }
+    }
+    return name;
+}
+
+/// Send an event: every reader of its type sees it once, this frame or the
+/// next. Safe anywhere, a query's loop included. See `events`.
+///
+/// ```zig
+/// try app.send(Damage{ .to = player, .amount = 5 });
+/// ```
+pub fn send(self: *App, event: anytype) Allocator.Error!void {
+    const channel = try self.channelOf(@TypeOf(event));
+    try channel.send(self.gpa, event);
+}
+
+/// The events of one type, this frame's and last frame's, for a reader to
+/// read. None when nothing ever sent one.
+pub fn events(self: *App, comptime T: type) *const events_mod.Events(T) {
+    const found = self.event_channels.get(typeKey(T)) orelse return &events_mod.Events(T).empty;
+    return @ptrCast(@alignCast(found.events));
+}
+
+fn channelOf(self: *App, comptime T: type) Allocator.Error!*events_mod.Events(T) {
+    const entry = try self.event_channels.getOrPut(self.gpa, typeKey(T));
+    if (entry.found_existing) return @ptrCast(@alignCast(entry.value_ptr.events));
+    const made = self.gpa.create(events_mod.Events(T)) catch |err| {
+        self.event_channels.swapRemoveAt(entry.index);
+        return err;
+    };
+    made.* = .{};
+    entry.value_ptr.* = .of(T, made);
+    return made;
+}
+
+/// One type's events, with what the frame and the end do to them.
+const EventChannel = struct {
+    events: *anyopaque,
+    update: *const fn (events: *anyopaque) void,
+    deinit: *const fn (events: *anyopaque, gpa: Allocator) void,
+
+    fn of(comptime T: type, made: *events_mod.Events(T)) EventChannel {
+        const Shim = struct {
+            fn update(p: *anyopaque) void {
+                const held: *events_mod.Events(T) = @ptrCast(@alignCast(p));
+                held.update();
+            }
+            fn deinit(p: *anyopaque, gpa: Allocator) void {
+                const held: *events_mod.Events(T) = @ptrCast(@alignCast(p));
+                held.deinit(gpa);
+                gpa.destroy(held);
+            }
+        };
+        return .{ .events = made, .update = Shim.update, .deinit = Shim.deinit };
+    }
+};
+
+/// A number for each type, the same for as long as the program runs: the
+/// address of a variable only that type's instance of this has.
+fn typeKey(comptime T: type) usize {
+    return @intFromPtr(&struct {
+        var marker: ?*const T = null;
+    }.marker);
 }
 
 // -------------------------------------------------------------------------

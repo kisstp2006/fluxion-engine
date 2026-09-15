@@ -51,6 +51,45 @@ pub const DebugViews = @import("debug_views.zig");
 /// `app.setState`, `app.addSystemIn`, `app.onEnter`.
 pub const States = @import("states.zig");
 
+/// Godot's signals, on components: `pub const signals` on one, and
+/// `app.signal`, `connect`, `emit`. The table is `app.signals`.
+pub const signals = @import("signals.zig");
+
+/// A signal of one entity: Godot 4's `Signal`. See `App.signal`.
+pub const Signal = signals.Signal;
+
+/// What a signal calls: a method by name, or a Zig function. Godot's
+/// `Callable`.
+pub const Callable = signals.Callable;
+
+/// Godot's `ConnectFlags`.
+pub const ConnectFlags = signals.Flags;
+
+/// How a connection is made: flags, unbinds, binds.
+pub const ConnectOptions = signals.Options;
+
+/// A value a connection hands its method after the signal's own.
+pub const Bind = signals.Bind;
+
+/// A connection, as `app.connectionsFrom` lists them.
+pub const Connection = signals.Connection;
+
+/// A signal an entity has, as `app.signalsOf` lists them.
+pub const SignalInfo = signals.Info;
+
+/// A method a connection can name, as `app.methodsOf` lists them.
+pub const MethodInfo = signals.MethodInfo;
+
+/// Typed events: what one system tells any others that care, by type rather
+/// than by who. `app.send` and `app.events`.
+pub const events = @import("events.zig");
+
+/// The events of one type, last frame's and this frame's.
+pub const Events = events.Events;
+
+/// A place in the events of one type, reading each once.
+pub const EventReader = events.Reader;
+
 /// Where a game's files are: `res://` paths from the project's root, and
 /// files known by the UUID in the `.uid` file beside them: `app.project`.
 pub const Project = @import("Project.zig");
@@ -232,6 +271,9 @@ test {
     _ = Commands;
     _ = DebugViews;
     _ = States;
+    _ = signals;
+    _ = events;
+    _ = @import("signals_test.zig");
     _ = Project;
     _ = dialog;
     _ = attr;
