@@ -95,8 +95,8 @@
         // queries: `fluxion-physics` pins `fluxion-jobs` where `fluxion-ecs`
         // does, so the two share one `Jobs`.
         .fluxion_physics = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-physics#f88083de8ffba5100ca0eef056d4035807a9a21e",
-            .hash = "fluxion_physics-0.1.0-dovcrpwcBwBpImy8L3eiHE8XzhLoP15DjVYgmC8E7A-V",
+            .url = "git+https://github.com/kisstp2006/fluxion-physics#3412dd958dd733605b81aac74aa9938c36426e25",
+            .hash = "fluxion_physics-0.1.0-dovcrpZDBwB4MtOKiSI6gu3jVL89u42Z7fJK4piMUf_K",
         },
 
         // The components and the engine's calls, described at run time: what
