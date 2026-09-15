@@ -515,7 +515,8 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   pad's A press what has it, and typing and the editing keys reach a text
   input that has it. Ctrl+C, Ctrl+X and Ctrl+V go through the system
   clipboard - see [the clipboard](#-the-clipboard) - so text moves between a
-  text input and every other program.
+  text input and every other program. AltGr is never Ctrl: AltGr and V types
+  `@` on a Hungarian keyboard, and Ctrl+Alt+V still pastes.
 - **The pointer's shape is the interface's** once there is a `.ui` system: an
   I-beam over a text input, the arrows over a resize handle, and
   `app.ui.setCursor` for a game that wants its own. A locked pointer points at

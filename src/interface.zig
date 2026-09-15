@@ -183,10 +183,11 @@ fn textAction(k: platform.event.KeyEvent) ?ui.text_input.Action {
     };
 }
 
-/// Control held as a command, and not AltGr: Windows reports AltGr as control
-/// and alt together, and on a Hungarian keyboard AltGr and V types `@`.
+/// Control held as a command, with alt or without. AltGr is not control: the
+/// platform reports it as `alt_graph` on every system, so AltGr and V types
+/// `@` on a Hungarian keyboard, and control and alt and V still pastes.
 pub fn command(k: platform.event.KeyEvent) bool {
-    return k.mods.control and !k.mods.alt;
+    return k.mods.control;
 }
 
 fn arrow(key: platform.Key) ?ui.Navigation {
@@ -406,13 +407,28 @@ test "shortcuts follow the letters the layout shows, and AltGr is not one" {
     fixture.input.apply(keyDown(.a, .{ .control = true }));
     fixture.input.apply(keyDown(.c, .{ .control = true }));
     fixture.input.apply(keyDown(.end, .{}));
-    fixture.input.apply(keyOn(.v, .v, .{ .control = true, .alt = true }));
+    fixture.input.apply(keyOn(.v, .v, .{ .alt_graph = true }));
     try fixture.frame(nameField);
     try testing.expectEqualStrings("a", fixture.layout.textValueOf("name").?);
 
     fixture.input.apply(keyOn(.y, .z, .{ .control = true }));
     try fixture.frame(nameField);
     try testing.expectEqualStrings("", fixture.layout.textValueOf("name").?);
+}
+
+test "control is a command with alt held too" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+
+    try fixture.frame(nameField);
+    fixture.layout.setFocus("name");
+    fixture.input.apply(character('a'));
+    fixture.input.apply(keyDown(.a, .{ .control = true }));
+    fixture.input.apply(keyDown(.c, .{ .control = true }));
+    fixture.input.apply(keyDown(.end, .{}));
+    fixture.input.apply(keyOn(.v, .v, .{ .control = true, .alt = true }));
+    try fixture.frame(nameField);
+    try testing.expectEqualStrings("aa", fixture.layout.textValueOf("name").?);
 }
 
 test "the arrows are the game's until the interface has the focus" {
