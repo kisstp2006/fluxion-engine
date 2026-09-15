@@ -615,6 +615,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         w.resized = false;
         self.input.focused = w.focused;
     }
+    self.fitInterface();
 
     self.device = try .init(gpa, .{
         .backend = switch (backend) {
@@ -929,6 +930,7 @@ pub fn step(self: *App) anyerror!bool {
             try self.adoptSize(window.width, window.height);
         }
     }
+    self.fitInterface();
 
     self.time.tick();
     self.debug_frame.advance(self.time.delta);
@@ -1043,6 +1045,11 @@ fn hasInterface(self: *const App) bool {
 /// about this frame.
 fn feedInterface(self: *App) !void {
     if (self.interfaceFace()) |face| self.ui.setMeasurer(Interface.measurer(face));
+    // Asked of the system when the wheel turned, so a changed setting is
+    // taken at once - and only then, since on Linux asking reads a file.
+    if (self.input.wheel.x != 0 or self.input.wheel.y != 0) {
+        if (self.window) |*window| self.interface.scroll_lines = window.scrollLines();
+    }
     try self.interface.feed(self.gpa, &self.ui, &self.input, &self.clipboard, self.time.unscaled_delta);
 }
 
@@ -1059,6 +1066,17 @@ fn layOutInterface(self: *App) !void {
     }
     self.interface.commands = try self.ui.end();
     if (self.window) |*window| self.interface.applyCursor(&self.ui, window);
+}
+
+/// The interface's scale for this frame: the game's `zoom` times the
+/// display's, which it follows unless told not to - and 1 with no window.
+fn fitInterface(self: *App) void {
+    const display: f32 = if (self.window) |*window|
+        (if (self.interface.follow_display) window.content_scale else 1)
+    else
+        1;
+    self.interface.display_scale = display;
+    self.interface.scale = self.interface.zoom * display;
 }
 
 fn interfaceFace(self: *App) ?*const typeface.Font {
@@ -3867,4 +3885,17 @@ test "a new scene is written empty, never over another, and says what it is with
 
     try files.tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.json", .data = "{ \"hello\": 1 }" });
     try testing.expect(try app.sceneInfo("res://notes.json", null) == null);
+}
+
+test "the interface is laid out at the game's zoom times the display's scale" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    _ = try app.step();
+    // No window, so no display to follow.
+    try testing.expectEqual(@as(f32, 1), app.interface.display_scale);
+    try testing.expectEqual(@as(f32, 1), app.interface.scale);
+
+    app.interface.zoom = 1.25;
+    _ = try app.step();
+    try testing.expectEqual(@as(f32, 1.25), app.interface.scale);
 }

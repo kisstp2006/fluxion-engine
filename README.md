@@ -529,9 +529,17 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   I-beam over a text input, the arrows over a resize handle, and
   `app.ui.setCursor` for a game that wants its own. A locked pointer points at
   nothing in it.
-- **`app.interface.scale` and `safe_area`** are fluxion-ui's surface: twice
-  the size on a 4K screen, clear of a television's edges. A picture on an
-  element names one of `app.interface.textures` by its index.
+- **It is the size the display asks for.** `app.interface.scale`, what it is
+  laid out at, is the game's own `app.interface.zoom` - an interface-size
+  setting - times the scale of the display the window is on: 1.25 or 2 on a
+  HiDPI screen, followed as the window is dragged to another monitor.
+  `follow_display = false` sizes it by the window alone. `safe_area` keeps it
+  clear of a television's edges, and a picture on an element names one of
+  `app.interface.textures` by its index.
+- **The wheel scrolls as the system says**: the lines a notch is set to in
+  Windows' mouse settings or KDE's, a page at a time where that was chosen,
+  and three lines elsewhere. `input.wheel` stays in notches, which is what a
+  zoom wants.
 - **Without a `.ui` system none of this happens.** Nothing is fed, laid out or
   drawn, and a game that never asks for an interface runs as it did.
 

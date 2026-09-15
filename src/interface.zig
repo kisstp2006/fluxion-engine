@@ -30,8 +30,15 @@ const Window = @import("window.zig");
 const Interface = @This();
 const log = std.log.scoped(.fluxion_engine);
 
-/// How far one notch of the wheel scrolls, in pixels.
-pub const pixels_per_notch = 40;
+/// How far one line of the system's wheel setting scrolls, in the
+/// interface's own lengths: at the usual three lines a notch, the forty
+/// pixels a notch has always scrolled. See `scroll_lines`.
+pub const pixels_per_line: f32 = 40.0 / 3.0;
+
+/// How much of the window a notch scrolls when the system scrolls a page at a
+/// time: all of it less an eighth, as a browser does, so a line of what was
+/// showing is still showing.
+pub const page_fraction: f32 = 0.875;
 
 /// How far a stick has to lean, past its dead zone, to step the focus.
 pub const stick_step = 0.5;
@@ -40,8 +47,29 @@ pub const stick_step = 0.5;
 /// as for a `Text2D`.
 font: Assets.FontHandle = .none,
 
-/// Multiplies every length in the interface. See `ui.Surface.scale`.
+/// Multiplies every length in the interface: what it is laid out at this
+/// frame, `zoom` times `display_scale`, worked out by `App` at the top of
+/// every frame. Read it - to size what a system draws beside the interface -
+/// and set `zoom`. See `ui.Surface.scale`.
 scale: f32 = 1,
+
+/// The game's own multiplier for the interface, on top of the display's:
+/// an "interface size" setting.
+zoom: f32 = 1,
+
+/// Pixels per logical unit of the display the window is on: 1 on an
+/// ordinary display, 1.5 or 2 on a HiDPI one, and 1 with no window. Kept by
+/// `App` from the window - at the start, and whenever the window moves to a
+/// monitor with another - while `follow_display` is on.
+display_scale: f32 = 1,
+
+/// Whether the interface grows with the display, as the system's own
+/// windows do. Off for a game that sizes its interface by the window alone.
+follow_display: bool = true,
+
+/// What the system scrolls text by for a notch of the wheel, as `App` last
+/// asked it: lines, or a page. See `pixels_per_line`.
+scroll_lines: platform.ScrollLines = .{},
 
 /// How far in from each edge of the window the interface keeps.
 safe_area: ui.Padding = .none,
@@ -106,9 +134,9 @@ pub fn feed(
     for (input.typedThisFrame()) |typed| try receive(gpa, layout, clipboard, typed);
 
     if (input.wheel.x != 0 or input.wheel.y != 0) {
-        const dx = input.wheel.x * pixels_per_notch;
-        const dy = -input.wheel.y * pixels_per_notch;
-        if (layout.scrollHovered(dx, dy)) input.wheel = .{};
+        // The wheel counts up as positive, and a scroll moves the content.
+        const across, const up = self.wheelDistance(input.wheel.x, input.wheel.y, layout.surface.height);
+        if (layout.scrollHovered(across, -up)) input.wheel = .{};
     }
 
     const pad = input.anyPad();
@@ -116,6 +144,19 @@ pub fn feed(
 
     const accept = input.isDown(.enter) or input.isDown(.kp_enter) or input.isDown(.space) or pad.down(.a);
     layout.setActivate(accept and !layout.wantsKeyboard());
+}
+
+/// How far a turn of the wheel scrolls, in pixels, sideways and up: notches
+/// times the system's characters and lines at the interface's scale, or
+/// times a page of `height`. Signed as the wheel is.
+fn wheelDistance(self: *const Interface, notches_x: f32, notches_y: f32, height: f32) [2]f32 {
+    const line = pixels_per_line * self.scale;
+    const across = notches_x * self.scroll_lines.x * line;
+    const up = if (self.scroll_lines.page)
+        notches_y * height * page_fraction
+    else
+        notches_y * self.scroll_lines.y * line;
+    return .{ across, up };
 }
 
 fn receive(gpa: Allocator, layout: *ui.Ui, clipboard: *Clipboard, typed: Input.Typed) Allocator.Error!void {
@@ -464,6 +505,29 @@ test "a wheel the interface scrolled with does not reach the game" {
     fixture.input.apply(wheelTurned(-1));
     try fixture.feed(0);
     try testing.expectEqual(@as(f32, -1), fixture.input.wheel.y);
+}
+
+test "a notch scrolls the lines the system says, at the interface's scale, or a page" {
+    const Case = struct { lines: platform.ScrollLines = .{}, scale: f32 = 1, moved: f32 };
+    for ([_]Case{
+        // The usual three lines: the forty pixels a notch always was.
+        .{ .moved = 40 },
+        .{ .lines = .{ .y = 6 }, .moved = 80 },
+        .{ .scale = 2, .moved = 80 },
+        // A page at a time: the surface's hundred pixels, less an eighth.
+        .{ .lines = .{ .y = 1, .page = true }, .moved = 87.5 },
+    }) |case| {
+        var fixture: Fixture = .init();
+        defer fixture.deinit();
+        fixture.interface.scroll_lines = case.lines;
+        fixture.interface.scale = case.scale;
+
+        try fixture.frame(longList);
+        fixture.input.apply(pointerAt(10, 10));
+        fixture.input.apply(wheelTurned(-1));
+        try fixture.feed(0);
+        try testing.expectApproxEqAbs(case.moved, fixture.layout.scrollOf("list").?.position.y, 0.001);
+    }
 }
 
 test "a locked pointer points at nothing in the interface" {

@@ -123,6 +123,12 @@ cursor_wanted: Cursor = .normal,
 /// it.
 focused: bool = true,
 
+/// Pixels per logical unit of the display the window is on: 1 on an
+/// ordinary one, 1.5 or 2 on a HiDPI one. Asked at `open`, and told again
+/// whenever the window moves to a monitor with another. What
+/// `Interface.display_scale` follows.
+content_scale: f32 = 1,
+
 has_gl_context: bool = false,
 
 /// Open a window at this address.
@@ -159,6 +165,7 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
     self.width = fb[0];
     self.height = fb[1];
     self.focused = self.handle.isFocused();
+    self.content_scale = self.handle.contentScale()[0];
 }
 
 pub fn close(self: *Window) void {
@@ -195,6 +202,12 @@ pub fn setVsync(self: *Window, on: bool) Error!void {
 /// `error.Unavailable` for a shape this system has not got.
 pub fn setCursorShape(self: *Window, shape: platform.CursorShape) Error!void {
     try self.handle.setCursorShape(shape);
+}
+
+/// How many lines the user has the system scroll text by for a notch of the
+/// wheel - or a page. Asked each time, so a changed setting is taken at once.
+pub fn scrollLines(self: *Window) platform.ScrollLines {
+    return self.ctx.scrollLines();
 }
 
 /// Open the system's file dialog, in front of this window and modal to it.
@@ -359,6 +372,7 @@ pub fn pump(self: *Window, input: *Input) bool {
         switch (ev) {
             .close => self.closing = true,
             .focus => |change| self.focused = change.value,
+            .scale => |to| self.content_scale = to.x,
             .framebuffer_resize => |size| {
                 // Never nought by nought: a minimised window keeps its last
                 // real size.
