@@ -357,6 +357,23 @@ app.input.answerDialog(.{ .id = id, .paths = &.{"C:/games/meadow"} });
 _ = try app.step(); // this frame's systems see it, the next frame's do not
 ```
 
+## 📥 Files dropped on the window
+
+```zig
+for (app.input.dropped()) |drop| {
+    for (drop.paths) |path| try bringIn(path, drop.x, drop.y); // where they were let go
+}
+```
+
+- **A drop is input**, as a dialog's answer is: everything let go in one
+  armful is one `Dropped`, there for every system of the frame it arrives in
+  and gone in the next, its paths lent until the frame ends.
+- **`x` and `y` are where it was let go**, in the pixels `input.pointer` is
+  in - into the folder under it, onto the thing under it. A fluxion-platform
+  from before drops said where gives the pointer's last place instead.
+- **Windows and the web drop files**; X11 and Wayland do not yet.
+- **A test drops them itself**: `app.input.dropFiles(.{ .paths = &.{"C:/Art/hero.png"}, .x = 40, .y = 60 })`.
+
 ## ⌛ Frame pacing
 
 ```zig
@@ -1118,6 +1135,8 @@ Here, and checked by the tests:
 - The system's file and folder dialogs, `openFileDialog` and
   `openFolderDialog`, answered in `app.input` a frame or more later, and
   answered by a test when there is no window.
+- Files dropped on the window, with where they were let go, in `app.input`
+  for a frame.
 - Frame pacing: vsync switched while running, a frame cap that holds its
   average, and a minimised window that sleeps instead of drawing.
 - Every system timed, under the name it was added with: its time over the

@@ -26,6 +26,9 @@
 //!
 //! The platform polls the controllers once a frame, and `readPads` turns the
 //! difference into the same edges a key has.
+//!
+//! Files let go over the window and the answers to file dialogs are input
+//! too, each there for one frame: see `dropped` and `dialogAnswers`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -110,8 +113,31 @@ answers: [answer_capacity]dialog.Answer = undefined,
 answers_len: usize = 0,
 answers_seen: usize = 0,
 
+/// Files let go over the window this frame, kept as the dialogs' answers
+/// are: see `dropped`.
+drops: [drop_capacity]Dropped = undefined,
+drops_len: usize = 0,
+drops_seen: usize = 0,
+
 /// How much typing one frame can hold: far more than a fast typist manages.
 pub const typed_capacity = 32;
+
+/// How many drops one frame can hold. A person lets go of one armful at a
+/// time; this is room for a test's several.
+pub const drop_capacity = 4;
+
+/// Files let go over the window: dragged there from the system's file
+/// manager.
+pub const Dropped = struct {
+    /// The operating system's paths, lent until the frame ends. A page is
+    /// never shown a path, so in a browser they are the files' names, and
+    /// fluxion-platform's `web.droppedFile` has the bytes.
+    paths: []const []const u8,
+    /// Where they were let go, in the pixels `pointer` is in: where to put
+    /// them. Where the platform does not say, where the pointer last was.
+    x: f32,
+    y: f32,
+};
 
 /// How many dialog answers one frame can hold. One dialog is open at a time,
 /// so a frame has one at most, and a test that answers for several is still
@@ -473,6 +499,26 @@ pub fn dialogAnswer(self: *const Input, id: dialog.Id) ?[]const []const u8 {
     return null;
 }
 
+/// The files let go over the window this frame, in the order they were:
+/// every system of the frame sees them, and the next frame does not.
+///
+/// ```zig
+/// for (app.input.dropped()) |drop| for (drop.paths) |path| try bringIn(path, drop.x, drop.y);
+/// ```
+pub fn dropped(self: *const Input) []const Dropped {
+    return self.drops[0..self.drops_len];
+}
+
+/// Files let go over the window, for this frame's systems: what `apply`
+/// does with the platform's drops, and what a test calls. Given between
+/// frames, it is the next frame's. Past `drop_capacity` in one frame, it is
+/// dropped.
+pub fn dropFiles(self: *Input, drop: Dropped) void {
+    if (self.drops_len == self.drops.len) return;
+    self.drops[self.drops_len] = drop;
+    self.drops_len += 1;
+}
+
 /// One controller, by its platform slot. A controller keeps its slot while it
 /// stays plugged in, so slots work as player numbers. An empty slot says no
 /// and zero to everything.
@@ -514,12 +560,19 @@ pub fn beginFrame(self: *Input) void {
     std.mem.copyForwards(dialog.Answer, self.answers[0..kept], self.answers[self.answers_seen..self.answers_len]);
     self.answers_len = kept;
     self.answers_seen = 0;
+
+    // The drops, the same way.
+    const still = self.drops_len - self.drops_seen;
+    std.mem.copyForwards(Dropped, self.drops[0..still], self.drops[self.drops_seen..self.drops_len]);
+    self.drops_len = still;
+    self.drops_seen = 0;
 }
 
 /// Mark what this frame's systems have seen, for `beginFrame` to let go.
 /// Called by `App` at the end of every frame, one whose system failed too.
 pub fn endFrame(self: *Input) void {
     self.answers_seen = self.answers_len;
+    self.drops_seen = self.drops_len;
 }
 
 /// A dialog's answer, for this frame's systems: what `apply` does with the
@@ -663,6 +716,16 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             // Keys held as the focus goes would stay held for ever: their
             // release goes to whichever window took the focus.
             if (!s.value) self.releaseEverything();
+        },
+        .drop => |d| {
+            // Where it was let go, once the platform says; the pointer's last
+            // place until then, which is where a drag over the window was.
+            const point = comptime @hasField(platform.event.DropEvent, "x");
+            self.dropFiles(.{
+                .paths = d.paths,
+                .x = if (point) @floatCast(d.x) else self.pointer.x,
+                .y = if (point) @floatCast(d.y) else self.pointer.y,
+            });
         },
         else => {},
     }
@@ -1074,4 +1137,56 @@ test "the platform's answer to a dialog is folded in with the rest of the events
         input.apply(.{ .file_dialog = .{ .window = .none, .id = @enumFromInt(7), .paths = &.{"/art/hero.png"} } });
         try testing.expectEqualStrings("/art/hero.png", input.dialogAnswer(@enumFromInt(7)).?[0]);
     } else return error.SkipZigTest;
+}
+
+test "a drop is there for the frame it came in, and one given between frames for the next" {
+    var input: Input = .{};
+
+    // Arrived with the frame's events: this frame's.
+    input.beginFrame();
+    input.dropFiles(.{ .paths = &.{ "C:/Art/hero.png", "C:/Art/tree.png" }, .x = 40, .y = 60 });
+    try testing.expectEqual(@as(usize, 1), input.dropped().len);
+    try testing.expectEqualStrings("C:/Art/tree.png", input.dropped()[0].paths[1]);
+    try testing.expectEqual(@as(f32, 60), input.dropped()[0].y);
+    input.endFrame();
+
+    // Given after the frame ended: kept through the next frame's start, and
+    // only the next.
+    input.dropFiles(.{ .paths = &.{"C:/Levels/meadow.json"}, .x = 0, .y = 0 });
+    input.beginFrame();
+    try testing.expectEqual(@as(usize, 1), input.dropped().len);
+    try testing.expectEqualStrings("C:/Levels/meadow.json", input.dropped()[0].paths[0]);
+    input.endFrame();
+    input.beginFrame();
+    try testing.expectEqual(@as(usize, 0), input.dropped().len);
+}
+
+test "a frame's drops past what it holds are dropped, never written past the end" {
+    var input: Input = .{};
+    input.beginFrame();
+    for (0..drop_capacity + 2) |n| input.dropFiles(.{ .paths = &.{}, .x = @floatFromInt(n), .y = 0 });
+    try testing.expectEqual(@as(usize, drop_capacity), input.dropped().len);
+    try testing.expectEqual(@as(f32, drop_capacity - 1), input.dropped()[drop_capacity - 1].x);
+}
+
+test "the platform's drop is folded in with the rest of the events, at the place it was let go" {
+    var input: Input = .{};
+    input.beginFrame();
+    input.apply(.{ .cursor = .{ .window = .none, .x = 7, .y = 9, .dx = 0, .dy = 0 } });
+
+    var drop: platform.event.DropEvent = .{ .window = .none, .paths = &.{"/art/hero.png"} };
+    const point = comptime @hasField(platform.event.DropEvent, "x");
+    if (point) {
+        drop.x = 120;
+        drop.y = 45.5;
+    }
+    input.apply(.{ .drop = drop });
+
+    const got = input.dropped();
+    try testing.expectEqual(@as(usize, 1), got.len);
+    try testing.expectEqualStrings("/art/hero.png", got[0].paths[0]);
+    // A platform that says where is taken at its word; one that does not
+    // gets the pointer's last place.
+    try testing.expectEqual(@as(f32, if (point) 120 else 7), got[0].x);
+    try testing.expectEqual(@as(f32, if (point) 45.5 else 9), got[0].y);
 }

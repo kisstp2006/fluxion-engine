@@ -903,9 +903,10 @@ pub fn step(self: *App) anyerror!bool {
     // The old edges go first, then this frame's events. The resize flag is an
     // edge too.
     self.input.beginFrame();
-    // Every system has had this frame's dialog answers when it ends - or had
-    // its chance, when one of them failed - and they go at the next
-    // `beginFrame`, before the pump that frees the platform's paths in them.
+    // Every system has had this frame's dialog answers and drops when it
+    // ends - or had its chance, when one of them failed - and they go at the
+    // next `beginFrame`, before the pump that frees the platform's paths in
+    // them.
     // A `defer`, so a loop that goes on after an error never reads a path
     // that is gone.
     defer self.input.endFrame();
@@ -3585,4 +3586,30 @@ test "a frame that fails still lets its dialog answers go" {
 
     _ = try app.step();
     try testing.expect(app.input.dialogAnswer(id) == null);
+}
+
+test "files dropped on the window reach that frame's systems, and only that frame's" {
+    const Seen = struct {
+        var drops: usize = 0;
+        var last: []const u8 = "";
+
+        fn look(app: *App) anyerror!void {
+            for (app.input.dropped()) |drop| {
+                drops += 1;
+                last = drop.paths[drop.paths.len - 1];
+            }
+        }
+    };
+    Seen.drops = 0;
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addSystem(.update, "look", Seen.look);
+    try app.startup();
+
+    app.input.dropFiles(.{ .paths = &.{ "C:/Art/hero.png", "C:/Art/tree.png" }, .x = 10, .y = 20 });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Seen.drops);
+    try testing.expectEqualStrings("C:/Art/tree.png", Seen.last);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Seen.drops);
 }
