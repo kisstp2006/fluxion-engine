@@ -27,6 +27,11 @@
 //! one nobody has read yet sends the engine through the whole project once,
 //! passing over hidden directories - `.git`, `.zig-cache` - and `zig-out` and
 //! `zig-pkg`, which are built rather than written.
+//!
+//! **A file moved here takes its UUID along**: `moveFile` moves the `.uid`
+//! file beside it and tells the project where the UUID is now, and
+//! `copyFile` gives a copy a UUID of its own, so two files never share one.
+//! Neither ever writes over a file.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -432,6 +437,202 @@ fn learn(self: *Project, io: std.Io, entry: std.Io.Dir.Walker.Entry) Allocator.E
 }
 
 // -------------------------------------------------------------------------
+// Moving and copying
+// -------------------------------------------------------------------------
+
+/// Move or rename a file or a folder, named as any path is, with its `.uid`
+/// file: its UUID goes where it goes, so every scene that names it finds it
+/// there. Never over something already at `to` - that is
+/// `error.PathAlreadyExists` - and never into itself. The folder it goes into
+/// has to be there. `App.moveFile` moves what was loaded from it as well.
+pub fn moveFile(self: *Project, from: []const u8, to: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const gpa = self.gpa;
+    const old = try self.canonical(gpa, from);
+    defer gpa.free(old);
+    const new = try self.canonical(gpa, to);
+    defer gpa.free(new);
+    const old_file = try self.osPath(gpa, old);
+    defer gpa.free(old_file);
+    const new_file = try self.osPath(gpa, new);
+    defer gpa.free(new_file);
+    if (std.mem.eql(u8, new, old)) return;
+    if (under(new, old) != null) return error.InsideItself;
+
+    // Another spelling of the one file - `hero.png` to `Hero.png` where
+    // letter case is not told apart - is there already, and is a rename all
+    // the same.
+    const cwd = std.Io.Dir.cwd();
+    const respelt = try sameFile(io, old_file, new_file);
+    if (respelt) try cwd.rename(old_file, cwd, new_file, io) else try renameNew(io, old_file, new_file);
+
+    // A file's UUID goes with it; a folder's files' `.uid` files are inside
+    // it already. The file has moved either way, so a `.uid` file left
+    // behind is said, not undone.
+    const old_uid = try std.mem.concat(gpa, u8, &.{ old_file, uid_extension });
+    defer gpa.free(old_uid);
+    const new_uid = try std.mem.concat(gpa, u8, &.{ new_file, uid_extension });
+    defer gpa.free(new_uid);
+    if (cwd.access(io, old_uid, .{})) |_| {
+        const moved = if (respelt) cwd.rename(old_uid, cwd, new_uid, io) else renameNew(io, old_uid, new_uid);
+        moved catch |err| log.warn("{s} moved to {s}, and its {s} file did not: {t}", .{ old, new, uid_extension, err });
+    } else |_| {}
+    try self.repoint(old, new);
+}
+
+/// Whether `other` is `path` spelt another way - where letter case is not
+/// told apart, on Windows or a Mac or a Windows drive under Linux - rather
+/// than another file: the same file on the disc, when there is one there.
+fn sameFile(io: std.Io, path: []const u8, other: []const u8) !bool {
+    const cwd = std.Io.Dir.cwd();
+    const there = cwd.statFile(io, other, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => |e| return e,
+    };
+    const here = try cwd.statFile(io, path, .{});
+    return here.inode == there.inode;
+}
+
+/// Copy a file, or a folder and everything in it, never over something
+/// already at `to`. A copy is a file of its own: where the original has a
+/// UUID, the copy is given a new one, so the two are never taken for each
+/// other.
+pub fn copyFile(self: *Project, from: []const u8, to: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const gpa = self.gpa;
+    const old = try self.canonical(gpa, from);
+    defer gpa.free(old);
+    const new = try self.canonical(gpa, to);
+    defer gpa.free(new);
+    const old_file = try self.osPath(gpa, old);
+    defer gpa.free(old_file);
+    const new_file = try self.osPath(gpa, new);
+    defer gpa.free(new_file);
+    try refuseTaken(io, new_file);
+    // A folder copied into itself would copy its copy, for ever.
+    if (under(new, old) != null) return error.InsideItself;
+
+    const cwd = std.Io.Dir.cwd();
+    const kind = (try cwd.statFile(io, old_file, .{})).kind;
+    if (kind != .directory) {
+        try copyNew(io, cwd, old_file, cwd, new_file);
+        const kept = try std.mem.concat(gpa, u8, &.{ old_file, uid_extension });
+        defer gpa.free(kept);
+        if (cwd.access(io, kept, .{})) |_| {
+            const fresh = try std.mem.concat(gpa, u8, &.{ new_file, uid_extension });
+            defer gpa.free(fresh);
+            try self.giveNewUid(io, cwd, fresh, new);
+        } else |_| {}
+        return;
+    }
+
+    var source = try cwd.openDir(io, old_file, .{ .iterate = true });
+    defer source.close(io);
+    try cwd.createDir(io, new_file, .default_dir);
+    var target = try cwd.openDir(io, new_file, .{});
+    defer target.close(io);
+    var walker = try source.walk(gpa);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| switch (entry.kind) {
+        .directory => try target.createDirPath(io, entry.path),
+        .file => if (std.mem.endsWith(u8, entry.basename, uid_extension)) {
+            const inside = entry.path[0 .. entry.path.len - uid_extension.len];
+            const named = try std.mem.concat(gpa, u8, &.{ new, "/", inside });
+            defer gpa.free(named);
+            if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, named, std.fs.path.sep, '/');
+            try self.giveNewUid(io, target, entry.path, named);
+        } else try copyNew(io, entry.dir, entry.basename, target, entry.path),
+        // A link is left out rather than followed out of the folder.
+        else => {},
+    };
+}
+
+/// Forget the UUIDs of the file at `path`, or of every file in a folder:
+/// after it left the disc, so no UUID names a place with nothing there. A
+/// scan finds it again if it comes back.
+pub fn forgetFile(self: *Project, path: []const u8) Allocator.Error!void {
+    const named = self.canonical(self.gpa, path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // A path that names nothing here has nothing to forget.
+        error.OutsideProject, error.NoSuchUid => return,
+    };
+    defer self.gpa.free(named);
+    try self.repoint(named, null);
+}
+
+/// What comes after `folder` in `path`, when `path` is `folder` or is inside
+/// it: `""`, or the rest from its separator on. Null otherwise. Asks nothing
+/// of the disc.
+pub fn under(path: []const u8, folder: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, path, folder)) return null;
+    const rest = path[folder.len..];
+    if (rest.len == 0) return rest;
+    if (rest[0] == '/' or std.fs.path.isSep(rest[0])) return rest;
+    return null;
+}
+
+/// Point the UUIDs of the file or folder at `old` at `new`, both as
+/// `canonical` names them - or, with `new` null or outside the project,
+/// forget them.
+fn repoint(self: *Project, old: []const u8, new: ?[]const u8) Allocator.Error!void {
+    var found: std.ArrayList([]const u8) = .empty;
+    defer found.deinit(self.gpa);
+    var it = self.by_path.keyIterator();
+    while (it.next()) |path| {
+        if (under(path.*, old) != null) try found.append(self.gpa, path.*);
+    }
+    for (found.items) |held| {
+        defer self.gpa.free(held);
+        const uid = self.by_path.fetchRemove(held).?.value;
+        _ = self.by_uid.remove(uid);
+        const to = new orelse continue;
+        const moved = try std.mem.concat(self.gpa, u8, &.{ to, held[old.len..] });
+        defer self.gpa.free(moved);
+        if (std.mem.startsWith(u8, moved, scheme)) try self.remember(uid, moved);
+    }
+}
+
+/// A `.uid` file at `sub_path` in `dir` with a UUID never given before, for
+/// the file `project_path` names.
+fn giveNewUid(self: *Project, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, project_path: []const u8) !void {
+    const uid = self.newUid();
+    var line: [uid_scheme.len + Uuid.string_len + 1]u8 = undefined;
+    const text = std.fmt.bufPrint(&line, uid_scheme ++ "{f}\n", .{uid}) catch unreachable;
+    try dir.writeFile(io, .{ .sub_path = sub_path, .data = text, .flags = .{ .exclusive = true } });
+    if (std.mem.startsWith(u8, project_path, scheme)) try self.remember(uid, project_path);
+}
+
+/// `error.PathAlreadyExists` when something is at `path`.
+fn refuseTaken(io: std.Io, path: []const u8) !void {
+    if (std.Io.Dir.cwd().access(io, path, .{})) |_| return error.PathAlreadyExists else |err| switch (err) {
+        error.FileNotFound => {},
+        else => |e| return e,
+    }
+}
+
+/// Whether a rename can be asked never to replace what is there, on every
+/// drive: Windows promises it. Linux has it on most file systems and not on
+/// some - a Windows drive under WSL, FUSE, older NFS - and there the standard
+/// library takes the refusal for its own mistake, a panic in a debug build.
+/// So elsewhere the name is looked at first, and taken in the moment after.
+const atomic_new_names = builtin.os.tag == .windows;
+
+/// A rename that never replaces what is at `to`.
+fn renameNew(io: std.Io, from: []const u8, to: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    if (atomic_new_names) return cwd.renamePreserve(from, cwd, to, io);
+    try refuseTaken(io, to);
+    try cwd.rename(from, cwd, to, io);
+}
+
+/// A copy that never replaces what is at `to`, the same way.
+fn copyNew(io: std.Io, from_dir: std.Io.Dir, from: []const u8, to_dir: std.Io.Dir, to: []const u8) !void {
+    if (atomic_new_names) return std.Io.Dir.copyFile(from_dir, from, to_dir, to, io, .{ .replace = false });
+    if (to_dir.access(io, to, .{})) |_| return error.PathAlreadyExists else |_| {}
+    try std.Io.Dir.copyFile(from_dir, from, to_dir, to, io, .{});
+}
+
+// -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
 
@@ -603,4 +804,152 @@ test "a UUID no file holds is no path, and hidden and built directories are not 
     try testing.expect(try project.pathOf(orphan) == null);
     try testing.expectError(error.NoSuchUid, project.canonical(testing.allocator, "uid://" ++ orphan.toString()));
     try testing.expectError(error.NoSuchUid, project.osPath(testing.allocator, "uid://not-a-uuid"));
+}
+
+/// Whether the directory `folder` has an entry spelt exactly `name`: what
+/// `access` cannot say where letter case is not told apart.
+fn listed(dir: std.Io.Dir, folder: []const u8, name: []const u8) !bool {
+    var inside = try dir.openDir(testing.io, folder, .{ .iterate = true });
+    defer inside.close(testing.io);
+    var it = inside.iterate();
+    while (try it.next(testing.io)) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
+}
+
+test "a file moved takes its UUID along, and never goes over another or into itself" {
+    var scratch: Scratch = .init();
+    defer scratch.tmp.cleanup();
+    try scratch.put("art/hero.png");
+    try scratch.put("art/tree.png");
+    try scratch.tmp.dir.createDirPath(testing.io, "art/people");
+    const dir = scratch.tmp.dir;
+
+    var project: Project = try .init(testing.allocator, testing.io, try scratch.at());
+    defer project.deinit();
+    const uid = try project.ensureUid("res://art/hero.png");
+
+    try project.moveFile("res://art/hero.png", "res://art/people/ada.png");
+    try dir.access(testing.io, "art/people/ada.png", .{});
+    try dir.access(testing.io, "art/people/ada.png.uid", .{});
+    try testing.expectError(error.FileNotFound, dir.access(testing.io, "art/hero.png.uid", .{}));
+    // Known where it went without another look through the project.
+    try testing.expect(project.knownUid("res://art/people/ada.png").?.eql(uid));
+    try testing.expect(project.knownUid("res://art/hero.png") == null);
+
+    // Over a file already there, and into itself: refused, and nothing moved.
+    try testing.expectError(error.PathAlreadyExists, project.moveFile("res://art/tree.png", "res://art/people/ada.png"));
+    try testing.expectError(error.InsideItself, project.moveFile("res://art", "res://art/people/art"));
+    try dir.access(testing.io, "art/tree.png", .{});
+
+    // Only its letters' case changed: a rename of the one file, wherever
+    // case is not told apart too.
+    try project.moveFile("res://art/people/ada.png", "res://art/people/Ada.png");
+    try testing.expect(try listed(dir, "art/people", "Ada.png"));
+    try testing.expect(try listed(dir, "art/people", "Ada.png.uid"));
+    try testing.expect(!try listed(dir, "art/people", "ada.png"));
+    try testing.expectEqualStrings("res://art/people/Ada.png", (try project.pathOf(uid)).?);
+
+    // To where it is already: nothing to do.
+    try project.moveFile("res://art/tree.png", "res://art/./tree.png");
+    try dir.access(testing.io, "art/tree.png", .{});
+}
+
+test "a folder moved takes the UUID of every file in it along, and none beside it" {
+    var scratch: Scratch = .init();
+    defer scratch.tmp.cleanup();
+    try scratch.put("art/people/ada.png");
+    try scratch.put("art/people/deep/bo.png");
+    try scratch.put("art/peoples/cy.png");
+
+    var project: Project = try .init(testing.allocator, testing.io, try scratch.at());
+    defer project.deinit();
+    const ada = try project.ensureUid("res://art/people/ada.png");
+    const bo = try project.ensureUid("res://art/people/deep/bo.png");
+    const cy = try project.ensureUid("res://art/peoples/cy.png");
+
+    // Onto a folder already there: refused, as a file is.
+    try testing.expectError(error.PathAlreadyExists, project.moveFile("res://art/people", "res://art/peoples"));
+
+    try project.moveFile("res://art/people", "res://crowd");
+    try testing.expectEqualStrings("res://crowd/ada.png", project.by_uid.get(ada).?);
+    try testing.expectEqualStrings("res://crowd/deep/bo.png", project.by_uid.get(bo).?);
+    try testing.expectEqualStrings("res://art/peoples/cy.png", project.by_uid.get(cy).?);
+    try scratch.tmp.dir.access(testing.io, "crowd/deep/bo.png.uid", .{});
+
+    // Another run, which reads the `.uid` files where they went.
+    var fresh: Project = try .init(testing.allocator, testing.io, scratch.path);
+    defer fresh.deinit();
+    try testing.expectEqualStrings("res://crowd/deep/bo.png", (try fresh.pathOf(bo)).?);
+}
+
+test "a copy is a file of its own, with a UUID of its own where the original has one" {
+    var scratch: Scratch = .init();
+    defer scratch.tmp.cleanup();
+    try scratch.put("art/hero.png");
+    try scratch.put("art/tree.png");
+    try scratch.put("art/people/ada.png");
+    try scratch.put("art/people/deep/bo.png");
+    const dir = scratch.tmp.dir;
+
+    var project: Project = try .init(testing.allocator, testing.io, try scratch.at());
+    defer project.deinit();
+    const hero = try project.ensureUid("res://art/hero.png");
+    const ada = try project.ensureUid("res://art/people/ada.png");
+
+    try project.copyFile("res://art/hero.png", "res://art/hero copy.png");
+    var bytes: [16]u8 = undefined;
+    try testing.expectEqualStrings("bytes", try dir.readFile(testing.io, "art/hero copy.png", &bytes));
+    const copied = project.knownUid("res://art/hero copy.png").?;
+    try testing.expect(!copied.eql(hero));
+    try testing.expectEqualStrings("res://art/hero.png", (try project.pathOf(hero)).?);
+
+    // One with no UUID is copied with none.
+    try project.copyFile("res://art/tree.png", "res://art/tree copy.png");
+    try testing.expectError(error.FileNotFound, dir.access(testing.io, "art/tree copy.png.uid", .{}));
+
+    // A folder, and everything in it.
+    try project.copyFile("res://art/people", "res://art/crowd");
+    try dir.access(testing.io, "art/crowd/deep/bo.png", .{});
+    try testing.expectError(error.FileNotFound, dir.access(testing.io, "art/crowd/deep/bo.png.uid", .{}));
+    const crowd = project.knownUid("res://art/crowd/ada.png").?;
+    try testing.expect(!crowd.eql(ada));
+    var fresh: Project = try .init(testing.allocator, testing.io, scratch.path);
+    defer fresh.deinit();
+    try testing.expect(crowd.eql((try fresh.uidOf("res://art/crowd/ada.png")).?));
+
+    try testing.expectError(error.PathAlreadyExists, project.copyFile("res://art/tree.png", "res://art/hero.png"));
+    try testing.expectError(error.PathAlreadyExists, project.copyFile("res://art/tree.png", "res://art/tree.png"));
+    try testing.expectError(error.InsideItself, project.copyFile("res://art", "res://art/crowd/art"));
+    try testing.expectEqualStrings("bytes", try dir.readFile(testing.io, "art/hero.png", &bytes));
+}
+
+test "a file forgotten leaves its UUID naming nothing, and a folder every UUID in it" {
+    var scratch: Scratch = .init();
+    defer scratch.tmp.cleanup();
+    try scratch.put("art/hero.png");
+    try scratch.put("art/people/ada.png");
+    try scratch.put("music/song.ogg");
+
+    var project: Project = try .init(testing.allocator, testing.io, try scratch.at());
+    defer project.deinit();
+    const hero = try project.ensureUid("res://art/hero.png");
+    const ada = try project.ensureUid("res://art/people/ada.png");
+    const song = try project.ensureUid("res://music/song.ogg");
+
+    try project.forgetFile("res://art");
+    try testing.expect(project.by_uid.get(hero) == null);
+    try testing.expect(project.by_uid.get(ada) == null);
+    try testing.expect(project.knownUid("res://art/hero.png") == null);
+    try testing.expect(project.by_uid.get(song) != null);
+    // What is not the project's has nothing to forget.
+    try project.forgetFile("res://../elsewhere");
+}
+
+test "a path is under a folder only past a separator" {
+    try testing.expectEqualStrings("", under("res://art", "res://art").?);
+    try testing.expectEqualStrings("/hero.png", under("res://art/hero.png", "res://art").?);
+    try testing.expect(under("res://artwork/hero.png", "res://art") == null);
+    try testing.expect(under("res://ar", "res://art") == null);
 }

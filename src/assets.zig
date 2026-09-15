@@ -530,6 +530,32 @@ pub fn reloadFile(self: *Assets, path: []const u8) !bool {
     return any;
 }
 
+/// That the file or folder at `old` is at `new` now, both as
+/// `Project.canonical` names them: what was read from it is kept by where it
+/// is, so it is found there, and a scene saved next names the new place.
+pub fn renamed(self: *Assets, old: []const u8, new: []const u8) Allocator.Error!void {
+    var textures = self.textures.iterator();
+    while (textures.next()) |entry| try self.moveSource(&entry.value.source, old, new);
+    var faces = self.fonts.iterator();
+    while (faces.next()) |entry| try self.moveSource(&entry.value.*.source, old, new);
+}
+
+fn moveSource(self: *Assets, source: *[]const u8, old: []const u8, new: []const u8) Allocator.Error!void {
+    if (source.*.len == 0) return;
+    const rest = Project.under(source.*, old) orelse return;
+    const moved = try std.mem.concat(self.gpa, u8, &.{ new, rest });
+    // In the separators its kind of path is kept in: `/` in a project's, the
+    // system's own in the system's.
+    if (std.fs.path.sep != '/') {
+        if (Project.isProjectPath(moved))
+            std.mem.replaceScalar(u8, moved, std.fs.path.sep, '/')
+        else
+            std.mem.replaceScalar(u8, moved, '/', std.fs.path.sep);
+    }
+    self.gpa.free(source.*);
+    source.* = moved;
+}
+
 /// Give a texture back to the driver. Every handle to it stops resolving.
 pub fn unload(self: *Assets, handle: TextureHandle) void {
     if (self.textures.remove(handle.toId())) |texture| {

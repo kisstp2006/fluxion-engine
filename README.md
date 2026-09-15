@@ -698,9 +698,26 @@ game --root ../my-game          # or App.Options.root; the working directory oth
   folder, or the `project.fluxion` in it - or else the working directory.
 
 ```zig
+try app.moveFile("res://art/hero.png", "res://art/people/ada.png"); // with its .uid, and what was read from it
+try app.copyFile("res://art/people", "res://art/crowd");             // folders too; a copy gets a UUID of its own
+try app.moveToTrash("res://art/old.png");                            // where the person can take it back from
 _ = try app.assets.reloadFile("res://art/hero.png");                 // changed on the disc: read again in place
 ```
 
+- **A file moved takes its UUID along.** `app.moveFile` moves or renames a
+  file or a folder with the `.uid` files that go with it, tells the project
+  where each UUID is now, and moves what was read from it too: a texture's
+  `textureSource` is its new place, so the scene saved next names it, and a
+  scene saved before finds it by its UUID. Moving and `app.copyFile` never
+  write over a file (`error.PathAlreadyExists`) or go into themselves
+  (`error.InsideItself`), and a copy of a file with a UUID is given a new
+  one, so two files never share one.
+- **Throwing away can be taken back.** `app.moveToTrash` moves a file or a
+  folder to the Recycle Bin or the freedesktop.org trash, its `.uid` file
+  after it, and forgets its UUIDs; what was loaded from it stays loaded.
+  `fx.App.trash_available` says whether this system has a trash, and
+  `app.trash` names a folder that stands in for it - what a test uses, which
+  must not fill the person's own.
 - **A file changed on the disc is read again in place.**
   `app.assets.reloadFile` reads every texture and font read from it again,
   under the same handles - a sprite shows the new pixels, at the new size,
@@ -1194,6 +1211,10 @@ Here, and checked by the tests:
   away from, `uid://` for a file by the UUID beside it, files moved with
   their `.uid` files found where they went, and entities' UUIDs kept beside
   the world as names are.
+- Files moved, copied and thrown away as an editor does it: UUIDs moved
+  along and copies given their own, what was loaded following its file, the
+  system's trash, and textures and fonts read again in place when their
+  files change.
 - `project.fluxion`: read with no App for a project manager, made and
   rewritten in place, read by every game as it starts, and its renderer
   choosing the backend - Direct3D 11 first on Windows - with `--backend`

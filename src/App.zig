@@ -370,6 +370,11 @@ clipboard: Clipboard = .{},
 /// The id the next headless dialog gets. See `openFileDialog`.
 next_dialog: u32 = 1,
 
+/// Where `moveToTrash` puts things instead of the system's trash, when set:
+/// a folder, in the freedesktop.org layout a file manager restores from. For
+/// a test, which must not fill a person's own trash. Borrowed.
+trash: ?[]const u8 = null,
+
 time: Time,
 
 /// Where each interpolating transform was before the last fixed step: the
@@ -479,6 +484,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .interface = .{},
         .clipboard = .{},
         .next_dialog = 1,
+        .trash = null,
         // A fixed frame time wins over the clock, and the clock over nothing.
         .time = .init(if (options.frame_time) |seconds|
             .{ .fixed = seconds }
@@ -1440,6 +1446,91 @@ fn forgetDeadNames(self: *App) void {
         const entity = self.names.keys()[at];
         if (!self.world.isAlive(entity)) self.forgetName(entity);
     }
+}
+
+// -------------------------------------------------------------------------
+// Files
+// -------------------------------------------------------------------------
+//
+// What an editor does to a project's files, done so that nothing the engine
+// holds is left pointing at the old place.
+
+/// Whether `moveToTrash` has a trash to move things to on this system: the
+/// Recycle Bin on Windows, the freedesktop.org trash on a Linux desktop -
+/// with a fluxion-platform that has trash at all. The Linux one takes only
+/// what is on the home folder's drive: anything else is `error.OtherDrive`.
+/// A folder in `App.trash` stands in for either, on any system.
+pub const trash_available = if (@hasDecl(platform, "trash")) platform.trash.available else false;
+
+/// Move or rename a file or a folder, with its `.uid` file, and everything
+/// read from it with it: a texture loaded from it stays loaded, kept by
+/// where it is now, so the scene saved next names the new place - and every
+/// scene that names it by its UUID finds it there. Never over something
+/// already at `to`: that is `error.PathAlreadyExists`. See
+/// `Project.moveFile`.
+pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
+    const old = try self.project.canonical(self.gpa, from);
+    defer self.gpa.free(old);
+    const new = try self.project.canonical(self.gpa, to);
+    defer self.gpa.free(new);
+    try self.project.moveFile(old, new);
+    try self.assets.renamed(old, new);
+}
+
+/// Copy a file, or a folder and everything in it, never over something
+/// already at `to`. A copy of a file with a UUID is given a new one. See
+/// `Project.copyFile`.
+pub fn copyFile(self: *App, from: []const u8, to: []const u8) !void {
+    return self.project.copyFile(from, to);
+}
+
+/// Move a file or a folder to the system's trash, where a person can take it
+/// back from - with its `.uid` file, so what comes back has its UUID. What
+/// the project knew of its UUIDs is forgotten; what was loaded from it stays
+/// loaded. `error.Unsupported` where there is no trash: see
+/// `trash_available`.
+pub fn moveToTrash(self: *App, path: []const u8) !void {
+    if (comptime @hasDecl(platform, "trash")) {
+        const io = self.io orelse return error.NoIo;
+        const named = try self.project.canonical(self.gpa, path);
+        defer self.gpa.free(named);
+        const file = try self.project.osPath(self.gpa, named);
+        defer self.gpa.free(file);
+        const kept = try std.mem.concat(self.gpa, u8, &.{ file, Project.uid_extension });
+        defer self.gpa.free(kept);
+
+        try self.throwAway(io, file);
+        // Its UUID after it, so a restore brings back both. The file has gone
+        // either way, so a `.uid` file left behind is said, not undone.
+        if (std.Io.Dir.cwd().access(io, kept, .{})) |_| {
+            self.throwAway(io, kept) catch |err| log.warn("{s} is in the trash and its {s} file is not: {t}", .{ named, Project.uid_extension, err });
+        } else |_| {}
+        try self.project.forgetFile(named);
+        return;
+    }
+    return error.Unsupported;
+}
+
+/// One file or folder, absolute, to `trash` when it is set and to the
+/// system's otherwise.
+fn throwAway(self: *App, io: std.Io, file: []const u8) !void {
+    const bin = platform.trash;
+    const folder = self.trash orelse return bin.move(self.gpa, io, file);
+    // The time in UTC: a folder of one's own is for tests and tools, which
+    // want it the same on every machine more than in the local hour.
+    const seconds: u64 = @intCast(@max(0, std.Io.Timestamp.now(io, .real).toSeconds()));
+    const at: std.time.epoch.EpochSeconds = .{ .secs = seconds };
+    const date = at.getEpochDay().calculateYearDay();
+    const day = date.calculateMonthDay();
+    const time = at.getDaySeconds();
+    return bin.freedesktop.move(self.gpa, io, file, folder, .{
+        .year = date.year,
+        .month = day.month.numeric(),
+        .day = @as(u8, day.day_index) + 1,
+        .hour = time.getHoursIntoDay(),
+        .minute = time.getMinutesIntoHour(),
+        .second = time.getSecondsIntoMinute(),
+    });
 }
 
 // -------------------------------------------------------------------------
@@ -3691,6 +3782,74 @@ const Files = struct {
         return App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = try files.at() });
     }
 };
+
+test "a file moved takes what was read from it along, and the scene saved next names the new place" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    try files.picture("art/hero.png");
+    const app = try files.app();
+    defer app.destroy();
+
+    const hero = try app.assets.loadTexture("res://art/hero.png", .{});
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(1, 2), components.Sprite.of(hero) });
+    try app.saveScene("res://meadow.json", .{});
+    const uid = app.project.knownUid("res://art/hero.png").?;
+
+    try app.moveFile("res://art/hero.png", "res://art/ada.png");
+    try testing.expectEqualStrings("res://art/ada.png", app.assets.textureSource(hero).?);
+    try testing.expect(app.assets.findTexture("res://art/ada.png").?.eql(hero));
+
+    // A folder, and what was read from inside it.
+    try app.moveFile("res://art", "res://pictures");
+    try testing.expectEqualStrings("res://pictures/ada.png", app.assets.textureSource(hero).?);
+    try testing.expectEqualStrings("res://pictures/ada.png", (try app.project.pathOf(uid)).?);
+
+    // Another run finds it by its UUID from the scene saved before the moves,
+    // and the scene saved now names where it is.
+    const other = try files.app();
+    defer other.destroy();
+    const loaded = try other.loadScene("res://meadow.json", .{});
+    try testing.expectEqual(@as(usize, 1), loaded.moved);
+    try app.saveScene("res://meadow.json", .{});
+    var said = (try app.sceneInfo("res://meadow.json", null)).?;
+    defer said.deinit(testing.allocator);
+    try testing.expectEqualStrings("res://pictures/ada.png", said.files[0].path);
+    try testing.expect(said.files[0].uid.?.eql(uid));
+}
+
+test "a file thrown away goes to the trash with its UUID, which names nothing after it" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    try files.picture("art/hero.png");
+    const app = try files.app();
+    defer app.destroy();
+    if (comptime !@hasDecl(platform, "trash")) {
+        try testing.expectError(error.Unsupported, app.moveToTrash("res://art/hero.png"));
+        return;
+    }
+    // A trash of the test's own: the person's is not the test's to fill.
+    var trash_buffer: [160]u8 = undefined;
+    app.trash = try std.fmt.bufPrint(&trash_buffer, "{s}/Trash", .{try files.at()});
+    const uid = try app.project.ensureUid("res://art/hero.png");
+
+    try app.moveToTrash("res://art/hero.png");
+    const dir = files.tmp.dir;
+    try testing.expectError(error.FileNotFound, dir.access(testing.io, "art/hero.png", .{}));
+    try testing.expectError(error.FileNotFound, dir.access(testing.io, "art/hero.png.uid", .{}));
+    try dir.access(testing.io, "Trash/files/hero.png", .{});
+    try dir.access(testing.io, "Trash/files/hero.png.uid", .{});
+    try dir.access(testing.io, "Trash/info/hero.png.trashinfo", .{});
+    try testing.expect(app.project.knownUid("res://art/hero.png") == null);
+    try testing.expect(app.project.by_uid.get(uid) == null);
+
+    // Another of the same name, beside the first; a folder, whole.
+    try files.picture("art/hero.png");
+    try app.moveToTrash("res://art/hero.png");
+    try dir.access(testing.io, "Trash/files/hero.png.2", .{});
+    try app.moveToTrash("res://art");
+    try dir.access(testing.io, "Trash/files/art", .{});
+    try testing.expectError(error.FileNotFound, app.moveToTrash("res://art"));
+}
 
 test "a new scene is written empty, never over another, and says what it is without being loaded" {
     var files: Files = try .init();
