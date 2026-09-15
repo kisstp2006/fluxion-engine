@@ -415,6 +415,10 @@ pub const Renderer = struct {
 
             for (transforms, labels, chunk.entities) |local, label, entity| {
                 if (!label.visible or label.len == 0 or label.color.a <= 0) continue;
+                // A scene's words are UTF-8 by the time they are read, but a
+                // label's bytes can be written by hand, and the walk through
+                // its characters below takes them on trust.
+                if (!std.unicode.utf8ValidateSlice(label.slice())) continue;
 
                 // Not drawn when it cannot be placed, as with a sprite.
                 const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse continue;

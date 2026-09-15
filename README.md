@@ -703,8 +703,9 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   world, so one scene can name an entity another brought - and loads the
   files or finds them already loaded. A texture made from pixels has no
   file, and is written as `null`.
-- **A version 1 scene still reads**: references by their place in the list,
-  and paths from the scene file's own directory, as they were written.
+- **Only version 2 is read.** A version 1 scene - references by their place
+  in the list, paths from the scene file's own directory - is refused with a
+  message that says so, and so is a newer one.
 - **JSON and CBOR are one scene in two spellings.**
   [Fluxion JSON](https://github.com/kisstp2006/fluxion-json) writes and reads
   both, and loading tells them apart by the bytes CBOR starts with. CBOR is
@@ -720,8 +721,14 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   and the path to the value - and leaves the world as it was:
 
   ```
-  meadow.json:3:32: there is no entity 7 in this scene, which has 2 (at /entities/1/Transform2D/parent)
+  meadow.json:3:32: no entity in this scene or in the world has the UUID 77777777-7777-4777-8777-777777777777 (at /entities/1/Transform2D/parent)
   ```
+
+- **A scene that is wrong is an error, never a crash**, so an editor shows it
+  and goes on. Numbers no hand would give still load - JSON5 keeps NaN and the
+  infinities - and the frames after them do not stop either: an animation of
+  no columns or an endless rate shows its first cell, a collider with a NaN in
+  its shape gets no shape, a label's size is held to what its atlas can keep.
 
 - **A load goes beside what is there.** A level over another is
   `app.clearWorld()` - every entity, name and UUID gone at once - and then
@@ -1041,8 +1048,9 @@ Here, and checked by the tests:
 - Scenes: the world, its names, its UUIDs and every registered component
   written as JSON or CBOR and read back, with entity references by UUID -
   inside the scene first, then in the world - textures and fonts found again
-  by their `.uid` files or their `res://` paths, version 1 scenes still read,
-  and a mistake reported at its line and column.
+  by their `.uid` files or their `res://` paths, and a mistake reported at
+  its line and column rather than crashing - nor do the frames after a
+  scene of NaNs and zeroes.
 - The project's files: `res://` paths from a root the program can be started
   away from, `uid://` for a file by the UUID beside it, files moved with
   their `.uid` files found where they went, and entities' UUIDs kept beside

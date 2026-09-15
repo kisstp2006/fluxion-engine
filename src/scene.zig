@@ -1438,6 +1438,12 @@ test "a mistake in a scene says where it is, and leaves the world as it was" {
 }
 
 test "numbers no hand would give load, and the frames after them do not crash" {
+    // The colliders that get no shape are said so in warnings, which are the
+    // point and need not fill the test's output.
+    const level = testing.log_level;
+    testing.log_level = .err;
+    defer testing.log_level = level;
+
     const app = try headless();
     defer app.destroy();
     _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 }) catch {};
@@ -1463,12 +1469,24 @@ test "numbers no hand would give load, and the frames after them do not crash" {
     , .{});
     try testing.expectEqual(@as(usize, 11), loaded.entities);
 
-    // Words that are not UTF-8: a lone surrogate written as an escape, and a
-    // byte no UTF-8 has.
-    _ = read(app,
-        \\{ "fluxion_scene": 2, "entities": [{ "Transform2D": {}, "Text2D": { "text": "a\uD800b" } }] }
-    , .{}) catch {};
-    _ = read(app, "{ \"fluxion_scene\": 2, \"entities\": [{ \"Transform2D\": {}, \"Text2D\": { \"text\": \"a\xffb\" } }] }", .{}) catch {};
+    // Words that are not UTF-8 never reach a label: a lone surrogate written
+    // as an escape is read as U+FFFD, and a byte no UTF-8 has is a mistake.
+    _ = try read(app,
+        \\{ "fluxion_scene": 2, "entities": [{ "name": "surrogate", "Transform2D": {}, "Text2D": { "text": "a\uD800b" } }] }
+    , .{});
+    try testing.expectEqualStrings("a\u{FFFD}b", app.world.get(app.find("surrogate").?, Text2D).?.slice());
+    try testing.expectError(error.SyntaxError, read(app, "{ \"fluxion_scene\": 2, \"entities\": [{ \"Text2D\": { \"text\": \"a\xffb\" } }] }", .{}));
+
+    // And a label's bytes written by hand, past UTF-8 and past its buffer,
+    // are neither drawn nor saved as they are.
+    var broken: Text2D = .of("ok");
+    broken.bytes[0] = 0xFF;
+    _ = try app.world.spawnWith(.{ Transform2D{}, broken });
+    var overlong: Text2D = .of("ok");
+    overlong.len = 200;
+    _ = try app.world.spawnWith(.{ Transform2D{}, overlong });
+    const saved = try write(app, testing.allocator, .{});
+    testing.allocator.free(saved);
 
     // Edited, and paused: bodies are made at the top of every frame.
     app.time.scale = 0;

@@ -467,9 +467,10 @@ pub const Text2D = extern struct {
         self.set(written);
     }
 
-    /// The text, as a string.
+    /// The text, as a string. A length written by hand past the buffer is
+    /// taken as the whole buffer.
     pub fn slice(self: *const Text2D) []const u8 {
-        return self.bytes[0..self.len];
+        return self.bytes[0..@min(self.len, capacity)];
     }
 };
 
