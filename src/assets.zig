@@ -30,6 +30,7 @@ const rhi = @import("fluxion_rhi");
 const image = @import("fluxion_image");
 const id = @import("fluxion_id");
 const typeface = @import("fluxion_font");
+const platform = @import("fluxion_platform");
 
 const Atlas = @import("text/Atlas.zig");
 const Project = @import("Project.zig");
@@ -101,6 +102,9 @@ pub const Font = struct {
     texture: rhi.Texture,
     /// The file it was read from, or empty. See `Texture.source`.
     source: []const u8 = "",
+    /// Which font of that file it is, when the file is a collection. See
+    /// `FontOptions.member`.
+    member: u32 = 0,
 };
 
 /// What a `Text2D` holds. Shaped like `TextureHandle`, for the same reasons.
@@ -149,6 +153,11 @@ pub const FontOptions = struct {
     /// The glyph atlas's side. 512 holds a couple of alphabets at game sizes.
     atlas: u32 = 512,
     label: []const u8 = "",
+    /// Which font of a TrueType collection - a `.ttc`, several fonts in one
+    /// file - by its place in the file, and nought for a file that is one
+    /// font. What the system's own lookup answers with the path: see
+    /// `loadSystemFont`.
+    member: u32 = 0,
 };
 
 /// How a texture should be sampled, and what it is called in a debugger.
@@ -344,7 +353,7 @@ fn addFont(self: *Assets, bytes: []const u8, options: FontOptions, source: []con
     const owned = try self.gpa.dupe(u8, bytes);
     errdefer self.gpa.free(owned);
 
-    const face: typeface.Font = try .init(owned);
+    const face: typeface.Font = try .initMember(owned, options.member);
 
     var atlas: Atlas = try .init(self.gpa, options.atlas, options.atlas);
     errdefer atlas.deinit();
@@ -365,6 +374,7 @@ fn addFont(self: *Assets, bytes: []const u8, options: FontOptions, source: []con
         .atlas = atlas,
         .texture = texture,
         .source = source,
+        .member = options.member,
     };
 
     const handle: FontHandle = .fromId(try self.fonts.add(self.gpa, font));
@@ -373,8 +383,10 @@ fn addFont(self: *Assets, bytes: []const u8, options: FontOptions, source: []con
     return handle;
 }
 
-/// The operating system's own interface font: one path per platform and no
-/// fallback. A game that ships carries its own.
+/// A fixed guess at the operating system's interface font: one path per
+/// platform, for a caller with no `Assets` at hand. `loadSystemFont` asks
+/// the system instead, and is right where this is not - a Japanese Windows, a
+/// Linux without DejaVu. A game that ships carries its own.
 pub fn systemFontPath() []const u8 {
     return switch (@import("builtin").os.tag) {
         .windows => "C:/Windows/Fonts/segoeui.ttf",
@@ -383,7 +395,23 @@ pub fn systemFontPath() []const u8 {
     };
 }
 
-/// Open a TrueType file from the disc, named as `loadTexture` names one.
+/// Open the font the system's own dialogs use, as the system names it: the
+/// message font on Windows - Segoe UI, and Yu Gothic UI on Japanese Windows,
+/// which is the second font of a collection - what fontconfig makes of
+/// sans-serif on Linux, and Roboto on Android. `options.member` is replaced by
+/// the system's answer. For an editor's interface, or a game's debug text; a
+/// game's own words are set in a font it ships.
+pub fn loadSystemFont(self: *Assets, options: FontOptions) !FontHandle {
+    const io = self.io orelse return Error.NoIo;
+    const found = try platform.fonts.systemUi(self.gpa, io);
+    defer found.deinit(self.gpa);
+    var asked = options;
+    asked.member = found.index;
+    return self.loadFont(found.path, asked);
+}
+
+/// Open a TrueType file from the disc, named as `loadTexture` names one - or
+/// one font of a collection, by `options.member`.
 pub fn loadFont(self: *Assets, path: []const u8, options: FontOptions) !FontHandle {
     const io = self.io orelse return Error.NoIo;
     const source = try self.project.canonical(self.gpa, path);
@@ -398,17 +426,26 @@ pub fn loadFont(self: *Assets, path: []const u8, options: FontOptions) !FontHand
     return self.addFont(bytes, .{
         .atlas = options.atlas,
         .label = if (options.label.len == 0) source else options.label,
+        .member = options.member,
     }, source);
 }
 
-/// The font already read from `path`, if one was. See `findTexture`.
+/// The font already read from `path`, if one was: the first font of the
+/// file, as `loadFont` opens one by default. See `findTexture`, and
+/// `findFontMember` for another font of a collection.
 pub fn findFont(self: *Assets, path: []const u8) ?FontHandle {
+    return self.findFontMember(path, 0);
+}
+
+/// The font already read from `path` at this place in it.
+pub fn findFontMember(self: *Assets, path: []const u8, member: u32) ?FontHandle {
     const named = self.project.canonical(self.gpa, path) catch null;
     defer if (named) |text| self.gpa.free(text);
     const wanted = named orelse path;
     var it = self.fonts.iterator();
     while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry.value.*.source, wanted)) return .fromId(entry.handle);
+        const font = entry.value.*;
+        if (font.member == member and std.mem.eql(u8, font.source, wanted)) return .fromId(entry.handle);
     }
     return null;
 }
@@ -418,6 +455,13 @@ pub fn findFont(self: *Assets, path: []const u8) ?FontHandle {
 pub fn fontSource(self: *Assets, handle: FontHandle) ?[]const u8 {
     const font = self.fonts.get(handle.toId()) orelse return null;
     return if (font.*.source.len == 0) null else font.*.source;
+}
+
+/// Which font of its file a font handle's font is: nought for a file that is
+/// one font, for `.none`, and for an expired handle.
+pub fn fontMember(self: *Assets, handle: FontHandle) u32 {
+    const font = self.fonts.get(handle.toId()) orelse return 0;
+    return font.*.member;
 }
 
 /// What a font handle points at, or the default font when it points at
@@ -491,7 +535,7 @@ pub fn reloadFont(self: *Assets, handle: FontHandle) !bool {
     // Read into memory the font keeps, since the face holds views into it.
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .limited(font_limit));
     errdefer self.gpa.free(bytes);
-    const face: typeface.Font = try .init(bytes);
+    const face: typeface.Font = try .initMember(bytes, font.member);
     var atlas: Atlas = try .init(self.gpa, font.atlas.width, font.atlas.height);
     // Blank, and uploaded so at the next flush: the old glyphs leave the
     // texture as well as the table.
@@ -658,6 +702,67 @@ test "a font keeps its address when more are loaded" {
     for (0..8) |_| _ = try assets.loadFont(systemFontPath(), .{ .atlas = 64 });
 
     try testing.expectEqual(face, &assets.fontOf(first).?.face);
+}
+
+/// A TrueType collection the system has, by its path, or null: Yu Gothic
+/// beside Yu Gothic UI on Windows, the Noto CJK fonts on a Linux box.
+fn systemCollection() ?[]const u8 {
+    const candidates = [_][]const u8{
+        "C:/Windows/Fonts/YuGothM.ttc",
+        "C:/Windows/Fonts/cambria.ttc",
+        "C:/Windows/Fonts/msgothic.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/Helvetica.ttc",
+    };
+    for (candidates) |path| {
+        std.Io.Dir.cwd().access(testing.io, path, .{}) catch continue;
+        return path;
+    }
+    return null;
+}
+
+test "a font of a collection is opened at its place, found by it, and read again at it" {
+    const path = systemCollection() orelse return error.SkipZigTest;
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+
+    var project: Project = try .init(testing.allocator, testing.io, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, testing.io, &project);
+    defer assets.deinit();
+
+    const first = try assets.loadFont(path, .{ .atlas = 64 });
+    const second = try assets.loadFont(path, .{ .atlas = 64, .member = 1 });
+    try testing.expectEqual(@as(u32, 0), assets.fontMember(first));
+    try testing.expectEqual(@as(u32, 1), assets.fontMember(second));
+    const at = assets.fontOf(second).?.face.file.directory_at;
+    try testing.expect(assets.fontOf(first).?.face.file.directory_at != at);
+
+    try testing.expectEqual(first, assets.findFont(path).?);
+    try testing.expectEqual(second, assets.findFontMember(path, 1).?);
+    try testing.expect(assets.findFontMember(path, 2) == null);
+
+    // Read again, it is the same font of the file, not the first.
+    try testing.expect(try assets.reloadFont(second));
+    try testing.expectEqual(at, assets.fontOf(second).?.face.file.directory_at);
+
+    // A place the file has not got is refused rather than read as another.
+    try testing.expectError(error.OutOfBounds, assets.loadFont(path, .{ .atlas = 64, .member = 1000 }));
+}
+
+test "the system's own interface font is the one the system names" {
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+
+    var project: Project = try .init(testing.allocator, testing.io, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, testing.io, &project);
+    defer assets.deinit();
+
+    const handle = assets.loadSystemFont(.{ .atlas = 64 }) catch return error.SkipZigTest;
+    try testing.expect(assets.fontSource(handle) != null);
+    try testing.expect(assets.fontOf(handle).?.face.has('A'));
 }
 
 test "every filter and wrap has a sampler of its own" {

@@ -451,6 +451,14 @@ _ = try world.spawnWith(.{
   against sprites by the same `layer` and `order` and all the text in one font
   is one draw call. The text lives *in* the component, in a fixed buffer, and
   `label.print("{d} points", .{score})` is what a game actually does with it.
+- **A font is a file, or one font of a collection.** `app.assets.loadFont`
+  opens a `.ttf` or an `.otf`, and `.member = n` the nth font of a `.ttc`,
+  which is what Windows ships its Chinese, Japanese and Korean fonts in.
+  `app.assets.loadSystemFont(.{})` asks the system which font its own
+  dialogs use - Segoe UI, Yu Gothic UI on Japanese Windows, what fontconfig
+  makes of sans-serif, Roboto - and opens that, at whatever place in its file
+  the system names: for a tool's interface, or a game's debug text. A game's
+  own words are set in a font it ships.
 - **What the camera cannot see is dropped before it costs anything**, one
   comparison per sprite, which is the difference between a renderer that costs
   what is drawn and one that costs what exists.
@@ -665,7 +673,7 @@ Not here yet: polygons, joints as components, and a view of the colliders in
 ```zig
 const hero = try app.assets.loadTexture("res://art/hero.png", .{});  // from the project's root
 try app.saveScene("res://levels/meadow.json", .{});
-const font = try app.assets.loadFont(fx.Assets.systemFontPath(), .{}); // the operating system's
+const font = try app.assets.loadFont("C:/Windows/Fonts/segoeui.ttf", .{}); // the operating system's
 ```
 
 ```bash
@@ -842,7 +850,8 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
 - **What a handle points at is written, not the handle.** An entity in a
   field - a transform's `parent`, a game's `leader` - is that entity's UUID,
   so adding one at the top changes no other line of the file. A texture or a
-  font is its file's `res://` path, and in `assets` its UUID and, for a
+  font is its file's `res://` path - `{ "file": ..., "member": 1 }` for a
+  font of a collection past its first - and in `assets` its UUID and, for a
   texture sampled otherwise than by default, how. Loading mints new
   entities, points every reference at them - in the scene first, then in the
   world, so one scene can name an entity another brought - and loads the
@@ -1190,6 +1199,8 @@ Here, and checked by the tests:
   alignments, and a label that formats into itself. Not here yet: wrapping, an
   outline, more than sixty-three bytes in one label, and more than one font in
   one label.
+- Fonts from a `.ttf`, an `.otf`, or one font of a `.ttc` collection, and
+  the system's own interface font as the system names it.
 - Culling against the camera, sprites and labels alike.
 - The interface: fluxion-ui laid out by `.ui` systems into one root, drawn
   over the 2D layer, fed from the keyboard, the mouse and the pads before the

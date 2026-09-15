@@ -114,7 +114,7 @@ fn spawn(app: *App) !void {
         .anchor_b = .init(340, 90),
     } });
 
-    const font = app.assets.loadFont(fx.Assets.systemFontPath(), .{}) catch |err| blk: {
+    const font = app.assets.loadSystemFont(.{}) catch |err| blk: {
         std.log.warn("no font ({t}); the count will not draw", .{err});
         break :blk fx.FontHandle.none;
     };

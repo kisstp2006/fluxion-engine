@@ -352,7 +352,7 @@ fn spawn(app: *App) !void {
 /// is drawn in - a scene writes no font for them. Without one the labels do
 /// not draw, and everything else still runs.
 fn openFont(app: *App) void {
-    _ = app.assets.loadFont(fx.Assets.systemFontPath(), .{}) catch |err| blk: {
+    _ = app.assets.loadSystemFont(.{}) catch |err| blk: {
         std.log.warn("no font ({t}); the labels will not draw", .{err});
         break :blk .none;
     };

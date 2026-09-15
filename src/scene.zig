@@ -441,7 +441,15 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
         const source = s.app.assets.fontSource(value.*) orelse return w.writeNull();
         const kept = try s.files.getOrPut(s.app.gpa, source);
         if (!kept.found_existing) kept.value_ptr.* = .{};
-        return w.writeString(source);
+        // The first font of a file is the file. Another font of a collection
+        // is an object that says which, so one scene can hold two of a file.
+        const member = s.app.assets.fontMember(value.*);
+        if (member == 0) return w.writeString(source);
+        try w.beginObject();
+        try w.field("file", source);
+        try w.key("member");
+        try w.writeInt(member);
+        return w.endObject();
     }
     switch (@typeInfo(T)) {
         .bool => try w.writeBool(value.*),
@@ -980,14 +988,43 @@ const Loading = struct {
         return handle;
     }
 
-    fn font(l: *Loading, path: []const u8) anyerror!FontHandle {
-        if (l.fonts.get(path)) |known| return known;
+    fn font(l: *Loading, path: []const u8, member: u32) anyerror!FontHandle {
+        // Kept by the file and the member: two fonts of one collection are
+        // two fonts.
+        const name = if (member == 0) path else try std.fmt.allocPrint(l.arena, "{s}\x00{d}", .{ path, member });
+        if (l.fonts.get(name)) |known| return known;
         const where, _ = try l.file(path);
         const assets = &l.app.assets;
-        const handle = assets.findFont(where) orelse assets.loadFont(where, .{}) catch |err|
-            return l.fail(err, "cannot read the font \"{s}\": {t}", .{ where, err });
-        try l.fonts.put(l.arena, try l.arena.dupe(u8, path), handle);
+        const handle = assets.findFontMember(where, member) orelse assets.loadFont(where, .{ .member = member }) catch |err| {
+            if (member == 0) return l.fail(err, "cannot read the font \"{s}\": {t}", .{ where, err });
+            return l.fail(err, "cannot read font {d} of the collection \"{s}\": {t}", .{ member, where, err });
+        };
+        try l.fonts.put(l.arena, try l.arena.dupe(u8, name), handle);
         return handle;
+    }
+
+    /// A font written as an object: its file, and which font of the file it
+    /// is. The object itself has begun.
+    fn fontObject(l: *Loading) anyerror!FontHandle {
+        var path: ?[]const u8 = null;
+        var member: u32 = 0;
+        while (try l.key()) |field| {
+            if (std.mem.eql(u8, field, "file")) {
+                const mark = l.path.push("file", .{});
+                const token = try l.next();
+                path = switch (token) {
+                    .string => |text| try l.arena.dupe(u8, text),
+                    else => return l.wrong("the file it was read from", token),
+                };
+                l.path.pop(mark);
+            } else if (std.mem.eql(u8, field, "member")) {
+                const mark = l.path.push("member", .{});
+                try readValue(l, u32, &member);
+                l.path.pop(mark);
+            } else try l.reader.skipValue();
+        }
+        const named = path orelse return l.fail(error.WrongType, "a font written as an object names its \"file\"", .{});
+        return l.font(named, member);
     }
 };
 
@@ -1071,12 +1108,22 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
         };
         return;
     }
-    if (T == TextureHandle or T == FontHandle) {
+    if (T == TextureHandle) {
         const token = try l.next();
         out.* = switch (token) {
             .null => .none,
-            .string => |path| if (T == TextureHandle) try l.texture(path) else try l.font(path),
+            .string => |path| try l.texture(path),
             else => return l.wrong("the file it was read from, or null", token),
+        };
+        return;
+    }
+    if (T == FontHandle) {
+        const token = try l.next();
+        out.* = switch (token) {
+            .null => .none,
+            .string => |path| try l.font(path, 0),
+            .object_begin => try l.fontObject(),
+            else => return l.wrong("the file it was read from, its file and member, or null", token),
         };
         return;
     }
@@ -1828,4 +1875,60 @@ test "two components of one name need a scene_name to tell them apart" {
     try app.registerComponents(.{Twins.Described});
     try testing.expectError(error.ComponentNameTaken, app.registerComponents(.{Twins.Both}));
     try testing.expect(app.scene_components.find("WrittenMarker") == null);
+}
+
+/// A TrueType collection the system has, by its path, or null. See
+/// `Assets`' tests.
+fn systemCollection() ?[]const u8 {
+    const candidates = [_][]const u8{
+        "C:/Windows/Fonts/YuGothM.ttc",
+        "C:/Windows/Fonts/cambria.ttc",
+        "C:/Windows/Fonts/msgothic.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+        "/System/Library/Fonts/Helvetica.ttc",
+    };
+    for (candidates) |path| {
+        std.Io.Dir.cwd().access(testing.io, path, .{}) catch continue;
+        return path;
+    }
+    return null;
+}
+
+test "a font of a collection is written as its file and member, and read back as that font" {
+    const path = systemCollection() orelse return error.SkipZigTest;
+    const source = try headless();
+    defer source.destroy();
+    const first = try source.assets.loadFont(path, .{ .atlas = 64 });
+    const second = try source.assets.loadFont(path, .{ .atlas = 64, .member = 1 });
+
+    var upright: Text2D = .of("a");
+    upright.font = first;
+    var other: Text2D = .of("b");
+    other.font = second;
+    try source.setName(try source.world.spawnWith(.{ Transform2D{}, upright }), "first");
+    try source.setName(try source.world.spawnWith(.{ Transform2D{}, other }), "second");
+
+    const text = try write(source, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "\"member\": 1") != null);
+
+    const copy = try headless();
+    defer copy.destroy();
+    _ = try read(copy, text, .{});
+    const a = copy.world.get(copy.find("first").?, Text2D).?.font;
+    const b = copy.world.get(copy.find("second").?, Text2D).?.font;
+    try testing.expectEqual(@as(u32, 0), copy.assets.fontMember(a));
+    try testing.expectEqual(@as(u32, 1), copy.assets.fontMember(b));
+    try testing.expect(!std.meta.eql(a, b));
+
+    // Written again, it is what was read.
+    const again = try write(copy, testing.allocator, .{});
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings(text, again);
+
+    // An object with no file is a mistake that says so, not a crash.
+    try testing.expectError(error.WrongType, read(copy,
+        \\{ "fluxion_scene": 2, "entities": [{ "Transform2D": {}, "Text2D": { "font": { "member": 1 } } }] }
+    , .{}));
 }

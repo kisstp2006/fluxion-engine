@@ -72,8 +72,8 @@
         // TrueType, rasterised into the glyph atlas the 2D pass draws text
         // from.
         .fluxion_font = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-font#38615f1e07dcb7ddaa0959ef4ea27a1ea115ac2d",
-            .hash = "fluxion_font-0.1.0-f3pT4n3pAwChQk8rk88uwmL4cZDTLTwWBXcu-VUqvM5K",
+            .url = "git+https://github.com/kisstp2006/fluxion-font#f666e62f498e5bfe04361c7f1bf6531334a51dbf",
+            .hash = "fluxion_font-0.1.0-f3pT4rn1AwBbbEom4emICxRn1vGPQvsRhUc0_lCawLB8",
         },
 
         // Lines, shapes and text over the world, for looking at what a game
