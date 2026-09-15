@@ -204,6 +204,24 @@ pub fn setCursorShape(self: *Window, shape: platform.CursorShape) Error!void {
     try self.handle.setCursorShape(shape);
 }
 
+/// Let an input method sit between the keys and the text, and raise the
+/// soft keyboard on a phone or a page: on while something is being typed
+/// into, and off otherwise. See `Interface.applyTextInput`.
+pub fn setTextInput(self: *Window, on: bool) Error!void {
+    try self.handle.setTextInput(on);
+}
+
+/// Whether text input is on.
+pub fn textInput(self: *const Window) bool {
+    return self.handle.textInput();
+}
+
+/// Where the caret is, in the framebuffer's pixels as the pointer is, so an
+/// input method puts its composition there and its candidates clear of it.
+pub fn setTextInputArea(self: *Window, area: platform.text.Area) Error!void {
+    try self.handle.setTextInputArea(area);
+}
+
 /// How many lines the user has the system scroll text by for a notch of the
 /// wheel - or a page. Asked each time, so a changed setting is taken at once.
 pub fn scrollLines(self: *Window) platform.ScrollLines {

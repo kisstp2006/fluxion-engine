@@ -1065,7 +1065,10 @@ fn layOutInterface(self: *App) !void {
         try self.schedule.run(.ui, self);
     }
     self.interface.commands = try self.ui.end();
-    if (self.window) |*window| self.interface.applyCursor(&self.ui, window);
+    if (self.window) |*window| {
+        self.interface.applyCursor(&self.ui, window);
+        self.interface.applyTextInput(&self.ui, window);
+    }
 }
 
 /// The interface's scale for this frame: the game's `zoom` times the

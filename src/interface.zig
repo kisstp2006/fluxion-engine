@@ -67,6 +67,20 @@ display_scale: f32 = 1,
 /// windows do. Off for a game that sizes its interface by the window alone.
 follow_display: bool = true,
 
+/// Whether the interface turns the platform's text input on while one of
+/// its text inputs has the keyboard, and off when none has. Off for a game
+/// that turns it on for a text box of its own. See `applyTextInput`.
+owns_text_input: bool = true,
+
+/// What the interface last asked text input to be.
+typing: bool = false,
+
+/// Where it last told the input method the caret was.
+caret_area: ?platform.text.Area = null,
+
+/// Whether the system has refused a caret's place once: told of it once.
+caret_refused: bool = false,
+
 /// What the system scrolls text by for a notch of the wheel, as `App` last
 /// asked it: lines, or a page. See `pixels_per_line`.
 scroll_lines: platform.ScrollLines = .{},
@@ -319,6 +333,55 @@ pub fn applyCursor(self: *Interface, layout: *ui.Ui, window: *Window) void {
     self.shape = wanted;
 }
 
+/// Turn the platform's text input on while one of the interface's text
+/// inputs has the keyboard - the soft keyboard on a phone or a page, and an
+/// input method's composition on a desktop - and off when none has, so an
+/// input method never sits between a game and its keys. And tell the input
+/// method where the caret is, so its composition and its list of candidates
+/// sit beside the text rather than across it. Each only when it changes, and
+/// neither with `owns_text_input` off.
+pub fn applyTextInput(self: *Interface, layout: *ui.Ui, window: *Window) void {
+    if (!self.owns_text_input) return;
+    const wanted = layout.wantsKeyboard();
+    if (wanted != self.typing) {
+        // Asked once per change, so a system that refuses is told once.
+        self.typing = wanted;
+        self.caret_area = null;
+        window.setTextInput(wanted) catch |err| {
+            log.warn("could not turn text input {s}: {t}", .{ if (wanted) "on" else "off", err });
+        };
+    }
+    if (!wanted) return;
+
+    const at = layout.caret() orelse return;
+    const area = caretArea(at) orelse return;
+    if (self.caret_area) |told| {
+        if (std.meta.eql(told, area)) return;
+    }
+    self.caret_area = area;
+    window.setTextInputArea(area) catch |err| {
+        if (!self.caret_refused) log.warn("could not say where the caret is: {t}", .{err});
+        self.caret_refused = true;
+    };
+}
+
+/// The caret's box in whole pixels round it, or null for one no window could
+/// be told of: a layout gone wrong is a caret not placed, never a crash. The
+/// framebuffer's pixels, which the platform places an input method by on
+/// every backend, as it reports the pointer in them.
+fn caretArea(at: ui.BoundingBox) ?platform.text.Area {
+    const limit: f32 = 1 << 30;
+    for ([_]f32{ at.x, at.y, at.width, at.height }) |value| {
+        if (!std.math.isFinite(value) or @abs(value) >= limit) return null;
+    }
+    return .{
+        .x = @intFromFloat(@floor(at.x)),
+        .y = @intFromFloat(@floor(at.y)),
+        .width = @intFromFloat(@max(0, @ceil(at.width))),
+        .height = @intFromFloat(@max(0, @ceil(at.height))),
+    };
+}
+
 fn platformShape(shape: ui.CursorShape) platform.CursorShape {
     return switch (shape) {
         inline else => |named| @field(platform.CursorShape, @tagName(named)),
@@ -528,6 +591,27 @@ test "a notch scrolls the lines the system says, at the interface's scale, or a 
         try fixture.feed(0);
         try testing.expectApproxEqAbs(case.moved, fixture.layout.scrollOf("list").?.position.y, 0.001);
     }
+}
+
+test "the caret is told in whole pixels round it, and a caret with no place is not told" {
+    const area = caretArea(.{ .x = 10.6, .y = 20.2, .width = 1.5, .height = 17.1 }).?;
+    try testing.expectEqual(platform.text.Area{ .x = 10, .y = 20, .width = 2, .height = 18 }, area);
+
+    try testing.expect(caretArea(.{ .x = std.math.nan(f32), .y = 0, .width = 1, .height = 1 }) == null);
+    try testing.expect(caretArea(.{ .x = 0, .y = std.math.inf(f32), .width = 1, .height = 1 }) == null);
+    try testing.expect(caretArea(.{ .x = 0, .y = 0, .width = 1e30, .height = 1 }) == null);
+}
+
+test "the caret of the text input with the keyboard is where the input method is told" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+
+    try fixture.frame(nameField);
+    try testing.expect(fixture.layout.caret() == null);
+    fixture.layout.setFocus("name");
+    try fixture.frame(nameField);
+    const at = fixture.layout.caret().?;
+    try testing.expect(caretArea(at) != null);
 }
 
 test "a locked pointer points at nothing in the interface" {

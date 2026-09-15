@@ -536,6 +536,13 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   `follow_display = false` sizes it by the window alone. `safe_area` keeps it
   clear of a television's edges, and a picture on an element names one of
   `app.interface.textures` by its index.
+- **Typing brings up the right keyboard.** While a text input has the
+  keyboard, the platform's text input is on: a phone's soft keyboard comes
+  up, a page's hidden field takes the typing, and an input method -
+  Japanese, Chinese, Korean - composes at the caret with its candidates
+  beside it. It is off again the moment none has, so an input method never
+  sits between a game and its keys. `owns_text_input = false` leaves it to a
+  game with a text box of its own.
 - **The wheel scrolls as the system says**: the lines a notch is set to in
   Windows' mouse settings or KDE's, a page at a time where that was chosen,
   and three lines elsewhere. `input.wheel` stays in notches, which is what a
@@ -1190,6 +1197,10 @@ Here, and checked by the tests:
   answered by a test when there is no window.
 - Files dropped on the window, with where they were let go, in `app.input`
   for a frame.
+- The interface at the display's scale, followed from monitor to monitor,
+  under a game's own zoom; the platform's text input switched with its focus,
+  for a phone's soft keyboard and an input method composing at the caret;
+  and the wheel scrolling the lines, or the page, the system is set to.
 - Frame pacing: vsync switched while running, a frame cap that holds its
   average, and a minimised window that sleeps instead of drawing.
 - Every system timed, under the name it was added with: its time over the
