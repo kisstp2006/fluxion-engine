@@ -978,8 +978,9 @@ fn readItems(l: *Loading, comptime Item: type, comptime len: usize, out: *[len]I
     if (try l.next() != .array_end) return l.fail(error.LengthMismatch, "expected {d} items, found more", .{len});
 }
 
-/// What a token is, for a message: `the string "wide"`, `an object`.
-fn found(token: Token) Found {
+/// What a token is, for a message: `the string "wide"`, `an object`. The
+/// project file's reader says it the same way.
+pub fn found(token: Token) Found {
     return .{ .token = token };
 }
 

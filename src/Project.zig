@@ -33,10 +33,38 @@ const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
+const json = @import("fluxion_json");
 const Uuid = @import("fluxion_id").Uuid;
+
+const settings_file = @import("project/settings.zig");
 
 const Project = @This();
 const log = std.log.scoped(.fluxion_engine);
+
+/// What a project's file is called, at its root: `project.fluxion`.
+pub const file_name = settings_file.file_name;
+
+/// What a project file says: its name, its renderer, its icon and the rest.
+/// See `project/settings.zig`.
+pub const Settings = settings_file.Settings;
+
+/// Which family of graphics APIs a project is drawn with, and its backends
+/// on each system.
+pub const Renderer = settings_file.Renderer;
+
+pub const ReadError = settings_file.ReadError;
+pub const WriteError = settings_file.WriteError;
+pub const CreateError = settings_file.CreateError;
+
+/// The project file in a folder, read with no `App` and no GPU: what a
+/// project manager lists projects by.
+pub const readSettings = settings_file.read;
+
+/// Write a folder's project file in place of the one there.
+pub const writeSettings = settings_file.write;
+
+/// Make a new project: its folder and its project file.
+pub const create = settings_file.create;
 
 /// What a project path starts with.
 pub const scheme = "res://";
@@ -84,21 +112,44 @@ by_path: std.StringHashMapUnmanaged(Uuid) = .empty,
 /// Whether the whole project has been looked through for `.uid` files.
 scanned: bool = false,
 
+/// What the project file at the root says, once `loadSettings` has read it:
+/// null for a root with none.
+settings: ?Settings = null,
+
 /// What new UUIDs are drawn from: seeded by the operating system, or with no
 /// `Io` by a constant, so a test makes the same ones every run.
 source: std.Random.DefaultCsprng,
 
-/// The project at `root` - the working directory when null. With no `Io`
-/// the paths are kept as they are given, and nothing is read.
+/// The project at `root` - the working directory when null, and the folder
+/// it is in when `root` names a project file, as a file association hands it
+/// over. With no `Io` the paths are kept as they are given, and nothing is
+/// read. Its settings are read by `loadSettings`.
 pub fn init(gpa: Allocator, io: ?std.Io, root: ?[]const u8) InitError!Project {
     var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = @splat(0x9A);
     if (io) |reach| reach.random(&seed);
 
     const cwd = if (io) |reach| try absoluteDirectory(gpa, reach, ".") else try gpa.dupe(u8, ".");
     errdefer gpa.free(cwd);
-    const at = root orelse ".";
+    const given = root orelse ".";
+    const at = if (std.mem.eql(u8, std.fs.path.basename(given), file_name))
+        std.fs.path.dirname(given) orelse "."
+    else
+        given;
     const absolute = if (io) |reach| try absoluteDirectory(gpa, reach, at) else try gpa.dupe(u8, at);
     return .{ .gpa = gpa, .io = io, .root = absolute, .cwd = cwd, .source = .init(seed) };
+}
+
+/// Read the project file at the root into `settings`. A root with none is
+/// left with none, and is still somewhere to read files from; one that is
+/// wrong is an error, with what and where in `diagnostics`.
+pub fn loadSettings(self: *Project, diagnostics: ?*json.Diagnostics) ReadError!void {
+    const io = self.io orelse return;
+    const read = readSettings(self.gpa, io, self.root, diagnostics) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    if (self.settings) |*old| old.deinit();
+    self.settings = read;
 }
 
 fn absoluteDirectory(gpa: Allocator, io: std.Io, path: []const u8) InitError![]u8 {
@@ -110,6 +161,7 @@ fn absoluteDirectory(gpa: Allocator, io: std.Io, path: []const u8) InitError![]u
 }
 
 pub fn deinit(self: *Project) void {
+    if (self.settings) |*held| held.deinit();
     self.forget();
     self.by_uid.deinit(self.gpa);
     self.by_path.deinit(self.gpa);
@@ -122,6 +174,22 @@ pub fn deinit(self: *Project) void {
 /// `uid://`.
 pub fn isProjectPath(path: []const u8) bool {
     return std.mem.startsWith(u8, path, scheme) or std.mem.startsWith(u8, path, uid_scheme);
+}
+
+/// Whether this is a project path that could name a file: a `res://` one
+/// that stays inside the root - see `tidy` - or a `uid://` one that holds a
+/// UUID. Asks nothing of the disc.
+pub fn isValidProjectPath(path: []const u8) bool {
+    if (std.mem.startsWith(u8, path, uid_scheme)) return parseUid(path) != null;
+    if (!std.mem.startsWith(u8, path, scheme)) return false;
+    const inside = path[scheme.len..];
+    if (inside.len > 0 and std.fs.path.isSep(inside[0])) return false;
+    if (inside.len > 1 and inside[1] == ':' and std.ascii.isAlphabetic(inside[0])) return false;
+    var steps = std.mem.tokenizeAny(u8, inside, "/\\");
+    while (steps.next()) |step| {
+        if (std.mem.eql(u8, step, "..")) return false;
+    }
+    return true;
 }
 
 // -------------------------------------------------------------------------

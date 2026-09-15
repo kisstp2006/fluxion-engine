@@ -19,6 +19,7 @@
 //! with no window and no GPU, which is how every test here runs.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
@@ -32,6 +33,7 @@ const debugdraw_rhi = @import("fluxion_debugdraw_rhi");
 const ui_lib = @import("fluxion_ui");
 const typeface = @import("fluxion_font");
 const physics_lib = @import("fluxion_physics");
+const json = @import("fluxion_json");
 const reflect = @import("fluxion_reflect");
 const Uuid = @import("fluxion_id").Uuid;
 
@@ -68,24 +70,42 @@ pub const Error = error{
     /// `Window.isAbsent`.
     NoDisplay,
 } || Allocator.Error || rhi.Error || Window.Error || Assets.Error ||
-    sprite.Error || ecs.Jobs.Error || debugdraw_rhi.Error || Project.InitError;
+    sprite.Error || ecs.Jobs.Error || debugdraw_rhi.Error || Project.InitError ||
+    Project.ReadError || BackendError;
 
 /// Which drawing API to open.
 pub const Backend = enum {
-    /// OpenGL, on every platform for now.
+    /// The best of the project's renderer on this system - see
+    /// `Project.Renderer.backends` - and with no project file the
+    /// compatibility renderer's: Direct3D 11 on Windows, OpenGL on Linux,
+    /// macOS and Android, WebGL in a browser.
     auto,
+    /// OpenGL 3.3.
     gl,
+    /// Direct3D 11. Windows only.
     d3d11,
+    /// WebGL 2, in a browser.
+    webgl,
     /// Accepts everything, draws nothing. What `.headless` uses.
     none,
-
-    fn resolve(self: Backend) Backend {
-        return switch (self) {
-            .auto => .gl,
-            else => self,
-        };
-    }
 };
+
+pub const BackendError = error{
+    /// The project's renderer has no backend built on this system: `modern`,
+    /// for now, which is Direct3D 12 and Vulkan.
+    RendererNotBuilt,
+};
+
+/// The backend to open: `wanted` as it is, unless it is `auto`, which is
+/// the best of `renderer`'s backends on `os`. A renderer with none is an
+/// error rather than a quiet fall back to another, which would hide what the
+/// game really looks like.
+pub fn chooseBackend(wanted: Backend, renderer: Project.Renderer, os: std.Target.Os.Tag) BackendError!Backend {
+    if (wanted != .auto) return wanted;
+    const choices = renderer.backends(os);
+    if (choices.len == 0) return error.RendererNotBuilt;
+    return choices[0];
+}
 
 /// How the window fills the screen. See `Window.Fullscreen`.
 pub const Fullscreen = Window.Fullscreen;
@@ -103,7 +123,9 @@ pub const WindowState = Window.State;
 pub const WindowSizeLimits = Window.SizeLimits;
 
 pub const Options = struct {
-    title: []const u8 = "fluxion",
+    /// What the title bar says. Null is the project's name, from its project
+    /// file, or "fluxion" with none.
+    title: ?[]const u8 = null,
     width: u32 = 1280,
     height: u32 = 720,
     backend: Backend = .auto,
@@ -124,9 +146,14 @@ pub const Options = struct {
     /// files and a fixed step, as in a test.
     io: ?std.Io = null,
 
-    /// The project's root directory, which `res://` paths are from. Null is
-    /// the working directory. See `Project`.
+    /// The project's root directory, which `res://` paths are from - or its
+    /// `project.fluxion`, which names the same directory. Null is the working
+    /// directory. See `Project`.
     root: ?[]const u8 = null,
+
+    /// Where the project file went wrong, when it did: `create` fails then,
+    /// and says it in the log as well.
+    project_diagnostics: ?*json.Diagnostics = null,
 
     /// Every frame counts as exactly this many seconds, whatever the clock
     /// says, so every run is the same. `Flags.apply` sets it for `--capture`.
@@ -491,6 +518,18 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.uuid_source = .init(seed);
     self.project = try .init(gpa, options.io, options.root);
     errdefer self.project.deinit();
+    // Before the backend is chosen: the project's renderer chooses it, and
+    // the window has to know whether it is OpenGL's. A project file that is
+    // wrong stops the start, and says why - where the caller asked for it,
+    // or else in the log - rather than being drawn some way the project did
+    // not ask for.
+    {
+        var own: json.Diagnostics = .{};
+        self.project.loadSettings(options.project_diagnostics orelse &own) catch |err| {
+            if (options.project_diagnostics == null and err != error.OutOfMemory) log.err("{f}", .{own});
+            return err;
+        };
+    }
 
     errdefer self.scene_components.deinit(gpa);
     errdefer self.types.deinit();
@@ -511,7 +550,15 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         else => unreachable,
     };
 
-    const backend = if (options.headless) .none else options.backend.resolve();
+    // Headless opens no renderer, so the project's is not asked about.
+    const renderer: Project.Renderer = if (self.project.settings) |held| held.renderer else .compatibility;
+    const backend: Backend = if (options.headless) .none else chooseBackend(options.backend, renderer, builtin.os.tag) catch |err| {
+        log.err("the {t} renderer ({s}) is not built yet: set \"renderer\" to \"compatibility\" in {s}, or give --backend", .{ renderer, renderer.apis(), Project.file_name });
+        return err;
+    };
+    if (!options.headless and options.backend != .auto and std.mem.indexOfScalar(Backend, renderer.backends(builtin.os.tag), backend) == null) {
+        log.info("drawing with {t}, which is not one of the {t} renderer's here", .{ backend, renderer });
+    }
 
     // The window comes first, and has to know whether to make an OpenGL
     // context: no platform lets a window change its mind about that.
@@ -519,7 +566,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         // Opened in place: its handle points at the context beside it.
         self.window = @as(Window, undefined);
         self.window.?.open(gpa, .{
-            .title = options.title,
+            .title = titleOf(options, self.project.settings),
             .width = options.width,
             .height = options.height,
             .resizable = options.resizable,
@@ -562,6 +609,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .backend = switch (backend) {
             .gl => .gl,
             .d3d11 => .d3d11,
+            .webgl => .webgl,
             .none => .none,
             .auto => .auto,
         },
@@ -609,6 +657,16 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.debug = self.debug_frame.pen();
 
     return self;
+}
+
+/// What the title bar says: the game's own title, or else its project's
+/// name, or else "fluxion".
+fn titleOf(options: Options, settings: ?Project.Settings) []const u8 {
+    if (options.title) |title| return title;
+    if (settings) |held| {
+        if (held.name.len > 0) return held.name;
+    }
+    return "fluxion";
 }
 
 pub fn destroy(self: *App) void {
@@ -3354,4 +3412,63 @@ test "the project's root is an option and a flag, and one that is not there stop
     const flags = try App.parseFlags(App.Flags, &.{ "game", "--root", "games/pong" });
     try testing.expectEqualStrings("games/pong", flags.apply(.{}).root.?);
     try testing.expectError(error.FileNotFound, App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = "no/such/project" }));
+}
+
+test "a project's file is read as it starts, and a root with none starts as before" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffers: [2][160]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    const bare = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+    try testing.expect(bare.project.settings == null);
+    try testing.expectEqualStrings("fluxion", titleOf(.{}, bare.project.settings));
+    bare.destroy();
+
+    try Project.writeSettings(testing.allocator, testing.io, root, .{ .name = "Meadow", .tags = &.{"2d"} });
+    // By the folder, or by the file itself, as a file association gives it.
+    const file = try std.fmt.bufPrint(&buffers[1], "{s}/" ++ Project.file_name, .{root});
+    for ([_][]const u8{ root, file }) |given| {
+        const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = given });
+        defer app.destroy();
+        const settings = app.project.settings.?;
+        try testing.expectEqualStrings("Meadow", settings.name);
+        try testing.expectEqualStrings("2d", settings.tags[0]);
+        try testing.expect(std.mem.endsWith(u8, app.project.root, &tmp.sub_path));
+        try testing.expectEqualStrings("Meadow", titleOf(.{}, settings));
+        try testing.expectEqualStrings("Pong", titleOf(.{ .title = "Pong" }, settings));
+    }
+}
+
+test "a project file that is wrong stops the start, and says what and where" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [160]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data = "{ \"fluxion_project\": 9, \"name\": \"Later\" }" });
+
+    var diagnostics: json.Diagnostics = .{};
+    try testing.expectError(error.UnsupportedVersion, App.create(testing.allocator, .{
+        .headless = true,
+        .io = testing.io,
+        .root = root,
+        .project_diagnostics = &diagnostics,
+    }));
+    try testing.expectEqualStrings("this project file is version 9; this engine reads version 1", diagnostics.message());
+    try testing.expectEqual(@as(u32, 1), diagnostics.line);
+}
+
+test "auto opens the best of the project's renderer, and a backend asked for wins" {
+    try testing.expectEqual(Backend.d3d11, try chooseBackend(.auto, .compatibility, .windows));
+    try testing.expectEqual(Backend.gl, try chooseBackend(.auto, .compatibility, .linux));
+    try testing.expectEqual(Backend.gl, try chooseBackend(.auto, .compatibility, .macos));
+    try testing.expectEqual(Backend.webgl, try chooseBackend(.auto, .compatibility, .emscripten));
+    try testing.expectEqual(Backend.gl, try chooseBackend(.gl, .compatibility, .windows));
+
+    // Not built: refused, not drawn with something else - unless asked for.
+    try testing.expectError(error.RendererNotBuilt, chooseBackend(.auto, .modern, .windows));
+    try testing.expectEqual(Backend.d3d11, try chooseBackend(.d3d11, .modern, .windows));
+
+    const flags = try App.parseFlags(App.Flags, &.{ "game", "--backend", "gl" });
+    try testing.expectEqual(Backend.gl, flags.apply(.{}).backend);
 }

@@ -52,7 +52,7 @@
 | `Clipboard` | Text copied and pasted: the system's, or the program's own with no window. |
 | `Commands` | Spawns, despawns, adds and removes that wait for the system asking for them to return. |
 | `States` | A game's own states, each an enum with one value at a time, and the systems that run in them. |
-| `Project` | Where a game's files are: `res://` paths from the project's root, and the UUIDs in the `.uid` files beside them. |
+| `Project` | Where a game's files are: `res://` paths from the project's root, the UUIDs in the `.uid` files beside them, and `project.fluxion`, whose renderer chooses the backend. |
 | `DebugViews` | What the engine draws into `app.debug` by itself: colliders, bodies, transforms, sprites, cameras, stats. |
 | `attr` | What a component's field means, for an inspector to show it by: a range, an angle, a unit, layers, several lines, a value behind a getter and a setter. |
 
@@ -329,6 +329,7 @@ if (!app.input.focused) pause(app);
   instead of spinning. The fixed steps keep the simulation in real time.
 - **On `d3d11`, vsync off does not yet go past the refresh rate**: the
   flip-model swapchain in fluxion-rhi has two buffers and no tearing support.
+  It is the backend Windows opens by default now.
 
 ## 🎨 The 2D layer
 
@@ -631,9 +632,62 @@ game --root ../my-game          # or App.Options.root; the working directory oth
   UUID none of them holds sends it through the project once, passing over
   hidden directories, `zig-out` and `zig-pkg`; `app.project.rescan()` looks
   again after files moved while the program ran.
-- **The root is `Options.root`**, or `--root` among the engine's flags, or
-  else the working directory. A project file will say where it is, once
-  there is one.
+- **The root is `Options.root`**, or `--root` among the engine's flags - the
+  folder, or the `project.fluxion` in it - or else the working directory.
+
+### The project file
+
+```json
+{
+  "fluxion_project": 1,
+  "name": "Meadow",
+  "description": "",
+  "icon": "res://icon.png",
+  "renderer": "compatibility",
+  "main_scene": "",
+  "tags": ["2d"]
+}
+```
+
+```zig
+var settings = try fx.Project.readSettings(gpa, io, "games/meadow", &diagnostics);  // no App, no GPU
+defer settings.deinit();
+try fx.Project.create(gpa, io, "games/pasture", .{ .name = "Pasture" });           // error.ProjectExists over one
+try fx.Project.writeSettings(gpa, io, "games/pasture", renamed);                    // written beside, then moved over
+```
+
+- **`project.fluxion` is a project's folder**, as `project.godot` is Godot's.
+  A game and an editor read the same file: `App.create` reads the one at the
+  root - `app.project.settings` - before anything opens, and a project
+  manager lists projects with `Project.readSettings`. A root without one
+  starts as it always did, with `settings` null.
+- **`name` is all it must have.** The rest are optional: `description`,
+  `icon` and `main_scene` (a `res://` or `uid://` path, or empty), `tags`,
+  and the renderer. The name is the window's title when the game gives none.
+- **What is wrong is said, with its line and column**, and stops the start
+  rather than being guessed round: another version, a renderer with no name
+  here, a path that is not the project's, no name. `Options.project_diagnostics`
+  is where it is said; without one it is said in the log. A key the engine
+  does not know is passed over with a warning, so a hand's addition does not
+  stop a game.
+
+### The renderer chooses the backend
+
+| Renderer | APIs | Windows | Linux, macOS, Android | Browser |
+| --- | --- | --- | --- | --- |
+| `compatibility` | Direct3D 11, OpenGL 3.3 | Direct3D 11, then OpenGL | OpenGL | WebGL 2 |
+| `modern` | Direct3D 12, Vulkan | not built yet | not built yet | not built yet |
+
+- **`Backend.auto` opens the best of the project's renderer** - the first of
+  `Renderer.backends(os)` - and a folder with no project file is drawn with
+  the compatibility renderer. So on Windows a game opens Direct3D 11 unless
+  asked otherwise, examples and editor included.
+- **A renderer that is not built opens nothing**: a `modern` project stops
+  with `error.RendererNotBuilt` and says to choose `compatibility`, rather
+  than being drawn with something it will not look like.
+- **`--backend` wins over the project**, so one game can be checked on every
+  backend of its renderer - `--backend gl` on Windows - and one outside it is
+  allowed, and said in the log.
 
 ## 🆔 UUIDs
 
@@ -932,8 +986,8 @@ it by path.
 </table>
 
 ```bash
-zig build example-pong
-zig build example-pong -- --backend d3d11
+zig build example-pong                      # Direct3D 11 on Windows, OpenGL elsewhere
+zig build example-pong -- --backend gl      # OpenGL on Windows too
 zig build example-pong -- --frames 420 --capture pong.png
 ```
 
@@ -1055,6 +1109,10 @@ Here, and checked by the tests:
   away from, `uid://` for a file by the UUID beside it, files moved with
   their `.uid` files found where they went, and entities' UUIDs kept beside
   the world as names are.
+- `project.fluxion`: read with no App for a project manager, made and
+  rewritten in place, read by every game as it starts, and its renderer
+  choosing the backend - Direct3D 11 first on Windows - with `--backend`
+  still over it.
 - Reflection: every component described - fields, defaults, ranges, units -
   and found on an entity by its scene name, read and written in place, added
   and taken off; the engine's calls and a game's states made by name, errors
