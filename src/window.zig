@@ -22,6 +22,7 @@ const platform = @import("fluxion_platform");
 const rhi = @import("fluxion_rhi");
 
 const Input = @import("input.zig");
+const dialog = @import("dialog.zig");
 
 const Window = @This();
 const log = std.log.scoped(.fluxion_engine);
@@ -201,6 +202,33 @@ pub fn setVsync(self: *Window, on: bool) Error!void {
 /// `error.Unavailable` for a shape this system has not got.
 pub fn setCursorShape(self: *Window, shape: platform.CursorShape) Error!void {
     try self.handle.setCursorShape(shape);
+}
+
+/// Open the system's file dialog, in front of this window and modal to it.
+/// The answer comes through `pump`. See `dialog`.
+pub fn openFileDialog(self: *Window, options: dialog.FileOptions) Error!dialog.Id {
+    if (comptime dialog.available) {
+        const id = try self.ctx.openFileDialog(.{
+            .window = self.handle,
+            .title = options.title,
+            .multiple = options.multiple,
+            .filters = options.filters,
+            .initial_folder = options.initial_folder,
+        });
+        return @enumFromInt(@intFromEnum(id));
+    } else return error.Unavailable;
+}
+
+/// Open the system's folder dialog, as `openFileDialog` does a file one.
+pub fn openFolderDialog(self: *Window, options: dialog.FolderOptions) Error!dialog.Id {
+    if (comptime dialog.available) {
+        const id = try self.ctx.openFolderDialog(.{
+            .window = self.handle,
+            .title = options.title,
+            .initial_folder = options.initial_folder,
+        });
+        return @enumFromInt(@intFromEnum(id));
+    } else return error.Unavailable;
 }
 
 /// Let a held pointer go when the window loses the keyboard, and take it back

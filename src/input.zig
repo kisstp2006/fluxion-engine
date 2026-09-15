@@ -33,6 +33,8 @@ const testing = std.testing;
 const platform = @import("fluxion_platform");
 const math = @import("fluxion_math");
 
+const dialog = @import("dialog.zig");
+
 const Vec2 = math.Vec2;
 
 const Input = @This();
@@ -101,8 +103,20 @@ trigger_deadzone: f32 = 0.1,
 /// is looking at it.
 focused: bool = true,
 
+/// The dialogs answered this frame, and ones answered since the last frame
+/// ended: see `dialogAnswers`. The first `answers_seen` were there for a
+/// whole frame, and go at the top of the next.
+answers: [answer_capacity]dialog.Answer = undefined,
+answers_len: usize = 0,
+answers_seen: usize = 0,
+
 /// How much typing one frame can hold: far more than a fast typist manages.
 pub const typed_capacity = 32;
+
+/// How many dialog answers one frame can hold. One dialog is open at a time,
+/// so a frame has one at most, and a test that answers for several is still
+/// well inside this.
+pub const answer_capacity = 8;
 
 /// How many controllers can be told apart: fluxion-platform's slots.
 pub const max_pads = platform.gamepad.max_devices;
@@ -443,6 +457,22 @@ pub fn typedThisFrame(self: *const Input) []const Typed {
     return self.typed[0..self.typed_len];
 }
 
+/// The file and folder dialogs answered this frame, each with the id
+/// `App.openFileDialog` or `openFolderDialog` gave. Every system of the frame
+/// sees them; the next frame does not, and the paths are lent until then.
+pub fn dialogAnswers(self: *const Input) []const dialog.Answer {
+    return self.answers[0..self.answers_len];
+}
+
+/// The paths one dialog came back with this frame - none when it was
+/// cancelled - or null when it has not come back this frame.
+pub fn dialogAnswer(self: *const Input, id: dialog.Id) ?[]const []const u8 {
+    for (self.dialogAnswers()) |answer| {
+        if (answer.id == id) return answer.paths;
+    }
+    return null;
+}
+
 /// One controller, by its platform slot. A controller keeps its slot while it
 /// stays plugged in, so slots work as player numbers. An empty slot says no
 /// and zero to everything.
@@ -477,6 +507,29 @@ pub fn beginFrame(self: *Input) void {
     self.pointer.dy = 0;
     self.wheel = .{};
     self.typed_len = 0;
+
+    // The answers a whole frame has had go; one given between frames - by a
+    // test, for the person who is not there - stays for this one.
+    const kept = self.answers_len - self.answers_seen;
+    std.mem.copyForwards(dialog.Answer, self.answers[0..kept], self.answers[self.answers_seen..self.answers_len]);
+    self.answers_len = kept;
+    self.answers_seen = 0;
+}
+
+/// Mark what this frame's systems have seen, for `beginFrame` to let go.
+/// Called by `App` at the end of every frame, one whose system failed too.
+pub fn endFrame(self: *Input) void {
+    self.answers_seen = self.answers_len;
+}
+
+/// A dialog's answer, for this frame's systems: what `apply` does with the
+/// platform's, and what a test calls to answer a headless dialog. Given
+/// between frames, it is the next frame's. Past `answer_capacity` in one
+/// frame, it is dropped.
+pub fn answerDialog(self: *Input, answer: dialog.Answer) void {
+    if (self.answers_len == self.answers.len) return;
+    self.answers[self.answers_len] = answer;
+    self.answers_len += 1;
 }
 
 /// Forget the edges a fixed step has just seen. Called by `App` after every
@@ -523,8 +576,18 @@ pub fn readPads(self: *Input, devices: []const platform.Gamepad) void {
 }
 
 /// Fold one platform event in. Events that are not input are ignored, so a
-/// caller may hand over everything the queue produced.
+/// caller may hand over everything the queue produced. A dialog's answer is
+/// input too: see `dialogAnswers`.
 pub fn apply(self: *Input, ev: platform.Event) void {
+    if (comptime dialog.available) {
+        switch (ev) {
+            .file_dialog => |answered| return self.answerDialog(.{
+                .id = @enumFromInt(@intFromEnum(answered.id)),
+                .paths = answered.paths,
+            }),
+            else => {},
+        }
+    }
     switch (ev) {
         .key => |k| {
             self.mods = k.mods;
@@ -972,4 +1035,43 @@ test "a locked pointer does not turn anything while the window is in the backgro
     input.apply(.{ .focus = .{ .window = .none, .value = true } });
     input.apply(cursorEvent(0, 0, 3, 0));
     try testing.expectEqual(@as(f32, 3), input.pointer.dx);
+}
+
+test "a dialog's answer is there for the frame it came in, and one given between frames for the next" {
+    var input: Input = .{};
+    const early: dialog.Id = @enumFromInt(1);
+    const late: dialog.Id = @enumFromInt(2);
+
+    // Arrived with the frame's events: this frame's.
+    input.beginFrame();
+    input.answerDialog(.{ .id = early, .paths = &.{"C:/games/meadow"} });
+    try testing.expectEqualStrings("C:/games/meadow", input.dialogAnswer(early).?[0]);
+    input.endFrame();
+
+    // Given after the frame ended: kept through the next frame's start.
+    input.answerDialog(.{ .id = late, .paths = &.{} });
+    input.beginFrame();
+    try testing.expect(input.dialogAnswer(early) == null);
+    try testing.expectEqual(@as(usize, 0), input.dialogAnswer(late).?.len);
+    input.endFrame();
+    input.beginFrame();
+    try testing.expectEqual(@as(usize, 0), input.dialogAnswers().len);
+}
+
+test "a frame's dialog answers past what it holds are dropped, never written past the end" {
+    var input: Input = .{};
+    input.beginFrame();
+    for (0..answer_capacity + 3) |n| input.answerDialog(.{ .id = @enumFromInt(n + 1), .paths = &.{} });
+    try testing.expectEqual(@as(usize, answer_capacity), input.dialogAnswers().len);
+    try testing.expect(input.dialogAnswer(@enumFromInt(answer_capacity)) != null);
+    try testing.expect(input.dialogAnswer(@enumFromInt(answer_capacity + 1)) == null);
+}
+
+test "the platform's answer to a dialog is folded in with the rest of the events" {
+    if (comptime dialog.available) {
+        var input: Input = .{};
+        input.beginFrame();
+        input.apply(.{ .file_dialog = .{ .window = .none, .id = @enumFromInt(7), .paths = &.{"/art/hero.png"} } });
+        try testing.expectEqualStrings("/art/hero.png", input.dialogAnswer(@enumFromInt(7)).?[0]);
+    } else return error.SkipZigTest;
 }

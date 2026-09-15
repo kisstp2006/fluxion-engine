@@ -55,6 +55,10 @@ pub const States = @import("states.zig");
 /// files known by the UUID in the `.uid` file beside them: `app.project`.
 pub const Project = @import("Project.zig");
 
+/// File and folder dialogs, the system's own: `app.openFileDialog`,
+/// `app.openFolderDialog`, and the answer in `app.input.dialogAnswer`.
+pub const dialog = @import("dialog.zig");
+
 /// A 128-bit name for a thing, unique everywhere: what an entity is known by
 /// in a scene - `app.uuidOf`, `app.findUuid` - and a project's file by in its
 /// `.uid` file.
@@ -229,6 +233,7 @@ test {
     _ = DebugViews;
     _ = States;
     _ = Project;
+    _ = dialog;
     _ = attr;
     _ = assets;
     _ = components;

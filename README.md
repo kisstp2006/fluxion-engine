@@ -50,6 +50,7 @@
 | `scene` | A world written down and read back, as JSON or as CBOR. |
 | `Bodies` | Which body is which entity's: the physics world kept in step with the components. |
 | `Clipboard` | Text copied and pasted: the system's, or the program's own with no window. |
+| `dialog` | The system's file and folder dialogs: what `app.openFileDialog` asks for, and the answer `app.input` holds for a frame. |
 | `Commands` | Spawns, despawns, adds and removes that wait for the system asking for them to return. |
 | `States` | A game's own states, each an enum with one value at a time, and the systems that run in them. |
 | `Project` | Where a game's files are: `res://` paths from the project's root, the UUIDs in the `.uid` files beside them, and `project.fluxion`, whose renderer chooses the backend. |
@@ -311,6 +312,50 @@ const can_paste = app.hasClipboardText();           // a Paste entry that greys 
 - **Without a window - headless, in a test - the clipboard is the program's
   own**, so copying and pasting still work inside it, and a test never
   overwrites what the person running it had copied.
+
+## 📂 File and folder dialogs
+
+```zig
+browsing = try app.openFolderDialog(.{ .title = "Where the project goes" });
+picking = try app.openFileDialog(.{
+    .multiple = true,
+    .filters = &.{.{ .name = "Images", .extensions = &.{ "png", "jpg" } }},
+});
+
+// In any system, a frame or more later:
+if (app.input.dialogAnswer(browsing)) |paths| {
+    if (paths.len > 0) try useFolder(paths[0]); // none: it was cancelled
+}
+```
+
+- **They are the system's own**, through
+  [Fluxion Platform](https://github.com/kisstp2006/fluxion-platform): over
+  the window and modal to it, with the places and the recent files the player
+  already knows.
+- **Asking returns at once**, with an id, and the game goes on running and
+  drawing while the dialog is open. The answer is in `app.input` for every
+  system of the frame it arrives in, and gone in the next;
+  `app.input.dialogAnswers()` is all of that frame's.
+- **A cancel is an answer too**, with no paths, so every dialog is answered
+  exactly once.
+- **The paths are lent** until the frame ends - they are the platform's, and
+  its next pump frees them - so a game that keeps one keeps a copy. A frame
+  whose system failed lets them go all the same, so a loop that carries on
+  after an error never reads one that is gone.
+- **One dialog at a time.** Asking while one is open is `error.Unavailable`,
+  and so is a filter two systems would read differently - `"*.png"`,
+  `"png;jpg"` - and a platform with no dialogs yet: X11, Wayland, Android.
+  `fx.dialog.available` says whether the fluxion-platform this was built with
+  has them at all.
+- **Without a window, a dialog is never answered by itself.** The app still
+  hands out ids, and a test answers for the person who is not there, the way
+  it presses keys for them:
+
+```zig
+const id = try app.openFolderDialog(.{});
+app.input.answerDialog(.{ .id = id, .paths = &.{"C:/games/meadow"} });
+_ = try app.step(); // this frame's systems see it, the next frame's do not
+```
 
 ## ⌛ Frame pacing
 
@@ -1070,6 +1115,9 @@ Here, and checked by the tests:
 - The system clipboard, for the interface's copy and paste and for the
   game's own - `setClipboardText`, `clipboardText`, `hasClipboardText` - and
   the program's own clipboard when there is no window.
+- The system's file and folder dialogs, `openFileDialog` and
+  `openFolderDialog`, answered in `app.input` a frame or more later, and
+  answered by a test when there is no window.
 - Frame pacing: vsync switched while running, a frame cap that holds its
   average, and a minimised window that sleeps instead of drawing.
 - Every system timed, under the name it was added with: its time over the

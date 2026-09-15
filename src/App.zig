@@ -43,6 +43,7 @@ const Bodies = @import("bodies.zig");
 const Clipboard = @import("clipboard.zig");
 const Commands = @import("commands.zig");
 const DebugViews = @import("debug_views.zig");
+const dialog = @import("dialog.zig");
 const Project = @import("Project.zig");
 const States = @import("states.zig");
 const Interface = @import("interface.zig");
@@ -366,6 +367,9 @@ interface: Interface = .{},
 /// `setClipboardText`.
 clipboard: Clipboard = .{},
 
+/// The id the next headless dialog gets. See `openFileDialog`.
+next_dialog: u32 = 1,
+
 time: Time,
 
 /// Where each interpolating transform was before the last fixed step: the
@@ -474,6 +478,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .ui = .init(gpa),
         .interface = .{},
         .clipboard = .{},
+        .next_dialog = 1,
         // A fixed frame time wins over the clock, and the clock over nothing.
         .time = .init(if (options.frame_time) |seconds|
             .{ .fixed = seconds }
@@ -898,6 +903,12 @@ pub fn step(self: *App) anyerror!bool {
     // The old edges go first, then this frame's events. The resize flag is an
     // edge too.
     self.input.beginFrame();
+    // Every system has had this frame's dialog answers when it ends - or had
+    // its chance, when one of them failed - and they go at the next
+    // `beginFrame`, before the pump that frees the platform's paths in them.
+    // A `defer`, so a loop that goes on after an error never reads a path
+    // that is gone.
+    defer self.input.endFrame();
     self.schedule.beginFrame();
     self.resized = false;
 
@@ -1769,6 +1780,34 @@ pub fn cursor(self: *const App) Cursor {
 /// without a window.
 pub fn setCursorShape(self: *App, shape: CursorShape) Window.Error!void {
     if (self.window) |*window| try window.setCursorShape(shape);
+}
+
+/// Open the system's file dialog over the window, and say which one it is:
+/// its answer is `input.dialogAnswer(id)` in the frame it comes back in. See
+/// `dialog`.
+///
+/// ```zig
+/// opening = try app.openFileDialog(.{ .filters = &.{.{ .name = "Scenes", .extensions = &.{ "json", "scene" } }} });
+/// ```
+///
+/// `error.Unavailable` while another is open, and where the platform has no
+/// dialogs. Headless, it is never answered by itself: a test answers it with
+/// `input.answerDialog`.
+pub fn openFileDialog(self: *App, options: dialog.FileOptions) dialog.Error!dialog.Id {
+    if (self.window) |*window| return window.openFileDialog(options);
+    return self.headlessDialog();
+}
+
+/// Open the system's folder dialog over the window. See `openFileDialog`.
+pub fn openFolderDialog(self: *App, options: dialog.FolderOptions) dialog.Error!dialog.Id {
+    if (self.window) |*window| return window.openFolderDialog(options);
+    return self.headlessDialog();
+}
+
+fn headlessDialog(self: *App) dialog.Id {
+    defer self.next_dialog +%= 1;
+    if (self.next_dialog == 0) self.next_dialog = 1;
+    return @enumFromInt(self.next_dialog);
 }
 
 /// Teach the platform controllers it does not know, from text in SDL's
@@ -3471,4 +3510,79 @@ test "auto opens the best of the project's renderer, and a backend asked for win
 
     const flags = try App.parseFlags(App.Flags, &.{ "game", "--backend", "gl" });
     try testing.expectEqual(Backend.gl, flags.apply(.{}).backend);
+}
+
+test "a headless dialog is never answered by itself, and a test's answer comes in the next frame" {
+    const Seen = struct {
+        var answers: usize = 0;
+        var last: dialog.Id = .none;
+        var paths: usize = 0;
+
+        fn look(a: *App) anyerror!void {
+            for (a.input.dialogAnswers()) |answer| {
+                answers += 1;
+                last = answer.id;
+                paths += answer.paths.len;
+            }
+        }
+    };
+    Seen.answers = 0;
+    Seen.paths = 0;
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addSystem(.update, "look", Seen.look);
+
+    const folder = try app.openFolderDialog(.{ .title = "Where the project goes" });
+    const file = try app.openFileDialog(.{ .multiple = true, .filters = &.{.{ .name = "Scenes", .extensions = &.{ "json", "scene" } }} });
+    try testing.expect(folder != .none and file != .none and folder != file);
+
+    for (0..3) |_| _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), Seen.answers);
+
+    app.input.answerDialog(.{ .id = folder, .paths = &.{"C:/games/meadow"} });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Seen.answers);
+    try testing.expectEqual(folder, Seen.last);
+    try testing.expectEqual(@as(usize, 1), Seen.paths);
+
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Seen.answers);
+    try testing.expect(app.input.dialogAnswer(folder) == null);
+
+    // A cancel is an answer, with no paths.
+    app.input.answerDialog(.{ .id = file, .paths = &.{} });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 2), Seen.answers);
+    try testing.expectEqual(@as(usize, 0), app.input.dialogAnswer(file).?.len);
+
+    // The ids go round after four billion, past `.none`.
+    app.next_dialog = std.math.maxInt(u32);
+    try testing.expectEqual(@as(u32, std.math.maxInt(u32)), @intFromEnum(try app.openFileDialog(.{})));
+    try testing.expectEqual(@as(u32, 1), @intFromEnum(try app.openFileDialog(.{})));
+}
+
+test "a frame that fails still lets its dialog answers go" {
+    // The platform's paths are good until its next pump. An answer that a
+    // failed frame kept would be read in the next one from memory already
+    // given back - by an editor, which goes on after a system's error.
+    const Once = struct {
+        var failed = false;
+
+        fn fail(_: *App) anyerror!void {
+            if (failed) return;
+            failed = true;
+            return error.Broken;
+        }
+    };
+    Once.failed = false;
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addSystem(.update, "fails once", Once.fail);
+
+    const id = try app.openFileDialog(.{});
+    app.input.answerDialog(.{ .id = id, .paths = &.{"C:/games/meadow/hero.png"} });
+    try testing.expectError(error.Broken, app.step());
+
+    _ = try app.step();
+    try testing.expect(app.input.dialogAnswer(id) == null);
 }
