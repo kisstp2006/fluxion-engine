@@ -279,9 +279,9 @@ if (app.resized) layOutAgain(app.width, app.height);
   `.normal` means the window's own size even for one that was maximised
   before it was minimised, which Windows would otherwise bring back
   maximised.
-- **Limits apply at once.** The platform only enforces them on the next
-  drag, so a window already outside new limits is brought inside them when
-  they are set.
+- **Limits apply at once.** A window already outside new limits is brought
+  inside them when they are set, and one that is maximised, minimised or
+  fullscreen when it is a window again.
 - **`Options.resizable` and `Options.maximized`** say what can only be said
   when the window is made. Without a window - headless - all of this is
   nothing, and says so without failing.

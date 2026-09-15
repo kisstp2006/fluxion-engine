@@ -57,8 +57,9 @@ pub const Cursor = enum {
     /// `Input.pointer` holds still and only `dx` and `dy` move.
     locked,
 
-    /// Whether this mode keeps the pointer inside the window, and so has to
-    /// let go of it when the window loses the keyboard.
+    /// Whether this mode keeps the pointer inside the window - and so lets go
+    /// of it while the window is without the keyboard, which the platform
+    /// sees to.
     pub fn holds(self: Cursor) bool {
         return self == .confined or self == .locked;
     }
@@ -78,8 +79,9 @@ pub const State = enum {
     normal,
     /// Filling the monitor's work area, frame included.
     maximized,
-    /// In the taskbar. `App.width` and `height` hold at the last real size,
-    /// because a swapchain of nought by nought is an error on every backend.
+    /// In the taskbar. `App.width` and `height` hold at the last real size -
+    /// the platform reports no other - because a swapchain of nought by
+    /// nought is an error on every backend.
     minimized,
 };
 
@@ -113,9 +115,7 @@ resized: bool = false,
 /// Set by the close button, by Alt+F4, and by `requestClose`.
 closing: bool = false,
 
-/// What the game asked the pointer to do. A held pointer is let go while the
-/// window is in the background, and this is what it goes back to. See
-/// `refocus`.
+/// What the game asked the pointer to do.
 cursor_wanted: Cursor = .normal,
 
 /// Whether the window has the keyboard. Asked of the platform at `open`,
@@ -163,29 +163,22 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
 
 pub fn close(self: *Window) void {
     // An exclusive display mode and a held pointer belong to the whole
-    // machine, and outlive the window unless they are put back first.
-    if (self.handle.fullscreen() == .exclusive) {
-        self.handle.setFullscreen(.windowed) catch {};
-    }
-    if (self.cursor_wanted.holds()) {
-        self.handle.setCursorMode(.normal) catch {};
-    }
+    // machine: the platform puts both back as the window goes.
     self.handle.destroy();
     self.ctx.deinit();
     self.* = undefined;
 }
 
 /// Where the pointer may go, and whether it shows. A mode that holds the
-/// pointer, asked for from the background, is taken when the window comes
-/// back; see `refocus`.
+/// pointer holds it only while the window has the keyboard, as GLFW's does:
+/// the platform lets go when an alt-tab takes the focus, and takes the
+/// pointer back when it returns. Asked for from the background, it waits.
 pub fn setCursor(self: *Window, wanted: Cursor) Error!void {
     // Raw motion matters only while locked, and the platform switches it with
     // the mode. Where there is none, locking works on accelerated numbers.
     if (wanted == .locked) _ = self.handle.setRawMouseMotion(true);
 
-    if (self.focused or !wanted.holds()) {
-        try self.handle.setCursorMode(wanted.platformMode());
-    }
+    try self.handle.setCursorMode(wanted.platformMode());
     self.cursor_wanted = wanted;
 }
 
@@ -231,28 +224,15 @@ pub fn openFolderDialog(self: *Window, options: dialog.FolderOptions) Error!dial
     } else return error.Unavailable;
 }
 
-/// Let a held pointer go when the window loses the keyboard, and take it back
-/// when it returns, as GLFW does. The Windows platform does neither, so an
-/// alt-tabbed game would keep the pointer trapped, or come back without it.
-fn refocus(self: *Window, focused: bool) void {
-    self.focused = focused;
-    if (!self.cursor_wanted.holds()) return;
-
-    const mode: platform.CursorMode = if (focused) self.cursor_wanted.platformMode() else .normal;
-    self.handle.setCursorMode(mode) catch |err| {
-        log.warn("could not {s} the pointer: {t}", .{ if (focused) "take back" else "let go of", err });
-    };
-}
-
 /// Fill the monitor the window is on, or go back to being a window. The size
 /// is read back at once, so `App.create` makes its swapchain at the right
 /// size.
 pub fn setFullscreen(self: *Window, wanted: Fullscreen) Error!void {
     const request: platform.Fullscreen = switch (wanted) {
         .windowed => .windowed,
-        .borderless => .{ .borderless = self.monitorIndex() orelse return error.Unavailable },
+        .borderless => .{ .borderless = self.handle.monitor() orelse return error.Unavailable },
         .exclusive => |mode| .{ .exclusive = .{
-            .monitor = self.monitorIndex() orelse return error.Unavailable,
+            .monitor = self.handle.monitor() orelse return error.Unavailable,
             .mode = mode,
         } },
     };
@@ -295,18 +275,13 @@ pub fn position(self: *const Window) [2]i32 {
     return self.handle.position();
 }
 
-/// How small and how large the player may drag the window. The platform
-/// applies limits only on the next drag, so a window already outside them is
-/// brought inside here.
+/// How small and how large the player may drag the window. A window already
+/// outside them is brought inside at once, and its size read back; one that
+/// is maximised, minimised or fullscreen is sized by its monitor, and meets
+/// the limits when it is a window again.
 pub fn setSizeLimits(self: *Window, limits: SizeLimits) Error!void {
     try self.handle.setSizeLimits(limits);
-
-    // A maximised or fullscreen window is sized by its monitor, and meets the
-    // limits when it is a window again.
-    if (self.state() != .normal or self.fullscreen() != .windowed) return;
-    const width = within(self.width, limits.min_width, limits.max_width);
-    const height = within(self.height, limits.min_height, limits.max_height);
-    if (width != self.width or height != self.height) try self.setSize(width, height);
+    self.refreshSize();
 }
 
 /// Maximise the window, minimise it, or put it back. Maximising leaves
@@ -319,7 +294,7 @@ pub fn setState(self: *Window, wanted: State) Error!void {
             if (self.fullscreen() != .windowed) try self.setFullscreen(.windowed);
             try self.handle.maximize();
         },
-        .normal => try self.restoreFully(),
+        .normal => try self.handle.restore(),
     }
     self.refreshSize();
 }
@@ -335,55 +310,14 @@ pub fn state(self: *const Window) State {
 /// size and a place of its own to be given.
 fn makeOrdinary(self: *Window) Error!void {
     if (self.fullscreen() != .windowed) try self.setFullscreen(.windowed);
-    try self.restoreFully();
-}
-
-/// Back to the window's own size and place. Windows restores a minimised
-/// window to how it was before - maximised, perhaps - so this restores up to
-/// twice.
-fn restoreFully(self: *Window) Error!void {
-    for (0..2) |_| {
-        if (self.state() == .normal) return;
-        try self.handle.restore();
-    }
-}
-
-/// A size held between its limits, where a limit of zero is none.
-fn within(value: u32, min: u32, max: u32) u32 {
-    var held = value;
-    if (min != 0) held = @max(held, min);
-    if (max != 0) held = @min(held, max);
-    return held;
-}
-
-/// Which monitor the window is on: the one under its middle, or the primary
-/// one when it is over none - as a minimised window is, parked far off the
-/// screen. Null only when there are no monitors.
-fn monitorIndex(self: *Window) ?usize {
-    const list = self.ctx.monitors();
-    if (list.len == 0) return null;
-
-    // The middle, so a window straddling two belongs to the one showing more
-    // of it. Wayland does not say where a window is, so there it is the first.
-    const at = self.handle.position();
-    const middle_x = at[0] +| @as(i32, @intCast(self.width / 2));
-    const middle_y = at[1] +| @as(i32, @intCast(self.height / 2));
-
-    for (list, 0..) |mon, i| {
-        if (mon.bounds.contains(middle_x, middle_y)) return i;
-    }
-    for (list, 0..) |mon, i| {
-        if (mon.primary) return i;
-    }
-    return 0;
+    // One step from minimised or maximised, even minimised from maximised.
+    if (self.state() != .normal) try self.handle.restore();
 }
 
 /// Read the drawable size back, and flag a resize if it moved, as `pump`
-/// does.
+/// does. A minimised window keeps its last real size.
 fn refreshSize(self: *Window) void {
     const fb = self.handle.framebufferSize();
-    // Zero is a minimised window, held at its last real size.
-    if (fb[0] == 0 or fb[1] == 0) return;
     if (fb[0] == self.width and fb[1] == self.height) return;
     self.width = fb[0];
     self.height = fb[1];
@@ -424,11 +358,10 @@ pub fn pump(self: *Window, input: *Input) bool {
         input.apply(ev);
         switch (ev) {
             .close => self.closing = true,
-            .focus => |change| self.refocus(change.value),
+            .focus => |change| self.focused = change.value,
             .framebuffer_resize => |size| {
-                // Minimising reports nought by nought on Windows, which no
-                // swapchain can be: hold the last real size instead.
-                if (size.width == 0 or size.height == 0) continue;
+                // Never nought by nought: a minimised window keeps its last
+                // real size.
                 if (size.width == self.width and size.height == self.height) continue;
                 self.width = size.width;
                 self.height = size.height;
