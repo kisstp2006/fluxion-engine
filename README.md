@@ -393,6 +393,27 @@ if (!app.input.focused) pause(app);
   flip-model swapchain in fluxion-rhi has two buffers and no tearing support.
   It is the backend Windows opens by default now.
 
+## 📱 In the background
+
+```zig
+fn keep(app: *fx.App) !void {
+    if (app.input.justSuspended()) try app.saveScene("res://save.json", .{}); // the last word
+    if (app.input.lowMemory()) forgetWhatCanBeLoadedAgain(app);
+}
+```
+
+- **Only a phone and a page go into the background.** A desktop program
+  never does, and none of this happens to it.
+- **The frame the news comes in runs as usual**, and `justSuspended()` is a
+  system's last chance to save: Android may end a program in the background
+  without another word. The frames after it run no systems and draw
+  nothing until `justResumed()`, and the clock starts again then, so the
+  time away is not one long frame throwing everything forward.
+- **Nothing is drawn while Android has taken the surface away**, and the
+  swapchain is made again at the size the new one comes back at.
+- **`lowMemory()` is the system asking for memory back**, for the one frame
+  it asked in: a game lets go of what it can load again.
+
 ## 🎨 The 2D layer
 
 One quad in a vertex buffer and a second buffer stepping once per instance
@@ -1201,6 +1222,8 @@ Here, and checked by the tests:
   under a game's own zoom; the platform's text input switched with its focus,
   for a phone's soft keyboard and an input method composing at the caret;
   and the wheel scrolling the lines, or the page, the system is set to.
+- The background on a phone or a page: a frame to save in, nothing run or
+  drawn until the program is back, and the system's call for memory.
 - Frame pacing: vsync switched while running, a frame cap that holds its
   average, and a minimised window that sleeps instead of drawing.
 - Every system timed, under the name it was added with: its time over the

@@ -399,6 +399,15 @@ pub fn pump(self: *Window, input: *Input) bool {
                 self.height = size.height;
                 self.resized = true;
             },
+            // Android's surface back after the background, perhaps at
+            // another size: the swapchain is made again at that one.
+            .surface_created => |surface| {
+                if (surface.width == 0 or surface.height == 0) continue;
+                if (surface.width == self.width and surface.height == self.height) continue;
+                self.width = surface.width;
+                self.height = surface.height;
+                self.resized = true;
+            },
             else => {},
         }
     }

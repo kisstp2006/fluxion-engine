@@ -932,6 +932,16 @@ pub fn step(self: *App) anyerror!bool {
     }
     self.fitInterface();
 
+    // In the background - an Android app switched away from, a page hidden -
+    // a frame runs nothing and draws nothing, save the one the news came in,
+    // for its systems to save what they must. Coming back starts the clock
+    // again, so the time away is not a frame.
+    if (self.input.suspended and !self.input.justSuspended()) {
+        try self.waitForNextFrame(true);
+        return self.running;
+    }
+    if (self.input.justResumed()) self.time.restart();
+
     self.time.tick();
     self.debug_frame.advance(self.time.delta);
     if (self.hasInterface()) try self.feedInterface();
@@ -994,8 +1004,9 @@ pub fn step(self: *App) anyerror!bool {
 
     if (self.hasInterface()) try self.layOutInterface();
 
+    // Nothing to draw on while Android has taken the surface away.
     const minimized = self.windowState() == .minimized;
-    if (!minimized) try self.render();
+    if (!minimized and !self.input.surface_lost) try self.render();
 
     if (self.frames_left) |left| {
         if (left <= 1) {
@@ -3888,6 +3899,79 @@ test "a new scene is written empty, never over another, and says what it is with
 
     try files.tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.json", .data = "{ \"hello\": 1 }" });
     try testing.expect(try app.sceneInfo("res://notes.json", null) == null);
+}
+
+test "a program in the background runs no systems until it is back, but for the frame it left in" {
+    const Count = struct {
+        var runs: usize = 0;
+        var left: usize = 0;
+        var back: usize = 0;
+
+        fn look(a: *App) anyerror!void {
+            runs += 1;
+            if (a.input.justSuspended()) left += 1;
+            if (a.input.justResumed()) back += 1;
+        }
+    };
+    Count.runs = 0;
+    Count.left = 0;
+    Count.back = 0;
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addSystem(.update, "look", Count.look);
+
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Count.runs);
+
+    // Told between frames, as the next pump would tell it.
+    app.input.apply(.suspended);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 2), Count.runs);
+    try testing.expectEqual(@as(usize, 1), Count.left);
+
+    for (0..3) |_| try testing.expect(try app.step());
+    try testing.expectEqual(@as(usize, 2), Count.runs);
+
+    app.input.apply(.resumed);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 3), Count.runs);
+    try testing.expectEqual(@as(usize, 1), Count.back);
+}
+
+test "the time a program spent in the background is not a frame" {
+    // The clock, not a fixed frame, so time away can be measured.
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    _ = try app.step();
+
+    app.input.apply(.suspended);
+    _ = try app.step();
+    _ = try app.step();
+
+    // Away for ever, as far as the clock can tell, and back.
+    app.time.last = .zero;
+    app.input.apply(.resumed);
+    _ = try app.step();
+    try testing.expectEqual(@as(f32, 0), app.time.unscaled_delta);
+}
+
+test "memory running low is told to the systems of one frame" {
+    const Seen = struct {
+        var low: usize = 0;
+
+        fn look(a: *App) anyerror!void {
+            if (a.input.lowMemory()) low += 1;
+        }
+    };
+    Seen.low = 0;
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addSystem(.update, "look", Seen.look);
+
+    app.input.apply(.low_memory);
+    _ = try app.step();
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Seen.low);
 }
 
 test "the interface is laid out at the game's zoom times the display's scale" {

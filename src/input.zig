@@ -119,6 +119,23 @@ drops: [drop_capacity]Dropped = undefined,
 drops_len: usize = 0,
 drops_seen: usize = 0,
 
+/// Whether the program is in the background, from `.suspended` to
+/// `.resumed`: an Android app switched away from, a page that was hidden.
+/// A desktop program never is. See `justSuspended`.
+suspended: bool = false,
+
+/// Whether the window has nothing to draw on, from `.surface_lost` to
+/// `.surface_created`: an Android app's, while it is in the background.
+surface_lost: bool = false,
+
+/// The lifecycle's edges this frame, and ones told since the last frame
+/// ended, kept as the dialogs' answers are.
+happened: std.EnumSet(Happening) = .initEmpty(),
+happened_seen: std.EnumSet(Happening) = .initEmpty(),
+
+/// What the system says of the program as a whole, rather than of a key.
+pub const Happening = enum { suspended, resumed, low_memory };
+
 /// How much typing one frame can hold: far more than a fast typist manages.
 pub const typed_capacity = 32;
 
@@ -519,6 +536,26 @@ pub fn dropFiles(self: *Input, drop: Dropped) void {
     self.drops_len += 1;
 }
 
+/// Whether the program went into the background this frame: a system's
+/// last chance to save, because the frames after it run no systems until it
+/// comes back - and Android may end a program in the background without
+/// another word.
+pub fn justSuspended(self: *const Input) bool {
+    return self.happened.contains(.suspended);
+}
+
+/// Whether the program came back from the background this frame. The clock
+/// starts again with it, so the time away is not a frame.
+pub fn justResumed(self: *const Input) bool {
+    return self.happened.contains(.resumed);
+}
+
+/// Whether the system asked for memory back this frame: a game lets go of
+/// what it can load again. Android's, and never a desktop's.
+pub fn lowMemory(self: *const Input) bool {
+    return self.happened.contains(.low_memory);
+}
+
 /// One controller, by its platform slot. A controller keeps its slot while it
 /// stays plugged in, so slots work as player numbers. An empty slot says no
 /// and zero to everything.
@@ -566,6 +603,10 @@ pub fn beginFrame(self: *Input) void {
     std.mem.copyForwards(Dropped, self.drops[0..still], self.drops[self.drops_seen..self.drops_len]);
     self.drops_len = still;
     self.drops_seen = 0;
+
+    // And the lifecycle's edges.
+    self.happened = self.happened.differenceWith(self.happened_seen);
+    self.happened_seen = .initEmpty();
 }
 
 /// Mark what this frame's systems have seen, for `beginFrame` to let go.
@@ -573,6 +614,7 @@ pub fn beginFrame(self: *Input) void {
 pub fn endFrame(self: *Input) void {
     self.answers_seen = self.answers_len;
     self.drops_seen = self.drops_len;
+    self.happened_seen = self.happened;
 }
 
 /// A dialog's answer, for this frame's systems: what `apply` does with the
@@ -727,6 +769,17 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 .y = if (point) @floatCast(d.y) else self.pointer.y,
             });
         },
+        .suspended => {
+            self.suspended = true;
+            self.happened.insert(.suspended);
+        },
+        .resumed => {
+            self.suspended = false;
+            self.happened.insert(.resumed);
+        },
+        .low_memory => self.happened.insert(.low_memory),
+        .surface_lost => self.surface_lost = true,
+        .surface_created => self.surface_lost = false,
         else => {},
     }
 }
@@ -1189,4 +1242,36 @@ test "the platform's drop is folded in with the rest of the events, at the place
     // gets the pointer's last place.
     try testing.expectEqual(@as(f32, if (point) 120 else 7), got[0].x);
     try testing.expectEqual(@as(f32, if (point) 45.5 else 9), got[0].y);
+}
+
+test "going into the background is an edge for its frame and a level until the program is back" {
+    var input: Input = .{};
+
+    // Told in the frame: that frame's.
+    input.beginFrame();
+    input.apply(.suspended);
+    try testing.expect(input.justSuspended() and input.suspended);
+    input.endFrame();
+
+    input.beginFrame();
+    try testing.expect(!input.justSuspended() and input.suspended);
+    input.endFrame();
+
+    // Told between frames - by a test - it is the next frame's.
+    input.apply(.resumed);
+    input.apply(.low_memory);
+    input.beginFrame();
+    try testing.expect(input.justResumed() and input.lowMemory() and !input.suspended);
+    input.endFrame();
+    input.beginFrame();
+    try testing.expect(!input.justResumed() and !input.lowMemory());
+}
+
+test "a window without a surface is one until it has a surface again" {
+    var input: Input = .{};
+    try testing.expect(!input.surface_lost);
+    input.apply(.{ .surface_lost = .none });
+    try testing.expect(input.surface_lost);
+    input.apply(.{ .surface_created = .{ .window = .none, .width = 1080, .height = 2400 } });
+    try testing.expect(!input.surface_lost);
 }

@@ -64,6 +64,9 @@ next_frame: std.Io.Timestamp = .zero,
 /// Set by `stepOnce`, and spent by the next frame.
 step_once: bool = false,
 
+/// Set by `restart`, and spent by the next frame.
+restarting: bool = false,
+
 /// A countdown that lives in a component: a serve after a pause, a cooldown.
 ///
 /// ```zig
@@ -113,9 +116,18 @@ pub fn stepOnce(self: *Time) void {
     self.step_once = true;
 }
 
+/// Forget when the last frame was, so the next one measures nothing from
+/// the clock: after the program was in the background, the time it was away
+/// is not a frame. A fixed source is the same length regardless.
+pub fn restart(self: *Time) void {
+    self.restarting = true;
+}
+
 /// Read the clock and work out this frame's length. Called once a frame, by
 /// `App.step`.
 pub fn tick(self: *Time) void {
+    const restarting = self.restarting;
+    self.restarting = false;
     var raw = switch (self.source) {
         .fixed => |seconds| seconds,
         .clock => |io| blk: {
@@ -123,7 +135,7 @@ pub fn tick(self: *Time) void {
             defer self.last = now;
             // The first frame has nothing to measure from, and counting the
             // start-up would move everything before anything is on screen.
-            if (self.frame == 0) break :blk 0;
+            if (self.frame == 0 or restarting) break :blk 0;
             const ns = self.last.durationTo(now).nanoseconds;
             break :blk @as(f32, @floatFromInt(@as(i64, @intCast(ns)))) / std.time.ns_per_s;
         },
@@ -205,6 +217,23 @@ test "the accumulator hands out whole steps and keeps the remainder" {
 
     try std.testing.expectEqual(@as(u32, 2), steps);
     try std.testing.expectApproxEqAbs(@as(f32, 0.005), time.accumulator, 0.0001);
+}
+
+test "the frame after a restart measures nothing, however long the program was away" {
+    var time = Time.init(.{ .clock = std.testing.io });
+    time.tick();
+
+    // Away far longer than any frame: clamped, as a stall is.
+    time.last = .zero;
+    time.tick();
+    try std.testing.expectEqual(time.max_delta, time.unscaled_delta);
+
+    // Away as long again, and back through `restart`: no frame at all.
+    time.last = .zero;
+    time.restart();
+    time.tick();
+    try std.testing.expectEqual(@as(f32, 0), time.unscaled_delta);
+    try std.testing.expect(!time.restarting);
 }
 
 test "a stalled frame is clamped rather than teleporting everything" {
