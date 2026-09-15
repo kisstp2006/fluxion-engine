@@ -140,6 +140,10 @@ pub const Error = error{
     NoIo,
 } || Allocator.Error || rhi.Error;
 
+/// The biggest font file read: far past any typeface a game ships, and short
+/// of reading a wrongly named video into memory.
+const font_limit = 32 << 20;
+
 /// How a font should be opened.
 pub const FontOptions = struct {
     /// The glyph atlas's side. 512 holds a couple of alphabets at game sizes.
@@ -167,6 +171,11 @@ fonts: FontTable = .empty,
 /// What a `Text2D` with no font of its own is drawn in: the first font
 /// loaded.
 default_font: FontHandle = .none,
+
+/// How many times a font has been read again, counting up. A font read
+/// again keeps its address, so whoever holds glyphs drawn from one - the
+/// interface's renderer - watches this to draw them again. See `reloadFont`.
+font_reloads: u32 = 0,
 
 /// One opaque white texel. See the module comment.
 white: TextureHandle = .none,
@@ -382,7 +391,7 @@ pub fn loadFont(self: *Assets, path: []const u8, options: FontOptions) !FontHand
     const file = try self.project.osPath(self.gpa, source);
     defer self.gpa.free(file);
 
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .limited(32 << 20));
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .limited(font_limit));
     defer self.gpa.free(bytes);
     self.learnUid(source);
 
@@ -432,6 +441,93 @@ pub fn flushFonts(self: *Assets) !void {
         try self.device.updateTexture(font.texture, font.atlas.pixels, font.atlas.rowPitch());
         font.atlas.markClean();
     }
+}
+
+/// Read a texture's file again, in place: the handle stays, so every sprite
+/// and field holding it shows the new pixels, at the new size when the size
+/// changed. Says whether there was a file to read - not for an expired
+/// handle, nor for a texture made from pixels. A file that no longer reads
+/// is an error, and the texture keeps what it had.
+pub fn reloadTexture(self: *Assets, handle: TextureHandle) !bool {
+    const texture = self.textures.get(handle.toId()) orelse return false;
+    if (texture.source.len == 0) return false;
+    const io = self.io orelse return Error.NoIo;
+    const file = try self.project.osPath(self.gpa, texture.source);
+    defer self.gpa.free(file);
+
+    var decoded = try image.png.readFile(self.gpa, io, file, .{});
+    defer decoded.deinit(self.gpa);
+
+    if (decoded.width == texture.width and decoded.height == texture.height) {
+        try self.device.updateTexture(texture.gpu, decoded.pixels, 0);
+        return true;
+    }
+    // Another size is another texture on the device, and the old one's
+    // `rhi` handle stops resolving - which is why whoever shows textures in
+    // the interface hands their list over every frame.
+    const gpu = try self.device.createTexture(.{
+        .width = decoded.width,
+        .height = decoded.height,
+        .data = decoded.pixels,
+        .label = texture.source,
+    });
+    self.device.destroyTexture(texture.gpu);
+    texture.gpu = gpu;
+    texture.width = decoded.width;
+    texture.height = decoded.height;
+    return true;
+}
+
+/// Read a font's file again, in place: the handle and the font's address
+/// stay, and the glyphs drawn so far go, to be drawn again from the new
+/// face. Says whether there was a file to read, as `reloadTexture` does.
+pub fn reloadFont(self: *Assets, handle: FontHandle) !bool {
+    const font = (self.fonts.get(handle.toId()) orelse return false).*;
+    if (font.source.len == 0) return false;
+    const io = self.io orelse return Error.NoIo;
+    const file = try self.project.osPath(self.gpa, font.source);
+    defer self.gpa.free(file);
+
+    // Read into memory the font keeps, since the face holds views into it.
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .limited(font_limit));
+    errdefer self.gpa.free(bytes);
+    const face: typeface.Font = try .init(bytes);
+    var atlas: Atlas = try .init(self.gpa, font.atlas.width, font.atlas.height);
+    // Blank, and uploaded so at the next flush: the old glyphs leave the
+    // texture as well as the table.
+    atlas.dirty = true;
+
+    // Nothing can fail from here, so the font is never half the old one.
+    font.atlas.deinit();
+    self.gpa.free(font.bytes);
+    font.face = face;
+    font.bytes = bytes;
+    font.atlas = atlas;
+    self.font_reloads +%= 1;
+    return true;
+}
+
+/// Read again everything read from `path`, however either was spelt: every
+/// texture and every font. What a tool calls when a file changed on the disc.
+/// Says whether anything had been read from it. Stops at the first that
+/// fails to read, as the rest would.
+pub fn reloadFile(self: *Assets, path: []const u8) !bool {
+    const named = self.project.canonical(self.gpa, path) catch null;
+    defer if (named) |text| self.gpa.free(text);
+    const wanted = named orelse path;
+
+    var any = false;
+    var textures = self.textures.iterator();
+    while (textures.next()) |entry| {
+        if (!std.mem.eql(u8, entry.value.source, wanted)) continue;
+        if (try self.reloadTexture(.fromId(entry.handle))) any = true;
+    }
+    var faces = self.fonts.iterator();
+    while (faces.next()) |entry| {
+        if (!std.mem.eql(u8, entry.value.*.source, wanted)) continue;
+        if (try self.reloadFont(.fromId(entry.handle))) any = true;
+    }
+    return any;
 }
 
 /// Give a texture back to the driver. Every handle to it stops resolving.
@@ -597,4 +693,116 @@ test "a file inside the project is kept by its res:// path, and found by any spe
     var by_uid: [64]u8 = undefined;
     try testing.expect(assets.findTexture(try std.fmt.bufPrint(&by_uid, "uid://{f}", .{uid})).?.eql(hero));
     try testing.expect(assets.findTexture("res://art/villain.png") == null);
+}
+
+/// A PNG of one colour, `width` by `height`, written to `path`.
+fn writeSolid(path: []const u8, width: u32, height: u32, grey: u8) !void {
+    const pixels = try testing.allocator.alloc(u8, @as(usize, width) * height * 4);
+    defer testing.allocator.free(pixels);
+    @memset(pixels, grey);
+    try image.png.writeFile(testing.allocator, testing.io, path, .{
+        .width = width,
+        .height = height,
+        .pixels = pixels,
+        .row_pitch = @as(usize, width) * 4,
+    }, .{});
+}
+
+test "a texture read again keeps its handle and its sampling, at the file's new size" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var png_buffer: [160]u8 = undefined;
+    const png = try std.fmt.bufPrint(&png_buffer, "{s}/hero.png", .{root});
+    try writeSolid(png, 1, 1, 255);
+
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+    var project: Project = try .init(testing.allocator, testing.io, root);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, testing.io, &project);
+    defer assets.deinit();
+
+    const hero = try assets.loadTexture("res://hero.png", .{ .filter = .linear });
+    const first = assets.get(hero).?.gpu;
+
+    // The same size: the same texture on the device, filled again.
+    try writeSolid(png, 1, 1, 128);
+    try testing.expect(try assets.reloadTexture(hero));
+    try testing.expect(std.meta.eql(first, assets.get(hero).?.gpu));
+
+    // Another size: another texture on the device, under the same handle -
+    // and found by the file's other spelling.
+    try writeSolid(png, 2, 3, 64);
+    try testing.expect(try assets.reloadFile(png));
+    const now = assets.get(hero).?;
+    try testing.expectEqual(@as(u32, 2), now.width);
+    try testing.expectEqual(@as(u32, 3), now.height);
+    try testing.expectEqual(rhi.Filter.linear, now.filter);
+    try testing.expectEqual(@as(u32, 3), (try device.textureSize(now.gpu)).height);
+    try testing.expectError(error.InvalidHandle, device.textureSize(first));
+    try testing.expectEqual(@as(usize, 1), assets.count());
+}
+
+test "a texture whose file no longer reads keeps what it had" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var png_buffer: [160]u8 = undefined;
+    const png = try std.fmt.bufPrint(&png_buffer, "{s}/hero.png", .{root});
+    try writeSolid(png, 2, 2, 255);
+
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+    var project: Project = try .init(testing.allocator, testing.io, root);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, testing.io, &project);
+    defer assets.deinit();
+    const hero = try assets.loadTexture(png, .{});
+
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "hero.png", .data = "not a picture" });
+    try testing.expect(std.meta.isError(assets.reloadTexture(hero)));
+    try testing.expectEqual(@as(u32, 2), assets.get(hero).?.width);
+    try testing.expectEqual(@as(u32, 2), (try device.textureSize(assets.get(hero).?.gpu)).width);
+}
+
+test "what has no file has nothing to read again" {
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+    var project: Project = try .init(testing.allocator, null, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, null, &project);
+    defer assets.deinit();
+
+    const made = try assets.textureFromPixels(1, 1, &(.{255} ** 4), .{});
+    try testing.expect(!try assets.reloadTexture(made));
+    assets.unload(made);
+    try testing.expect(!try assets.reloadTexture(made));
+    try testing.expect(!try assets.reloadFont(.none));
+    try testing.expect(!try assets.reloadFile("res://nothing.png"));
+}
+
+test "a font read again keeps its handle and its address, and draws its glyphs again" {
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+    var project: Project = try .init(testing.allocator, testing.io, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, testing.io, &project);
+    defer assets.deinit();
+
+    const handle = assets.loadFont(systemFontPath(), .{ .atlas = 64 }) catch return error.SkipZigTest;
+    const font = assets.fontOf(handle).?;
+    _ = try font.atlas.glyph(&font.face, font.face.glyphFor('A'), 16);
+    try assets.flushFonts();
+    const old_bytes = font.bytes.ptr;
+
+    try testing.expect(try assets.reloadFile(systemFontPath()));
+    try testing.expectEqual(font, assets.fontOf(handle).?);
+    try testing.expect(font.bytes.ptr != old_bytes);
+    try testing.expectEqual(@as(usize, 0), font.atlas.count());
+    // Uploaded blank at the next flush, so the old glyphs leave the texture.
+    try testing.expect(font.atlas.dirty);
+    try testing.expectEqual(@as(u32, 1), assets.font_reloads);
 }

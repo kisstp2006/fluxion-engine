@@ -53,6 +53,9 @@ textures: []const rhi.Texture = &.{},
 renderer: ?ui_rhi.Renderer = null,
 /// The face `renderer` was made with.
 face: ?*const typeface.Font = null,
+/// The `Assets.font_reloads` the renderer's glyphs were drawn at: a font
+/// read again keeps its address, so the face alone cannot say.
+font_reloads: u32 = 0,
 
 /// This frame's, from `ui.end`.
 commands: []const ui.RenderCommand = &.{},
@@ -244,6 +247,14 @@ pub fn draw(
     renderer.setTextures(self.textures);
     renderer.setTime(self.seconds);
     try renderer.draw(target, .init(width, height), self.commands, null);
+}
+
+/// Let the renderer go, and the glyphs it drew: the next `draw` makes
+/// another. For a font read again in place.
+pub fn forgetRenderer(self: *Interface) void {
+    if (self.renderer) |*renderer| renderer.deinit();
+    self.renderer = null;
+    self.face = null;
 }
 
 fn rendererFor(self: *Interface, gpa: Allocator, device: *rhi.Device, face: *const typeface.Font) !*ui_rhi.Renderer {

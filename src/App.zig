@@ -1890,7 +1890,12 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
         try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, into, view, self.background, self.time.alpha());
     } else try self.clearTarget(into);
 
-    // 3. The interface, on top, loading what the 2D layer left.
+    // 3. The interface, on top, loading what the 2D layer left - with its
+    //    glyphs drawn again when a font was read again since.
+    if (self.interface.font_reloads != self.assets.font_reloads) {
+        self.interface.forgetRenderer();
+        self.interface.font_reloads = self.assets.font_reloads;
+    }
     try self.interface.draw(self.gpa, &self.device, self.interfaceFace(), into, width, height);
 
     // 4. `debug`, over all of it: the world through the 2D camera, and the
@@ -3018,6 +3023,25 @@ test "the interface is drawn over the 2D layer, in the default font" {
     try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
     try testing.expectEqual(&app.assets.fontOf(.none).?.face, app.interface.face.?);
     try testing.expectEqual(@as(usize, 2), app.interface.renderer.?.instances.items.len);
+}
+
+test "a font read again is drawn again in the interface, not from the old one's glyphs" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    const font = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch return error.SkipZigTest;
+    try app.addSystem(.ui, "label", Panel.label);
+    try app.startup();
+
+    _ = try app.step();
+    const first = app.interface.renderer.?.atlas_texture;
+    _ = try app.step();
+    try testing.expect(std.meta.eql(first, app.interface.renderer.?.atlas_texture));
+
+    // The face keeps its address, and the renderer is made again anyway.
+    try testing.expect(try app.assets.reloadFont(font));
+    _ = try app.step();
+    try testing.expect(!std.meta.eql(first, app.interface.renderer.?.atlas_texture));
+    try testing.expectEqual(&app.assets.fontOf(.none).?.face, app.interface.face.?);
 }
 
 const Clicks = struct {

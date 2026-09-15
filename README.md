@@ -697,6 +697,17 @@ game --root ../my-game          # or App.Options.root; the working directory oth
 - **The root is `Options.root`**, or `--root` among the engine's flags - the
   folder, or the `project.fluxion` in it - or else the working directory.
 
+```zig
+_ = try app.assets.reloadFile("res://art/hero.png");                 // changed on the disc: read again in place
+```
+
+- **A file changed on the disc is read again in place.**
+  `app.assets.reloadFile` reads every texture and font read from it again,
+  under the same handles - a sprite shows the new pixels, at the new size,
+  and text draws its glyphs again - and `reloadTexture`/`reloadFont` do one.
+  A file that no longer reads is an error, and what was loaded stays as it
+  was.
+
 ### The project file
 
 ```json
