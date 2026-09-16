@@ -41,6 +41,8 @@ const Assets = @import("assets.zig");
 const attr = @import("attr.zig");
 const Areas = @import("areas.zig");
 const Bodies = @import("bodies.zig");
+const Picking = @import("picking.zig");
+const pointer = @import("pointer.zig");
 const Clipboard = @import("clipboard.zig");
 const Commands = @import("commands.zig");
 const DebugViews = @import("debug_views.zig");
@@ -342,6 +344,20 @@ bodies: Bodies = .{},
 /// What is inside each `Area2D`, and the signals that say so. See
 /// `areas.zig`.
 areas: Areas = .{},
+/// What the pointer is over, and what it did there. See `picking.zig`.
+picking: Picking = .{},
+
+/// Whether the pointer picks what it is over at all: Godot's
+/// `physics/common/enable_object_picking`. An editor turns it off while it
+/// edits a scene rather than plays it.
+physics_object_picking: bool = true,
+/// Whether what is picked comes in the order it is drawn, the topmost
+/// first. Godot works the other way by default, and its order is the
+/// broadphase's.
+physics_object_picking_sort: bool = true,
+/// Whether only the first of several under the pointer hears the event,
+/// as Godot 4.3 can.
+physics_object_picking_first_only: bool = false,
 
 /// Where the game's files are - `res://` - and the UUIDs of the ones that
 /// have them. See `Project`.
@@ -716,6 +732,7 @@ pub fn destroy(self: *App) void {
     self.types.deinit();
     self.bodies.deinit(gpa);
     self.areas.deinit(gpa);
+    self.picking.deinit(gpa);
     self.physics.deinit();
     self.debug_renderer.deinit();
     self.debug_steps.deinit();
@@ -982,6 +999,9 @@ pub fn step(self: *App) anyerror!bool {
 
     try self.schedule.run(.input, self);
     self.shortcuts();
+    // After the game's own input systems, which may take the pointer with
+    // `input.setAsHandled`, and before the first step.
+    try self.picking.update(self);
 
     // A backlog too big to work through is dropped. See
     // `Time.max_fixed_steps`.
@@ -1078,7 +1098,8 @@ fn shortcuts(self: *App) void {
     }
 }
 
-fn hasInterface(self: *const App) bool {
+/// Whether the interface is laid out at all: a game with a `.ui` system.
+pub fn hasInterface(self: *const App) bool {
     return self.schedule.systemsIn(.ui).len != 0;
 }
 
@@ -1486,6 +1507,7 @@ pub fn sceneInfo(self: *App, path: []const u8, diagnostics: ?*json.Diagnostics) 
 pub fn clearWorld(self: *App) void {
     self.bodies.clear(self);
     self.areas.clear();
+    self.picking.clear();
     self.commands.clear();
     self.world.deinit();
     self.world = .init(self.gpa);

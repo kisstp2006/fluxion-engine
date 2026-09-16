@@ -161,6 +161,18 @@ pub const Collider2D = components.Collider2D;
 /// pickup, a hurtbox. Godot's Area2D.
 pub const Area2D = components.Area2D;
 
+/// What the pointer did, as an `input_event` signal is handed it.
+pub const pointer = @import("pointer.zig");
+
+/// One thing the pointer did: `fx.pointer.InputEvent`.
+pub const InputEvent = pointer.InputEvent;
+
+/// A button of the pointer, the wheel among them. Godot's `MouseButton`.
+pub const PointerButton = pointer.PointerButton;
+
+/// Which pointer buttons are held: `app.input.buttonMask()`.
+pub const ButtonMask = pointer.ButtonMask;
+
 /// Two colliders that began or stopped touching: `App.contactsBegun`.
 pub const Contact = Bodies.Contact;
 
@@ -277,9 +289,12 @@ test {
     _ = States;
     _ = signals;
     _ = @import("areas.zig");
+    _ = @import("picking.zig");
+    _ = @import("pointer.zig");
     _ = events;
     _ = @import("signals_test.zig");
     _ = @import("areas_test.zig");
+    _ = @import("picking_test.zig");
     _ = Project;
     _ = dialog;
     _ = attr;

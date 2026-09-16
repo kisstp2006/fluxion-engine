@@ -37,6 +37,7 @@ const platform = @import("fluxion_platform");
 const math = @import("fluxion_math");
 
 const dialog = @import("dialog.zig");
+const pointer_mod = @import("pointer.zig");
 
 const Vec2 = math.Vec2;
 
@@ -91,6 +92,19 @@ mods: platform.Mods = .{},
 typed: [typed_capacity]Typed = undefined,
 typed_len: usize = 0,
 
+/// Everything the pointer did this frame, in order: what picking hands
+/// to whatever is under it, and what a game reads for itself. See
+/// `pointerEvents`.
+pointer_events: [pointer_event_capacity]pointer_mod.InputEvent = undefined,
+pointer_events_len: usize = 0,
+/// How many of them this frame's systems have seen, so one given between
+/// frames - by a test, for the hand that is not there - is the next
+/// frame's rather than nobody's.
+pointer_events_seen: usize = 0,
+/// Whether this frame's pointer has been taken by something already.
+/// See `setAsHandled`.
+handled: bool = false,
+
 /// Every controller slot, as it stood at the top of this frame. Asked
 /// through `pad` and `anyPad`, which apply the dead zones and the clock.
 pads: [max_pads]PadState = @splat(.{}),
@@ -138,6 +152,9 @@ pub const Happening = enum { suspended, resumed, low_memory };
 
 /// How much typing one frame can hold: far more than a fast typist manages.
 pub const typed_capacity = 32;
+
+/// The most pointer events one frame keeps; the rest are dropped.
+pub const pointer_event_capacity = 32;
 
 /// How many drops one frame can hold. A person lets go of one armful at a
 /// time; this is room for a test's several.
@@ -495,6 +512,37 @@ pub fn anyKeyDown(self: *const Input) bool {
     return self.down.count() != 0;
 }
 
+/// What the pointer did this frame, oldest first: presses, releases,
+/// wheel notches as wheel buttons, and one motion for the frame's
+/// moving. Picking hands each to whatever is under it.
+pub fn pointerEvents(self: *const Input) []const pointer_mod.InputEvent {
+    return self.pointer_events[0..self.pointer_events_len];
+}
+
+/// Which buttons are held now: Godot's `get_mouse_button_mask`. The
+/// wheel is in an event's own mask, never here.
+pub fn buttonMask(self: *const Input) pointer_mod.ButtonMask {
+    var mask: pointer_mod.ButtonMask = .none;
+    for (0..button_span) |i| {
+        if (!self.button_down.isSet(i)) continue;
+        if (pointer_mod.PointerButton.of(@enumFromInt(@as(u8, @intCast(i))))) |which| mask = mask.with(which, true);
+    }
+    return mask;
+}
+
+/// Take this frame's pointer: picking stops there, and a system that
+/// asks `isHandled` leaves it alone. Godot's
+/// `Viewport.set_input_as_handled`, and what an `.input` system calls to
+/// keep a click from the world behind it.
+pub fn setAsHandled(self: *Input) void {
+    self.handled = true;
+}
+
+/// Whether something has taken this frame's pointer already.
+pub fn isHandled(self: *const Input) bool {
+    return self.handled;
+}
+
 /// What was typed this frame, oldest first.
 pub fn typedThisFrame(self: *const Input) []const Typed {
     return self.typed[0..self.typed_len];
@@ -590,6 +638,14 @@ pub fn beginFrame(self: *Input) void {
     self.pointer.dy = 0;
     self.wheel = .{};
     self.typed_len = 0;
+    self.handled = false;
+
+    // The pointer events a whole frame has had go; one given between
+    // frames stays for this one, as a dialog's answer does.
+    const unseen = self.pointer_events_len - self.pointer_events_seen;
+    std.mem.copyForwards(pointer_mod.InputEvent, self.pointer_events[0..unseen], self.pointer_events[self.pointer_events_seen..self.pointer_events_len]);
+    self.pointer_events_len = unseen;
+    self.pointer_events_seen = 0;
 
     // The answers a whole frame has had go; one given between frames - by a
     // test, for the person who is not there - stays for this one.
@@ -614,6 +670,7 @@ pub fn beginFrame(self: *Input) void {
 pub fn endFrame(self: *Input) void {
     self.answers_seen = self.answers_len;
     self.drops_seen = self.drops_len;
+    self.pointer_events_seen = self.pointer_events_len;
     self.happened_seen = self.happened;
 }
 
@@ -731,6 +788,16 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 },
                 .repeat => {},
             }
+            if (b.action != .repeat) {
+                if (pointer_mod.PointerButton.of(b.button)) |which| self.pushPointer(.{ .mouse_button = .{
+                    .button = which,
+                    .pressed = b.action == .press,
+                    .double_click = b.double_click,
+                    .position = .init(self.pointer.x, self.pointer.y),
+                    .button_mask = self.buttonMask(),
+                    .mods = b.mods,
+                } });
+            }
         },
         .cursor => |m| {
             if (self.pointer.locked) {
@@ -747,11 +814,16 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             self.pointer.y = @floatCast(m.y);
             self.pointer.dx += @floatCast(m.dx);
             self.pointer.dy += @floatCast(m.dy);
+            self.pushMotion(.init(@floatCast(m.dx), @floatCast(m.dy)));
         },
         .cursor_enter => |s| self.pointer.inside = s.value,
         .scroll => |w| {
             self.wheel.x += @floatCast(w.x);
             self.wheel.y += @floatCast(w.y);
+            // A notch is a press and a release of a wheel button, as
+            // Godot reports one.
+            if (w.y != 0) self.pushWheel(if (w.y > 0) .wheel_up else .wheel_down, @floatCast(@abs(w.y)), w.mods);
+            if (w.x != 0) self.pushWheel(if (w.x > 0) .wheel_right else .wheel_left, @floatCast(@abs(w.x)), w.mods);
         },
         .focus => |s| {
             self.focused = s.value;
@@ -798,6 +870,58 @@ pub fn releaseEverything(self: *Input) void {
     }
     self.down = .initEmpty();
     self.button_down = .initEmpty();
+}
+
+/// One pointer event, dropped rather than grown, as the typed ones are.
+fn pushPointer(self: *Input, event: pointer_mod.InputEvent) void {
+    if (self.pointer_events_len == self.pointer_events.len) return;
+    self.pointer_events[self.pointer_events_len] = event;
+    self.pointer_events_len += 1;
+}
+
+/// Motion, added to the last event when that is motion too: a frame's
+/// moving is one event, as Godot's accumulated input gives.
+fn pushMotion(self: *Input, by: math.Vec2) void {
+    const at: math.Vec2 = .init(self.pointer.x, self.pointer.y);
+    if (self.pointer_events_len != 0) {
+        const last = &self.pointer_events[self.pointer_events_len - 1];
+        if (last.* == .mouse_motion) {
+            last.mouse_motion.position = at;
+            last.mouse_motion.relative = last.mouse_motion.relative.add(by);
+            last.mouse_motion.button_mask = self.buttonMask();
+            last.mouse_motion.mods = self.mods;
+            return;
+        }
+    }
+    self.pushPointer(.{ .mouse_motion = .{
+        .position = at,
+        .relative = by,
+        .button_mask = self.buttonMask(),
+        .mods = self.mods,
+    } });
+}
+
+/// A wheel notch: the press that has the wheel's bit, and the release
+/// that has not.
+fn pushWheel(self: *Input, which: pointer_mod.PointerButton, notches: f32, mods: platform.Mods) void {
+    const at: math.Vec2 = .init(self.pointer.x, self.pointer.y);
+    const held = self.buttonMask();
+    self.pushPointer(.{ .mouse_button = .{
+        .button = which,
+        .pressed = true,
+        .factor = notches,
+        .position = at,
+        .button_mask = held.with(which, true),
+        .mods = mods,
+    } });
+    self.pushPointer(.{ .mouse_button = .{
+        .button = which,
+        .pressed = false,
+        .factor = notches,
+        .position = at,
+        .button_mask = held,
+        .mods = mods,
+    } });
 }
 
 fn pushTyped(self: *Input, item: Typed) void {

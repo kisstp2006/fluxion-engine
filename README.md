@@ -894,6 +894,67 @@ if (app.hasOverlappingBodies(door)) open(app, door);
   are not here**: this is what overlaps, not a place that changes physics.
   `input_pickable` is here and does nothing yet; picking comes next.
 
+### 🖱️ Picking: what the pointer is on
+
+```zig
+const lamp = try app.world.spawnWith(.{
+    fx.Transform2D.at(200, 120),
+    fx.Sprite.of(bulb),
+    fx.Area2D{},            // input_pickable is true, as Godot's is
+    fx.Collider2D{},        // the sprite's size
+});
+try app.addMethod("_on_input_event", onLampInput);
+try app.signal(lamp, fx.Area2D, .input_event).connect(.method(lamp, "_on_input_event"), .{});
+
+fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.Entity) !void {
+    _ = shape;
+    if (!event.isPressed(.left)) return;
+    toggle(app, self);
+    app.input.setAsHandled();   // the room behind it does not hear the click
+}
+```
+
+- **Once a frame, after the `.input` stage and before the first fixed step.**
+  A game's own `.input` system sees the pointer first and can keep it with
+  `app.input.setAsHandled()`; picking then does nothing at all. Godot picks
+  at the next physics tick, so ours has no lag.
+- **What can be picked** is an `Area2D` or a `RigidBody2D` with
+  `input_pickable` - true on an area and false on a body, as in Godot -
+  through a collider that holds the point, is on a layer (a `category` of
+  nought is never picked, and there is no picking mask), and whose object,
+  if it is drawn at all, is visible. A lone `Collider2D`, which is its own
+  static body, is not a collision object to pick: give it an `Area2D` or a
+  static body with the flag.
+- **Every pointer event of the frame goes to it, in order**: presses,
+  releases, the wheel's notches as presses and releases of wheel buttons,
+  and one motion event for the frame's moving. `app.input.pointerEvents()`
+  is the same list, for a game that would rather read it itself, and
+  `app.input.buttonMask()` says what is held.
+- **What is on top hears first**: higher `Sprite.layer`, then higher
+  `Sprite.order`, then the later entity. Godot leaves the order to its
+  broadphase unless asked; ours sorts unless
+  `app.physics_object_picking_sort` is false.
+- **Each shape under the point hears**, as Godot does, so an object with two
+  colliders under the pointer hears twice, with `shape` saying which. With
+  `app.physics_object_picking_first_only` only the first hears.
+- **A handler stops the rest** by calling `app.input.setAsHandled()`, which
+  is Godot 4.2's behaviour: the objects under it hear nothing of that event.
+  The handlers run as each object is told, so the next one sees it.
+- **`mouse_entered` and `mouse_exited`** come with the pointer, and
+  `mouse_shape_entered` and `mouse_shape_exited` for each collider. Hover is
+  worked out on every frame, event or no event, so a thing that moves under
+  a still pointer is entered; a thing that dies under it drops out
+  silently, as Godot's freed object does; and one that stops being pickable
+  is left at the next pass.
+- **Nothing is picked** while picking is off, while the cursor is `.locked`,
+  while the pointer is outside the window, or while the interface wants it -
+  `app.ui.wantsPointer()`, which is Godot's STOP control. In each case what
+  was hovered is left with its exits.
+- **An editor turns it off** with `app.physics_object_picking = false`,
+  beside `app.signals.dispatch = false`.
+- **`event.position` is in the window's pixels**, as Godot's viewport
+  coordinates are. `app.screenToWorld(x, y)` takes it into the world.
+
 Not here yet: polygons, joints as components, and a view of the colliders in
 `debug`.
 
@@ -1463,6 +1524,10 @@ Here, and checked by the tests:
 - Areas: what is in a place, as Godot has it - the eight overlap signals,
   the shapes forced to sensors, the asking side's mask deciding who is
   told, monitoring turned off and on again, and the six questions.
+- Picking: what the pointer is on and what it did there, as Godot has it -
+  `input_event`, `mouse_entered` and their shape pairs, the topmost first,
+  a handler that stops the rest, hover worked out every frame, and the
+  pointer's own events with the wheel as buttons.
 - Scenes: the world, its names, its UUIDs and every registered component
   written as JSON or CBOR and read back, with entity references by UUID -
   inside the scene first, then in the world - textures and fonts found again
