@@ -158,6 +158,9 @@ pub const FontOptions = struct {
     /// font. What the system's own lookup answers with the path: see
     /// `loadSystemFont`.
     member: u32 = 0,
+    /// For `loadSystemFont`: the system's monospaced font - the one its
+    /// terminal and its code editors use - rather than its interface font.
+    mono: bool = false,
 };
 
 /// How a texture should be sampled, and what it is called in a debugger.
@@ -401,9 +404,13 @@ pub fn systemFontPath() []const u8 {
 /// sans-serif on Linux, and Roboto on Android. `options.member` is replaced by
 /// the system's answer. For an editor's interface, or a game's debug text; a
 /// game's own words are set in a font it ships.
+///
+/// With `options.mono`, the monospaced one instead: Cascadia Mono or Consolas
+/// on Windows, fontconfig's monospace on Linux, Menlo on a Mac, Droid Sans
+/// Mono on Android - for a code editor, or a console.
 pub fn loadSystemFont(self: *Assets, options: FontOptions) !FontHandle {
     const io = self.io orelse return Error.NoIo;
-    const found = try platform.fonts.systemUi(self.gpa, io);
+    const found = if (options.mono) try platform.fonts.systemMono(self.gpa, io) else try platform.fonts.systemUi(self.gpa, io);
     defer found.deinit(self.gpa);
     var asked = options;
     asked.member = found.index;
@@ -763,6 +770,27 @@ test "the system's own interface font is the one the system names" {
     const handle = assets.loadSystemFont(.{ .atlas = 64 }) catch return error.SkipZigTest;
     try testing.expect(assets.fontSource(handle) != null);
     try testing.expect(assets.fontOf(handle).?.face.has('A'));
+}
+
+test "the system's monospaced font gives every letter the same width" {
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+
+    var project: Project = try .init(testing.allocator, testing.io, null);
+    defer project.deinit();
+    var assets: Assets = try .init(testing.allocator, &device, testing.io, &project);
+    defer assets.deinit();
+
+    const mono = assets.loadSystemFont(.{ .atlas = 64, .mono = true }) catch return error.SkipZigTest;
+    const plain = assets.loadSystemFont(.{ .atlas = 64 }) catch return error.SkipZigTest;
+    try testing.expect(!std.mem.eql(u8, assets.fontSource(mono).?, assets.fontSource(plain).?));
+
+    // What makes it monospaced: a narrow letter is as wide as a wide one,
+    // which in the interface font it is not.
+    const code = assets.fontOf(mono).?.face.at(16);
+    try testing.expectApproxEqAbs(try code.measure("iiii"), try code.measure("WWWW"), 0.01);
+    const words = assets.fontOf(plain).?.face.at(16);
+    try testing.expect(try words.measure("iiii") < try words.measure("WWWW"));
 }
 
 test "every filter and wrap has a sampler of its own" {

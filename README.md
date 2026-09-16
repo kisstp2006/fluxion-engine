@@ -652,8 +652,10 @@ _ = try world.spawnWith(.{
   `app.assets.loadSystemFont(.{})` asks the system which font its own
   dialogs use - Segoe UI, Yu Gothic UI on Japanese Windows, what fontconfig
   makes of sans-serif, Roboto - and opens that, at whatever place in its file
-  the system names: for a tool's interface, or a game's debug text. A game's
-  own words are set in a font it ships.
+  the system names: for a tool's interface, or a game's debug text.
+  `.mono = true` opens its monospaced font instead - Cascadia Mono or
+  Consolas, fontconfig's monospace, Menlo, Droid Sans Mono - for a code
+  editor or a console. A game's own words are set in a font it ships.
 - **What the camera cannot see is dropped before it costs anything**, one
   comparison per sprite, which is the difference between a renderer that costs
   what is drawn and one that costs what exists.
@@ -1550,7 +1552,8 @@ Here, and checked by the tests:
   outline, more than sixty-three bytes in one label, and more than one font in
   one label.
 - Fonts from a `.ttf`, an `.otf`, or one font of a `.ttc` collection, and
-  the system's own interface font as the system names it.
+  the system's own interface font and its monospaced one, as the system
+  names them.
 - Culling against the camera, sprites and labels alike.
 - The interface: fluxion-ui laid out by `.ui` systems into one root, drawn
   over the 2D layer, fed from the keyboard, the mouse and the pads before the
