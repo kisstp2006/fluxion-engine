@@ -1416,6 +1416,10 @@ struct Door {
   `app.scriptSetup()` gives the language service's `flux.service.Options`
   with `app` and `self.entity` declared. This is for completions and
   diagnostics, and it needs no `useScripts`.
+- **An editor has the scripts and runs none of them**, with
+  `useScripts(.{ .run = false })`.
+  - Each file is compiled and never run: not its top level, a default, `ready` or `update`. So a script cannot change the scene being edited, as Godot's editor runs only `tool` scripts.
+  - Its structs' signals and methods are still listed and connected to, and the scene still writes the script.
 
 ## 🧪 It runs with no window and no GPU
 

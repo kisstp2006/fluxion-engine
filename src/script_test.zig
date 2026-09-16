@@ -833,3 +833,76 @@ test "what a script emits that the engine cannot carry stops the script, and is 
     try testing.expectEqual(@as(usize, 1), app.scripts.?.failures);
     try testing.expectEqual(@as(usize, 0), app.signals.failures);
 }
+
+// ---------------------------------------------------------------------------
+// An editor's scripts
+// ---------------------------------------------------------------------------
+
+const edited_door =
+    \\print("the top level");
+    \\var opened_at = stamp("a variable");
+    \\fn stamp(what: string) int {
+    \\    print(what);
+    \\    return 1;
+    \\}
+    \\struct Door {
+    \\    signal opened(by: string, times: int);
+    \\    var hinge: int = stamp("a default");
+    \\    fn ready(self) { print("ready"); }
+    \\    fn update(self, dt: float) { print("update"); }
+    \\    fn knock(self) { print("knock"); }
+    \\}
+;
+
+test "an editor's scripts are compiled, listed and connected to, and none of their code runs" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const app = try scripted(.{ .run = false, .out = &out.writer });
+    defer app.destroy();
+    const file = try app.addScript("door.flux", edited_door);
+    const door = try app.world.spawnWith(.{Script.of(file)});
+    const listener = try app.world.spawnWith(.{Counter{}});
+    try app.addMethod("_on_opened", Heard.onOpened);
+    for (0..3) |_| _ = try app.step();
+
+    // Not the top level, a variable, a default, `ready` or `update`.
+    try testing.expectEqualStrings("", out.written());
+    try testing.expect(app.scripts.?.instanceOf(door) == null);
+    try testing.expect(app.scripts.?.moduleOf(file) != null);
+
+    var infos: [8]signals.Info = undefined;
+    const listed = app.signalsOf(door, &infos);
+    try testing.expectEqual(@as(usize, 1), listed.len);
+    try testing.expectEqualStrings("opened", listed[0].name);
+    try testing.expect(app.hasMethod(door, "knock"));
+    try app.connectNamed(door, "opened", .method(listener, "_on_opened"), .{});
+    var connections: [4]signals.Connection = undefined;
+    try testing.expect(app.connectionsFrom(door, &connections)[0].known);
+    try testing.expectError(error.NotRunning, app.callMethodOn(door, "knock", &.{}));
+
+    // New text is compiled afresh: its signal is there, and still nothing
+    // runs.
+    try app.setScriptText(file, edited_door ++ "\nstruct Latch { signal closed(); }");
+    try testing.expect(app.scripts.?.moduleOf(file) != null);
+    app.world.get(door, Script).?.* = Script.named(file, "Latch");
+    try testing.expect(app.hasSignal(door, "closed"));
+    _ = try app.step();
+    try testing.expectEqualStrings("", out.written());
+    try testing.expect(app.scripts.?.instanceOf(door) == null);
+}
+
+test "a connection an editor made while its script did not compile is known once it does" {
+    const app = try scripted(.{ .run = false });
+    defer app.destroy();
+    const file = try app.addScript("door.flux", "struct Door { signal opened(by: string, times: int)");
+    const door = try app.world.spawnWith(.{Script.of(file)});
+    const listener = try app.world.spawnWith(.{Counter{}});
+    try app.connectNamed(door, "opened", .method(listener, "_on_opened"), .{});
+    var connections: [4]signals.Connection = undefined;
+    try testing.expect(!app.connectionsFrom(door, &connections)[0].known);
+
+    // No instance is ever made, so the file's own reading has to find it.
+    try app.setScriptText(file, door_signals);
+    try testing.expect(app.connectionsFrom(door, &connections)[0].known);
+    try testing.expect(app.scripts.?.instanceOf(door) == null);
+}

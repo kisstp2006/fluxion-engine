@@ -68,6 +68,13 @@
 //! the engine looks at the files itself, every so many seconds, for a game
 //! started from an editor as a program of its own.
 //!
+//! **An editor has the scripts and runs none of them**: `Options.run =
+//! false`. Its files are compiled, read again and written in scenes, and
+//! their structs' signals and methods listed and connected to, but no code
+//! of theirs runs - not the top level, a default, `ready` or `update` - so
+//! a script cannot change the scene being edited. Godot's editor runs only
+//! a `tool` script; this one runs none.
+//!
 //! **Order.** Scripts are called in the order their instances were made.
 //! `exit` runs at the end of the frame the entity died in, after it is gone,
 //! so `self.entity.alive()` is false there. Godot's `_exit_tree` comes
@@ -128,6 +135,13 @@ pub const Options = struct {
     /// again each one saved since: a game run from an editor takes what the
     /// editor saves. Null never looks, as a shipped game has nothing to watch.
     watch: ?f32 = null,
+    /// Whether the scripts run. Off is an editor's: a file is compiled and
+    /// never run, not even its top level; no instance is made, so no
+    /// default, `ready`, `physics`, `update` or `exit` runs, no task wakes,
+    /// and `watch` is not looked at. The structs' signals and methods are
+    /// listed all the same, and connections to them kept. A signal's call
+    /// into a method is `error.NotRunning`.
+    run: bool = true,
 };
 
 /// A `.flux` file loaded into the app's VM, the way a `FontHandle` is a
@@ -492,6 +506,16 @@ pub const Scripts = struct {
         // Its text stays where it is, and the `File` may not: running the
         // top level can load another script, and the table grow.
         const source = file.source;
+        if (!self.options.run) {
+            // An editor's: the structs are made by compiling, and nothing
+            // runs. Text that does not compile leaves the last that did.
+            const compiled = self.vm.compile(source, file.text) catch |err| switch (err) {
+                error.CompileFailed => return self.sayDiagnostics(source),
+                error.OutOfMemory => return self.outOfMemory(null),
+            };
+            self.files.get(handle.toId()).?.module = compiled;
+            return;
+        }
         const module = self.vm.load(source, file.text) catch |err| switch (err) {
             error.CompileFailed => return self.sayDiagnostics(source),
             // Compiled, and its top level stopped: the structs are there.
@@ -592,7 +616,11 @@ pub const Scripts = struct {
 
         // As in `compile`: a default the reload runs can load a script.
         const source = file.source;
-        if (file.module) |module| {
+        if (!self.options.run) {
+            // Nothing runs and no instance holds the old code: compiled
+            // afresh.
+            self.compile(handle);
+        } else if (file.module) |module| {
             const report = self.vm.reload(module, kept) catch |err| switch (err) {
                 error.CompileFailed => return self.sayDiagnostics(source),
                 error.Busy => return error.Busy,
@@ -613,8 +641,24 @@ pub const Scripts = struct {
             inst.said = .initEmpty();
             self.lookUp(inst);
         }
-        // A signal the new code declares may have connections waiting.
-        for (self.instances.keys()) |entity| try self.knowConnections(entity);
+        // A signal the new code declares may have connections waiting: on
+        // each entity the file is on, whether it has an instance or not.
+        try self.knowConnectionsOf(handle);
+    }
+
+    fn knowConnectionsOf(self: *Scripts, handle: ScriptHandle) Allocator.Error!void {
+        const app = self.app;
+        self.scratch.clearRetainingCapacity();
+        var query = ecs.Query(.{Script}).over(&app.world) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TooManyComponents => return,
+        };
+        while (query.next()) |chunk| {
+            for (chunk.entities, chunk.slice(Script)) |entity, script| {
+                if (script.source.eql(handle)) try self.scratch.append(app.gpa, entity);
+            }
+        }
+        for (self.scratch.items) |entity| try self.knowConnections(entity);
     }
 
     /// Give each script of the project's that has no UUID one, in a `.uid`
@@ -646,6 +690,8 @@ pub const Scripts = struct {
     // ---------------------------------------------------------------------
 
     fn pass(self: *Scripts, moment: Moment) Allocator.Error!void {
+        // An editor's scripts are never made, stepped or looked for.
+        if (!self.options.run) return;
         switch (moment) {
             .physics => |dt| {
                 try self.sync();
@@ -903,6 +949,7 @@ pub const Scripts = struct {
     /// instance not made yet - a signal emitted before the first frame - is
     /// made and readied first.
     fn callMethod(self: *Scripts, entity: Entity, name: []const u8, args: []const reflect.Value) anyerror!void {
+        if (!self.options.run) return error.NotRunning;
         const class = self.classOfEntity(entity) orelse return error.NoSuchMethod;
         const method = self.vm.methodNamed(class, name) orelse return error.NoSuchMethod;
         if (args.len >= max_args) return error.WrongArguments;
