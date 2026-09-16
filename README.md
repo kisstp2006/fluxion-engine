@@ -385,11 +385,26 @@ const turn = app.input.pointer.dx;
   than on each axis, so a nearly diagonal push does not snap to a straight
   line, and rescaled so the first movement past it is small rather than a
   jump. `Input.stick_deadzone` is a fifth by default.
-- **`setCursor` takes four modes**: `.normal`, `.hidden` for a game that
-  draws its own pointer, `.confined` to hold it inside the window, and
-  `.locked` to take it away and report movement with no edge to stop at,
-  unaccelerated where the system allows. While locked, `input.pointer` holds
-  still where it was and only `dx` and `dy` move.
+- **`setCursor` takes five modes**: `.normal`, `.hidden` for a game that
+  draws its own pointer, `.confined` to hold it inside the window,
+  `.confined_hidden` for both at once, and `.locked` to take it away and
+  report movement with no edge to stop at, unaccelerated where the system
+  allows. While locked, `input.pointer` holds still where it was and only
+  `dx` and `dy` move; `.confined_hidden` keeps saying where it is.
+- **The pointer's shape is the system's**, `app.setCursorShape(.pointing_hand)`
+  and the rest of Godot's seventeen, or a picture of the game's own with
+  `app.setCursorImage(.{ .pixels = rgba, .width = 32, .height = 32, .hot_x = 4, .hot_y = 2 })`.
+  A browser quietly keeps its arrow past 128 by 128, so a cursor a page
+  will see should be small.
+- **Where the pointer is, and how fast**: `input.pointer.x/y` in the
+  framebuffer's pixels, `app.pointerInWorld()` through the camera,
+  `app.pointerIn(entity)` in one entity's own space, and
+  `input.pointer.velocity` in pixels a second, worked out over at least a
+  tenth of a second and nought once it has been still for three. A game
+  puts it somewhere itself with `app.warpPointer(x, y)`.
+- **A double click is the system's own**: `input.doubleClicked(.left)` for
+  the press that made one, by Windows' setting or four hundred
+  milliseconds within a few pixels elsewhere.
 - **A held pointer is let go when the window loses the keyboard**, and taken
   back when it returns - so a player who alt-tabs away from a locked game gets
   their mouse back, and the lock is still a lock when they come back to it. A
@@ -420,6 +435,10 @@ if (app.resized) layOutAgain(app.width, app.height);
 - **Limits apply at once.** A window already outside new limits is brought
   inside them when they are set, and one that is maximised, minimised or
   fullscreen when it is a window again.
+- **The window's own picture** is `app.setWindowIcon(&.{ big, small })`,
+  straight RGBA rows in as many sizes as a game has, and the system takes
+  the one it wants. An empty list puts the system's own back. Wayland has
+  none - a window's picture comes from its desktop file there.
 - **`Options.resizable` and `Options.maximized`** say what can only be said
   when the window is made. Without a window - headless - all of this is
   nothing, and says so without failing.
@@ -551,6 +570,15 @@ fn keep(app: *fx.App) !void {
   swapchain is made again at the size the new one comes back at.
 - **`lowMemory()` is the system asking for memory back**, for the one frame
   it asked in: a game lets go of what it can load again.
+- **The notch and the gesture bar are kept out of.** `app.safeArea()` is
+  how far in from each edge of the framebuffer the part nothing covers
+  starts, and the interface keeps its root inside it, which is all a game
+  with an `.ui` system has to do. `app.interface.follow_safe_area = false`
+  for a game that would rather draw into the notch itself. Nought on every
+  desktop; a page gets it only with `viewport-fit=cover` in its viewport
+  meta tag, and what it answers there is the page's own edges in the
+  canvas's pixels - exact for a canvas that fills the page, which is what a
+  game is, and an over-estimate for one with a page above it.
 
 ## 🎨 The 2D layer
 
@@ -1528,6 +1556,10 @@ Here, and checked by the tests:
   `input_event`, `mouse_entered` and their shape pairs, the topmost first,
   a handler that stops the rest, hover worked out every frame, and the
   pointer's own events with the wheel as buttons.
+- The pointer itself: its speed, a warp, a point in an entity's own space,
+  double clicks the system counted, every cursor mode and shape, a cursor
+  picture of the game's own, and the window's icon.
+- A phone's safe area, kept out of by the interface.
 - Scenes: the world, its names, its UUIDs and every registered component
   written as JSON or CBOR and read back, with entity references by UUID -
   inside the scene first, then in the world - textures and fonts found again

@@ -173,6 +173,16 @@ pub const PointerButton = pointer.PointerButton;
 /// Which pointer buttons are held: `app.input.buttonMask()`.
 pub const ButtonMask = pointer.ButtonMask;
 
+/// A picture of the game's own for the pointer: `App.setCursorImage`.
+pub const CursorImage = platform.CursorImage;
+
+/// One size of a window's own picture: `App.setWindowIcon`.
+pub const IconImage = platform.IconImage;
+
+/// How far in from each edge of the framebuffer the usable part starts:
+/// `App.safeArea`.
+pub const Insets = platform.Insets;
+
 /// Two colliders that began or stopped touching: `App.contactsBegun`.
 pub const Contact = Bodies.Contact;
 

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! Picking through a whole app: what the pointer is over, what hears a
-//! click, in which order, and who can stop it.
+//! click, in which order, and who can stop it - and what the pointer
+//! itself says of where it is and how fast it is moving.
 
 const std = @import("std");
 const testing = std.testing;
@@ -406,4 +407,147 @@ test "a click beside a turned shape, near it but not in it, hits nothing" {
     click(app, .init(0, 19), true);
     _ = try app.step();
     try testing.expectEqual(@as(usize, 1), Heard.count(.picked));
+}
+
+/// Input given from inside an `.input` system, which is where the pump puts
+/// it: an edge given between frames is gone by the time the systems run.
+const Feed = struct {
+    var moving: f32 = 0;
+    var press = false;
+    var double = false;
+
+    fn run(app: *App) anyerror!void {
+        if (moving != 0) app.input.apply(.{ .cursor = .{
+            .window = .none,
+            .x = 0,
+            .y = 0,
+            .dx = moving,
+            .dy = 0,
+        } });
+        if (press) {
+            app.input.apply(.{ .mouse_button = .{
+                .window = .none,
+                .button = .left,
+                .action = .press,
+                .mods = .{},
+                .x = 10,
+                .y = 10,
+                .double_click = double,
+            } });
+            press = false;
+        }
+    }
+};
+
+test "the pointer says how fast it is moving, and forgets once it stands still" {
+    const app = try headless();
+    defer app.destroy();
+    Feed.moving = 10;
+    Feed.press = false;
+    try app.addSystem(.input, "feed", Feed.run);
+
+    // Ten pixels a frame at sixty frames a second, for more than the tenth
+    // of a second the velocity is worked out over.
+    for (0..8) |_| _ = try app.step();
+    try testing.expect(app.input.pointer.velocity.x > 400);
+    try testing.expectEqual(@as(f32, 0), app.input.pointer.velocity.y);
+
+    // Still for three seconds: nothing is moving any more.
+    Feed.moving = 0;
+    for (0..200) |_| _ = try app.step();
+    try testing.expectEqual(@as(f32, 0), app.input.pointer.velocity.x);
+}
+
+test "a double click is the one the system counted" {
+    const app = try headless();
+    defer app.destroy();
+    Feed.moving = 0;
+    Feed.press = true;
+    Feed.double = false;
+    try app.addSystem(.input, "feed", Feed.run);
+
+    _ = try app.step();
+    try testing.expect(app.input.buttonJustPressed(.left));
+    try testing.expect(!app.input.doubleClicked(.left));
+
+    Feed.press = true;
+    Feed.double = true;
+    _ = try app.step();
+    try testing.expect(app.input.doubleClicked(.left));
+    try testing.expect(app.input.pointerEvents()[0].mouse_button.double_click);
+
+    // This frame's, as every edge is.
+    Feed.double = false;
+    _ = try app.step();
+    try testing.expect(!app.input.doubleClicked(.left));
+}
+
+test "the pointer is put where a warp says, and read in an entity's own space" {
+    const app = try headless();
+    defer app.destroy();
+    const dial = try app.world.spawnWith(.{Transform2D{
+        .x = 40,
+        .y = 10,
+        .rotation = std.math.pi / 2.0,
+        .scale_x = 2,
+        .scale_y = 2,
+    }});
+
+    // Without a window there is no system to move, and the pointer is still
+    // where the game put it, for the game and for a test.
+    const middle = app.worldToScreen(40, 10);
+    app.warpPointer(middle.x, middle.y);
+    try testing.expectEqual(middle.x, app.input.pointer.x);
+
+    const at_middle = app.pointerIn(dial).?;
+    try testing.expectApproxEqAbs(@as(f32, 0), at_middle.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0), at_middle.y, 0.001);
+
+    // A quarter turn takes the dial's +x to the world's +y, and the scale
+    // halves what a step in the world is worth in its own space.
+    const along = app.pointIn(dial, .init(40, 30)).?;
+    try testing.expectApproxEqAbs(@as(f32, 10), along.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0), along.y, 0.001);
+    try testing.expect(app.pointerIn(.none) == null);
+}
+
+test "an event handed to an entity is the same event in its own space" {
+    const app = try headless();
+    defer app.destroy();
+    const knob = try app.world.spawnWith(.{Transform2D.at(60, 0)});
+    const on_screen = app.worldToScreen(70, 0);
+    const event: pointer.InputEvent = .{ .mouse_button = .{
+        .button = .left,
+        .pressed = true,
+        .position = .init(on_screen.x, on_screen.y),
+    } };
+
+    const local = app.localEvent(knob, event);
+    try testing.expect(local.isPressed(.left));
+    try testing.expectApproxEqAbs(@as(f32, 10), local.position().x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0), local.position().y, 0.001);
+
+    // An entity that is not there leaves the event as it was.
+    const same = app.localEvent(.none, event);
+    try testing.expectEqual(event.position().x, same.position().x);
+}
+
+test "the interface keeps inside the safe area, or inside whatever the game says" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try app.step();
+    // No window, so no notch: the whole of it is the interface's.
+    try testing.expect(app.safeArea().isEmpty());
+    try testing.expect(std.meta.eql(app.interface.safe_area, .{}));
+
+    // A game that draws into the notch itself says so, and keeps its own.
+    app.interface.follow_safe_area = false;
+    app.interface.safe_area = .{ .top = 40 };
+    _ = try app.step();
+    try testing.expectEqual(@as(u16, 40), app.interface.safe_area.top);
+    try testing.expectEqual(@as(f32, 40), app.interface.surface(200, 100).safe_area.top);
+
+    app.interface.follow_safe_area = true;
+    _ = try app.step();
+    try testing.expectEqual(@as(u16, 0), app.interface.safe_area.top);
 }

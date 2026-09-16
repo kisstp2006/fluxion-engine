@@ -85,8 +85,14 @@ caret_refused: bool = false,
 /// asked it: lines, or a page. See `pixels_per_line`.
 scroll_lines: platform.ScrollLines = .{},
 
-/// How far in from each edge of the window the interface keeps.
+/// How far in from each edge of the framebuffer the interface keeps: a
+/// phone's notch and gesture bar, a page's safe area. Filled from the
+/// system every frame while `follow_safe_area` is on.
 safe_area: ui.Padding = .none,
+
+/// Whether the safe area follows the system's. Off, the game says what it
+/// is - for a program that would rather draw into the notch itself.
+follow_safe_area: bool = true,
 
 /// What an image's texture number means. Borrowed: it has to outlive the
 /// frames drawn from it.

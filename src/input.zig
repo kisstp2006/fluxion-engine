@@ -87,6 +87,16 @@ wheel: Wheel = .{},
 /// What was held down when the last event arrived. Shift, control, alt.
 mods: platform.Mods = .{},
 
+/// Buttons whose press this frame was the second of a double click, by
+/// the system's own rule. See `doubleClicked`.
+button_double: Buttons = .initEmpty(),
+
+/// How far the pointer has moved since the velocity was last worked out,
+/// and how long that has taken; and how long it has been still.
+pointer_moved: math.Vec2 = .zero,
+pointer_elapsed: f32 = 0,
+pointer_still: f32 = 0,
+
 /// Everything typed this frame, in order: the codepoints meant, and the keys
 /// that may mean an edit.
 typed: [typed_capacity]Typed = undefined,
@@ -152,6 +162,12 @@ pub const Happening = enum { suspended, resumed, low_memory };
 
 /// How much typing one frame can hold: far more than a fast typist manages.
 pub const typed_capacity = 32;
+
+/// The least time the pointer's velocity is worked out over, so a frame
+/// with no motion in it does not read as a stop. Godot's tracker.
+const velocity_window = 0.1;
+/// How long the pointer stands still before its velocity is nought.
+const velocity_forgets = 3.0;
 
 /// The most pointer events one frame keeps; the rest are dropped.
 pub const pointer_event_capacity = 32;
@@ -405,6 +421,11 @@ pub const Pointer = struct {
     y: f32 = 0,
     dx: f32 = 0,
     dy: f32 = 0,
+    /// How fast it is moving, in pixels a second, worked out over at
+    /// least the last tenth of a second: Godot's
+    /// `get_last_mouse_velocity`. Nought once it has been still for
+    /// three seconds. Set by `Input.trackPointer`.
+    velocity: math.Vec2 = .zero,
     /// Whether the pointer is over the window at all.
     inside: bool = true,
 
@@ -510,6 +531,30 @@ fn anyKeyOf(self: *const Input, keys: [2]i32) f32 {
 /// Whether anything at all is held down.
 pub fn anyKeyDown(self: *const Input) bool {
     return self.down.count() != 0;
+}
+
+/// Whether that button's press this frame was the second of a double
+/// click, by the system's rule: Windows' own setting, or four hundred
+/// milliseconds within a few pixels. A third press starts again, and a
+/// `.fixed` system reads the frame's, not the step's.
+pub fn doubleClicked(self: *const Input, button: platform.MouseButton) bool {
+    const i = @intFromEnum(button);
+    return i < button_span and self.button_double.isSet(i);
+}
+
+/// Work out the pointer's velocity from the frame's motion. Called by
+/// `App` once a frame, after the events are in.
+pub fn trackPointer(self: *Input, delta: f32) void {
+    const moved: math.Vec2 = .init(self.pointer.dx, self.pointer.dy);
+    self.pointer_moved = self.pointer_moved.add(moved);
+    self.pointer_elapsed += delta;
+    if (moved.x != 0 or moved.y != 0) self.pointer_still = 0 else self.pointer_still += delta;
+    if (self.pointer_elapsed >= velocity_window) {
+        self.pointer.velocity = self.pointer_moved.scale(1 / self.pointer_elapsed);
+        self.pointer_moved = .zero;
+        self.pointer_elapsed = 0;
+    }
+    if (self.pointer_still >= velocity_forgets) self.pointer.velocity = .zero;
 }
 
 /// What the pointer did this frame, oldest first: presses, releases,
@@ -630,6 +675,7 @@ pub fn beginFrame(self: *Input) void {
     self.released = .initEmpty();
     self.button_pressed = .initEmpty();
     self.button_released = .initEmpty();
+    self.button_double = .initEmpty();
     for (&self.pads) |*state| {
         state.pressed = .initEmpty();
         state.released = .initEmpty();
@@ -780,6 +826,7 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                     self.button_down.set(i);
                     self.button_pressed.set(i);
                     self.fixed_button_pressed.set(i);
+                    if (b.double_click) self.button_double.set(i);
                 },
                 .release => {
                     self.button_down.unset(i);

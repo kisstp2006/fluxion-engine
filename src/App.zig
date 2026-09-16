@@ -999,6 +999,9 @@ pub fn step(self: *App) anyerror!bool {
 
     try self.schedule.run(.input, self);
     self.shortcuts();
+    // The pointer's speed, from everything this frame has said of it,
+    // including what an `.input` system put in.
+    self.input.trackPointer(self.time.unscaled_delta);
     // After the game's own input systems, which may take the pointer with
     // `input.setAsHandled`, and before the first step.
     try self.picking.update(self);
@@ -1142,6 +1145,21 @@ fn fitInterface(self: *App) void {
         1;
     self.interface.display_scale = display;
     self.interface.scale = self.interface.zoom * display;
+    if (self.interface.follow_safe_area) {
+        const edges = self.safeArea();
+        self.interface.safe_area = .{
+            .left = cut(edges.left),
+            .top = cut(edges.top),
+            .right = cut(edges.right),
+            .bottom = cut(edges.bottom),
+        };
+    }
+}
+
+/// A screen edge as the interface holds it: sixteen bits, which is wider
+/// than any screen there is.
+fn cut(edge: u32) u16 {
+    return @intCast(@min(edge, std.math.maxInt(u16)));
 }
 
 fn interfaceFace(self: *App) ?*const typeface.Font {
@@ -2351,6 +2369,88 @@ pub fn cursor(self: *const App) Cursor {
 /// without a window.
 pub fn setCursorShape(self: *App, shape: CursorShape) Window.Error!void {
     if (self.window) |*window| try window.setCursorShape(shape);
+}
+
+/// A picture of the game's own for the pointer, with the point in it that
+/// does the pointing; null puts the shape back. Godot's
+/// `Input.set_custom_mouse_cursor`. Nothing without a window.
+///
+/// ```zig
+/// const sword = app.assets.get(cursor_texture).?;
+/// try app.setCursorImage(.{ .pixels = pixels, .width = 32, .height = 32, .hot_x = 4, .hot_y = 2 });
+/// ```
+///
+/// A browser quietly keeps its own arrow past a size of its own - 128 by
+/// 128 in Chrome and Firefox - so a cursor a page will see should be small.
+pub fn setCursorImage(self: *App, picture: ?platform.CursorImage) Window.Error!void {
+    if (self.window) |*window| try window.setCursorImage(picture);
+}
+
+/// The window's own picture, in the title bar, the task switcher and the
+/// dock: several sizes at once, and the system takes the one it wants. An
+/// empty list puts the system's own back. Nothing without a window, and
+/// `error.Unavailable` on Wayland, where a window's picture comes from its
+/// desktop file, and on Android.
+pub fn setWindowIcon(self: *App, images: []const platform.IconImage) Window.Error!void {
+    if (self.window) |*window| try window.setIcon(images);
+}
+
+/// How far in from each edge of the framebuffer the part of the window that
+/// nothing covers starts: a phone's notch and its gesture bar, a page's
+/// safe area. Nought on every desktop, and without a window.
+///
+/// `app.safeArea().within(app.width, app.height)` is what is left, which is
+/// where the interface puts its root - see `Interface.follow_safe_area`.
+/// A page gets them only with `viewport-fit=cover` in its viewport meta tag.
+pub fn safeArea(self: *const App) platform.Insets {
+    if (self.window) |*window| return window.safeArea();
+    return .{};
+}
+
+/// Put the pointer there, in framebuffer pixels: Godot's `warp_mouse`. The
+/// system takes a moment to say it moved, so `input.pointer` is set here as
+/// well. Nothing without a window, save moving what a test reads.
+pub fn warpPointer(self: *App, x: f32, y: f32) void {
+    if (self.window) |*window| {
+        window.setCursorPos(x, y) catch |err| {
+            log.warn("could not put the pointer at {d},{d}: {t}", .{ x, y, err });
+            return;
+        };
+    }
+    self.input.pointer.x = x;
+    self.input.pointer.y = y;
+}
+
+/// Where the pointer is in an entity's own space: Godot's
+/// `get_local_mouse_position`. Null for an entity that is not there, or
+/// whose chain of parents is broken.
+///
+/// ```zig
+/// const at = app.pointerIn(dial) orelse return;
+/// dial_angle = std.math.atan2(at.y, at.x);
+/// ```
+pub fn pointerIn(self: *App, entity: ecs.Entity) ?math.Vec2 {
+    return self.pointIn(entity, self.pointerInWorld());
+}
+
+/// The same for any point in the world.
+pub fn pointIn(self: *App, entity: ecs.Entity, point: math.Vec2) ?math.Vec2 {
+    const place = self.worldTransform(entity) orelse return null;
+    const local = place.unapply(point.x, point.y);
+    return .init(local.x, local.y);
+}
+
+/// A pointer event as an entity sees it: the same event, with its place in
+/// that entity's own space rather than the window's. Godot's
+/// `make_input_local`.
+pub fn localEvent(self: *App, entity: ecs.Entity, event: pointer.InputEvent) pointer.InputEvent {
+    const at = self.screenToWorld(event.position().x, event.position().y);
+    const local = self.pointIn(entity, at) orelse return event;
+    var made = event;
+    switch (made) {
+        inline else => |*held| held.position = local,
+    }
+    return made;
 }
 
 /// Open the system's file dialog over the window, and say which one it is:

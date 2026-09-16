@@ -56,12 +56,16 @@ pub const Cursor = enum {
     /// first-person camera, or a drag further than the screen is wide.
     /// `Input.pointer` holds still and only `dx` and `dy` move.
     locked,
+    /// Invisible and held, and still saying where it is: a strategy game
+    /// that draws its own pointer and scrolls at the screen's edge. Unlike
+    /// `locked`, `Input.pointer` follows it and stops at the edges.
+    confined_hidden,
 
     /// Whether this mode keeps the pointer inside the window - and so lets go
     /// of it while the window is without the keyboard, which the platform
     /// sees to.
     pub fn holds(self: Cursor) bool {
-        return self == .confined or self == .locked;
+        return self == .confined or self == .locked or self == .confined_hidden;
     }
 
     fn platformMode(self: Cursor) platform.CursorMode {
@@ -70,6 +74,7 @@ pub const Cursor = enum {
             .hidden => .hidden,
             .confined => .captured,
             .locked => .disabled,
+            .confined_hidden => .confined_hidden,
         };
     }
 };
@@ -202,6 +207,35 @@ pub fn setVsync(self: *Window, on: bool) Error!void {
 /// `error.Unavailable` for a shape this system has not got.
 pub fn setCursorShape(self: *Window, shape: platform.CursorShape) Error!void {
     try self.handle.setCursorShape(shape);
+}
+
+/// Put the pointer there, in the framebuffer's pixels: `App.warpPointer`.
+pub fn setCursorPos(self: *Window, x: f32, y: f32) Error!void {
+    try self.handle.setCursorPos(x, y);
+}
+
+/// A picture of the game's own for the pointer, up to 256 by 256, with the
+/// point in it that does the pointing; null puts the shape back. One image
+/// to a window, and it outranks `setCursorShape` until it is cleared.
+/// `error.Unavailable` where the system has no custom cursors - Android -
+/// or for an image too large.
+pub fn setCursorImage(self: *Window, image: ?platform.CursorImage) Error!void {
+    try self.handle.setCursorImage(image);
+}
+
+/// The window's own picture, in the title bar, the task switcher and the
+/// dock: several sizes at once, and the system picks. An empty list puts
+/// the system's own back. `error.Unavailable` on Wayland, where a window's
+/// picture comes from its desktop file, and on Android.
+pub fn setIcon(self: *Window, images: []const platform.IconImage) Error!void {
+    try self.handle.setIcon(images);
+}
+
+/// How far in from each edge of the framebuffer the part of the window
+/// nothing covers starts: a phone's notch, its gesture bar, a page's
+/// safe area. Nought on every desktop. See `App.safeArea`.
+pub fn safeArea(self: *const Window) platform.Insets {
+    return self.handle.safeArea();
 }
 
 /// Let an input method sit between the keys and the text, and raise the
