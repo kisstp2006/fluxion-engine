@@ -547,6 +547,11 @@ pub const RigidBody2D = extern struct {
     /// Swept against other moving bodies too, not only the static ones.
     bullet: bool = false,
 
+    /// Whether the pointer can pick it. Godot keeps it false on a body and
+    /// true on an `Area2D`; picking asks it of whichever object a collider
+    /// belongs to.
+    input_pickable: bool = false,
+
     /// Static never moves; kinematic moves at its velocity and nothing
     /// pushes it; dynamic is pushed by everything.
     pub const Type = physics.BodyType;
@@ -556,6 +561,7 @@ pub const RigidBody2D = extern struct {
         .velocity = .{ attr.Unit{ .text = "/s" }, attr.Doc{ .text = "World units a second" } },
         .angular_velocity = .{ attr.Angle{}, attr.Unit{ .text = "/s" }, attr.Doc{ .text = "Clockwise on screen" } },
         .gravity_scale = .{attr.Doc{ .text = "Zero floats, minus one rises" }},
+        .input_pickable = .{attr.Doc{ .text = "Whether the pointer can pick it" }},
     };
 };
 
@@ -611,6 +617,54 @@ pub const Collider2D = extern struct {
     pub fn circle(radius: f32) Collider2D {
         return .{ .shape = .circle, .radius = radius };
     }
+};
+
+/// Godot's Area2D: a place that tells what is in it, and pushes nothing. A
+/// trigger, a pickup, a hurtbox, a door's threshold.
+///
+/// ```zig
+/// const trap = try world.spawnWith(.{ Transform2D.at(100, 0), Area2D{}, Collider2D.box(32, 32) });
+/// try app.signal(trap, Area2D, .body_entered).connect(.method(door, "_on_body_entered"), .{});
+/// ```
+///
+/// Its shapes are its own `Collider2D` and the ones hanging from it, every
+/// one of them a sensor whatever the collider says. In the physics it is a
+/// kinematic body that goes where its transform goes, so a moving area
+/// carries its shapes. An entity may have an `Area2D` or a `RigidBody2D`,
+/// not both.
+///
+/// Godot's `priority`, its gravity and damping overrides and its audio bus
+/// are not here: this is what overlaps, not a place that changes physics.
+pub const Area2D = extern struct {
+    /// Whether it says what is in it. Off, it hears nothing and its
+    /// questions are empty, and what was in it is left with an exit.
+    monitoring: bool = true,
+    /// Whether other areas see it. It is still seen by a body's contacts.
+    monitorable: bool = true,
+    /// Whether the pointer can pick it. Godot's
+    /// `CollisionObject2D.input_pickable`, true for an area as there.
+    input_pickable: bool = true,
+
+    /// What it says. `body` is the entity of what came in - the collider's
+    /// `App.collisionObjectOf` - and `local_shape` the collider of this
+    /// area that was touched.
+    pub const signals = .{
+        .body_entered = struct { body: Entity },
+        .body_exited = struct { body: Entity },
+        .body_shape_entered = struct { body: Entity, body_shape: Entity, local_shape: Entity },
+        .body_shape_exited = struct { body: Entity, body_shape: Entity, local_shape: Entity },
+        .area_entered = struct { area: Entity },
+        .area_exited = struct { area: Entity },
+        .area_shape_entered = struct { area: Entity, area_shape: Entity, local_shape: Entity },
+        .area_shape_exited = struct { area: Entity, area_shape: Entity, local_shape: Entity },
+    };
+
+    pub const reflect_name = "Area2D";
+    pub const reflect_fields = .{
+        .monitoring = .{attr.Doc{ .text = "Whether it says what is in it" }},
+        .monitorable = .{attr.Doc{ .text = "Whether other areas see it" }},
+        .input_pickable = .{attr.Doc{ .text = "Whether the pointer can pick it" }},
+    };
 };
 
 test "a transform maps its own space into the world" {

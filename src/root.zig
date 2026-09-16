@@ -157,6 +157,10 @@ pub const RigidBody2D = components.RigidBody2D;
 /// The shape a body collides with, or a static body of its own.
 pub const Collider2D = components.Collider2D;
 
+/// A place that tells what is in it and pushes nothing: a trigger, a
+/// pickup, a hurtbox. Godot's Area2D.
+pub const Area2D = components.Area2D;
+
 /// Two colliders that began or stopped touching: `App.contactsBegun`.
 pub const Contact = Bodies.Contact;
 
@@ -272,8 +276,10 @@ test {
     _ = DebugViews;
     _ = States;
     _ = signals;
+    _ = @import("areas.zig");
     _ = events;
     _ = @import("signals_test.zig");
+    _ = @import("areas_test.zig");
     _ = Project;
     _ = dialog;
     _ = attr;

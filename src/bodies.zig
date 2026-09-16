@@ -24,6 +24,7 @@ const Vec2 = math.Vec2;
 const Transform2D = components.Transform2D;
 const RigidBody2D = components.RigidBody2D;
 const Collider2D = components.Collider2D;
+const Area2D = components.Area2D;
 const Sprite = components.Sprite;
 const BodyId = physics.BodyId;
 const ShapeId = physics.ShapeId;
@@ -76,6 +77,8 @@ began_frame: std.ArrayList(Contact) = .empty,
 ended_frame: std.ArrayList(Contact) = .empty,
 /// Counts syncs, skipping zero.
 mark: u32 = 0,
+/// Entities told already that they cannot be a body and an area at once.
+refused: std.AutoHashMapUnmanaged(Entity, void) = .empty,
 
 const BodyLink = struct {
     entity: Entity = .none,
@@ -139,6 +142,7 @@ pub fn deinit(self: *Bodies, gpa: Allocator) void {
     self.ended_step.deinit(gpa);
     self.began_frame.deinit(gpa);
     self.ended_frame.deinit(gpa);
+    self.refused.deinit(gpa);
     self.* = undefined;
 }
 
@@ -158,6 +162,7 @@ pub fn sync(self: *Bodies, app: *App) !void {
     if (self.mark == 0) self.mark = 1;
     self.moving.clearRetainingCapacity();
     try self.syncRigid(app);
+    try self.syncAreas(app);
     try self.syncColliders(app);
     try self.sweep(app);
 }
@@ -245,14 +250,42 @@ fn destroy(self: *Bodies, app: *App, id: BodyId) !void {
     app.physics.destroyBody(id);
 }
 
+/// An `Area2D` is a kinematic body that goes where its transform goes. An
+/// entity with a `RigidBody2D` as well is a body, and its area is passed
+/// over: a place that tells what is in it is not also a thing that falls.
+fn syncAreas(self: *Bodies, app: *App) !void {
+    var it = try ecs.Query(.{ Transform2D, Area2D }).over(&app.world);
+    while (it.next()) |chunk| {
+        const also_a_body = app.world.has(chunk.entities[0], RigidBody2D);
+        for (chunk.entities, chunk.slice(Transform2D)) |e, place| {
+            if (also_a_body) {
+                if (try self.refused.fetchPut(app.gpa, e, {}) == null) {
+                    log.warn("{f} has an Area2D and a RigidBody2D; it is a body, and the area does nothing", .{e});
+                }
+                continue;
+            }
+            const area: RigidBody2D = .{ .type = .kinematic };
+            const link = &self.bodies.items[e.index];
+            if (link.entity.eql(e) and link.rigid != null and link.rigid.?.type == .kinematic) {
+                update(app, link, place, area);
+            } else {
+                const at = placed(app, e, place) orelse continue;
+                try self.make(app, link, e, place, at, area);
+            }
+            self.body_seen.items[e.index] = self.mark;
+            try self.moving.append(app.gpa, e.index);
+        }
+    }
+}
+
 fn syncColliders(self: *Bodies, app: *App) !void {
     var it = try ecs.Query(.{ Transform2D, Collider2D }).over(&app.world);
     while (it.next()) |chunk| {
         // One archetype: every row has a body of its own, or none does.
-        const rigid = app.world.has(chunk.entities[0], RigidBody2D);
+        const own_body = owns(&app.world, chunk.entities[0]);
         for (chunk.entities, chunk.slice(Transform2D), chunk.slice(Collider2D)) |e, place, collider| {
-            const owner = if (rigid or place.parent.isNone()) e else ownerOf(&app.world, e, place) orelse continue;
-            if (!rigid and owner.eql(e)) try self.syncStatic(app, e, place);
+            const owner = if (own_body or place.parent.isNone()) e else ownerOf(&app.world, e, place) orelse continue;
+            if (!own_body and owner.eql(e)) try self.syncStatic(app, e, place);
 
             const body_link = &self.bodies.items[owner.index];
             if (!body_link.entity.eql(owner) or self.body_seen.items[owner.index] != self.mark) continue;
@@ -287,17 +320,39 @@ fn syncStatic(self: *Bodies, app: *App, e: Entity, place: Transform2D) !void {
     self.body_seen.items[e.index] = self.mark;
 }
 
-/// Whose body a collider is part of: its own entity's when that has a
-/// `RigidBody2D`, else the nearest one above it that has, else its own. Null
+/// Whether an entity is an area: one that is a body as well is a body, and
+/// its area does nothing. See `syncAreas`.
+pub fn isArea(world: *ecs.World, e: Entity) bool {
+    return world.has(e, Area2D) and !world.has(e, RigidBody2D);
+}
+
+/// Whether an entity is a collision object of its own: a body, or an area.
+fn owns(world: *ecs.World, e: Entity) bool {
+    return world.has(e, RigidBody2D) or world.has(e, Area2D);
+}
+
+/// Which collision object a collider belongs to: Godot's `CollisionObject2D`
+/// of a shape. Its own entity when that is a body or an area, else the
+/// nearest one above it that is, else its own entity, which is its own
+/// static body. Null when it is neither a collider nor an object itself, or
 /// when the chain above it is broken.
+pub fn objectOf(world: *ecs.World, e: Entity) ?Entity {
+    const place = world.get(e, Transform2D) orelse return null;
+    if (!world.has(e, Collider2D)) return if (owns(world, e)) e else null;
+    return ownerOf(world, e, place.*);
+}
+
+/// Whose body a collider is part of: its own entity when that is a body or
+/// an area, else the nearest one above it that is, else its own. Null when
+/// the chain above it is broken.
 fn ownerOf(world: *ecs.World, e: Entity, place: Transform2D) ?Entity {
-    if (world.has(e, RigidBody2D)) return e;
+    if (owns(world, e)) return e;
     var above = place.parent;
     var depth: usize = 0;
     while (!above.isNone()) : (depth += 1) {
         if (depth == Transform2D.max_depth) return null;
         const up = world.get(above, Transform2D) orelse return if (world.isAlive(above)) e else null;
-        if (world.has(above, RigidBody2D)) return above;
+        if (owns(world, above)) return above;
         above = up.parent;
     }
     return e;
@@ -328,7 +383,10 @@ fn inputsOf(app: *App, e: Entity, place: Transform2D, collider: Collider2D, owne
             frame = Transform2D.compose(frame, chain[depth]);
         }
     }
-    return .{ .collider = collider, .place = .of(frame), .sprite = spriteOf(app, e, collider) };
+    // Every shape of an area is a sensor, whatever its collider says.
+    var shaped = collider;
+    if (isArea(&app.world, owner)) shaped.sensor = true;
+    return .{ .collider = shaped, .place = .of(frame), .sprite = spriteOf(app, e, shaped) };
 }
 
 fn worldScale(app: *App, e: Entity) ?[2]f32 {

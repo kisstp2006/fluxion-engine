@@ -276,6 +276,8 @@ try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked 
   signal's name, and the struct of its arguments. An entity has the signals
   of all its components. When two of them declare the same name, the signal
   is written `Health.hit`.
+- **The engine declares its own**: an `Area2D` says what came into it and
+  what left. See [Areas](#-areas-what-is-in-a-place).
 - **A connection is to one component's signal.** If a component that
   declares the same name is added later - a `Shield` that also has `hit` -
   the connection is only written differently, as `Health.hit`, and still
@@ -837,6 +839,61 @@ this was measured on: 131 us a step for 7,500, where the step itself takes
 75 us resting and 267 us falling. A level of thousands of tiles wants the
 tilemap below rather than an entity a tile.
 
+### 🚪 Areas: what is in a place
+
+```zig
+const door = try app.world.spawnWith(.{ fx.Transform2D.at(320, 180), fx.Area2D{}, fx.Collider2D.box(40, 80) });
+try app.signal(door, fx.Area2D, .body_entered).connect(.method(door, "_on_body_entered"), .{});
+
+fn onBodyEntered(app: *fx.App, self: fx.Entity, body: fx.Entity) !void {
+    if (app.world.has(body, Player)) open(app, self);
+}
+
+// Or asked, instead of heard:
+if (app.hasOverlappingBodies(door)) open(app, door);
+```
+
+- **An `Area2D` is a place that tells what is in it and pushes nothing**:
+  Godot's Area2D. A trigger, a pickup, a hurtbox, a door's threshold. Its
+  shapes are its own `Collider2D` and the ones hanging from it, every one of
+  them a sensor whatever its collider says, and in the physics it is a
+  kinematic body that goes where its transform goes.
+- **It says eight things**, Godot's, with shape indices replaced by the
+  colliders' entities: `body_entered` and `body_exited`,
+  `area_entered` and `area_exited`, and a `*_shape_entered` and
+  `*_shape_exited` for each, which name the two colliders as well.
+  `body_entered` comes once for a body however many of its shapes are in
+  there: at the first shape pair, and `body_exited` after the last.
+- **`body` is the collision object**, not the collider: the entity the
+  collider belongs to, which `app.collisionObjectOf` gives - its own entity
+  when that has an `Area2D` or a `RigidBody2D`, else the nearest one above
+  it that has, else itself, being its own static body.
+- **Who is told is the asking side's business.** An area reports what its
+  own shape's `mask` takes, whatever the other side's mask says, so Godot's
+  hitbox and hurtbox work: a hitbox is on the hitboxes layer and asks for
+  nothing, a hurtbox asks for hitboxes and is on no layer, and only the
+  hurtbox is told. An area is reported to another area only while its
+  `monitorable` is true.
+- **The questions, as of the last step:** `app.overlappingBodies(area, &buf)`,
+  `app.overlappingAreas(area, &buf)`, `app.hasOverlappingBodies(area)`,
+  `app.hasOverlappingAreas(area)`, `app.overlapsBody(area, body)` and
+  `app.overlapsArea(area, other)`. With `monitoring` off they are empty and
+  say so in the log once, where Godot errors every time.
+- **`monitoring` turned off leaves what was in it with an exit**, and turning
+  it on again finds what is in it and says so. So do a mask changed, an area
+  that becomes monitorable, and a component taken away: what an area says is
+  worked out again after every step, from the pairs the physics holds.
+- **An exit is also said when the other side despawns**, naming the entity
+  that has died, as an ended contact does.
+- **The signals are emitted after the step and heard before the systems of
+  the next one**, so a `.fixed` system that moves a player sees the doors it
+  opened on its next turn. Godot flushes them at the start of the next tick.
+- **An entity is an area or a body, not both.** One with an `Area2D` and a
+  `RigidBody2D` is a body, its area does nothing, and the log says so once.
+- **Godot's `priority`, its gravity and damping overrides and its audio bus
+  are not here**: this is what overlaps, not a place that changes physics.
+  `input_pickable` is here and does nothing yet; picking comes next.
+
 Not here yet: polygons, joints as components, and a view of the colliders in
 `debug`.
 
@@ -1037,7 +1094,7 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   both, and loading tells them apart by the bytes CBOR starts with. CBOR is
   the smaller file; JSON is the one to read, to diff, and to edit by hand,
   comments and all.
-- **A scene holds what it has been told about.** The seven engine components
+- **A scene holds what it has been told about.** The eight engine components
   are registered from the start, and a game's own under their type's name -
   or a `pub const scene_name`, for two types called the same, or failing
   that its `reflect_name`. A component in a file that nothing here is
@@ -1157,7 +1214,7 @@ as data, and the engine hands its components and its calls out through it.
   returned, where a bare `reflect.Value.call` would put it in a result, or
   nowhere. A console finds the call, parses each word into its parameter's
   type - `Value.parse` reads Zig's own syntax - and calls it.
-- **`app.types` holds every type by name**: the seven components, the values
+- **`app.types` holds every type by name**: the eight components, the values
   inside them - `Color`, `Region`, the texture and font handles -
   `DebugViews`, and a game's components as they are registered. A game's own
   console commands go in beside them with `app.types.addFunction("give", give)`,
@@ -1403,6 +1460,9 @@ Here, and checked by the tests:
   with them; boxes and circles sized by their sprites; compound bodies from
   children; places and speeds written back after each step; contacts once per
   frame or per step; rays, points and boxes asked in entities.
+- Areas: what is in a place, as Godot has it - the eight overlap signals,
+  the shapes forced to sensors, the asking side's mask deciding who is
+  told, monitoring turned off and on again, and the six questions.
 - Scenes: the world, its names, its UUIDs and every registered component
   written as JSON or CBOR and read back, with entity references by UUID -
   inside the scene first, then in the world - textures and fonts found again
@@ -1487,9 +1547,9 @@ before this package existed - the seam was cut for it deliberately.
 
 ## 🧩 What counts as a component
 
-Seven: `Transform2D`, `Sprite`, `Text2D`, `Animation`, `Camera2D`,
-`RigidBody2D` and `Collider2D`. Each one is something a person making a game
-would name, which is the test.
+Eight: `Transform2D`, `Sprite`, `Text2D`, `Animation`, `Camera2D`,
+`RigidBody2D`, `Collider2D` and `Area2D`. Each one is something a person
+making a game would name, which is the test.
 
 Two things that used to be on that list are not any more, and the reason is
 the same for both. `Parent` was a component holding a link and an offset; it

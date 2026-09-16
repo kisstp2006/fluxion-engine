@@ -39,6 +39,7 @@ const Uuid = @import("fluxion_id").Uuid;
 
 const Assets = @import("assets.zig");
 const attr = @import("attr.zig");
+const Areas = @import("areas.zig");
 const Bodies = @import("bodies.zig");
 const Clipboard = @import("clipboard.zig");
 const Commands = @import("commands.zig");
@@ -338,6 +339,9 @@ jobs: ecs.Jobs,
 physics: physics_lib.World,
 /// Which body is which entity's. See `bodies.zig`.
 bodies: Bodies = .{},
+/// What is inside each `Area2D`, and the signals that say so. See
+/// `areas.zig`.
+areas: Areas = .{},
 
 /// Where the game's files are - `res://` - and the UUIDs of the ones that
 /// have them. See `Project`.
@@ -563,6 +567,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Camera2D,
         components.RigidBody2D,
         components.Collider2D,
+        components.Area2D,
     }) catch |err| switch (err) {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
@@ -710,6 +715,7 @@ pub fn destroy(self: *App) void {
     self.event_channels.deinit(gpa);
     self.types.deinit();
     self.bodies.deinit(gpa);
+    self.areas.deinit(gpa);
     self.physics.deinit();
     self.debug_renderer.deinit();
     self.debug_steps.deinit();
@@ -1046,6 +1052,10 @@ fn stepPhysics(self: *App) !void {
     try self.bodies.sync(self);
     try self.physics.step(self.time.fixed_delta, &self.jobs);
     try self.bodies.afterStep(self);
+    // What the step found each area holding, said and heard before the
+    // systems of the next step run.
+    try self.areas.update(self);
+    try self.signals.drain(self);
 }
 
 fn waitForNextFrame(self: *App, minimized: bool) !void {
@@ -1475,6 +1485,7 @@ pub fn sceneInfo(self: *App, path: []const u8, diagnostics: ?*json.Diagnostics) 
 /// throws away.
 pub fn clearWorld(self: *App) void {
     self.bodies.clear(self);
+    self.areas.clear();
     self.commands.clear();
     self.world.deinit();
     self.world = .init(self.gpa);
@@ -2163,6 +2174,47 @@ pub fn overlapBox(self: *App, min: math.Vec2, max: math.Vec2, found: []ecs.Entit
 /// ```
 pub fn contactsBegun(self: *const App) []const Bodies.Contact {
     return self.bodies.began(self.input.clock == .fixed);
+}
+
+/// Whose collision object a collider is a shape of: Godot's
+/// `CollisionObject2D` of a shape, and what an area's signals name. The
+/// collider's own entity when that has an `Area2D` or a `RigidBody2D`, else
+/// the nearest one above it that has, else its own entity, which is its own
+/// static body. Null for an entity that is neither.
+pub fn collisionObjectOf(self: *App, collider: ecs.Entity) ?ecs.Entity {
+    return Bodies.objectOf(&self.world, collider);
+}
+
+/// The bodies inside `area` now, as many as `found` holds: Godot's
+/// `get_overlapping_bodies`. Empty, with a word in the log, for an area that
+/// is not monitoring.
+pub fn overlappingBodies(self: *App, area: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
+    return self.areas.overlapping(self, area, false, found);
+}
+
+/// The other areas inside `area` now: Godot's `get_overlapping_areas`.
+pub fn overlappingAreas(self: *App, area: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
+    return self.areas.overlapping(self, area, true, found);
+}
+
+/// Whether anything at all is inside `area`: Godot's `has_overlapping_bodies`.
+pub fn hasOverlappingBodies(self: *App, area: ecs.Entity) bool {
+    return self.areas.any(self, area, false);
+}
+
+/// Whether another area is inside it: Godot's `has_overlapping_areas`.
+pub fn hasOverlappingAreas(self: *App, area: ecs.Entity) bool {
+    return self.areas.any(self, area, true);
+}
+
+/// Whether that body is inside it: Godot's `overlaps_body`.
+pub fn overlapsBody(self: *App, area: ecs.Entity, body: ecs.Entity) bool {
+    return self.areas.overlaps(self, area, body);
+}
+
+/// Whether that area is inside it: Godot's `overlaps_area`.
+pub fn overlapsArea(self: *App, area: ecs.Entity, other: ecs.Entity) bool {
+    return self.areas.overlaps(self, area, other);
 }
 
 /// The same for contacts that ended - including because one of the two was
@@ -3773,7 +3825,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 7), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 8), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);
