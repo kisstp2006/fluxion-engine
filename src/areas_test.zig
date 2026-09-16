@@ -84,7 +84,7 @@ const Seen = struct {
 };
 
 fn headless() !*App {
-    const app = try App.create(testing.allocator, .{ .headless = true, .frame_time = 1.0 / 60.0 });
+    const app = try App.create(testing.allocator, .{ .headless = true, .frame_time = 1.0 / 60.0, .physics_2d = @import("bodies.zig").earth });
     errdefer app.destroy();
     try app.addMethod("_body_in", Seen.bodyIn);
     try app.addMethod("_body_out", Seen.bodyOut);
@@ -118,7 +118,7 @@ fn frames(app: *App, count: usize) !void {
 test "a body falling through an area is told entering and leaving, once each" {
     const app = try headless();
     defer app.destroy();
-    const gate = try app.world.spawnWith(.{ Transform2D.at(0, 100), Area2D{}, Collider2D.box(100, 40) });
+    const gate = try app.world.spawnWith(.{ Transform2D.at(0, 100), Area2D{}, Collider2D.rectangle(50, 20) });
     const stone = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.circle(4) });
     try watch(app, gate);
 
@@ -142,11 +142,11 @@ test "a body falling through an area is told entering and leaving, once each" {
 test "a kinematic body is in a still area while it is there, and the questions say so" {
     const app = try headless();
     defer app.destroy();
-    const trigger = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.box(60, 60) });
+    const trigger = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.rectangle(30, 30) });
     const player = try app.world.spawnWith(.{
         Transform2D.at(-100, 0),
         RigidBody2D{ .type = .kinematic },
-        Collider2D.box(20, 20),
+        Collider2D.rectangle(10, 10),
     });
     try watch(app, trigger);
 
@@ -178,47 +178,53 @@ test "a kinematic body is in a still area while it is there, and the questions s
     try testing.expectEqual(@as(usize, 0), app.overlappingBodies(trigger, &found).len);
 }
 
-test "a hitbox is seen by the hurtbox that asks for it, and not the other way" {
+test "a hitbox and the hurtbox that asks for it hear each other: Godot 3's layers go both ways" {
     const app = try headless();
     defer app.destroy();
-    const hitboxes: u16 = 1 << 2;
+    const hitboxes: u32 = 1 << 2;
 
-    // The hitbox says what it is and asks for nothing, as Godot's does.
-    var swing = Collider2D.box(30, 30);
-    swing.category = hitboxes;
-    swing.mask = 0;
+    // The hitbox says what it is and asks for nothing.
+    var swing = Collider2D.rectangle(15, 15);
+    swing.collision_layer = hitboxes;
+    swing.collision_mask = 0;
     const sword = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, swing });
 
     // The hurtbox is on no layer and asks for hitboxes.
-    var skin = Collider2D.box(30, 30);
-    skin.category = 0;
-    skin.mask = hitboxes;
+    var skin = Collider2D.rectangle(15, 15);
+    skin.collision_layer = 0;
+    skin.collision_mask = hitboxes;
     const monster = try app.world.spawnWith(.{ Transform2D.at(200, 0), Area2D{}, skin });
+
+    // A third on no layer that asks for nothing: nobody's.
+    var nothing = Collider2D.rectangle(15, 15);
+    nothing.collision_layer = 0;
+    nothing.collision_mask = 0;
+    const ghost = try app.world.spawnWith(.{ Transform2D.at(-200, 0), Area2D{}, nothing });
 
     try watch(app, sword);
     try watch(app, monster);
+    try watch(app, ghost);
     app.world.get(sword, Transform2D).?.x = 195;
     try frames(app, 2);
 
-    // The hurtbox heard it; the hitbox, which asks for nothing, heard none.
-    try testing.expectEqual(@as(usize, 1), Seen.count(.area_in));
-    try testing.expect(Seen.first(.area_in).?.area.eql(monster));
-    try testing.expect(Seen.first(.area_in).?.object.eql(sword));
+    // One mask asking is enough, for both of them.
+    try testing.expectEqual(@as(usize, 2), Seen.count(.area_in));
     try testing.expect(app.overlapsArea(monster, sword));
-    try testing.expect(!app.overlapsArea(sword, monster));
+    try testing.expect(app.overlapsArea(sword, monster));
 
-    // And out again.
-    app.world.get(sword, Transform2D).?.x = 0;
+    // And out again, and over the ghost, which neither hears.
+    app.world.get(sword, Transform2D).?.x = -195;
     try frames(app, 2);
-    try testing.expectEqual(@as(usize, 1), Seen.count(.area_out));
-    try testing.expect(Seen.first(.area_out).?.area.eql(monster));
+    try testing.expectEqual(@as(usize, 2), Seen.count(.area_out));
+    try testing.expect(!app.overlapsArea(sword, ghost));
+    try testing.expect(!app.overlapsArea(ghost, sword));
 }
 
 test "an area that stops monitoring leaves what was in it, and answers nothing" {
     const app = try headless();
     defer app.destroy();
-    const zone = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.box(60, 60) });
-    const thing = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, Collider2D.box(10, 10) });
+    const zone = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.rectangle(30, 30) });
+    const thing = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, Collider2D.rectangle(5, 5) });
     try watch(app, zone);
 
     try frames(app, 2);
@@ -246,8 +252,8 @@ test "an area that stops monitoring leaves what was in it, and answers nothing" 
 test "what an area held is left with an exit when it is despawned" {
     const app = try headless();
     defer app.destroy();
-    const pit = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.box(60, 60) });
-    const coin = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, Collider2D.box(10, 10) });
+    const pit = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.rectangle(30, 30) });
+    const coin = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, Collider2D.rectangle(5, 5) });
     try watch(app, pit);
 
     try frames(app, 2);
@@ -265,9 +271,9 @@ test "an area carries the colliders hanging from it, and every one of them is a 
     const app = try headless();
     defer app.destroy();
     const room = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{} });
-    const left = try app.world.spawnWith(.{ Transform2D.childOf(room, -40, 0), Collider2D.box(20, 20) });
-    _ = try app.world.spawnWith(.{ Transform2D.childOf(room, 40, 0), Collider2D.box(20, 20) });
-    const walker = try app.world.spawnWith(.{ Transform2D.at(-40, 0), RigidBody2D{ .type = .kinematic }, Collider2D.box(10, 10) });
+    const left = try app.world.spawnWith(.{ Transform2D.childOf(room, -40, 0), Collider2D.rectangle(10, 10) });
+    _ = try app.world.spawnWith(.{ Transform2D.childOf(room, 40, 0), Collider2D.rectangle(10, 10) });
+    const walker = try app.world.spawnWith(.{ Transform2D.at(-40, 0), RigidBody2D{ .type = .kinematic }, Collider2D.rectangle(5, 5) });
     try watch(app, room);
 
     try testing.expect(app.collisionObjectOf(left).?.eql(room));
@@ -294,8 +300,8 @@ test "an area carries the colliders hanging from it, and every one of them is a 
 test "an entity that is a body and an area is a body, and its area does nothing" {
     const app = try headless();
     defer app.destroy();
-    const both = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, RigidBody2D{}, Collider2D.box(20, 20) });
-    const floor = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.box(400, 20) });
+    const both = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, RigidBody2D{}, Collider2D.rectangle(10, 10) });
+    const floor = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.rectangle(200, 10) });
     try watch(app, both);
 
     try frames(app, 90);
@@ -309,9 +315,9 @@ test "an entity that is a body and an area is a body, and its area does nothing"
 test "an area that is not monitorable is seen by bodies' contacts and not by areas" {
     const app = try headless();
     defer app.destroy();
-    const ghost = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{ .monitorable = false }, Collider2D.box(40, 40) });
-    const eye = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.box(40, 40) });
-    const walker = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, Collider2D.box(10, 10) });
+    const ghost = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{ .monitorable = false }, Collider2D.rectangle(20, 20) });
+    const eye = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.rectangle(20, 20) });
+    const walker = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, Collider2D.rectangle(5, 5) });
     try watch(app, eye);
     try watch(app, ghost);
 
@@ -332,21 +338,19 @@ test "an area that is not monitorable is seen by bodies' contacts and not by are
     try testing.expect(app.overlapsArea(eye, ghost));
 }
 
-test "a group says who meets whom, over the masks, for an area as for a body" {
+test "an area hears a body that asks for it, though the area asks for nothing" {
     const app = try headless();
     defer app.destroy();
-    var listening = Collider2D.box(40, 40);
-    listening.mask = 0;
-    listening.group = 7;
+    var listening = Collider2D.rectangle(20, 20);
+    listening.collision_mask = 0;
     const ear = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, listening });
 
-    var quiet = Collider2D.box(10, 10);
-    quiet.category = 0;
-    quiet.group = 7;
+    var quiet = Collider2D.rectangle(5, 5);
+    quiet.collision_layer = 0;
     const mouse = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, quiet });
     try watch(app, ear);
 
-    // Neither mask takes the other, and the group says they meet anyway.
+    // The mouse is on no layer, and its mask has the ear's.
     try frames(app, 2);
     try testing.expectEqual(@as(usize, 1), Seen.count(.body_in));
     try testing.expect(app.overlapsBody(ear, mouse));
@@ -355,8 +359,8 @@ test "a group says who meets whom, over the masks, for an area as for a body" {
 test "an area moved over a still body finds it, and lets go as it moves on" {
     const app = try headless();
     defer app.destroy();
-    const sweep = try app.world.spawnWith(.{ Transform2D.at(-100, 0), Area2D{}, Collider2D.box(20, 20) });
-    const post = try app.world.spawnWith(.{ Transform2D.at(0, 0), Collider2D.box(20, 20) });
+    const sweep = try app.world.spawnWith(.{ Transform2D.at(-100, 0), Area2D{}, Collider2D.rectangle(10, 10) });
+    const post = try app.world.spawnWith(.{ Transform2D.at(0, 0), Collider2D.rectangle(10, 10) });
     try watch(app, sweep);
 
     for (0..12) |_| {
@@ -377,8 +381,8 @@ test "an area moved over a still body finds it, and lets go as it moves on" {
 test "an area goes through a scene with its connections, and tells what is in it again" {
     const first = try headless();
     defer first.destroy();
-    const gate = try first.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{ .monitorable = false }, Collider2D.box(60, 60) });
-    const walker = try first.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, Collider2D.box(10, 10) });
+    const gate = try first.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{ .monitorable = false }, Collider2D.rectangle(30, 30) });
+    const walker = try first.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, Collider2D.rectangle(5, 5) });
     try first.signal(gate, Area2D, .body_entered).connect(.method(gate, "_body_in"), .{ .flags = .{ .persist = true } });
 
     const bytes = try scene.write(first, testing.allocator, .{});
@@ -399,4 +403,28 @@ test "an area goes through a scene with its connections, and tells what is in it
     try testing.expectEqual(@as(usize, 1), Seen.count(.body_in));
     try testing.expect(Seen.first(.body_in).?.area.eql(there));
     try testing.expect(again.overlapsBody(there, again.findUuid(first.uuidOf(walker).?).?));
+}
+
+test "a body stays in an area while its collider is made anew, and leaves when no layer joins them" {
+    const app = try headless();
+    defer app.destroy();
+    const trigger = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.rectangle(30, 30) });
+    const player = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .type = .kinematic }, Collider2D.rectangle(10, 10) });
+    try watch(app, trigger);
+    try frames(app, 2);
+    try testing.expectEqual(@as(usize, 1), Seen.count(.body_in));
+
+    // A new friction makes its shape anew where it was: nothing to say.
+    app.world.get(player, Collider2D).?.friction = 0.5;
+    try frames(app, 2);
+    try testing.expectEqual(@as(usize, 1), Seen.count(.body_in));
+    try testing.expectEqual(@as(usize, 0), Seen.count(.body_out));
+    try testing.expect(app.overlapsBody(trigger, player));
+
+    // On no layer and looking for none: it leaves.
+    app.world.get(player, Collider2D).?.collision_layer = 0;
+    app.world.get(player, Collider2D).?.collision_mask = 0;
+    try frames(app, 2);
+    try testing.expectEqual(@as(usize, 1), Seen.count(.body_out));
+    try testing.expect(!app.overlapsBody(trigger, player));
 }

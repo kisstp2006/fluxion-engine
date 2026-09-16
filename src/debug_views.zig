@@ -251,7 +251,7 @@ test "the collider view outlines each collider in its body's colour" {
     const app = try headless();
     defer app.destroy();
     app.debug_views.colliders = true;
-    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), components.Collider2D.box(400, 20) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), components.Collider2D.rectangle(200, 10) });
     _ = try app.world.spawnWith(.{ Transform2D.at(0, 0), components.RigidBody2D{}, components.Collider2D.circle(5) });
 
     _ = try app.step();
@@ -268,8 +268,8 @@ test "a collider is drawn where its sprite is between fixed steps" {
     app.debug_views.colliders = true;
     const puck = try app.world.spawnWith(.{
         Transform2D.at(0, 0).interpolated(),
-        components.RigidBody2D{ .gravity_scale = 0, .velocity = .init(600, 0) },
-        components.Collider2D.box(10, 10),
+        components.RigidBody2D{ .gravity_scale = 0, .linear_velocity = .init(600, 0) },
+        components.Collider2D.rectangle(5, 5),
     });
 
     // Two frames a step: the second of each pair is halfway between steps.
@@ -285,7 +285,7 @@ test "the body view marks moving bodies and where they are heading" {
     const app = try headless();
     defer app.destroy();
     app.debug_views.bodies = true;
-    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), components.Collider2D.box(400, 20) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), components.Collider2D.rectangle(200, 10) });
     _ = try app.world.spawnWith(.{ Transform2D.at(0, 0), components.RigidBody2D{}, components.Collider2D.circle(5) });
 
     for (0..10) |_| _ = try app.step();

@@ -8,7 +8,7 @@
 //!
 //! What can be picked is an `Area2D` or a `RigidBody2D` with
 //! `input_pickable`, through a collider that holds the point, is on a layer
-//! - a `category` of nought is never picked, as in Godot - and whose
+//! - a `collision_layer` of nought is never picked, as in Godot - and whose
 //! object, if it is drawn at all, is visible.
 
 const std = @import("std");
@@ -147,7 +147,7 @@ fn take(self: *Picking, app: *App, id: physics.ShapeId, point: Vec2) !void {
     const shape = app.bodies.entityOf(app, id) orelse return;
     const collider = app.world.get(shape, Collider2D) orelse return;
     // Godot picks through a shape on a layer, and has no picking mask.
-    if (collider.category == 0) return;
+    if (collider.collision_layer == 0) return;
     const object = Bodies.objectOf(&app.world, shape) orelse return;
     if (!pickable(app, object)) return;
 

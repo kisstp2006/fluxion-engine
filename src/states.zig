@@ -398,7 +398,7 @@ test "an editor's Edit, Play, Pause and Step, out of states and the clock" {
     const app = try headless();
     defer app.destroy();
     try app.addSystemsIn(Play.playing, Game.addSystems);
-    const crate = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.RigidBody2D{}, components.Collider2D.box(10, 10) });
+    const crate = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.RigidBody2D{}, components.Collider2D.rectangle(5, 5) });
     const height = struct {
         fn of(a: *App, e: @import("fluxion_ecs").Entity) f32 {
             return a.world.get(e, components.Transform2D).?.y;

@@ -56,6 +56,8 @@ pub const Settings = settings_file.Settings;
 /// Which family of graphics APIs a project is drawn with, and its backends
 /// on each system.
 pub const Renderer = settings_file.Renderer;
+/// How a 2D world moves: `physics_2d` in the project file.
+pub const Physics2D = settings_file.Physics2D;
 
 pub const ReadError = settings_file.ReadError;
 pub const WriteError = settings_file.WriteError;

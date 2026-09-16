@@ -79,6 +79,24 @@ ended_frame: std.ArrayList(Contact) = .empty,
 mark: u32 = 0,
 /// Entities told already that they cannot be a body and an area at once.
 refused: std.AutoHashMapUnmanaged(Entity, void) = .empty,
+/// Pairs of bodies kept from touching, with how many times each was asked:
+/// Godot's collision exceptions, by entity, so they outlast a body made
+/// anew. The physics is told of each pair once, while both bodies are there.
+exceptions: std.AutoArrayHashMapUnmanaged(EntityPair, u32) = .empty,
+
+/// Two entities, the lower first, so either order names the pair.
+pub const EntityPair = struct {
+    a: Entity,
+    b: Entity,
+
+    pub fn of(x: Entity, y: Entity) EntityPair {
+        return if (x.toInt() < y.toInt()) .{ .a = x, .b = y } else .{ .a = y, .b = x };
+    }
+
+    fn has(self: EntityPair, e: Entity) bool {
+        return self.a.eql(e) or self.b.eql(e);
+    }
+};
 
 const BodyLink = struct {
     entity: Entity = .none,
@@ -143,6 +161,7 @@ pub fn deinit(self: *Bodies, gpa: Allocator) void {
     self.began_frame.deinit(gpa);
     self.ended_frame.deinit(gpa);
     self.refused.deinit(gpa);
+    self.exceptions.deinit(gpa);
     self.* = undefined;
 }
 
@@ -198,14 +217,14 @@ fn update(app: *App, link: *BodyLink, place: Transform2D, rigid: RigidBody2D) vo
         }
         link.transform = place;
     }
-    if (!std.meta.eql(rigid.velocity, was.velocity) or rigid.angular_velocity != was.angular_velocity) {
-        body.linear_velocity = rigid.velocity;
+    if (!std.meta.eql(rigid.linear_velocity, was.linear_velocity) or rigid.angular_velocity != was.angular_velocity) {
+        body.linear_velocity = rigid.linear_velocity;
         body.angular_velocity = rigid.angular_velocity;
         body.wake();
     }
-    body.linear_damping = rigid.linear_damping;
-    body.angular_damping = rigid.angular_damping;
-    body.bullet = rigid.bullet;
+    body.linear_damping = linearDamp(app, rigid);
+    body.angular_damping = angularDamp(app, rigid);
+    body.bullet = rigid.continuous_cd != .disabled;
     if (rigid.gravity_scale != was.gravity_scale) {
         body.gravity_scale = rigid.gravity_scale;
         body.wake();
@@ -221,6 +240,15 @@ fn update(app: *App, link: *BodyLink, place: Transform2D, rigid: RigidBody2D) vo
     link.rigid = rigid;
 }
 
+/// A body's damping: its own, or with minus one the project's.
+fn linearDamp(app: *const App, rigid: RigidBody2D) f32 {
+    return if (rigid.linear_damp >= 0) rigid.linear_damp else app.physics_2d.default_linear_damp;
+}
+
+fn angularDamp(app: *const App, rigid: RigidBody2D) f32 {
+    return if (rigid.angular_damp >= 0) rigid.angular_damp else app.physics_2d.default_angular_damp;
+}
+
 fn make(self: *Bodies, app: *App, link: *BodyLink, e: Entity, place: Transform2D, at: Pose, rigid: ?RigidBody2D) !void {
     if (!link.entity.isNone()) try self.destroy(app, link.body);
     const r = rigid orelse RigidBody2D{ .type = .static };
@@ -228,17 +256,99 @@ fn make(self: *Bodies, app: *App, link: *BodyLink, e: Entity, place: Transform2D
         .type = r.type,
         .position = .init(at.x, at.y),
         .angle = at.rotation,
-        .linear_velocity = r.velocity,
+        .linear_velocity = r.linear_velocity,
         .angular_velocity = r.angular_velocity,
-        .linear_damping = r.linear_damping,
-        .angular_damping = r.angular_damping,
+        .linear_damping = linearDamp(app, r),
+        .angular_damping = angularDamp(app, r),
         .gravity_scale = r.gravity_scale,
         .fixed_rotation = r.fixed_rotation,
         .allow_sleep = r.can_sleep,
-        .bullet = r.bullet,
+        .bullet = r.continuous_cd != .disabled,
         .user_data = e.toInt(),
     });
     link.* = .{ .entity = e, .body = body, .rigid = rigid, .transform = place, .placed = at };
+    // A body made anew has lost its exceptions with the old one.
+    for (self.exceptions.keys()) |pair| {
+        if (!pair.has(e)) continue;
+        const other = if (pair.a.eql(e)) pair.b else pair.a;
+        if (self.bodyOfObject(other)) |theirs| try app.physics.addCollisionException(body, theirs);
+    }
+}
+
+/// The body an object has now: a body, or a collider's own static one.
+fn bodyOfObject(self: *const Bodies, e: Entity) ?BodyId {
+    if (e.index >= self.bodies.items.len) return null;
+    const link = self.bodies.items[e.index];
+    return if (link.entity.eql(e)) link.body else null;
+}
+
+// -------------------------------------------------------------------------
+// Collision exceptions
+// -------------------------------------------------------------------------
+
+pub const ExceptionError = error{
+    /// Neither a `RigidBody2D` nor a collider that is its own static body:
+    /// an area, a collider that is part of a body, or nothing physical.
+    NotABody,
+    /// The same body twice.
+    SameBody,
+} || Allocator.Error;
+
+/// Keep two bodies from touching: Godot's `add_collision_exception_with`.
+/// Counted, so two calls take two removals. It lasts until then or until
+/// either entity is gone, a body made anew included.
+pub fn addException(self: *Bodies, app: *App, a: Entity, b: Entity) ExceptionError!void {
+    if (!isBody(&app.world, a) or !isBody(&app.world, b)) return error.NotABody;
+    if (a.eql(b)) return error.SameBody;
+    const held = try self.exceptions.getOrPut(app.gpa, .of(a, b));
+    if (held.found_existing) {
+        held.value_ptr.* += 1;
+        return;
+    }
+    held.value_ptr.* = 1;
+    const ours = self.bodyOfObject(a) orelse return;
+    const theirs = self.bodyOfObject(b) orelse return;
+    app.physics.addCollisionException(ours, theirs) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // Both are there: `bodyOfObject` found them.
+        error.NoSuchBody, error.SameBody => unreachable,
+    };
+}
+
+/// Take one `addException` back. Nothing, for a pair that has none.
+pub fn removeException(self: *Bodies, app: *App, a: Entity, b: Entity) void {
+    const key: EntityPair = .of(a, b);
+    const count = self.exceptions.getPtr(key) orelse return;
+    count.* -= 1;
+    if (count.* > 0) return;
+    _ = self.exceptions.orderedRemove(key);
+    const ours = self.bodyOfObject(a) orelse return;
+    const theirs = self.bodyOfObject(b) orelse return;
+    app.physics.removeCollisionException(ours, theirs);
+}
+
+/// The bodies `e` is kept from touching, as many as `found` holds, in the
+/// order they were asked for.
+pub fn exceptionsOf(self: *const Bodies, e: Entity, found: []Entity) []Entity {
+    var count: usize = 0;
+    for (self.exceptions.keys()) |pair| {
+        if (count == found.len) break;
+        if (!pair.has(e)) continue;
+        found[count] = if (pair.a.eql(e)) pair.b else pair.a;
+        count += 1;
+    }
+    return found[0..count];
+}
+
+/// Whether an entity is a body a collision exception can name: a
+/// `RigidBody2D`, or a collider that is a static body of its own.
+fn isBody(world: *ecs.World, e: Entity) bool {
+    if (world.has(e, RigidBody2D)) return true;
+    if (world.has(e, Area2D)) return false;
+    const place = world.get(e, Transform2D) orelse return false;
+    if (!world.has(e, Collider2D)) return false;
+    const owner = ownerOf(world, e, place.*) orelse return false;
+    return owner.eql(e);
 }
 
 fn destroy(self: *Bodies, app: *App, id: BodyId) !void {
@@ -286,6 +396,8 @@ fn syncColliders(self: *Bodies, app: *App) !void {
         for (chunk.entities, chunk.slice(Transform2D), chunk.slice(Collider2D)) |e, place, collider| {
             const owner = if (own_body or place.parent.isNone()) e else ownerOf(&app.world, e, place) orelse continue;
             if (!own_body and owner.eql(e)) try self.syncStatic(app, e, place);
+            // Not there while disabled: its shape goes with the sweep.
+            if (collider.disabled) continue;
 
             const body_link = &self.bodies.items[owner.index];
             if (!body_link.entity.eql(owner) or self.body_seen.items[owner.index] != self.mark) continue;
@@ -398,7 +510,7 @@ fn worldScale(app: *App, e: Entity) ?[2]f32 {
 
 fn spriteOf(app: *App, e: Entity, collider: Collider2D) [4]f32 {
     const wanted = switch (collider.shape) {
-        .box => collider.width == 0 or collider.height == 0,
+        .rectangle => collider.extents.x == 0 or collider.extents.y == 0,
         .circle => collider.radius == 0,
     };
     if (!wanted) return @splat(0);
@@ -421,15 +533,15 @@ fn reshape(self: *Bodies, app: *App, link: *ShapeLink, e: Entity, body: BodyId, 
 fn shapeOf(inputs: Inputs, e: Entity) ?physics.Shape {
     const c = inputs.collider;
     const place = inputs.place;
-    var offset: [2]f32 = .{ c.offset_x, c.offset_y };
+    var offset: [2]f32 = .{ c.offset.x, c.offset.y };
     const geometry: physics.shape.Geometry = switch (c.shape) {
-        .box => blk: {
-            if (c.width == 0 or c.height == 0) {
+        .rectangle => blk: {
+            if (c.extents.x == 0 or c.extents.y == 0) {
                 offset[0] += inputs.sprite[2];
                 offset[1] += inputs.sprite[3];
             }
-            const half_width = @abs((if (c.width != 0) c.width else inputs.sprite[0]) * place.scale_x) / 2;
-            const half_height = @abs((if (c.height != 0) c.height else inputs.sprite[1]) * place.scale_y) / 2;
+            const half_width = @abs(if (c.extents.x != 0) c.extents.x * place.scale_x else inputs.sprite[0] * place.scale_x / 2);
+            const half_height = @abs(if (c.extents.y != 0) c.extents.y * place.scale_y else inputs.sprite[1] * place.scale_y / 2);
             const centre = centreOf(place, offset);
             const turn = place.rotation + c.rotation;
             if (!(half_width > least_size and half_height > least_size)) return null;
@@ -450,11 +562,21 @@ fn shapeOf(inputs: Inputs, e: Entity) ?physics.Shape {
     };
     return .{
         .geometry = geometry,
-        .material = .{ .friction = c.friction, .restitution = c.restitution, .density = c.density },
-        .filter = .{ .category = c.category, .mask = c.mask, .group = c.group },
+        .material = .{ .friction = c.friction, .restitution = c.bounce, .density = c.density },
+        .filter = .{ .category = c.collision_layer, .mask = c.collision_mask },
         .sensor = c.sensor,
+        // The entity's `+y`, down the screen, turned and flipped into the
+        // body's frame: the way something is held going.
+        .one_way = if (c.one_way_collision) .{ .direction = downOf(place, c.rotation) } else null,
         .user_data = e.toInt(),
     };
+}
+
+/// Where a collider's own `+y` points in its body's frame.
+fn downOf(place: Pose, rotation: f32) Vec2 {
+    const turn = place.rotation + rotation;
+    const flip: f32 = if (place.scale_y < 0) -1 else 1;
+    return .init(-@sin(turn) * flip, @cos(turn) * flip);
 }
 
 /// Whether every one of these is a number, and not an infinity. A shape made
@@ -486,6 +608,17 @@ fn take(self: *Bodies, app: *App, shape: ShapeId, e: Entity) !void {
 }
 
 fn sweep(self: *Bodies, app: *App) !void {
+    // An exception naming an entity that is gone goes too: its body, and
+    // what the physics held of it, went with it.
+    var at: usize = 0;
+    while (at < self.exceptions.count()) {
+        const pair = self.exceptions.keys()[at];
+        if (app.world.isAlive(pair.a) and app.world.isAlive(pair.b)) {
+            at += 1;
+        } else {
+            self.exceptions.orderedRemoveAt(at);
+        }
+    }
     for (self.shape_seen.items, self.shapes.items) |*seen, *link| {
         if (seen.* == 0 or seen.* == self.mark) continue;
         try self.take(app, link.shape, link.entity);
@@ -530,7 +663,7 @@ pub fn afterStep(self: *Bodies, app: *App) !void {
         link.placed.y = body.position().y;
         link.placed.rotation = body.angle;
         if (app.world.get(link.entity, RigidBody2D)) |written| {
-            written.velocity = body.linear_velocity;
+            written.linear_velocity = body.linear_velocity;
             written.angular_velocity = body.angular_velocity;
             link.rigid = written.*;
         }
@@ -592,6 +725,7 @@ pub fn clear(self: *Bodies, app: *App) void {
     self.departed.clearRetainingCapacity();
     self.began_step.clearRetainingCapacity();
     self.ended_step.clearRetainingCapacity();
+    self.exceptions.clearRetainingCapacity();
     self.beginFrame();
 }
 
@@ -673,8 +807,13 @@ pub fn overlapBox(self: *const Bodies, app: *App, min: Vec2, max: Vec2, found: [
 
 const scene = @import("scene.zig");
 
+/// Earth's pull at a hundred units to the metre, with nothing slowing a
+/// body down: what these tests' numbers were worked out for. The defaults,
+/// Godot 3's, have tests of their own.
+pub const earth: @import("Project.zig").Physics2D = .{ .default_gravity = 981, .default_linear_damp = 0, .default_angular_damp = 0 };
+
 fn headless(frame_time: f32) !*App {
-    return App.create(testing.allocator, .{ .headless = true, .frame_time = frame_time });
+    return App.create(testing.allocator, .{ .headless = true, .frame_time = frame_time, .physics_2d = earth });
 }
 
 fn frames(app: *App, count: usize) !void {
@@ -684,12 +823,12 @@ fn frames(app: *App, count: usize) !void {
 test "a crate falls onto a floor and comes to rest on it" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    const floor = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.box(400, 20) });
-    const crate = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.box(20, 20) });
+    const floor = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.rectangle(200, 10) });
+    const crate = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.rectangle(10, 10) });
 
     try frames(app, 120);
     try testing.expectApproxEqAbs(@as(f32, 80), app.world.get(crate, Transform2D).?.y, 1);
-    try testing.expectApproxEqAbs(@as(f32, 0), app.world.get(crate, RigidBody2D).?.velocity.y, 1);
+    try testing.expectApproxEqAbs(@as(f32, 0), app.world.get(crate, RigidBody2D).?.linear_velocity.y, 1);
     try testing.expectEqual(physics.BodyType.static, app.bodyOf(floor).?.type);
     try testing.expectEqual(@as(usize, 2), app.physics.bodyCount());
 }
@@ -701,7 +840,7 @@ test "a body falling says how fast, in its component" {
 
     try frames(app, 30);
     // Half a second of 981 units a second squared.
-    try testing.expectApproxEqAbs(@as(f32, 490), app.world.get(stone, RigidBody2D).?.velocity.y, 20);
+    try testing.expectApproxEqAbs(@as(f32, 490), app.world.get(stone, RigidBody2D).?.linear_velocity.y, 20);
 }
 
 test "writing the transform moves the body, and writing the velocity sets it going" {
@@ -714,10 +853,10 @@ test "writing the transform moves the body, and writing the velocity sets it goi
     try frames(app, 1);
     try testing.expectApproxEqAbs(@as(f32, 50), app.bodyOf(puck).?.position().x, 0.001);
 
-    app.world.get(puck, RigidBody2D).?.velocity = .init(60, 0);
+    app.world.get(puck, RigidBody2D).?.linear_velocity = .init(60, 0);
     try frames(app, 1);
     try testing.expectApproxEqAbs(@as(f32, 51), app.world.get(puck, Transform2D).?.x, 0.01);
-    try testing.expectApproxEqAbs(@as(f32, 60), app.world.get(puck, RigidBody2D).?.velocity.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 60), app.world.get(puck, RigidBody2D).?.linear_velocity.x, 0.001);
 }
 
 test "a contact is heard once a frame however many steps ran, and once a step in .fixed" {
@@ -741,8 +880,8 @@ test "a contact is heard once a frame however many steps ran, and once a step in
     defer app.destroy();
     try app.addSystem(.update, "count frames", Heard.update);
     try app.addSystem(.fixed, "count steps", Heard.fixed);
-    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.box(400, 20) });
-    _ = try app.world.spawnWith(.{ Transform2D.at(0, 70), RigidBody2D{}, Collider2D.box(20, 20) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.rectangle(200, 10) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 70), RigidBody2D{}, Collider2D.rectangle(10, 10) });
 
     try frames(app, 10);
     try testing.expectEqual(@as(usize, 1), Heard.in_frames);
@@ -752,8 +891,8 @@ test "a contact is heard once a frame however many steps ran, and once a step in
 test "a despawned entity takes its body with it, and its contacts end naming it" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    const floor = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.box(400, 20) });
-    const crate = try app.world.spawnWith(.{ Transform2D.at(0, 79), RigidBody2D{}, Collider2D.box(20, 20) });
+    const floor = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.rectangle(200, 10) });
+    const crate = try app.world.spawnWith(.{ Transform2D.at(0, 79), RigidBody2D{}, Collider2D.rectangle(10, 10) });
     try frames(app, 5);
     try testing.expectEqual(@as(usize, 2), app.physics.bodyCount());
 
@@ -768,7 +907,7 @@ test "a despawned entity takes its body with it, and its contacts end naming it"
 test "a sensor is heard and pushes nothing" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    var zone = Collider2D.box(100, 100);
+    var zone = Collider2D.rectangle(50, 50);
     zone.sensor = true;
     const pit = try app.world.spawnWith(.{ Transform2D.at(0, 200), zone });
     const stone = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.circle(4) });
@@ -788,8 +927,8 @@ test "a sensor is heard and pushes nothing" {
 test "a ray finds what it hits first, and a point what is under it" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    const near = try app.world.spawnWith(.{ Transform2D.at(50, 0), Collider2D.box(10, 10) });
-    const far = try app.world.spawnWith(.{ Transform2D.at(100, 0), Collider2D.box(10, 10) });
+    const near = try app.world.spawnWith(.{ Transform2D.at(50, 0), Collider2D.rectangle(5, 5) });
+    const far = try app.world.spawnWith(.{ Transform2D.at(100, 0), Collider2D.rectangle(5, 5) });
     try app.syncBodies();
 
     const hit = app.castRay(.init(0, 0), .init(200, 0), .{}).?;
@@ -808,8 +947,8 @@ test "a ray finds what it hits first, and a point what is under it" {
 test "a collider hanging from a body is part of that body" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    const hull = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .gravity_scale = 0 }, Collider2D.box(10, 10) });
-    const arm = try app.world.spawnWith(.{ Transform2D.childOf(hull, 20, 0), Collider2D.box(10, 10) });
+    const hull = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .gravity_scale = 0 }, Collider2D.rectangle(5, 5) });
+    const arm = try app.world.spawnWith(.{ Transform2D.childOf(hull, 20, 0), Collider2D.rectangle(5, 5) });
     try app.syncBodies();
 
     try testing.expectEqual(@as(usize, 1), app.physics.bodyCount());
@@ -843,7 +982,7 @@ test "a collider with no size takes its sprite's, centred on the sprite" {
 test "a transform's scale scales its collider" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    const big = try app.world.spawnWith(.{ Transform2D.at(0, 0).scaled(2), Collider2D.box(10, 10) });
+    const big = try app.world.spawnWith(.{ Transform2D.at(0, 0).scaled(2), Collider2D.rectangle(5, 5) });
     try app.syncBodies();
     try testing.expect(app.overlapPoint(.init(9, 0)).?.eql(big));
 
@@ -855,7 +994,7 @@ test "a transform's scale scales its collider" {
 test "changing a body's type makes it anew" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    const crate = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.box(10, 10) });
+    const crate = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.rectangle(5, 5) });
     try frames(app, 1);
     const was = app.bodyIdOf(crate).?;
 
@@ -884,7 +1023,7 @@ test "a moving parent does not carry a body, whose place is written in the paren
 test "a static collider goes where its transform does, and is found there after the next step" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    const door = try app.world.spawnWith(.{ Transform2D.at(0, 0), Collider2D.box(10, 10) });
+    const door = try app.world.spawnWith(.{ Transform2D.at(0, 0), Collider2D.rectangle(5, 5) });
     try frames(app, 1);
     app.world.get(door, Transform2D).?.x = 40;
     try frames(app, 1);
@@ -896,8 +1035,8 @@ test "a static collider goes where its transform does, and is found there after 
 test "a scene keeps bodies and colliders, and loading one makes them" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.box(400, 20) });
-    _ = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .bullet = true }, Collider2D.circle(5) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.rectangle(200, 10) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .continuous_cd = .cast_ray }, Collider2D.circle(5) });
     const text = try scene.write(app, testing.allocator, .{});
     defer testing.allocator.free(text);
 
@@ -912,11 +1051,197 @@ test "a scene keeps bodies and colliders, and loading one makes them" {
 test "clearing the world takes every body with it" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
-    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.box(400, 20) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.rectangle(200, 10) });
     _ = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.circle(5) });
     try frames(app, 1);
 
     app.clearWorld();
     try frames(app, 1);
     try testing.expectEqual(@as(usize, 0), app.physics.bodyCount());
+}
+
+test "a body's damping of minus one is the project's, and its own is its own" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const drifting = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.circle(4) });
+    const braked = try app.world.spawnWith(.{ Transform2D.at(50, 0), RigidBody2D{ .linear_damp = 3, .angular_damp = 0 }, Collider2D.circle(4) });
+    try app.syncBodies();
+    // Godot 3's, with no project file to say otherwise.
+    try testing.expectEqual(@as(f32, 0.1), app.bodyOf(drifting).?.linear_damping);
+    try testing.expectEqual(@as(f32, 1), app.bodyOf(drifting).?.angular_damping);
+    try testing.expectEqual(@as(f32, 3), app.bodyOf(braked).?.linear_damping);
+    try testing.expectEqual(@as(f32, 0), app.bodyOf(braked).?.angular_damping);
+
+    app.world.get(braked, RigidBody2D).?.linear_damp = -1;
+    try app.syncBodies();
+    try testing.expectEqual(@as(f32, 0.1), app.bodyOf(braked).?.linear_damping);
+}
+
+test "gravity is the project's, and the rules for touching are Godot 3's whatever a game passes" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try testing.expectEqual(@as(f32, 98), app.physics.gravity.y);
+    try testing.expectEqual(@as(f32, 0), app.physics.gravity.x);
+
+    const sideways = try App.create(testing.allocator, .{
+        .headless = true,
+        .physics = .{ .units_per_metre = 100, .filter_rule = .both, .friction_mix = .geometric_mean },
+        .physics_2d = .{ .default_gravity = 30, .default_gravity_vector = .init(1, 0) },
+    });
+    defer sideways.destroy();
+    try testing.expectEqual(@as(f32, 30), sideways.physics.gravity.x);
+    try testing.expectEqual(physics.FilterRule.either, sideways.physics.settings.filter_rule);
+    try testing.expectEqual(physics.Mix.minimum, sideways.physics.settings.friction_mix);
+    try testing.expectEqual(physics.Mix.sum_clamped, sideways.physics.settings.restitution_mix);
+}
+
+test "two colliders touch when either one's mask has the other's layer" {
+    const app = try headless(1.0 / 60.0);
+    defer app.destroy();
+    var floor = Collider2D.rectangle(200, 10);
+    floor.collision_mask = 1 << 1;
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), floor });
+    // On layer two, looking for nothing: the floor looks for it.
+    var looked_for = Collider2D.rectangle(10, 10);
+    looked_for.collision_layer = 1 << 1;
+    looked_for.collision_mask = 0;
+    const crate = try app.world.spawnWith(.{ Transform2D.at(-50, 0), RigidBody2D{}, looked_for });
+    // On layer three, looking for nothing: nobody's.
+    var unseen = looked_for;
+    unseen.collision_layer = 1 << 2;
+    const ghost = try app.world.spawnWith(.{ Transform2D.at(50, 0), RigidBody2D{}, unseen });
+    try frames(app, 120);
+    try testing.expectApproxEqAbs(@as(f32, 80), app.world.get(crate, Transform2D).?.y, 1);
+    try testing.expect(app.world.get(ghost, Transform2D).?.y > 300);
+}
+
+test "a disabled collider is not there until it is turned back on" {
+    const app = try headless(1.0 / 60.0);
+    defer app.destroy();
+    var trapdoor = Collider2D.rectangle(200, 10);
+    trapdoor.disabled = true;
+    const floor = try app.world.spawnWith(.{ Transform2D.at(0, 100), trapdoor });
+    const early = try app.world.spawnWith(.{ Transform2D.at(-50, 0), RigidBody2D{}, Collider2D.rectangle(10, 10) });
+    try frames(app, 60);
+    try testing.expect(app.world.get(early, Transform2D).?.y > 300);
+    // The crate's shape and none of the floor's.
+    try testing.expectEqual(@as(usize, 1), app.physics.shapeCount());
+
+    app.world.get(floor, Collider2D).?.disabled = false;
+    const late = try app.world.spawnWith(.{ Transform2D.at(50, 0), RigidBody2D{}, Collider2D.rectangle(10, 10) });
+    try frames(app, 120);
+    try testing.expectApproxEqAbs(@as(f32, 80), app.world.get(late, Transform2D).?.y, 1);
+
+    // And off again, what stands on it falls.
+    app.world.get(floor, Collider2D).?.disabled = true;
+    try frames(app, 60);
+    try testing.expect(app.world.get(late, Transform2D).?.y > 300);
+}
+
+test "a one-way collider holds a crate that lands on it and lets one up through it from below" {
+    const app = try headless(1.0 / 60.0);
+    defer app.destroy();
+    var ledge = Collider2D.rectangle(200, 10);
+    ledge.one_way_collision = true;
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 100), ledge });
+    const lands = try app.world.spawnWith(.{ Transform2D.at(-50, 0), RigidBody2D{}, Collider2D.rectangle(10, 10) });
+    // Under the ledge, thrown up well past it.
+    const jumps = try app.world.spawnWith(.{ Transform2D.at(50, 160), RigidBody2D{ .linear_velocity = .init(0, -700) }, Collider2D.rectangle(10, 10) });
+    var cleared = false;
+    for (0..180) |_| {
+        _ = try app.step();
+        if (app.world.get(jumps, Transform2D).?.y < 0) cleared = true;
+    }
+    try testing.expect(cleared);
+    try testing.expectApproxEqAbs(@as(f32, 80), app.world.get(lands, Transform2D).?.y, 1);
+    try testing.expectApproxEqAbs(@as(f32, 80), app.world.get(jumps, Transform2D).?.y, 1);
+}
+
+test "a one-way collider turned over holds from below instead, and so does one turned by its own rotation" {
+    const app = try headless(1.0 / 60.0);
+    defer app.destroy();
+    var ledge = Collider2D.rectangle(100, 10);
+    ledge.one_way_collision = true;
+    // Its entity half round: its own +y points up the screen.
+    _ = try app.world.spawnWith(.{ Transform2D{ .x = -150, .y = 100, .rotation = std.math.pi }, ledge });
+    // The collider half round on an entity that is not.
+    var turned = ledge;
+    turned.rotation = std.math.pi;
+    _ = try app.world.spawnWith(.{ Transform2D.at(150, 100), turned });
+    // Flipped upside down by its scale.
+    _ = try app.world.spawnWith(.{ Transform2D{ .x = 450, .y = 100, .scale_y = -1 }, ledge });
+    const first = try app.world.spawnWith(.{ Transform2D.at(-150, 0), RigidBody2D{}, Collider2D.rectangle(10, 10) });
+    const second = try app.world.spawnWith(.{ Transform2D.at(150, 0), RigidBody2D{}, Collider2D.rectangle(10, 10) });
+    const third = try app.world.spawnWith(.{ Transform2D.at(450, 0), RigidBody2D{}, Collider2D.rectangle(10, 10) });
+    try frames(app, 60);
+    try testing.expect(app.world.get(first, Transform2D).?.y > 300);
+    try testing.expect(app.world.get(second, Transform2D).?.y > 300);
+    try testing.expect(app.world.get(third, Transform2D).?.y > 300);
+}
+
+test "a collision exception keeps two bodies apart, outlasts a body made anew, and goes with an entity" {
+    const app = try headless(1.0 / 60.0);
+    defer app.destroy();
+    const floor = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.rectangle(200, 10) });
+    const crate = try app.world.spawnWith(.{ Transform2D.at(-50, 0), RigidBody2D{ .type = .kinematic }, Collider2D.rectangle(10, 10) });
+    const other = try app.world.spawnWith(.{ Transform2D.at(50, 0), RigidBody2D{}, Collider2D.rectangle(10, 10) });
+    // Told before any body is made, twice: the physics hears of it once the
+    // bodies are there.
+    try app.addCollisionExceptionWith(crate, floor);
+    try app.addCollisionExceptionWith(floor, crate);
+    try testing.expectError(error.SameBody, app.addCollisionExceptionWith(crate, crate));
+    const area = try app.world.spawnWith(.{ Transform2D.at(0, -300), components.Area2D{}, Collider2D.rectangle(5, 5) });
+    try testing.expectError(error.NotABody, app.addCollisionExceptionWith(crate, area));
+    try frames(app, 1);
+    try testing.expect(app.physics.hasCollisionException(app.bodyIdOf(crate).?, app.bodyIdOf(floor).?));
+
+    var found: [4]Entity = undefined;
+    try testing.expectEqual(@as(usize, 1), app.collisionExceptionsOf(floor, &found).len);
+    try testing.expect(found[0].eql(crate));
+
+    // Made anew as a dynamic body, it still falls through the floor, and
+    // the other lands on it.
+    app.world.get(crate, RigidBody2D).?.type = .dynamic;
+    try frames(app, 120);
+    try testing.expect(app.world.get(crate, Transform2D).?.y > 300);
+    try testing.expectApproxEqAbs(@as(f32, 80), app.world.get(other, Transform2D).?.y, 1);
+
+    // Taken back once of twice, it stays; twice, it is gone, from the
+    // physics too.
+    app.removeCollisionExceptionWith(crate, floor);
+    try testing.expectEqual(@as(usize, 1), app.collisionExceptionsOf(crate, &found).len);
+    app.removeCollisionExceptionWith(floor, crate);
+    try testing.expectEqual(@as(usize, 0), app.collisionExceptionsOf(crate, &found).len);
+    try testing.expect(!app.physics.hasCollisionException(app.bodyIdOf(crate).?, app.bodyIdOf(floor).?));
+
+    // One naming an entity that is gone goes with it.
+    try app.addCollisionExceptionWith(other, floor);
+    app.world.despawn(other);
+    try frames(app, 1);
+    try testing.expectEqual(@as(usize, 0), app.collisionExceptionsOf(floor, &found).len);
+}
+
+test "what a collider and its body say reaches the shape and the body the physics has" {
+    const app = try headless(1.0 / 60.0);
+    defer app.destroy();
+    var said = Collider2D.circle(4);
+    said.friction = 0.25;
+    said.bounce = 0.75;
+    said.density = 3;
+    said.collision_layer = 1 << 31;
+    said.collision_mask = 1 << 30;
+    const ball = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .continuous_cd = .cast_shape }, said });
+    const plain = try app.world.spawnWith(.{ Transform2D.at(50, 0), RigidBody2D{}, Collider2D.circle(4) });
+    try app.syncBodies();
+
+    const body = app.bodyOf(ball).?;
+    try testing.expect(body.bullet);
+    try testing.expect(!app.bodyOf(plain).?.bullet);
+    const shape = app.physics.shape(body.first_shape).?.def;
+    try testing.expectEqual(@as(f32, 0.25), shape.material.friction);
+    try testing.expectEqual(@as(f32, 0.75), shape.material.restitution);
+    try testing.expectEqual(@as(f32, 3), shape.material.density);
+    try testing.expectEqual(@as(u32, 1 << 31), shape.filter.category);
+    try testing.expectEqual(@as(u32, 1 << 30), shape.filter.mask);
+    try testing.expect(shape.one_way == null);
 }

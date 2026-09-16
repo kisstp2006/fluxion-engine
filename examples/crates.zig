@@ -151,7 +151,7 @@ fn ball(app: *App, x: f32, y: f32) !fx.Entity {
         Transform2D.at(x, y).interpolated(),
         Sprite{ .texture = art.disc, .tint = theme.ball, .width = ball_size, .height = ball_size },
         RigidBody2D{},
-        Collider2D{ .shape = .circle, .restitution = 0.5 },
+        Collider2D{ .shape = .circle, .bounce = 0.5 },
     });
 }
 
@@ -182,7 +182,7 @@ fn throw(app: *App) !void {
     var it = try fx.Query(.{RigidBody2D}).over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.slice(RigidBody2D)) |*body| {
-            if (body.type == .dynamic) body.velocity.y -= 650;
+            if (body.type == .dynamic) body.linear_velocity.y -= 650;
         }
     }
 }
@@ -249,6 +249,9 @@ pub fn main(init: std.process.Init) !void {
         .io = init.io,
         .quit_key = .escape,
         .fullscreen_key = .f11,
+        // A hundred pixels to the metre, falling as things do on Earth: the
+        // project default is Godot 3's gentler 98.
+        .physics_2d = .{ .default_gravity = 981 },
     })) catch |err| switch (err) {
         error.NoDisplay => {
             try out.print("no display, so nothing to show\n", .{});

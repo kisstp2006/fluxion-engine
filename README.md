@@ -843,14 +843,14 @@ fn spawn(app: *fx.App) !void {
         fx.Transform2D.at(480, 100).interpolated(),
         fx.Sprite.of(crate),
         fx.RigidBody2D{},
-        fx.Collider2D{ .restitution = 0.3 },
+        fx.Collider2D{ .bounce = 0.3 },
     });
 }
 
 fn jump(app: *fx.App) !void {                          // a .fixed system
     const player = app.find("player") orelse return;
     const body = app.world.get(player, fx.RigidBody2D) orelse return;
-    if (app.input.justPressed(.space)) body.velocity.y = -500;
+    if (app.input.justPressed(.space)) body.linear_velocity.y = -500;
 }
 ```
 
@@ -864,13 +864,31 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   entity hanging from a body it is part of that body, where the entity is -
   a compound shape is a body and a few children.
 - **A collider with no size is its sprite's**, pivot and all, and the
-  transform's scale scales it; `.box(w, h)` and `.circle(r)` say otherwise.
+  transform's scale scales it. `.rectangle(half_width, half_height)` says
+  otherwise, in half sizes as Godot's `extents`, and so does `.circle(r)`.
+- **Godot 3's names and rules.**
+  - Two colliders touch when either one's `collision_mask` has the other's `collision_layer`: 32 bits, one for each layer. The project file names them.
+  - A pair's `friction` is the smaller of the two, and its `bounce` the two added, no more than one.
+  - A body's `linear_damp` and `angular_damp` of minus one take the project's.
+  - `continuous_cd` sweeps a fast body against other moving bodies too; the level stops one either way.
+- **A platform to jump up through** is a collider with `one_way_collision`.
+  - What comes onto it from its entity's `-y`, up the screen, stands on it; what comes from below or the side goes through.
+  - It is decided when the two first touch and kept while they touch, as Godot 3.6 decides it.
+  - Turn the entity, or the collider's `rotation`, and the side turns with it.
+- **`disabled` takes a collider out** until it is turned back on: nothing
+  touches it, and what stood on it falls.
+- **Two bodies can be kept apart by name**:
+  `app.addCollisionExceptionWith(a, b)`, Godot's collision exception, whatever
+  their layers say.
+  - Counted: `removeCollisionExceptionWith` takes one back.
+  - `collisionExceptionsOf(body, &buffer)` lists them.
+  - It lasts through a body made anew and goes with either entity.
 - **The world steps after each `.fixed` stage**, on the same scheduler as the
   queries, so what a `.fixed` system wrote is in that step. Then each moving
-  body's place goes into its transform and its speed into `velocity`; set
-  `interpolate` on the transform to draw it between steps.
+  body's place goes into its transform and its speed into `linear_velocity`;
+  set `interpolate` on the transform to draw it between steps.
 - **Writing is moving.** A transform the game writes puts the body there,
-  and a `velocity` it writes sets the body going. For a force or an impulse,
+  and a `linear_velocity` it writes sets the body going. For a force or an impulse,
   `app.bodyOf(entity)` is the body itself. A body is in the world's space: a
   moving parent does not carry it, and its place is written back in the
   parent's space.
@@ -881,9 +899,13 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   may name a despawned entity - often that is why it ended.
 - **The three questions, answered in entities**: `app.castRay(from, to, .{})`,
   `app.overlapPoint(point)` and `app.overlapBox(min, max, &buffer)`.
-- **Everything else is `app.physics`**: gravity, settings, and joints between
-  the handles `app.bodyIdOf` gives. `Options.physics` starts at a hundred
-  units a metre, for a world measured in pixels.
+- **How the world moves is the project's**: `physics_2d` in `project.fluxion`,
+  or `Options.physics_2d` for a game with none.
+  - Godot 3's numbers by default: gravity 98 down the screen, damping 0.1 and 1.
+  - A game of a hundred pixels to the metre that wants Earth's gravity says `.default_gravity = 981`.
+- **Everything else is `app.physics`**: settings, and joints between the
+  handles `app.bodyIdOf` gives. `Options.physics` starts at a hundred units a
+  metre, which scales the physics' tolerances.
 
 **When the bodies catch up.** Before every fixed step the engine compares
 each body and collider with what it last made, and on a paused frame - and
@@ -899,7 +921,7 @@ tilemap below rather than an entity a tile.
 ### 🚪 Areas: what is in a place
 
 ```zig
-const door = try app.world.spawnWith(.{ fx.Transform2D.at(320, 180), fx.Area2D{}, fx.Collider2D.box(40, 80) });
+const door = try app.world.spawnWith(.{ fx.Transform2D.at(320, 180), fx.Area2D{}, fx.Collider2D.rectangle(20, 40) });
 try app.signal(door, fx.Area2D, .body_entered).connect(.method(door, "_on_body_entered"), .{});
 
 fn onBodyEntered(app: *fx.App, self: fx.Entity, body: fx.Entity) !void {
@@ -977,8 +999,8 @@ fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.En
   at the next physics tick, so ours has no lag.
 - **What can be picked** is an `Area2D` or a `RigidBody2D` with
   `input_pickable` - true on an area and false on a body, as in Godot -
-  through a collider that holds the point, is on a layer (a `category` of
-  nought is never picked, and there is no picking mask), and whose object,
+  through a collider that holds the point, is on a layer (a `collision_layer`
+  of nought is never picked, and there is no picking mask), and whose object,
   if it is drawn at all, is visible. A lone `Collider2D`, which is its own
   static body, is not a collision object to pick: give it an `Area2D` or a
   static body with the flag.
@@ -1283,7 +1305,9 @@ as data, and the engine hands its components and its calls out through it.
   `fx.attr` - a `Range` for a slider on a sprite's pivot, a colour's
   channels, a collider's friction and bounce; `Angle` on every rotation,
   kept in radians and shown in degrees; a `Unit` after a number (`px`, `s`,
-  `/s`); `Layers` on a collider's category and mask, a toggle a bit; a `Doc`
+  `/s`); `Layers` on a collider's layer and mask, a toggle a bit named from
+  the project's list; `Extents` and `Radius` on its size and `Placement` on
+  the collider itself, for an editor's handles; a `Doc`
   for a zero that is not zero ("zero is the sprite's width"); `Hidden` on
   `Text2D`'s buffer, whose words are a `Property` instead - `text`, read
   with its method `slice` and written with `set`, which keeps the length and

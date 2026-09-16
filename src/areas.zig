@@ -37,9 +37,13 @@ const Between = struct {
     object: Entity,
     /// Whether the object is an area of its own: which pair of signals it is.
     is_area: bool,
-    /// Whether the area has been told of it: it is monitoring, its mask
-    /// takes the other's category, and an area in it is monitorable.
+    /// Whether the area has been told of it: it is monitoring, either mask
+    /// takes the other's layer, and an area in it is monitorable.
     reported: bool = false,
+    /// How many of the physics' shape pairs between the two colliders
+    /// overlap: one, except for the step in which a collider is made anew,
+    /// whose new shape begins as its old one ends.
+    touching: u32 = 0,
 };
 
 /// One area and one thing in it, however many of their shapes touch.
@@ -100,23 +104,27 @@ fn found(self: *Areas, app: *App, local: Entity, other: Entity) !void {
     if (object.eql(area)) return;
 
     const pair = try self.pairs.getOrPut(app.gpa, .{ .local = local, .other = other });
-    if (pair.found_existing) return;
-    pair.value_ptr.* = .{ .area = area, .object = object, .is_area = Bodies.isArea(&app.world, object) };
+    if (!pair.found_existing) pair.value_ptr.* = .{ .area = area, .object = object, .is_area = Bodies.isArea(&app.world, object) };
+    pair.value_ptr.touching += 1;
 }
 
 /// A pair the physics has let go of - they parted, or a shape went with its
-/// entity - with the exits it was owed.
+/// entity - with the exits it was owed. A collider made anew let go of its
+/// old shape as its new one began, and the pair stays.
 fn lost(self: *Areas, app: *App, local: Entity, other: Entity) !void {
-    const gone = self.pairs.fetchSwapRemove(.{ .local = local, .other = other }) orelse return;
+    const key: ShapePair = .{ .local = local, .other = other };
+    const pair = self.pairs.getPtr(key) orelse return;
+    pair.touching -|= 1;
+    if (pair.touching > 0) return;
+    const gone = self.pairs.fetchSwapRemove(key).?;
     if (gone.value.reported) try self.parted(app, gone.value, local, other);
 }
 
-/// Whether the shape `mine` is told about the shape `theirs`: Godot's rule,
-/// which asks the reporting side's mask and not the other's. A group says it
-/// outright, as it does in the physics.
+/// Whether the shape `mine` is told about the shape `theirs`: Godot 3's
+/// rule, the one its physics touches by, where either side's mask having
+/// the other's layer is enough.
 fn told(mine: Collider2D, theirs: Collider2D) bool {
-    if (mine.group == theirs.group and mine.group != 0) return mine.group > 0;
-    return (mine.mask & theirs.category) != 0;
+    return (mine.collision_mask & theirs.collision_layer) != 0 or (theirs.collision_mask & mine.collision_layer) != 0;
 }
 
 /// Whether an area is to be told of one pair as things stand now.

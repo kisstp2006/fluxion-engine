@@ -87,7 +87,7 @@ const Heard = struct {
 };
 
 fn headless() !*App {
-    const app = try App.create(testing.allocator, .{ .headless = true, .width = 400, .height = 200, .frame_time = 1.0 / 60.0 });
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 400, .height = 200, .frame_time = 1.0 / 60.0, .physics_2d = @import("bodies.zig").earth });
     errdefer app.destroy();
     try app.addMethod("_pick", Heard.picked);
     try app.addMethod("_in", Heard.entered);
@@ -144,7 +144,7 @@ fn move(app: *App, at: Vec2) void {
 test "a click is heard by what is under it, with where it was and which collider" {
     const app = try headless();
     defer app.destroy();
-    const button = try app.world.spawnWith(.{ Transform2D.at(50, 20), Area2D{}, Collider2D.box(40, 40) });
+    const button = try app.world.spawnWith(.{ Transform2D.at(50, 20), Area2D{}, Collider2D.rectangle(20, 20) });
     try watch(app, button);
 
     click(app, .init(50, 20), true);
@@ -188,7 +188,7 @@ test "a click through a camera that is moved, zoomed and turned lands where it l
             view.zoom = 2;
         }
     }
-    const target = try app.world.spawnWith(.{ Transform2D.at(140, -30), Area2D{}, Collider2D.box(20, 20) });
+    const target = try app.world.spawnWith(.{ Transform2D.at(140, -30), Area2D{}, Collider2D.rectangle(10, 10) });
     try watch(app, target);
 
     click(app, .init(140, -30), true);
@@ -206,8 +206,8 @@ test "a click through a camera that is moved, zoomed and turned lands where it l
 test "what is drawn over the other is picked first, and first_only stops after it" {
     const app = try headless();
     defer app.destroy();
-    const under = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 1 }, Area2D{}, Collider2D.box(60, 60) });
-    const over = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 3 }, Area2D{}, Collider2D.box(60, 60) });
+    const under = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 1 }, Area2D{}, Collider2D.rectangle(30, 30) });
+    const over = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 3 }, Area2D{}, Collider2D.rectangle(30, 30) });
     try watch(app, under);
     try watch(app, over);
 
@@ -230,8 +230,8 @@ test "what is drawn over the other is picked first, and first_only stops after i
 test "a handler that takes the pointer stops the one under it hearing" {
     const app = try headless();
     defer app.destroy();
-    const under = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 1 }, Area2D{}, Collider2D.box(60, 60) });
-    const over = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 3 }, Area2D{}, Collider2D.box(60, 60) });
+    const under = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 1 }, Area2D{}, Collider2D.rectangle(30, 30) });
+    const over = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 3 }, Area2D{}, Collider2D.rectangle(30, 30) });
     try watch(app, under);
     try watch(app, over);
 
@@ -253,7 +253,7 @@ test "a handler that takes the pointer stops the one under it hearing" {
 test "an entity moved under a pointer that has not moved is entered" {
     const app = try headless();
     defer app.destroy();
-    const walker = try app.world.spawnWith(.{ Transform2D.at(150, 0), Area2D{}, Collider2D.box(30, 30) });
+    const walker = try app.world.spawnWith(.{ Transform2D.at(150, 0), Area2D{}, Collider2D.rectangle(15, 15) });
     try watch(app, walker);
 
     move(app, .init(0, 0));
@@ -274,7 +274,7 @@ test "an entity moved under a pointer that has not moved is entered" {
 test "what has died under the pointer says nothing, and is forgotten" {
     const app = try headless();
     defer app.destroy();
-    const ghost = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.box(30, 30) });
+    const ghost = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.rectangle(15, 15) });
     try watch(app, ghost);
 
     move(app, .init(0, 0));
@@ -293,9 +293,9 @@ test "a body is picked only when it says so, and a lone collider never is" {
     const crate = try app.world.spawnWith(.{
         Transform2D.at(0, 0),
         RigidBody2D{ .type = .static },
-        Collider2D.box(40, 40),
+        Collider2D.rectangle(20, 20),
     });
-    const wall = try app.world.spawnWith(.{ Transform2D.at(100, 0), Collider2D.box(40, 40) });
+    const wall = try app.world.spawnWith(.{ Transform2D.at(100, 0), Collider2D.rectangle(20, 20) });
     try watch(app, crate);
     try watch(app, wall);
 
@@ -319,11 +319,11 @@ test "a body is picked only when it says so, and a lone collider never is" {
 test "a hidden object, one on no layer, and picking turned off are all passed over" {
     const app = try headless();
     defer app.destroy();
-    var quiet = Collider2D.box(40, 40);
-    quiet.category = 0;
+    var quiet = Collider2D.rectangle(20, 20);
+    quiet.collision_layer = 0;
     const nowhere = try app.world.spawnWith(.{ Transform2D.at(100, 0), Area2D{}, quiet });
-    const hidden = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .visible = false }, Area2D{}, Collider2D.box(40, 40) });
-    const plain = try app.world.spawnWith(.{ Transform2D.at(-100, 0), Area2D{}, Collider2D.box(40, 40) });
+    const hidden = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .visible = false }, Area2D{}, Collider2D.rectangle(20, 20) });
+    const plain = try app.world.spawnWith(.{ Transform2D.at(-100, 0), Area2D{}, Collider2D.rectangle(20, 20) });
     try watch(app, nowhere);
     try watch(app, hidden);
     try watch(app, plain);
@@ -356,7 +356,7 @@ const Taker = struct {
 test "an input system that takes the pointer leaves picking nothing" {
     const app = try headless();
     defer app.destroy();
-    const thing = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.box(40, 40) });
+    const thing = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.rectangle(20, 20) });
     try watch(app, thing);
     try app.addSystem(.input, "take", Taker.take);
 
@@ -369,7 +369,7 @@ test "an input system that takes the pointer leaves picking nothing" {
 test "a wheel notch is a press and a release of a wheel button, and motion is one event" {
     const app = try headless();
     defer app.destroy();
-    const thing = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.box(40, 40) });
+    const thing = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.rectangle(20, 20) });
     try watch(app, thing);
 
     move(app, .init(0, 0));
@@ -394,7 +394,7 @@ test "a click beside a turned shape, near it but not in it, hits nothing" {
     defer app.destroy();
     // A square turned an eighth of a turn: a diamond, whose corner region
     // the pointer can be in without being in the shape.
-    var diamond = Collider2D.box(40, 40);
+    var diamond = Collider2D.rectangle(20, 20);
     diamond.rotation = std.math.pi / 4.0;
     const gem = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, diamond });
     try watch(app, gem);

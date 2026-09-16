@@ -11,7 +11,14 @@
 //!   "icon": "res://icon.png",
 //!   "renderer": "compatibility",
 //!   "main_scene": "",
-//!   "tags": ["2d"]
+//!   "tags": ["2d"],
+//!   "physics_2d": {
+//!     "default_gravity": 98,
+//!     "default_gravity_vector": [0, 1],
+//!     "default_linear_damp": 0.1,
+//!     "default_angular_damp": 1,
+//!     "layer_names": ["world", "player"]
+//!   }
 //! }
 //! ```
 //!
@@ -32,6 +39,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const json = @import("fluxion_json");
+const math = @import("fluxion_math");
 const Uuid = @import("fluxion_id").Uuid;
 
 const App = @import("../App.zig");
@@ -77,6 +85,30 @@ pub const Renderer = enum {
     }
 };
 
+/// How a 2D world moves when nothing else says so: Godot 3's `physics/2d`
+/// settings, and its names. A game with no project file takes
+/// `App.Options.physics_2d`.
+pub const Physics2D = struct {
+    /// How hard everything falls, in units a second squared: Godot 3's
+    /// 98, where a unit is a pixel. A world of a hundred units to the metre
+    /// that wants Earth's says 981.
+    default_gravity: f32 = 98,
+    /// Which way: down the screen.
+    default_gravity_vector: math.Vec2 = .init(0, 1),
+    /// How much of its speed and its spin a body loses a second, when its
+    /// own `linear_damp` or `angular_damp` is minus one: Godot 3's.
+    default_linear_damp: f32 = 0.1,
+    default_angular_damp: f32 = 1,
+    /// A name for each of the 32 collision layers, `""` for one with none:
+    /// what an editor shows beside a layer's toggle.
+    layer_names: [32][]const u8 = @splat(""),
+
+    /// The gravity as the physics takes it: the vector, scaled.
+    pub fn gravity(self: Physics2D) math.Vec2 {
+        return self.default_gravity_vector.scale(self.default_gravity);
+    }
+};
+
 /// What a project file says.
 pub const Settings = struct {
     name: []const u8,
@@ -88,6 +120,7 @@ pub const Settings = struct {
     /// project manager to show; nothing opens it by itself yet.
     main_scene: []const u8 = "",
     tags: []const []const u8 = &.{},
+    physics_2d: Physics2D = .{},
     /// What the text above is kept in, for settings read from a file; null
     /// for ones written in code, whose text is the caller's.
     arena: ?*std.heap.ArenaAllocator = null,
@@ -210,6 +243,8 @@ const Reading = struct {
                 out.renderer = try r.renderer();
             } else if (std.mem.eql(u8, name, "tags")) {
                 out.tags = try r.tags();
+            } else if (std.mem.eql(u8, name, "physics_2d")) {
+                out.physics_2d = try r.physics2d();
             } else {
                 log.warn("{s}: \"{s}\" is no project setting this engine knows, and is passed over", .{ r.file, name });
                 try r.reader.skipValue();
@@ -250,6 +285,50 @@ const Reading = struct {
         while (try r.reader.peek() != .array_end) try list.append(r.arena, try r.text("a tag"));
         _ = try r.next();
         return list.items;
+    }
+
+    fn physics2d(r: *Reading) ReadError!Physics2D {
+        var out: Physics2D = .{};
+        try r.open(.object_begin, "the 2D physics settings, which are an object");
+        while (try r.key()) |name| {
+            if (std.mem.eql(u8, name, "default_gravity")) {
+                out.default_gravity = try r.decimal("the default gravity");
+            } else if (std.mem.eql(u8, name, "default_gravity_vector")) {
+                out.default_gravity_vector = try r.vector("the way gravity pulls");
+            } else if (std.mem.eql(u8, name, "default_linear_damp")) {
+                out.default_linear_damp = try r.decimal("the default linear damp");
+            } else if (std.mem.eql(u8, name, "default_angular_damp")) {
+                out.default_angular_damp = try r.decimal("the default angular damp");
+            } else if (std.mem.eql(u8, name, "layer_names")) {
+                try r.open(.array_begin, "the layer names, which are a list");
+                var at: usize = 0;
+                while (try r.reader.peek() != .array_end) : (at += 1) {
+                    if (at == out.layer_names.len) return r.fail(error.WrongType, "there are 32 physics layers, and this names more", .{});
+                    out.layer_names[at] = try r.text("a layer's name");
+                }
+                _ = try r.next();
+            } else {
+                log.warn("{s}: \"physics_2d.{s}\" is no 2D physics setting this engine knows, and is passed over", .{ r.file, name });
+                try r.reader.skipValue();
+            }
+        }
+        return out;
+    }
+
+    fn decimal(r: *Reading, comptime what: []const u8) ReadError!f32 {
+        const token = try r.next();
+        return switch (token) {
+            .number => |n| n.asFloat(f32),
+            else => r.wrong(what ++ ", which is a number", token),
+        };
+    }
+
+    fn vector(r: *Reading, comptime what: []const u8) ReadError!math.Vec2 {
+        try r.open(.array_begin, what ++ ", which is two numbers");
+        const x = try r.decimal(what);
+        const y = try r.decimal(what);
+        try r.open(.array_end, what ++ ", which is two numbers and no more");
+        return .init(x, y);
     }
 
     fn next(r: *Reading) ReadError!Token {
@@ -330,6 +409,25 @@ const File = struct {
         try w.beginArray();
         for (s.tags) |tag| try w.writeString(tag);
         try w.endArray();
+        const p = s.physics_2d;
+        try w.key("physics_2d");
+        try w.beginObject();
+        try w.field("default_gravity", p.default_gravity);
+        try w.key("default_gravity_vector");
+        try w.beginArray();
+        try w.write(p.default_gravity_vector.x);
+        try w.write(p.default_gravity_vector.y);
+        try w.endArray();
+        try w.field("default_linear_damp", p.default_linear_damp);
+        try w.field("default_angular_damp", p.default_angular_damp);
+        // Up to the last layer with a name: most projects name a few.
+        var named: usize = p.layer_names.len;
+        while (named > 0 and p.layer_names[named - 1].len == 0) named -= 1;
+        try w.key("layer_names");
+        try w.beginArray();
+        for (p.layer_names[0..named]) |layer| try w.writeString(layer);
+        try w.endArray();
+        try w.endObject();
         try w.endObject();
     }
 };
@@ -360,12 +458,22 @@ test "a project file is written and read back as it was" {
     var folder: Folder = .init();
     defer folder.tmp.cleanup();
     const tags = [_][]const u8{ "2d", "jam" };
+    var layers: [32][]const u8 = @splat("");
+    layers[0] = "world";
+    layers[3] = "wolves";
     try write(testing.allocator, testing.io, try folder.at(""), .{
         .name = "Meadow",
         .description = "Sheep, and a wolf",
         .icon = "res://icon.png",
         .main_scene = "res://levels/meadow.json",
         .tags = &tags,
+        .physics_2d = .{
+            .default_gravity = 981,
+            .default_gravity_vector = .init(0.6, 0.8),
+            .default_linear_damp = 0,
+            .default_angular_damp = 0.5,
+            .layer_names = layers,
+        },
     });
 
     var settings = try read(testing.allocator, testing.io, try folder.at(""), null);
@@ -377,10 +485,23 @@ test "a project file is written and read back as it was" {
     try testing.expectEqualStrings("res://levels/meadow.json", settings.main_scene);
     try testing.expectEqual(@as(usize, 2), settings.tags.len);
     try testing.expectEqualStrings("jam", settings.tags[1]);
+    const physics = settings.physics_2d;
+    try testing.expectEqual(@as(f32, 981), physics.default_gravity);
+    try testing.expectEqual(@as(f32, 0.8), physics.default_gravity_vector.y);
+    try testing.expectEqual(@as(f32, 0), physics.default_linear_damp);
+    try testing.expectEqual(@as(f32, 0.5), physics.default_angular_damp);
+    try testing.expectEqualStrings("wolves", physics.layer_names[3]);
+    try testing.expectEqualStrings("", physics.layer_names[2]);
+    try testing.expectEqualStrings("", physics.layer_names[31]);
+    try testing.expectApproxEqAbs(@as(f32, 784.8), physics.gravity().y, 0.01);
 
-    var kept: [512]u8 = undefined;
+    var kept: [1024]u8 = undefined;
     const text = try folder.tmp.dir.readFile(testing.io, file_name, &kept);
     try testing.expect(std.mem.startsWith(u8, text, "{\n  \"fluxion_project\": 1,\n  \"name\": \"Meadow\","));
+    // The layers up to the last one named, and no further.
+    const wolves = std.mem.indexOf(u8, text, "\"wolves\"").?;
+    const after = std.mem.trimStart(u8, text[wolves + "\"wolves\"".len ..], " \r\n");
+    try testing.expect(std.mem.startsWith(u8, after, "]"));
 }
 
 test "what a project file leaves out takes its default, and a key it does not know is passed over" {
@@ -400,6 +521,11 @@ test "what a project file leaves out takes its default, and a key it does not kn
     try testing.expectEqualStrings("", settings.icon);
     try testing.expectEqual(Renderer.compatibility, settings.renderer);
     try testing.expectEqual(@as(usize, 0), settings.tags.len);
+    // Godot 3's physics, which a new Godot project has.
+    try testing.expectEqual(@as(f32, 98), settings.physics_2d.default_gravity);
+    try testing.expectEqual(@as(f32, 1), settings.physics_2d.default_gravity_vector.y);
+    try testing.expectEqual(@as(f32, 0.1), settings.physics_2d.default_linear_damp);
+    try testing.expectEqual(@as(f32, 1), settings.physics_2d.default_angular_damp);
 }
 
 test "a project file that is wrong says what and where, and one that is not there says so" {
@@ -439,6 +565,22 @@ test "a project file that is wrong says what and where, and one that is not ther
             .text = "{ \"fluxion_project\": 1, \"name\": 7 }",
             .err = error.WrongType,
             .message = "expected the project's name, which is text, found the number 7",
+        },
+        .{
+            .text = "{ \"fluxion_project\": 1, \"name\": \"Down\", \"physics_2d\": { \"default_gravity\": \"down\" } }",
+            .err = error.WrongType,
+            .message = "expected the default gravity, which is a number, found the string \"down\"",
+        },
+        .{
+            .text = "{ \"fluxion_project\": 1, \"name\": \"Deep\", \"physics_2d\": { \"default_gravity_vector\": [0, 1, 0] } }",
+            .err = error.WrongType,
+            .message = "expected the way gravity pulls, which is two numbers and no more, found the number 0",
+        },
+        .{
+            .text = "{ \"fluxion_project\": 1, \"name\": \"Many\", \"physics_2d\": { \"layer_names\": [" ++
+                ("\"\", " ** 32) ++ "\"thirty-third\"] } }",
+            .err = error.WrongType,
+            .message = "there are 32 physics layers, and this names more",
         },
     };
     for (cases) |case| {

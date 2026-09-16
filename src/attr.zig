@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! What a field means, for an inspector to show it by: the five attributes
-//! fluxion-reflect spells for every Fluxion tool, and five more that a game's
-//! components want. An attribute is found by its type, so one namespace is
+//! fluxion-reflect spells for every Fluxion tool, and the ones a game's
+//! components want: how a number reads, and what a shape is to be dragged by. An attribute is found by its type, so one namespace is
 //! all an inspector imports:
 //!
 //! ```zig
@@ -46,8 +46,46 @@ pub const Unit = struct {
 };
 
 /// An integer whose bits are each a layer, on or off: shown as a row of
-/// toggles, one a bit, rather than as a number.
-pub const Layers = struct {};
+/// toggles, one a bit, rather than as a number, each with the name the
+/// project gives it.
+pub const Layers = struct {
+    /// Which of the project's lists names the layers.
+    names: Names = .none,
+
+    pub const Names = enum {
+        /// None: the layers are their numbers.
+        none,
+        /// `physics_2d.layer_names` in `project.fluxion`.
+        physics_2d,
+    };
+};
+
+// -------------------------------------------------------------------------
+// Geometry an editor can draw and drag
+// -------------------------------------------------------------------------
+//
+// Each says what a field is in the entity's own space - the transform's, and
+// then the component's `Placement` - so an editor draws and drags it without
+// knowing the component.
+
+/// A radius, drawn as a circle with a handle on it.
+pub const Radius = struct {};
+
+/// Half a width and a height, drawn as a box around the middle with handles
+/// on its sides and corners: Godot's `extents`.
+pub const Extents = struct {};
+
+/// On a component whose geometry sits away from its entity's origin: the
+/// fields that say where, which every field above is drawn from. A
+/// `math.Vec2` and an angle in radians.
+///
+/// ```zig
+/// pub const reflect_attributes = .{fx.attr.Placement{ .offset = "offset", .rotation = "rotation" }};
+/// ```
+pub const Placement = struct {
+    offset: []const u8,
+    rotation: []const u8,
+};
 
 /// Text that may run over several lines. On a function that takes text - a
 /// setter - it says so of that text.
@@ -72,10 +110,20 @@ pub const Property = struct {
 };
 
 /// Stop the build at a property of `T`'s that names a method `T` does not
-/// list in `reflect_methods`, or a getter and a setter that do not agree.
+/// list in `reflect_methods`, or a getter and a setter that do not agree -
+/// and at a placement naming fields `T` does not have, or of other types.
 pub fn check(comptime T: type) void {
     if (!@hasDecl(T, "reflect_attributes")) return;
     inline for (T.reflect_attributes) |attribute| {
+        if (@TypeOf(attribute) == Placement) {
+            const where = "fluxion-engine: " ++ @typeName(T) ++ "'s placement";
+            if (!@hasField(T, attribute.offset) or @FieldType(T, attribute.offset) != @import("fluxion_math").Vec2) {
+                @compileError(where ++ " names " ++ attribute.offset ++ ", which is not a math.Vec2 field of it");
+            }
+            if (!@hasField(T, attribute.rotation) or @FieldType(T, attribute.rotation) != f32) {
+                @compileError(where ++ " names " ++ attribute.rotation ++ ", which is not an f32 field of it");
+            }
+        }
         if (@TypeOf(attribute) != Property) continue;
         const where = "fluxion-engine: " ++ @typeName(T) ++ "'s property " ++ attribute.name;
         inline for (.{ attribute.get, attribute.set }) |name| {

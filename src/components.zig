@@ -531,22 +531,26 @@ pub const Camera2D = extern struct {
 ///
 /// The body is in the world's space, so a moving parent does not carry it.
 /// After every fixed step its place goes into the transform and its speed
-/// into `velocity`; writing either moves the body or sets it going.
+/// into `linear_velocity`; writing either moves the body or sets it going.
 pub const RigidBody2D = extern struct {
     /// Changing it makes the body anew, and the joints to the old one go.
     type: Type = .dynamic,
     /// Units a second.
-    velocity: math.Vec2 = .zero,
+    linear_velocity: math.Vec2 = .zero,
     /// Radians a second, clockwise on screen.
     angular_velocity: f32 = 0,
-    linear_damping: f32 = 0,
-    angular_damping: f32 = 0,
+    /// How much of its speed it loses a second, as Godot's: 0.1 slows it by
+    /// a tenth. Minus one takes the project's `default_linear_damp`.
+    linear_damp: f32 = -1,
+    /// The same for its spin; minus one is `default_angular_damp`.
+    angular_damp: f32 = -1,
     /// Zero floats, minus one rises.
     gravity_scale: f32 = 1,
     fixed_rotation: bool = false,
     can_sleep: bool = true,
-    /// Swept against other moving bodies too, not only the static ones.
-    bullet: bool = false,
+    /// Godot's continuous collision detection. Off, a fast body is still
+    /// stopped by the level; on, by the other moving bodies too.
+    continuous_cd: ContinuousCd = .disabled,
 
     /// Whether the pointer can pick it. Godot keeps it false on a body and
     /// true on an `Area2D`; picking asks it of whichever object a collider
@@ -556,6 +560,9 @@ pub const RigidBody2D = extern struct {
     /// Static never moves; kinematic moves at its velocity and nothing
     /// pushes it; dynamic is pushed by everything.
     pub const Type = physics.BodyType;
+
+    /// Godot's names: a ray and a shape cast are both one sweep here.
+    pub const ContinuousCd = enum(u8) { disabled, cast_ray, cast_shape };
 
     /// What the pointer did over it, and which of its colliders it was
     /// over: Godot's CollisionObject2D signals. A body is picked only with
@@ -570,60 +577,75 @@ pub const RigidBody2D = extern struct {
 
     pub const reflect_name = "RigidBody2D";
     pub const reflect_fields = .{
-        .velocity = .{ attr.Unit{ .text = "/s" }, attr.Doc{ .text = "World units a second" } },
+        .linear_velocity = .{ attr.Unit{ .text = "/s" }, attr.Doc{ .text = "World units a second" } },
         .angular_velocity = .{ attr.Angle{}, attr.Unit{ .text = "/s" }, attr.Doc{ .text = "Clockwise on screen" } },
+        .linear_damp = .{attr.Doc{ .text = "Speed lost a second; -1 is the project's" }},
+        .angular_damp = .{attr.Doc{ .text = "Spin lost a second; -1 is the project's" }},
         .gravity_scale = .{attr.Doc{ .text = "Zero floats, minus one rises" }},
+        .continuous_cd = .{attr.Doc{ .text = "Swept against moving bodies too" }},
         .input_pickable = .{attr.Doc{ .text = "Whether the pointer can pick it" }},
     };
 };
 
-/// The shape a body collides with. On an entity with a `RigidBody2D` it is
-/// that body's, and on one hanging from such an entity it is part of that
-/// body, where the entity is. Anywhere else it is a static body of its own:
-/// a wall, a floor tile.
+/// The shape a body collides with: Godot's CollisionShape2D. On an entity
+/// with a `RigidBody2D` it is that body's, and on one hanging from such an
+/// entity it is part of that body, where the entity is. Anywhere else it is
+/// a static body of its own: a wall, a floor tile.
+///
+/// Two colliders touch when either one's `collision_mask` has the other's
+/// `collision_layer`, as in Godot 3. A pair's friction is the smaller of
+/// the two, and its bounce the two added, no more than one.
 pub const Collider2D = extern struct {
-    shape: Shape = .box,
-    /// A box's size before the transform's scale. Zero takes the sprite's,
-    /// and centres the shape on the sprite.
-    width: f32 = 0,
-    height: f32 = 0,
-    /// Zero is half the sprite's width, centred on the sprite.
+    shape: Shape = .rectangle,
+    /// Half a rectangle's width and height, before the transform's scale:
+    /// Godot's `extents`. Zero takes the sprite's size, and centres the
+    /// shape on the sprite.
+    extents: math.Vec2 = .zero,
+    /// A circle's. Zero is half the sprite's width, centred on the sprite.
     radius: f32 = 0,
     /// From the entity's origin, before its scale.
-    offset_x: f32 = 0,
-    offset_y: f32 = 0,
-    /// A box's turn on the entity.
+    offset: math.Vec2 = .zero,
+    /// A rectangle's turn on the entity.
     rotation: f32 = 0,
-    friction: f32 = 0.6,
+    friction: f32 = 1,
     /// How much of the speed a hit gives back: zero a beanbag, one a
     /// superball.
-    restitution: f32 = 0,
+    bounce: f32 = 0,
     /// Mass per square unit.
     density: f32 = 1,
     /// Reports what overlaps it and pushes nothing: a trigger, a pickup.
     sensor: bool = false,
-    /// Who touches whom; see `physics.Filter`.
-    category: u16 = 1,
-    mask: u16 = 0xFFFF,
-    group: i16 = 0,
+    /// Not there at all while on: nothing touches it, and it weighs nothing.
+    disabled: bool = false,
+    /// Held from one side only, a platform to jump up through: what comes
+    /// onto it from its entity's `-y`, up the screen, stands on it; what
+    /// comes from anywhere else goes through. Decided when the two first
+    /// touch, and kept while they touch.
+    one_way_collision: bool = false,
+    /// The layers it is on, and the layers it looks for.
+    collision_layer: u32 = 1,
+    collision_mask: u32 = 1,
 
-    pub const Shape = enum(u8) { box, circle };
+    pub const Shape = enum(u8) { rectangle, circle };
 
     pub const reflect_name = "Collider2D";
+    pub const reflect_attributes = .{attr.Placement{ .offset = "offset", .rotation = "rotation" }};
     pub const reflect_fields = .{
-        .width = .{attr.Doc{ .text = "Zero is the sprite's width" }},
-        .height = .{attr.Doc{ .text = "Zero is the sprite's height" }},
-        .radius = .{attr.Doc{ .text = "Zero is half the sprite's width" }},
+        .extents = .{ attr.Extents{}, attr.Doc{ .text = "Half the size; zero is the sprite's" } },
+        .radius = .{ attr.Radius{}, attr.Doc{ .text = "Zero is half the sprite's width" } },
         .rotation = .{attr.Angle{}},
         .friction = .{attr.Range{ .min = 0, .max = 1 }},
-        .restitution = .{attr.Range{ .min = 0, .max = 1 }},
+        .bounce = .{attr.Range{ .min = 0, .max = 1 }},
         .density = .{attr.Doc{ .text = "Mass per square unit" }},
-        .category = .{ attr.Layers{}, attr.Doc{ .text = "The layers it is on" } },
-        .mask = .{ attr.Layers{}, attr.Doc{ .text = "The layers it touches" } },
+        .disabled = .{attr.Doc{ .text = "Off, nothing touches it" }},
+        .one_way_collision = .{attr.Doc{ .text = "Held only from above" }},
+        .collision_layer = .{ attr.Layers{ .names = .physics_2d }, attr.Doc{ .text = "The layers it is on" } },
+        .collision_mask = .{ attr.Layers{ .names = .physics_2d }, attr.Doc{ .text = "The layers it looks for" } },
     };
 
-    pub fn box(width: f32, height: f32) Collider2D {
-        return .{ .width = width, .height = height };
+    /// A rectangle of these half sizes: Godot's `extents`.
+    pub fn rectangle(half_width: f32, half_height: f32) Collider2D {
+        return .{ .extents = .init(half_width, half_height) };
     }
 
     pub fn circle(radius: f32) Collider2D {
@@ -730,9 +752,13 @@ test "what an inspector shows a field by is on the field" {
     const reflect = @import("fluxion_reflect");
     try testing.expect(reflect.typeOf(Transform2D).field("rotation").?.attribute(attr.Angle) != null);
     try testing.expect(reflect.typeOf(Transform2D).field("x").?.attribute(attr.Angle) == null);
-    try testing.expect(reflect.typeOf(Collider2D).field("mask").?.attribute(attr.Layers) != null);
+    // Named from the project's list of physics layers, and dragged as a box
+    // from where the collider is placed.
+    try testing.expectEqual(attr.Layers.Names.physics_2d, reflect.typeOf(Collider2D).field("collision_mask").?.attribute(attr.Layers).?.names);
+    try testing.expect(reflect.typeOf(Collider2D).field("extents").?.attribute(attr.Extents) != null);
+    try testing.expectEqualStrings("offset", reflect.typeOf(Collider2D).attribute(attr.Placement).?.offset);
     try testing.expectEqualStrings("px", reflect.typeOf(Text2D).field("size").?.attribute(attr.Unit).?.text);
-    try testing.expectEqual(@as(f64, 1), reflect.typeOf(Collider2D).field("restitution").?.attribute(attr.Range).?.max);
+    try testing.expectEqual(@as(f64, 1), reflect.typeOf(Collider2D).field("bounce").?.attribute(attr.Range).?.max);
 
     // The words of a label are its methods' to read and write, and they may
     // run over several lines.

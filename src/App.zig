@@ -195,9 +195,17 @@ pub const Options = struct {
     /// Worker threads for parallel queries. Null is one fewer than the cores.
     workers: ?u32 = null,
 
-    /// A hundred units to the metre, for a world measured in pixels: gravity
-    /// pulls at 981 units a second squared.
+    /// A hundred units to the metre, for a world measured in pixels: what
+    /// the physics' tolerances are scaled by. The engine keeps Godot 3's
+    /// rules whatever the rest says: gravity is `physics_2d`'s, two
+    /// colliders touch when either one's mask has the other's layer, and a
+    /// pair's friction is the smaller and its bounce the sum.
     physics: physics_lib.Settings = .{ .units_per_metre = 100 },
+
+    /// How the 2D world moves - gravity, and what a body's damping of minus
+    /// one means - for a game with no project file: Godot 3's numbers. A
+    /// project file's `physics_2d` is taken instead.
+    physics_2d: Project.Physics2D = .{},
 };
 
 /// The command-line flags the engine understands, read with `parseFlags` and
@@ -340,6 +348,10 @@ jobs: ecs.Jobs,
 /// Rigid bodies, stepped after each `.fixed` stage. The engine makes one for
 /// every `RigidBody2D`; gravity, joints and the rest are here.
 physics: physics_lib.World,
+/// How the 2D world moves: the project file's `physics_2d`, or
+/// `Options.physics_2d` with none. Its gravity is put into `physics` as the
+/// app starts; a body reads its damping from here when it is synced.
+physics_2d: Project.Physics2D,
 /// Which body is which entity's. See `bodies.zig`.
 bodies: Bodies = .{},
 /// What is inside each `Area2D`, and the signals that say so. See
@@ -519,7 +531,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .world = .init(gpa),
         .commands = .init(gpa, &self.world),
         .jobs = undefined,
-        .physics = .init(gpa, options.physics),
+        .physics = .init(gpa, godotRules(options.physics)),
+        .physics_2d = options.physics_2d,
         .bodies = .{},
         .project = undefined,
         .assets = undefined,
@@ -596,6 +609,9 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             return err;
         };
     }
+    // The project's physics, or the game's with no project file.
+    if (self.project.settings) |held| self.physics_2d = held.physics_2d;
+    self.physics.gravity = self.physics_2d.gravity();
 
     errdefer self.scene_components.deinit(gpa);
     errdefer self.types.deinit();
@@ -2032,6 +2048,8 @@ pub const reflect_methods = .{
     .worldToScreen,
     .pointerInWorld,
     .overlapPoint,
+    .addCollisionExceptionWith,
+    .removeCollisionExceptionWith,
     .setFullscreen,
     .fullscreen,
     .toggleFullscreen,
@@ -2576,6 +2594,36 @@ pub fn overlapBox(self: *App, min: math.Vec2, max: math.Vec2, found: []ecs.Entit
 /// ```
 pub fn contactsBegun(self: *const App) []const Bodies.Contact {
     return self.bodies.began(self.input.clock == .fixed);
+}
+
+/// The physics' settings as the engine keeps them: Godot 3's rules for
+/// which layers touch and how two surfaces mix, whatever a game passed.
+fn godotRules(settings: physics_lib.Settings) physics_lib.Settings {
+    var kept = settings;
+    kept.filter_rule = .either;
+    kept.friction_mix = .minimum;
+    kept.restitution_mix = .sum_clamped;
+    return kept;
+}
+
+/// Keep two bodies from touching whatever their layers say: Godot's
+/// `add_collision_exception_with`. Each is a `RigidBody2D` or a collider
+/// that is a static body of its own. Counted, so two calls take two
+/// removals, and gone with either entity.
+pub fn addCollisionExceptionWith(self: *App, a: ecs.Entity, b: ecs.Entity) Bodies.ExceptionError!void {
+    return self.bodies.addException(self, a, b);
+}
+
+/// Take one `addCollisionExceptionWith` back: Godot's
+/// `remove_collision_exception_with`.
+pub fn removeCollisionExceptionWith(self: *App, a: ecs.Entity, b: ecs.Entity) void {
+    self.bodies.removeException(self, a, b);
+}
+
+/// The bodies `body` is kept from touching, as many as `found` holds:
+/// Godot's `get_collision_exceptions`.
+pub fn collisionExceptionsOf(self: *App, body: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
+    return self.bodies.exceptionsOf(body, found);
 }
 
 /// Whose collision object a collider is a shape of: Godot's
@@ -4507,7 +4555,7 @@ test "a component is added by its name holding its defaults, and taken off by it
     const thing = try app.world.spawnWith(.{components.Transform2D{}});
 
     const collider = try app.addComponentNamed(thing, "Collider2D");
-    try testing.expectEqual(@as(?f32, 0.6), (try collider.field("friction")).get(f32));
+    try testing.expectEqual(@as(?f32, 1), (try collider.field("friction")).get(f32));
     try (try collider.field("friction")).setFloat(0.25);
 
     // One it has is handed back as it is, not started again.
@@ -4628,7 +4676,11 @@ test "a project's file is read as it starts, and a root with none starts as befo
     try testing.expectEqualStrings("fluxion", titleOf(.{}, bare.project.settings));
     bare.destroy();
 
-    try Project.writeSettings(testing.allocator, testing.io, root, .{ .name = "Meadow", .tags = &.{"2d"} });
+    try Project.writeSettings(testing.allocator, testing.io, root, .{
+        .name = "Meadow",
+        .tags = &.{"2d"},
+        .physics_2d = .{ .default_gravity = 981, .default_linear_damp = 0.25 },
+    });
     // By the folder, or by the file itself, as a file association gives it.
     const file = try std.fmt.bufPrint(&buffers[1], "{s}/" ++ Project.file_name, .{root});
     for ([_][]const u8{ root, file }) |given| {
@@ -4640,6 +4692,9 @@ test "a project's file is read as it starts, and a root with none starts as befo
         try testing.expect(std.mem.endsWith(u8, app.project.root, &tmp.sub_path));
         try testing.expectEqualStrings("Meadow", titleOf(.{}, settings));
         try testing.expectEqualStrings("Pong", titleOf(.{ .title = "Pong" }, settings));
+        // Its physics over the game's, which it would have had with none.
+        try testing.expectEqual(@as(f32, 981), app.physics.gravity.y);
+        try testing.expectEqual(@as(f32, 0.25), app.physics_2d.default_linear_damp);
     }
 }
 
