@@ -90,6 +90,21 @@ pub const Events = events.Events;
 /// A place in the events of one type, reading each once.
 pub const EventReader = events.Reader;
 
+/// Flux scripts on entities, the way Godot puts a script on a node:
+/// `app.useScripts`, `app.loadScript`, and a `Script` on the entity.
+pub const script = @import("script.zig");
+
+/// A script on an entity: a `.flux` file, and which struct in it.
+pub const Script = script.Script;
+
+/// A `.flux` file loaded into the app's VM.
+pub const ScriptHandle = script.ScriptHandle;
+
+/// The scripting language itself, for what a game or a tool does beyond a
+/// `Script`: calling into a script by name, or checking one in an editor
+/// with `flux.service` and `app.scriptSetup()`.
+pub const flux = script.flux;
+
 /// Where a game's files are: `res://` paths from the project's root, and
 /// files known by the UUID in the `.uid` file beside them: `app.project`.
 pub const Project = @import("Project.zig");
@@ -305,6 +320,8 @@ test {
     _ = @import("signals_test.zig");
     _ = @import("areas_test.zig");
     _ = @import("picking_test.zig");
+    _ = @import("script.zig");
+    _ = @import("script_test.zig");
     _ = Project;
     _ = dialog;
     _ = attr;

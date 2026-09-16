@@ -58,6 +58,7 @@ const hierarchy = @import("hierarchy.zig");
 const scene = @import("scene.zig");
 const signals_mod = @import("signals.zig");
 const events_mod = @import("events.zig");
+const script_mod = @import("script.zig");
 const sprite = @import("render/sprite.zig");
 const View = @import("render/view.zig").View;
 
@@ -449,6 +450,10 @@ signals: signals_mod.Signals,
 /// Every type of event sent, by type. See `send` and `events`.
 event_channels: std.AutoArrayHashMapUnmanaged(usize, EventChannel) = .empty,
 
+/// Flux scripts: the VM, the files, and every entity's instance, once
+/// `useScripts` has made them. See `script`.
+scripts: ?*script_mod.Scripts = null,
+
 /// Every type described at run time, by name: the components, the values in
 /// them, and `DebugViews`. A game's components join when they are
 /// registered, and its own functions with `types.addFunction`, for a console
@@ -736,6 +741,8 @@ fn titleOf(options: Options, settings: ?Project.Settings) []const u8 {
 pub fn destroy(self: *App) void {
     const gpa = self.gpa;
 
+    // First, while everything a script's handle points at is still there.
+    if (self.scripts) |scripts| scripts.calls.destroy(scripts);
     self.schedule.deinit(gpa);
     self.states.deinit(gpa);
     self.snapshots.deinit(gpa);
@@ -1052,6 +1059,10 @@ pub fn step(self: *App) anyerror!bool {
             self.debug_under_steps.advance(self.time.fixed_delta);
             // Where everything was before this step, to draw between steps.
             try self.snapshotPrevious();
+            if (self.scripts) |scripts| {
+                try scripts.calls.pass(scripts, .{ .physics = self.time.fixed_delta });
+                try self.signals.drain(self);
+            }
             try self.schedule.run(.fixed, self);
             try self.stepPhysics();
             // Seen, so gone: the next step hears only what comes after.
@@ -1062,6 +1073,10 @@ pub fn step(self: *App) anyerror!bool {
     // pressed on a pause menu must not reach the first step after it.
     if (self.time.delta == 0) self.input.endFixedStep();
 
+    if (self.scripts) |scripts| {
+        try scripts.calls.pass(scripts, .{ .update = self.time.delta });
+        try self.signals.drain(self);
+    }
     try self.schedule.run(.update, self);
     try self.schedule.run(.late, self);
     // Deferred signal calls, Godot's idle time: after `.late`, before the
@@ -1072,6 +1087,12 @@ pub fn step(self: *App) anyerror!bool {
     // drawing: whatever hung from something despawned goes with it, and then
     // the names of everything that died are given back.
     try self.despawnOrphans();
+    // The scripts of the dead, and of what lost its `Script`, hear `exit`
+    // in the frame it happened.
+    if (self.scripts) |scripts| {
+        try scripts.calls.pass(scripts, .end_of_frame);
+        try self.signals.drain(self);
+    }
     self.forgetDeadNames();
     self.forgetDeadUuids();
     self.forgetDeadPlaces();
@@ -1716,6 +1737,8 @@ pub fn clearWorld(self: *App) void {
     self.by_uuid.clearRetainingCapacity();
     self.sibling_ranks.clearRetainingCapacity();
     self.signals.clear();
+    // Last, in the new world: each script's `exit` finds its entity gone.
+    if (self.scripts) |scripts| scripts.calls.clear(scripts);
 }
 
 /// Give back the names of everything that has died. Once a frame, after
@@ -1729,6 +1752,87 @@ fn forgetDeadNames(self: *App) void {
         const entity = self.names.keys()[at];
         if (!self.world.isAlive(entity)) self.forgetName(entity);
     }
+}
+
+// -------------------------------------------------------------------------
+// Scripts
+// -------------------------------------------------------------------------
+
+/// Run Flux scripts. This makes the VM, with `app` and `self.entity` in it,
+/// and lets scenes hold a `Script`. Call it once; a second call does
+/// nothing. See `script`.
+///
+/// ```zig
+/// try app.useScripts(.{ .budget = 1_000_000 });
+/// const door = try app.loadScript("res://scripts/door.flux");
+/// _ = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Script.of(door) });
+/// ```
+pub fn useScripts(self: *App, options: script_mod.Options) !void {
+    if (self.scripts != null) return;
+    try self.registerComponents(.{script_mod.Script});
+    self.types.addAll(.{script_mod.ScriptHandle}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {},
+    };
+    self.scripts = try script_mod.Scripts.create(self, options);
+}
+
+/// Read a `.flux` file and compile it, or find the script already read from
+/// it, named as `Project` names a file. A file that reads and does not
+/// compile still gets a handle, and its reasons are in the log. A `Script`
+/// holding it makes nothing until a reload compiles.
+pub fn loadScript(self: *App, path: []const u8) !script_mod.ScriptHandle {
+    const scripts = self.scripts orelse return error.ScriptsNotUsed;
+    return scripts.load(path);
+}
+
+/// A script compiled from text rather than a file: a test's, or a tool's.
+/// `name` is what the log and a scene call it. A name given before gets the
+/// new text, as `setScriptText` gives it.
+pub fn addScript(self: *App, name: []const u8, text: []const u8) !script_mod.ScriptHandle {
+    const scripts = self.scripts orelse return error.ScriptsNotUsed;
+    return scripts.add(name, text);
+}
+
+/// Read a script's file again and put the new code in while the game runs:
+/// every instance keeps its fields and goes on with the new code. Says
+/// whether there was a file to read. Text that does not compile leaves the
+/// old code running, and the reasons are in the log. Not from inside a
+/// script, which is `error.Busy`.
+pub fn reloadScript(self: *App, handle: script_mod.ScriptHandle) !bool {
+    const scripts = self.scripts orelse return false;
+    return scripts.reload(handle);
+}
+
+/// New code for a script from text, not its file: an editor's unsaved
+/// changes, run before they are saved. See `reloadScript`.
+pub fn setScriptText(self: *App, handle: script_mod.ScriptHandle, text: []const u8) !void {
+    const scripts = self.scripts orelse return error.ScriptsNotUsed;
+    return scripts.setText(handle, text);
+}
+
+/// The script read from `path`, if one was, spelt any way `Project` spells
+/// it.
+pub fn findScript(self: *App, path: []const u8) ?script_mod.ScriptHandle {
+    const scripts = self.scripts orelse return null;
+    const named = self.project.canonical(self.gpa, path) catch return scripts.find(path);
+    defer self.gpa.free(named);
+    return scripts.find(named);
+}
+
+/// Where a script was read from, or the name it was given; null for a
+/// handle that has expired.
+pub fn scriptSource(self: *App, handle: script_mod.ScriptHandle) ?[]const u8 {
+    const scripts = self.scripts orelse return null;
+    return scripts.sourceOf(handle);
+}
+
+/// What an editor's language service needs to check and complete a game's
+/// scripts as the game compiles them: `app` and `self.entity`. Hand it to
+/// `flux.service`, with a loader for the files being edited. It needs no
+/// `useScripts`.
+pub fn scriptSetup(self: *App) script_mod.flux.service.Options {
+    return script_mod.serviceOptions(self);
 }
 
 // -------------------------------------------------------------------------
@@ -1758,6 +1862,7 @@ pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
     defer self.gpa.free(new);
     try self.project.moveFile(old, new);
     try self.assets.renamed(old, new);
+    if (self.scripts) |scripts| try scripts.renamed(old, new);
 }
 
 /// Copy a file, or a folder and everything in it, never over something
@@ -1854,6 +1959,16 @@ pub const ComponentError = error{
 pub fn componentOf(self: *App, entity: ecs.Entity, name: []const u8) ?reflect.Value {
     const entry = self.scene_components.find(name) orelse return null;
     return self.valueOf(entity, entry);
+}
+
+/// The component of type `t` on an entity, found as `componentOf` finds one
+/// by name. A script's handle on a component looks itself up with this each
+/// time the script uses it.
+pub fn componentOfType(self: *App, entity: ecs.Entity, t: *const reflect.Type) ?reflect.Value {
+    for (self.scene_components.entries.items) |*entry| {
+        if (entry.type == t) return self.valueOf(entity, entry);
+    }
+    return null;
 }
 
 /// Every registered component an entity has, in the order they were

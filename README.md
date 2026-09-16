@@ -1348,6 +1348,67 @@ as data, and the engine hands its components and its calls out through it.
   name it as a scene names a component. An editor's state panel walks
   `app.states.slots`, each with its type and so the names of its values.
 
+## ✍️ Scripts
+
+Flux scripts on entities, the way Godot puts a script on a node. A `Script`
+component names a `.flux` file and a struct in it, and the entity gets an
+instance of that struct with itself in it as `self.entity`.
+
+```zig
+try app.useScripts(.{});
+const door = try app.loadScript("res://scripts/door.flux");
+_ = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Script.of(door) });
+```
+
+```zig
+// res://scripts/door.flux
+struct Door {
+    var open: bool = false;
+
+    fn ready(self) {
+        print("a door called", self.entity.name());
+    }
+
+    fn update(self, dt: float) {
+        if (self.open) self.entity.get("Transform2D").rotation += dt;
+    }
+}
+```
+
+- **What is called, and when.**
+  - `ready(self)` comes first.
+  - `physics(self, dt)` runs every fixed step, before the game's `.fixed` systems.
+  - `update(self, dt)` runs every frame, before its `.update` systems.
+  - `exit(self)` runs at the end of the frame in which the entity dies, or its `Script` is taken off or turned off, and when the world is cleared.
+
+  A method the struct does not declare is not called. One with the wrong parameters is said once in the log and not called.
+- **One VM, only in a game that asks.** `useScripts` makes the VM and
+  registers `Script`. The frame reaches the scripts through pointers that
+  only `useScripts` sets, so a game that never calls it has none of the
+  language in it: the ReleaseSmall examples grew by half a kilobyte to one
+  kilobyte.
+- **What a script reaches.** `app` is the engine, with the calls
+  `App.reflect_methods` lists. `self.entity` has `alive()`, `name()`,
+  `uuid()`, `has(name)`, `get(name)`, `add(name)` and `remove(name)`.
+  - A component from `get` is looked up again each time the script uses it, so keeping it in a field is safe while the world's rows move.
+  - Once it is gone, using it stops the script with a panic saying so.
+- **A script cannot stop the game.**
+  - Each call has a budget of loop rounds, `Options.budget`, ten million by default, and a call that runs past it is stopped.
+  - A panic is said in the log with its line, once for each instance's method, and counted in `app.scripts.?.failures`; the other scripts go on.
+  - `print` goes to the log, or to `Options.out`.
+- **Read again while the game runs.**
+  - `app.reloadScript(handle)` reads the file again. Every instance keeps its fields and goes on in the new code.
+  - Text that does not compile leaves the old code running, with the reasons in the log.
+  - `app.setScriptText` does the same from text, such as an editor's unsaved buffer.
+  - A file that does not compile at all still gets a handle, so a scene holding it opens, and it runs once a reload compiles.
+- **In a scene**, a `Script` is its file's path and its struct, and once the
+  scene is saved, the file's UUID as well. Reading the scene loads the file:
+  `"Script": { "source": "res://scripts/door.flux", "struct_name": "Door" }`
+- **An editor checks scripts as the game compiles them.**
+  `app.scriptSetup()` gives the language service's `flux.service.Options`
+  with `app` and `self.entity` declared. This is for completions and
+  diagnostics, and it needs no `useScripts`.
+
 ## 🧪 It runs with no window and no GPU
 
 ```zig
@@ -1389,7 +1450,7 @@ const fluxion = b.dependency("fluxion_engine", .{ .target = target, .optimize = 
 exe_mod.addImport("fluxion_engine", fluxion.module("fluxion_engine"));
 ```
 
-Thirteen dependencies come with it and **none of them is lazy**, which is the
+Fourteen dependencies come with it and **none of them is lazy**, which is the
 difference between an engine and the libraries under it. A library keeps its
 window and its file reading behind `lazy` so a consumer never downloads what
 it does not use; an engine uses all of it by definition.
@@ -1405,6 +1466,7 @@ it does not use; an engine uses all of it by definition.
 [JSON](https://github.com/kisstp2006/fluxion-json) ·
 [Physics](https://github.com/kisstp2006/fluxion-physics) ·
 [Reflect](https://github.com/kisstp2006/fluxion-reflect) ·
+[Script](https://github.com/kisstp2006/fluxion-script) ·
 [Math](https://github.com/kisstp2006/fluxion-math) ·
 [Id](https://github.com/kisstp2006/fluxion-id)
 
@@ -1613,6 +1675,10 @@ Here, and checked by the tests:
   and found on an entity by its scene name, read and written in place, added
   and taken off; the engine's calls and a game's states made by name, errors
   and all.
+- Flux scripts on entities: `ready`, `physics`, `update` and `exit`,
+  `self.entity` and its components found again at each use, a budget and a
+  log for what goes wrong, code read again into running instances, scripts
+  in scenes, and an editor's checking set up as the game's.
 - The world drawn into a texture through a view of its own, and a window
   that shows only the interface: an editor's scene panel, or a minimap.
 - Headless everything, and `capture` for a picture without a screen.

@@ -106,6 +106,14 @@
             .url = "git+https://github.com/kisstp2006/fluxion-reflect#07c7efbd04be742d0a44c4c83f89cfb72092ef1b",
             .hash = "fluxion_reflect-0.1.0-Aw2l_yWFBQAb5Js-wIcSOqHOsInw5YBn0StLvdqagJ-h",
         },
+        // Flux, the scripting language: one VM on the App for a game that
+        // calls `useScripts`, and a `Script` component per entity. Its own
+        // fluxion-reflect and fluxion-json are pinned where these are, so a
+        // `reflect.Value` is one type across the two.
+        .fluxion_script = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-script#af138b274ba8d1ba6743496c94c6b1eb109bf291",
+            .hash = "fluxion_script-0.1.0-rt2DKndLEQDK-L5DQp-FnfJkdQVxJkl933rYnsqIoPCJ",
+        },
 
         // Generational handles: what the asset tables hand out, and what a
         // component holds instead of a pointer. The commit every package

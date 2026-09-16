@@ -88,6 +88,8 @@ const ComponentId = ecs.component.Id;
 const TextureHandle = Assets.TextureHandle;
 const FontHandle = Assets.FontHandle;
 const Text2D = components.Text2D;
+const ScriptHandle = @import("script.zig").ScriptHandle;
+const Script = @import("script.zig").Script;
 const Uuid = @import("fluxion_id").Uuid;
 const math = @import("fluxion_math");
 const Color = @import("color.zig").Color;
@@ -264,6 +266,7 @@ const TextureOptions = struct {
 /// by that.
 pub fn save(app: *App, io: std.Io, path: []const u8, options: SaveOptions) !void {
     try app.assets.ensureUids();
+    if (app.scripts) |scripts| try scripts.ensureUids();
     const file = try app.project.osPath(app.gpa, path);
     defer app.gpa.free(file);
     return json.save(io, file, Document{ .app = app }, writeOptions(options));
@@ -511,7 +514,9 @@ fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T
             (if (field.defaultValue()) |default| !s.every_field and std.meta.eql(held.*, default) else false);
         if (!skip) {
             try w.key(field.name);
-            try writeValue(s, w, field.type, held);
+            if (comptime T == Script and std.mem.eql(u8, field.name, "struct_name")) {
+                try w.writeString(value.structName());
+            } else try writeValue(s, w, field.type, held);
         }
     }
     try w.endObject();
@@ -531,6 +536,12 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
         if (texture.source.len == 0) return w.writeNull();
         try s.files.put(s.app.gpa, texture.source, .{ .filter = texture.filter, .wrap = texture.wrap });
         return w.writeString(texture.source);
+    }
+    if (T == ScriptHandle) {
+        const source = s.app.scriptSource(value.*) orelse return w.writeNull();
+        const kept = try s.files.getOrPut(s.app.gpa, source);
+        if (!kept.found_existing) kept.value_ptr.* = .{};
+        return w.writeString(source);
     }
     if (T == FontHandle) {
         const source = s.app.assets.fontSource(value.*) orelse return w.writeNull();
@@ -883,6 +894,7 @@ const Loading = struct {
     /// Textures found or loaded already, by the path the file gives.
     textures: std.StringHashMapUnmanaged(TextureHandle) = .empty,
     fonts: std.StringHashMapUnmanaged(FontHandle) = .empty,
+    scripts: std.StringHashMapUnmanaged(ScriptHandle) = .empty,
     /// Files found by their UUIDs somewhere other than the scene says.
     moved: usize = 0,
     /// See `Loaded`.
@@ -1230,6 +1242,18 @@ const Loading = struct {
         return handle;
     }
 
+    /// A script the scene names. One that does not compile is still loaded,
+    /// and the scene opens with it: its `Script` makes nothing until a
+    /// reload compiles.
+    fn script(l: *Loading, path: []const u8) anyerror!ScriptHandle {
+        if (l.scripts.get(path)) |known| return known;
+        const where, _ = try l.file(path);
+        const handle = l.app.loadScript(where) catch |err|
+            return l.fail(err, "cannot read the script \"{s}\": {t}", .{ where, err });
+        try l.scripts.put(l.arena, try l.arena.dupe(u8, path), handle);
+        return handle;
+    }
+
     fn font(l: *Loading, path: []const u8, member: u32) anyerror!FontHandle {
         // Kept by the file and the member: two fonts of one collection are
         // two fonts.
@@ -1304,7 +1328,9 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
                 matched = true;
                 seen.set(i);
                 const mark = l.path.push("{s}", .{field.name});
-                try readValue(l, field.type, &@field(out.*, field.name));
+                if (comptime T == Script and std.mem.eql(u8, field.name, "struct_name")) {
+                    try readStructName(l, out);
+                } else try readValue(l, field.type, &@field(out.*, field.name));
                 l.path.pop(mark);
             }
         }
@@ -1322,6 +1348,18 @@ fn defaultTheRest(l: *Loading, comptime T: type, out: *T, seen: anytype) anyerro
                 return l.fail(error.MissingField, "{s} has no {s}, and it has no default to take", .{ nameOf(T), field.name });
         }
     }
+}
+
+/// A `Script`'s struct name, written as the text it is.
+fn readStructName(l: *Loading, out: *Script) anyerror!void {
+    const token = try l.next();
+    const text = switch (token) {
+        .string => |text| text,
+        else => return l.wrong("the name of a struct in the script", token),
+    };
+    if (text.len > out.struct_name.len) return l.fail(error.OutOfRange, "a struct name is {d} bytes, and a Script holds {d}", .{ text.len, out.struct_name.len });
+    out.struct_name = @splat(0);
+    @memcpy(out.struct_name[0..text.len], text);
 }
 
 fn readText(l: *Loading, out: *Text2D) anyerror!void {
@@ -1355,6 +1393,15 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
         out.* = switch (token) {
             .null => .none,
             .string => |path| try l.texture(path),
+            else => return l.wrong("the file it was read from, or null", token),
+        };
+        return;
+    }
+    if (T == ScriptHandle) {
+        const token = try l.next();
+        out.* = switch (token) {
+            .null => .none,
+            .string => |path| try l.script(path),
             else => return l.wrong("the file it was read from, or null", token),
         };
         return;
