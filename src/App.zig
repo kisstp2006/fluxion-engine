@@ -2155,6 +2155,25 @@ pub fn spriteCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     return sprite.cornersOf(drawn, placed, texture);
 }
 
+/// Where an entity's label is drawn, as its four corners in the world, round
+/// from the top left of its first line - turned, scaled and carried by its
+/// parents as the renderer does it. The box its lines are laid out in, not
+/// the ink. Null for an entity with no `Text2D`, one with nothing to draw,
+/// or one that cannot be placed.
+pub fn textCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
+    const label = (self.world.get(entity, components.Text2D) orelse return null).*;
+    const placed = self.worldTransform(entity) orelse return null;
+    const face = self.assets.fontOf(label.font) orelse return null;
+    return sprite.labelCornersOf(label, placed, face);
+}
+
+/// Whichever of the two an entity is drawn as: its sprite's corners, else
+/// its label's. What an editor outlines, frames and tests a click against
+/// without asking which it is.
+pub fn drawnCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
+    return self.spriteCorners(entity) orelse self.textCorners(entity);
+}
+
 /// What the camera sees, at the size of the window.
 fn currentView(self: *App) View {
     return .of(&self.world, &self.snapshots, @floatFromInt(self.width), @floatFromInt(self.height));
@@ -4508,4 +4527,74 @@ test "the interface is laid out at the game's zoom times the display's scale" {
     app.interface.zoom = 1.25;
     _ = try app.step();
     try testing.expectEqual(@as(f32, 1.25), app.interface.scale);
+}
+
+test "a label's corners are the box its lines are laid out in" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    _ = app.assets.loadSystemFont(.{ .atlas = 256 }) catch return error.SkipZigTest;
+
+    const one = try app.world.spawnWith(.{
+        components.Transform2D.at(100, 50),
+        components.Text2D.of("Hello"),
+    });
+    const corners = app.textCorners(one).?;
+    // The transform is the top left of the first line, and the box goes
+    // right and down from it.
+    try testing.expectApproxEqAbs(@as(f32, 100), corners[0].x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 50), corners[0].y, 0.001);
+    try testing.expect(corners[2].x > corners[0].x);
+    try testing.expect(corners[2].y > corners[0].y);
+    const width = corners[2].x - corners[0].x;
+    const height = corners[2].y - corners[0].y;
+
+    // A second line is another line's height, and no wider for the same
+    // words.
+    const two = try app.world.spawnWith(.{
+        components.Transform2D.at(100, 50),
+        components.Text2D.of("Hello\nHello"),
+    });
+    const taller = app.textCorners(two).?;
+    try testing.expectApproxEqAbs(width, taller[2].x - taller[0].x, 0.001);
+    try testing.expectApproxEqAbs(height * 2, taller[2].y - taller[0].y, 0.01);
+
+    // Centred, the same box sits astride the transform.
+    const middle = try app.world.spawnWith(.{
+        components.Transform2D.at(100, 50),
+        components.Text2D{ .alignment = .center },
+    });
+    app.world.get(middle, components.Text2D).?.set("Hello");
+    const centred = app.textCorners(middle).?;
+    try testing.expectApproxEqAbs(100 - width / 2, centred[0].x, 0.001);
+    try testing.expectApproxEqAbs(100 + width / 2, centred[2].x, 0.001);
+
+    // Nothing to draw, nothing to outline: no words, and bytes that are
+    // not words either, which the renderer passes over as well.
+    const empty = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Text2D{} });
+    try testing.expect(app.textCorners(empty) == null);
+    app.world.get(empty, components.Text2D).?.set(&.{ 0xff, 0xfe });
+    try testing.expect(app.textCorners(empty) == null);
+    try testing.expect(app.textCorners(.none) == null);
+}
+
+test "an entity is outlined by whichever of the two it is drawn as" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    _ = app.assets.loadSystemFont(.{ .atlas = 256 }) catch return error.SkipZigTest;
+
+    const drawn = try app.world.spawnWith(.{
+        components.Transform2D.at(0, 0),
+        components.Sprite.solid(.white, 20, 10),
+    });
+    const written = try app.world.spawnWith(.{
+        components.Transform2D.at(0, 0),
+        components.Text2D.of("Hello"),
+    });
+    const neither = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
+
+    const box = app.drawnCorners(drawn).?;
+    try testing.expectApproxEqAbs(@as(f32, 20), box[2].x - box[0].x, 0.001);
+    try testing.expect(app.drawnCorners(written) != null);
+    try testing.expect(app.spriteCorners(written) == null);
+    try testing.expect(app.drawnCorners(neither) == null);
 }

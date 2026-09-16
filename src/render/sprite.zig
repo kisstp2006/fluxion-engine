@@ -622,6 +622,54 @@ pub fn cornersOf(sprite: Sprite, placed: Transform2D, texture: *const Assets.Tex
     return out;
 }
 
+/// Where a label's four corners land in the world, round from the top left
+/// of its first line: the box its lines are laid out in - the widest line
+/// across, shifted by the alignment, and the lines' heights down - turned
+/// and scaled as the transform says. The laid-out box, not the ink: a line
+/// of spaces is as tall as any other.
+///
+/// Null for a label with nothing drawn: no words, a size that measures
+/// nothing, or bytes that are not UTF-8. What an editor outlines, frames and
+/// tests a click against, as `cornersOf` is for a sprite.
+pub fn labelCornersOf(label: Text2D, placed: Transform2D, face: *Assets.Font) ?[4]math.Vec2 {
+    const run = label.slice();
+    if (run.len == 0 or !std.unicode.utf8ValidateSlice(run)) return null;
+
+    // The size the renderer rounds to, and the lines it lays out.
+    const tallest: f32 = @floatFromInt(@min(face.atlas.height, std.math.maxInt(u16)));
+    const rounded = @round(label.size);
+    const pixels: u16 = if (rounded >= 1 and rounded <= tallest)
+        @intFromFloat(rounded)
+    else if (rounded > tallest)
+        @intFromFloat(tallest)
+    else
+        1;
+    const scaled = face.face.at(@floatFromInt(pixels));
+    const line_height = scaled.lineHeight() * label.line_spacing;
+    const measured = measure(&face.face, scaled, run);
+    if (!(measured.width > 0) or !(measured.lines > 0) or !std.math.isFinite(line_height)) return null;
+
+    // The transform is the top left of the first line; each line is moved
+    // by the alignment, and so is the box around them.
+    const left: f32 = switch (label.alignment) {
+        .left => 0,
+        .center => -measured.width / 2,
+        .right => -measured.width,
+    };
+    const width = measured.width * placed.scale_x;
+    const height = measured.lines * line_height * placed.scale_y;
+    const x0 = left * placed.scale_x;
+    const c = @cos(placed.rotation);
+    const s = @sin(placed.rotation);
+    var out: [4]math.Vec2 = undefined;
+    for (quad_round, &out) |corner, *point| {
+        const x = x0 + corner[0] * width;
+        const y = corner[1] * height;
+        point.* = .init(placed.x + x * c - y * s, placed.y + x * s + y * c);
+    }
+    return out;
+}
+
 /// The unit square's corners in order round it, rather than in the strip's
 /// order.
 const quad_round = [4][2]f32{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } };

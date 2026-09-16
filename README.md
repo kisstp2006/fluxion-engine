@@ -663,7 +663,9 @@ _ = try world.spawnWith(.{
   shader is given - so what is under the mouse is what is drawn under the
   mouse, zoomed and turned. `app.spriteCorners(entity)` is where a sprite's
   four corners land in the world, by the vertex shader's own arithmetic,
-  for asking whether a click hit it.
+  for asking whether a click hit it; `app.textCorners(entity)` is the same
+  for a label, the box its lines are laid out in, and
+  `app.drawnCorners(entity)` is whichever of the two an entity is drawn as.
 - **The world can be drawn through another camera, somewhere else.**
   `app.drawWorld(texture, view)` draws the sprites, the text and `debug` into
   a texture through any `fx.View` - a minimap, a picture-in-picture, an
