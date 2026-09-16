@@ -373,6 +373,16 @@ debug: debugdraw.Pen,
 debug_frame: debugdraw.Canvas,
 debug_steps: debugdraw.Canvas,
 debug_renderer: debugdraw_rhi.Renderer,
+/// The same as `debug`, drawn under the world rather than over it: after
+/// the frame is cleared to `background` and before the sprites, so the
+/// world is drawn over what it holds. An editor's grid, a level's guide
+/// lines. Inside `.fixed` it lasts until the next step, as `debug` does.
+debug_under: debugdraw.Pen,
+debug_under_frame: debugdraw.Canvas,
+debug_under_steps: debugdraw.Canvas,
+/// What the last frame drew of `debug_under`; `debug_renderer.stats` is
+/// what it drew over the world.
+debug_under_stats: debugdraw_rhi.Stats = .{},
 /// Whether anything `debug` holds is drawn - a game's own shapes and the
 /// views below. `Options.debug_key` flips it.
 debug_visible: bool = true,
@@ -506,6 +516,9 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .debug = undefined,
         .debug_frame = .init(gpa),
         .debug_steps = .init(gpa),
+        .debug_under = undefined,
+        .debug_under_frame = .init(gpa),
+        .debug_under_steps = .init(gpa),
         .debug_renderer = undefined,
         .debug_visible = true,
         .debug_views = .{},
@@ -699,6 +712,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.debug_renderer = try .init(gpa, &self.device, .{});
     errdefer self.debug_renderer.deinit();
     self.debug = self.debug_frame.pen();
+    self.debug_under = self.debug_under_frame.pen();
 
     return self;
 }
@@ -737,6 +751,8 @@ pub fn destroy(self: *App) void {
     self.debug_renderer.deinit();
     self.debug_steps.deinit();
     self.debug_frame.deinit();
+    self.debug_under_steps.deinit();
+    self.debug_under_frame.deinit();
     self.interface.deinit();
     self.clipboard.deinit(gpa);
     self.ui.deinit();
@@ -983,6 +999,7 @@ pub fn step(self: *App) anyerror!bool {
 
     self.time.tick();
     self.debug_frame.advance(self.time.delta);
+    self.debug_under_frame.advance(self.time.delta);
     if (self.hasInterface()) try self.feedInterface();
 
     // What was asked for outside any system - between frames, by a tool -
@@ -1020,9 +1037,12 @@ pub fn step(self: *App) anyerror!bool {
         defer self.time.delta = frame_delta;
         self.debug.canvas = &self.debug_steps;
         defer self.debug.canvas = &self.debug_frame;
+        self.debug_under.canvas = &self.debug_under_steps;
+        defer self.debug_under.canvas = &self.debug_under_frame;
 
         while (self.time.takeFixedStep()) |_| {
             self.debug_steps.advance(self.time.fixed_delta);
+            self.debug_under_steps.advance(self.time.fixed_delta);
             // Where everything was before this step, to draw between steps.
             try self.snapshotPrevious();
             try self.schedule.run(.fixed, self);
@@ -2576,7 +2596,8 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
     //    depth - or, with the world off the screen, only the clearing.
     const view: View = .of(&self.world, &self.snapshots, width, height);
     if (self.world_on_screen) {
-        try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, into, view, self.background, self.time.alpha());
+        const clear = try self.drawDebugUnder(into, view);
+        try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, into, view, clear, self.time.alpha());
     } else try self.clearTarget(into);
 
     // 3. The interface, on top, loading what the 2D layer left - with its
@@ -2609,7 +2630,8 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
 /// On OpenGL a texture drawn into is read bottom row first, so shown in the
 /// interface it wants its `source` turned over; see `drawnUpsideDown`.
 pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
-    try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, .{ .texture = into }, view, self.background, self.time.alpha());
+    const clear = try self.drawDebugUnder(.{ .texture = into }, view);
+    try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, .{ .texture = into }, view, clear, self.time.alpha());
     if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
 }
 
@@ -2621,6 +2643,26 @@ pub fn drawnUpsideDown(self: *const App) bool {
         .gl, .webgl => true,
         .d3d11, .none => false,
     };
+}
+
+/// Clear `into` to the background and draw `debug_under` on it, for the
+/// sprites to go over: the colour the sprites should clear to, which is
+/// none once this has cleared. With nothing under the world - the usual
+/// case - no pass is made, and the sprites clear as they always did.
+fn drawDebugUnder(self: *App, into: rhi.RenderTarget, view: View) !?Color {
+    self.debug_under_stats = .{};
+    if (!self.debug_visible) return self.background;
+    if (self.debug_under_frame.isEmpty() and self.debug_under_steps.isEmpty()) return self.background;
+    try self.debug_renderer.draw(&.{ &self.debug_under_steps, &self.debug_under_frame }, .{
+        .color = into,
+        .clear = self.background.array(),
+    }, .{
+        .view_projection = view.matrix(self.device.clip()),
+        .width = view.width,
+        .height = view.height,
+    });
+    self.debug_under_stats = self.debug_renderer.stats;
+    return null;
 }
 
 fn drawDebug(self: *App, into: rhi.RenderTarget, view: View) !void {
@@ -4597,4 +4639,60 @@ test "an entity is outlined by whichever of the two it is drawn as" {
     try testing.expect(app.drawnCorners(written) != null);
     try testing.expect(app.spriteCorners(written) == null);
     try testing.expect(app.drawnCorners(neither) == null);
+}
+
+const Beneath = struct {
+    fn grid(app: *App) anyerror!void {
+        app.debug_under.line2d(.init(-50, 0), .init(50, 0), .white);
+        app.debug_under.line2d(.init(0, -50), .init(0, 50), .white);
+    }
+
+    fn stepped(app: *App) anyerror!void {
+        app.debug_under.line2d(.init(0, 0), .init(1, 1), .white);
+    }
+};
+
+test "what is drawn under the world is drawn in a pass of its own, before the sprites" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addSystem(.update, "grid", Beneath.grid);
+    try app.addSystem(.update, "line", Scribble.line);
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 8, 8) });
+
+    _ = try app.step();
+    // Two under, one over, each counted where it was drawn.
+    try testing.expectEqual(@as(u32, 2), app.debug_under_stats.lines);
+    try testing.expectEqual(@as(u32, 1), app.debug_renderer.stats.lines);
+    try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
+
+    // Hidden with the rest of `debug`.
+    app.debug_visible = false;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.debug_under_stats.lines);
+    try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
+}
+
+test "nothing under the world makes no pass of its own" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 8, 8) });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.debug_under_stats.lines);
+    try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
+}
+
+test "under the world as over it, a fixed step's shapes last until the next step" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .fixed_delta = 1.0 / 64.0 });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 1.0 / 256.0 };
+    try app.addSystem(.fixed, "stepped", Beneath.stepped);
+
+    // A step every fourth frame: its line is there from the first step on,
+    // in the frames between the steps as well.
+    try app.startup();
+    for (1..13) |frame| {
+        _ = try app.step();
+        try testing.expectEqual(@as(u32, if (frame < 4) 0 else 1), app.debug_under_stats.lines);
+    }
+    try testing.expect(app.debug_under.canvas == &app.debug_under_frame);
 }

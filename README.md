@@ -764,6 +764,10 @@ fn watchBall(app: *fx.App) !void {
 - **`screen()` draws in pixels** from the top left, for a readout that stays
   where it is while the camera moves; `within2d(at, angle)` draws in
   something's own frame.
+- **`app.debug_under` draws under the world** instead of over it: after the
+  frame is cleared and before the sprites, so the game covers its lines. An
+  editor's grid, a level's guide lines. It is the same pen, and it makes no
+  pass of its own on a frame it holds nothing.
 - **Drawing never fails.** No `try`: a shape there is no memory for is
   counted and dropped rather than stopping the frame.
 - **It has its own font**, ASCII at a fixed size in pixels, so a number on
