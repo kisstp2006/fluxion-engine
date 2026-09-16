@@ -550,6 +550,32 @@ if (!app.input.focused) pause(app);
   flip-model swapchain in fluxion-rhi has two buffers and no tearing support.
   It is the backend Windows opens by default now.
 
+## ⏲️ Timers
+
+```zig
+const door = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Timer{ .wait_time = 2, .one_shot = true, .autostart = true } });
+try app.signal(door, fx.Timer, .timeout).connect(.method(door, "_on_timer_timeout"), .{});
+
+app.world.get(door, fx.Timer).?.start(5);      // five seconds from now; start(-1) is wait_time
+const fuse = try app.createTimer(1.5);         // one to connect to and forget
+try app.signal(fuse, fx.Timer, .timeout).connectFn(explode, .{});
+```
+
+- **Godot 3's Timer, as a component.**
+  - `wait_time`, `one_shot`, `autostart`, `paused` and `time_left`.
+  - `start`, `stop` and `isStopped`.
+  - The `timeout` signal, and it is saved with a scene.
+- **Counted by the engine**: once a frame before the `.update` systems, or
+  with `process_mode = .physics` once a fixed step before `.fixed`, so a
+  game's pause is the same length on every machine.
+  - What it says is heard before that stage's systems run.
+  - A repeating timer keeps what a frame ran past, so it keeps its rhythm.
+- **No time, no count.** A paused game's timers wait, and an editor, which
+  gives its world no time, starts none in the scene it edits. A timer read
+  back from a scene saved while it ran goes on from where it was.
+- **`app.createTimer(seconds)`** is Godot's `create_timer`: a one-shot timer
+  on an entity of its own, which goes once it has said `timeout`.
+
 ## 📱 In the background
 
 ```zig
@@ -1621,7 +1647,8 @@ Here, and checked by the tests:
   edges that a fixed step hears exactly once.
 - Controls as data: an `AxisBinding` holds two keys, a second two, a stick
   and a d-pad, lives in a component and saves with the world.
-- Timers that live in components, `app.single` for the component there is
+- Godot's Timer as a component, with `timeout` and `app.createTimer`;
+  `app.single` for the component there is
   one of, and engine shortcuts for quitting and fullscreen, off unless asked
   for.
 - Names that belong to the entity rather than to a component:

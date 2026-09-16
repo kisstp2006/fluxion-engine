@@ -55,6 +55,7 @@ const Time = @import("time.zig");
 const Window = @import("window.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
+const timer = @import("timer.zig");
 const scene = @import("scene.zig");
 const signals_mod = @import("signals.zig");
 const events_mod = @import("events.zig");
@@ -624,6 +625,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.RigidBody2D,
         components.Collider2D,
         components.Area2D,
+        timer.Timer,
     }) catch |err| switch (err) {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
@@ -1075,6 +1077,8 @@ pub fn step(self: *App) anyerror!bool {
             self.debug_under_steps.advance(self.time.fixed_delta);
             // Where everything was before this step, to draw between steps.
             try self.snapshotPrevious();
+            try timer.count(self, .physics, self.time.fixed_delta);
+            try self.signals.drain(self);
             if (self.scripts) |scripts| {
                 try scripts.calls.pass(scripts, .{ .physics = self.time.fixed_delta });
                 try self.signals.drain(self);
@@ -1089,6 +1093,8 @@ pub fn step(self: *App) anyerror!bool {
     // pressed on a pause menu must not reach the first step after it.
     if (self.time.delta == 0) self.input.endFixedStep();
 
+    try timer.count(self, .idle, self.time.delta);
+    try self.signals.drain(self);
     if (self.scripts) |scripts| {
         try scripts.calls.pass(scripts, .{ .update = self.time.delta });
         try self.signals.drain(self);
@@ -1499,6 +1505,18 @@ pub fn applyScale(self: *App, entity: ecs.Entity, ratio: math.Vec2) PlaceError!v
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     own.scale_x *= ratio.x;
     own.scale_y *= ratio.y;
+}
+
+/// A timer that runs once, `seconds` from now, on an entity of its own that
+/// goes after its `timeout`: Godot's `SceneTree.create_timer`, to connect
+/// to and forget.
+///
+/// ```zig
+/// const fuse = try app.createTimer(1.5);
+/// try app.signal(fuse, fx.Timer, .timeout).connectFn(explode, .{});
+/// ```
+pub fn createTimer(self: *App, seconds: f32) ecs.World.Error!ecs.Entity {
+    return self.world.spawnWith(.{timer.Timer{ .wait_time = seconds, .one_shot = true, .autostart = true, .free_when_stopped = true }});
 }
 
 /// The one entity's `T`: a score, a game's state - the component there is
@@ -2235,6 +2253,7 @@ pub const reflect_methods = .{
     .setStateNamed,
     .saveScene,
     .loadScene,
+    .createTimer,
     .worldTransform,
     .setWorldTransform,
     .globalPosition,
@@ -4811,7 +4830,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 8), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 9), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

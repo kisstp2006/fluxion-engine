@@ -233,8 +233,9 @@ pub const GamepadAxis = platform.GamepadAxis;
 /// The keys, stick and d-pad that move one axis, as component data.
 pub const AxisBinding = Input.AxisBinding;
 
-/// A countdown that lives in a component.
-pub const Timer = Time.Timer;
+/// Godot's Timer: a component that counts down and says `timeout`. See
+/// `timer.zig`.
+pub const Timer = @import("timer.zig").Timer;
 
 /// A point or a direction in the plane.
 pub const Vec2 = math.Vec2;
@@ -320,6 +321,7 @@ test {
     _ = @import("signals_test.zig");
     _ = @import("areas_test.zig");
     _ = @import("picking_test.zig");
+    _ = @import("timer.zig");
     _ = @import("script.zig");
     _ = @import("script_test.zig");
     _ = Project;

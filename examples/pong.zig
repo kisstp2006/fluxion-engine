@@ -110,12 +110,14 @@ const Paddle = extern struct {
 /// that a rally can make it faster.
 const Ball = extern struct {
     speed: f32 = ball_start_speed,
-    /// Until it serves itself. Ticked in the fixed stage, so the pause is the
-    /// same length on every machine; space cuts it short.
-    wait: fx.Timer = .seconds(serve_pause),
     /// Which way the next serve goes: 1 right, -1 left.
     towards: f32 = 1,
 };
+
+/// The pause before a serve: the ball's own `fx.Timer`, counted by fixed
+/// steps so the pause is the same length on every machine. Its `timeout`
+/// serves; space cuts it short.
+const serve_wait: fx.Timer = .{ .wait_time = serve_pause, .one_shot = true, .autostart = true, .process_mode = .physics };
 
 /// The whole of the game's state, on one entity.
 const Score = extern struct {
@@ -172,12 +174,14 @@ fn spawn(app: *App) !void {
         Paddle{ .move = fx.AxisBinding.keys(.up, .down).withPadY(1) },
     });
 
-    _ = try world.spawnWith(.{
+    const ball = try world.spawnWith(.{
         Transform2D.at(field_width / 2, field_height / 2).interpolated(),
         Sprite{ .tint = theme.ink, .width = ball_size, .height = ball_size, .layer = 10 },
         Velocity{},
         Ball{},
+        serve_wait,
     });
+    try app.signal(ball, fx.Timer, .timeout).connectFn(serve, .{});
 
     _ = try world.spawnWith(.{Score{}});
 
@@ -204,7 +208,7 @@ fn spawn(app: *App) !void {
 // -------------------------------------------------------------------------
 
 const Paddles = fx.Query(.{ Transform2D, Velocity, Paddle });
-const Balls = fx.Query(.{ Transform2D, Velocity, Ball });
+const Balls = fx.Query(.{ Transform2D, Velocity, Ball, fx.Timer });
 const Pips = fx.Query(.{ Sprite, Pip });
 
 /// Space serves and R starts again - and A and Start on any controller do
@@ -222,20 +226,24 @@ fn readKeys(app: *App) !void {
     if (app.input.justPressed(.space) or pads.justPressed(.a)) {
         var it = try Balls.over(&app.world);
         while (it.next()) |chunk| {
-            for (chunk.slice(Ball)) |*ball| ball.wait.finish();
+            for (chunk.slice(fx.Timer)) |*wait| {
+                if (wait.isStopped()) continue;
+                wait.stop();
+                try serve(app, .{});
+            }
         }
     }
 }
 
-/// Serve the ball when its pause runs out.
+/// Serve the ball: what its pause's `timeout` calls.
 ///
-/// In the fixed stage with everything else that moves, so a capture taken at
-/// frame two hundred shows the same rally every time it is run.
-fn serve(app: *App) !void {
+/// Heard before the fixed stage of the step the pause ran out in, so a
+/// capture taken at frame two hundred shows the same rally every time it is
+/// run.
+fn serve(app: *App, _: struct {}) !void {
     var it = try Balls.over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.slice(Ball), chunk.slice(Velocity)) |*ball, *velocity| {
-            if (!ball.wait.tick(app.time.delta)) continue;
             // Never quite flat, so a serve always has somewhere to go.
             velocity.* = .{
                 .x = ball.speed * ball.towards,
@@ -296,8 +304,8 @@ fn moveBall(app: *App) !void {
 
     var it = try Balls.over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(Transform2D), chunk.slice(Velocity), chunk.slice(Ball)) |*place, *speed, *ball| {
-            if (ball.wait.running()) continue;
+        for (chunk.slice(Transform2D), chunk.slice(Velocity), chunk.slice(Ball), chunk.slice(fx.Timer)) |*place, *speed, *ball, wait| {
+            if (!wait.isStopped()) continue;
 
             place.x += speed.x * dt;
             place.y += speed.y * dt;
@@ -368,10 +376,11 @@ fn award(app: *App, side: u8) void {
 fn resetBall(app: *App, towards: f32) !void {
     var it = try Balls.over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(Transform2D), chunk.slice(Velocity), chunk.slice(Ball)) |*place, *speed, *ball| {
+        for (chunk.slice(Transform2D), chunk.slice(Velocity), chunk.slice(Ball), chunk.slice(fx.Timer)) |*place, *speed, *ball, *wait| {
             place.* = Transform2D.at(field_width / 2, field_height / 2).interpolated();
             speed.* = .{};
             ball.* = .{ .towards = if (towards == 0) ball.towards else towards };
+            wait.start(-1);
         }
     }
 }
@@ -448,7 +457,6 @@ pub fn main(init: std.process.Init) !void {
 
     try app.addSystem(.startup, "spawn", spawn);
     try app.addSystem(.input, "read keys", readKeys);
-    try app.addSystem(.fixed, "serve", serve);
     try app.addSystem(.fixed, "drive paddles", drivePaddles);
     try app.addSystem(.fixed, "move ball", moveBall);
     try app.addSystem(.update, "show score", showScore);

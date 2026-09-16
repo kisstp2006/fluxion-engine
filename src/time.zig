@@ -67,44 +67,6 @@ step_once: bool = false,
 /// Set by `restart`, and spent by the next frame.
 restarting: bool = false,
 
-/// A countdown that lives in a component: a serve after a pause, a cooldown.
-///
-/// ```zig
-/// const Ball = extern struct { wait: Timer = .seconds(1.2) };
-///
-/// if (ball.wait.tick(app.time.delta)) serve();   // true once, as it runs out
-/// ```
-///
-/// Tick it in `.fixed` when the simulation depends on it.
-pub const Timer = extern struct {
-    /// Seconds until it goes off. Zero or less when it is not counting.
-    left: f32 = 0,
-
-    /// One that goes off after this many seconds.
-    pub fn seconds(duration: f32) Timer {
-        return .{ .left = duration };
-    }
-
-    /// Count down by `delta`, and say whether it went off in this call. True
-    /// in exactly one call.
-    pub fn tick(self: *Timer, delta: f32) bool {
-        if (self.left <= 0) return false;
-        self.left -= delta;
-        return self.left <= 0;
-    }
-
-    /// Whether it is still counting.
-    pub fn running(self: Timer) bool {
-        return self.left > 0;
-    }
-
-    /// Make it go off at the next `tick`. Not the same as setting `left` to
-    /// zero: at zero it is not counting, and the next `tick` says false.
-    pub fn finish(self: *Timer) void {
-        if (self.left > 0) self.left = std.math.floatMin(f32);
-    }
-};
-
 pub fn init(source: Source) Time {
     return .{ .source = source };
 }
@@ -265,28 +227,6 @@ test "a paused clock moves on by exactly one fixed step when asked" {
 
     time.tick();
     try std.testing.expectEqual(@as(f32, 0), time.delta);
-}
-
-test "a timer goes off once, in the tick it runs out in" {
-    var timer: Timer = .seconds(0.25);
-    try std.testing.expect(timer.running());
-
-    try std.testing.expect(!timer.tick(0.1));
-    try std.testing.expect(!timer.tick(0.1));
-    try std.testing.expect(timer.tick(0.1));
-    try std.testing.expect(!timer.running());
-    try std.testing.expect(!timer.tick(0.1));
-}
-
-test "finishing a timer makes the next tick go off, not skip it" {
-    var timer: Timer = .seconds(10);
-    timer.finish();
-    try std.testing.expect(timer.running());
-    try std.testing.expect(timer.tick(0.001));
-
-    var idle: Timer = .{};
-    idle.finish();
-    try std.testing.expect(!idle.tick(0.001));
 }
 
 test "a frame cap spaces the frames out" {
