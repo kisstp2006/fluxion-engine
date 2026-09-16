@@ -29,8 +29,8 @@
         // this; an engine is exactly the thing that may, because opening the
         // window is its job.
         .fluxion_platform = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-platform#8b61ac5607fb33d20ad5efbe9d0b31f7ac4d0486",
-            .hash = "fluxion_platform-0.1.0-WsOjUaAtFgDsmS0VrX9e_XEgUZksyO0dHYy3M77CeIJO",
+            .url = "git+https://github.com/kisstp2006/fluxion-platform#4475d32cdfc3e5350473695428d379c6ccd4c36c",
+            .hash = "fluxion_platform-0.1.0-WsOjUYesFgB-7--Ddjv2CohfG0aAChrpNWPou8Q_kpNS",
         },
 
         // The interface layer: the layout `.ui` systems declare into, and the
