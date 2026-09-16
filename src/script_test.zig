@@ -423,6 +423,37 @@ test "a script read again runs its new code in the instances it has, which keep 
     try testing.expect(!try app.reloadScript(.none));
 }
 
+test "a script saved while the game runs is read again when the watch next looks" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "mover.flux", .data = mover_before });
+
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root, .fixed_delta = 0.25 });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 0.25 };
+    try app.registerComponents(.{Counter});
+    // Every half second: every other frame.
+    try app.useScripts(.{ .watch = 0.5 });
+    const file = try app.loadScript("res://mover.flux");
+    const mover = try app.world.spawnWith(.{ Counter{}, Script.of(file) });
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 1), app.world.get(mover, Counter).?.value);
+
+    // The second frame's look finds it saved, before that frame's update.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "mover.flux", .data = mover_after });
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 200), app.world.get(mover, Counter).?.value);
+
+    // Saved again, it waits for the next look, two frames on.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "mover.flux", .data = mover_before });
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 300), app.world.get(mover, Counter).?.value);
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 4), app.world.get(mover, Counter).?.value);
+}
+
 test "a scene keeps an entity's script by its file and struct, and reading it loads the file" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

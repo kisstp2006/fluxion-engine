@@ -63,6 +63,11 @@
 //! holds it opens. Its reasons are in the log, and it runs once a reload
 //! compiles.
 //!
+//! **Read again while it runs.** `App.reloadScript` puts a file's new code
+//! into the instances it has, which keep their fields. With `Options.watch`
+//! the engine looks at the files itself, every so many seconds, for a game
+//! started from an editor as a program of its own.
+//!
 //! **Order.** Scripts are called in the order their instances were made.
 //! `exit` runs at the end of the frame the entity died in, after it is gone,
 //! so `self.entity.alive()` is false there. Godot's `_exit_tree` comes
@@ -118,6 +123,11 @@ pub const Options = struct {
     /// Where `print` writes. Null is the log, under `.flux`, a line at a
     /// time.
     out: ?*std.Io.Writer = null,
+    /// How often to look at the files the scripts were read from, in
+    /// seconds of the clock that does not stop for a paused game, and read
+    /// again each one saved since: a game run from an editor takes what the
+    /// editor saves. Null never looks, as a shipped game has nothing to watch.
+    watch: ?f32 = null,
 };
 
 /// A `.flux` file loaded into the app's VM, the way a `FontHandle` is a
@@ -270,6 +280,21 @@ const File = struct {
     module: ?*flux.object.Module,
     /// Whether there is a file to read again, or only text it was given.
     on_disc: bool,
+    /// The file as it was when last read, for `Options.watch` to see it
+    /// saved since. Null for text, and for a file the system would not say.
+    stamp: ?Stamp = null,
+};
+
+/// When a file was last changed, and how long it is: a save in the same
+/// tick of a coarse clock still changes the length, as a rule.
+const Stamp = struct {
+    modified: i96,
+    size: u64,
+
+    fn of(io: std.Io, path: []const u8) ?Stamp {
+        const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
+        return .{ .modified = stat.mtime.nanoseconds, .size = stat.size };
+    }
 };
 
 const Lifecycle = enum {
@@ -349,6 +374,10 @@ pub const Scripts = struct {
     printed: Printed = .{},
     /// Entities found in one walk of the world, to act on after it.
     scratch: std.ArrayList(Entity) = .empty,
+    /// Seconds since the files were last looked at. See `Options.watch`.
+    since_watched: f32 = 0,
+    /// Files found saved since they were read, to read after the look.
+    changed: std.ArrayList(ScriptHandle) = .empty,
 
     /// The VM, with `app` and `self.entity` in it.
     pub fn create(app: *App, options: Options) (Allocator.Error || flux.Vm.Error)!*Scripts {
@@ -396,6 +425,7 @@ pub const Scripts = struct {
         self.entity_of.deinit(gpa);
         self.refused.deinit(gpa);
         self.scratch.deinit(gpa);
+        self.changed.deinit(gpa);
         var it = self.files.iterator();
         while (it.next()) |entry| {
             gpa.free(entry.value.source);
@@ -421,12 +451,17 @@ pub const Scripts = struct {
 
         const file = try app.project.osPath(app.gpa, source);
         defer app.gpa.free(file);
+        // Looked at before it is read: a save between the two is seen at the
+        // next look, not taken for what was read.
+        const stamp: ?Stamp = .of(io, file);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, file, app.gpa, .limited(file_limit));
         if (Project.isProjectPath(source)) {
             _ = app.project.uidOf(source) catch |err|
                 log.warn("the {s} file beside {s} does not read: {t}", .{ Project.uid_extension, source, err });
         }
-        return self.keep(source, text, true);
+        const made = try self.keep(source, text, true);
+        if (self.files.get(made.toId())) |kept| kept.stamp = stamp;
+        return made;
     }
 
     /// A script from text, not a file: a test's, or a tool's. `name` is what
@@ -507,10 +542,41 @@ pub const Scripts = struct {
         const io = app.io orelse return error.NoIo;
         const path = try app.project.osPath(app.gpa, file.source);
         defer app.gpa.free(path);
+        const stamp: ?Stamp = .of(io, path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, app.gpa, .limited(file_limit));
         defer app.gpa.free(text);
         try self.setText(handle, text);
+        // Looked up again: the new code's defaults can load a script.
+        if (self.files.get(handle.toId())) |read| read.stamp = stamp;
         return true;
+    }
+
+    /// Each file saved since it was read, read again: see `Options.watch`.
+    /// One that does not read now - held by the program saving it - is
+    /// tried again at the next look.
+    fn watchFiles(self: *Scripts) Allocator.Error!void {
+        const app = self.app;
+        const io = app.io orelse return;
+        // Found first and read after: reading runs code, which can load a
+        // script into the table being walked.
+        self.changed.clearRetainingCapacity();
+        var it = self.files.iterator();
+        while (it.next()) |entry| {
+            if (!entry.value.on_disc) continue;
+            const path = app.project.osPath(app.gpa, entry.value.source) catch continue;
+            defer app.gpa.free(path);
+            const now = Stamp.of(io, path) orelse continue;
+            if (entry.value.stamp) |then| if (std.meta.eql(then, now)) continue;
+            try self.changed.append(app.gpa, .fromId(entry.handle));
+        }
+        for (self.changed.items) |handle| {
+            if (self.reload(handle)) |_| {
+                log.info("{s} was saved, and is read again", .{self.sourceOf(handle) orelse "a script"});
+            } else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => log.warn("{s} was saved, and does not read yet: {t}", .{ self.sourceOf(handle) orelse "a script", err }),
+            }
+        }
     }
 
     /// New code for a script, from text rather than its file: an editor's
@@ -587,6 +653,14 @@ pub const Scripts = struct {
                 self.callEach(.physics, dt);
             },
             .update => |dt| {
+                // First, so what was saved runs this frame.
+                if (self.options.watch) |every| {
+                    self.since_watched += self.app.time.unscaled_delta;
+                    if (self.since_watched >= every) {
+                        self.since_watched = 0;
+                        try self.watchFiles();
+                    }
+                }
                 try self.sync();
                 self.readyTheNew();
                 self.callEach(.update, dt);

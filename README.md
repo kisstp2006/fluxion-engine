@@ -1400,6 +1400,7 @@ struct Door {
   - `app.reloadScript(handle)` reads the file again. Every instance keeps its fields and goes on in the new code.
   - Text that does not compile leaves the old code running, with the reasons in the log.
   - `app.setScriptText` does the same from text, such as an editor's unsaved buffer.
+  - With `.watch = 0.5` in the options, the files are looked at every half second, and one saved since is read again before that frame's scripts run. A game started from an editor as its own program takes what the editor saves; a shipped game leaves it off.
   - A file that does not compile at all still gets a handle, so a scene holding it opens, and it runs once a reload compiles.
 - **Signals both ways.** A script's signals are its entity's, under `Script`:
   - `signal opened(by: string)` in the struct is listed by `app.signalsOf`, with its `signature` and `arity`, as soon as the entity has the `Script`.
