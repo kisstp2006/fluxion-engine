@@ -36,9 +36,15 @@
 //! `.late`, as Godot's is at idle time.
 //!
 //! **A named connection is looked up when it is called**: a method one of the
-//! target's components lists in its `reflect_methods`, or one the game gave
-//! `App.addMethod`. Connecting never asks, as Godot's never does - a tool
-//! connects to the game's methods, which it cannot see.
+//! target's components lists in its `reflect_methods`, one its script
+//! declares, or one the game gave `App.addMethod`. Connecting never asks, as
+//! Godot's never does - a tool connects to the game's methods, which it
+//! cannot see.
+//!
+//! **A script's signals are its entity's**, under `Script`: a `signal died`
+//! in the struct is `Script.died` in the table, listed, connected and saved
+//! as a component's is, and a script's emit is heard by the table's
+//! connections as a component's. See `script`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -108,10 +114,19 @@ pub fn declsOf(comptime T: type) []const Decl {
 /// A signal an entity has: which of its components declares it, and what
 /// it says. Godot's `get_signal_list` entry.
 pub const Info = struct {
-    /// What a scene calls the component.
+    /// What a scene calls the component: `Script` for a signal the
+    /// entity's script declares.
     component: []const u8,
     name: []const u8,
+    /// The struct of its arguments. A script's signal has no Zig struct, and
+    /// this has no fields: `signature` and `arity` say what it gives.
     args: *const reflect.Type,
+    /// A script's signal, its parameters as written: `by: string, hp: int`.
+    /// Empty for a component's.
+    signature: []const u8 = "",
+    /// How many arguments a script's signal gives. Null for a component's,
+    /// whose `args` says.
+    arity: ?u8 = null,
 };
 
 /// Godot's `ConnectFlags`.
@@ -370,13 +385,21 @@ pub const Registered = struct {
 /// A method a connection to an entity can name: Godot's `get_method_list`
 /// entry, what an editor's method picker lists.
 pub const MethodInfo = struct {
-    /// What a scene calls the component whose method it is; empty for one
-    /// given to `App.addMethod`, which every entity has.
+    /// What a scene calls the component whose method it is - `Script` for
+    /// one the entity's script declares - and empty for one given to
+    /// `App.addMethod`, which every entity has.
     component: []const u8,
     name: []const u8,
     /// What a call hands it, in order: not the component, nor the app and
-    /// the target.
+    /// the target. Empty for a script's, whose parameters have no Zig types:
+    /// `signature` and `arity` say what it takes.
     params: []const reflect.Param,
+    /// A script's method, its parameters as written: `damage: float, by`.
+    /// Empty for a Zig one.
+    signature: []const u8 = "",
+    /// How many arguments a script's method takes. Null for a Zig one,
+    /// whose `params` says.
+    arity: ?u8 = null,
 };
 
 /// `f`, a method for `App.addMethod`, kept with its parameters described.
@@ -559,6 +582,21 @@ pub const Signals = struct {
             self.freeConnection(held.*);
             held.* = connection;
         } else try list.append(self.gpa, connection);
+    }
+
+    /// Every connection of `source` kept unknown under `written`, made a
+    /// connection to the signal `key` names where it is: heard from now on,
+    /// in the order it was made. For a signal that became known after its
+    /// connections were read - a script's, once it compiles.
+    pub fn know(self: *Signals, source: Entity, written: []const u8, key: Key) Allocator.Error!void {
+        const list = self.from.getPtr(source) orelse return;
+        for (list.items) |*held| {
+            if (held.known or !std.mem.eql(u8, held.signal, written)) continue;
+            const signal = try std.fmt.allocPrint(self.gpa, "{s}.{s}", .{ key.component, key.name });
+            self.gpa.free(held.signal);
+            held.signal = signal;
+            held.known = true;
+        }
     }
 
     /// Take a connection away, or one count of it, and say whether there

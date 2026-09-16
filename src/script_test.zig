@@ -11,6 +11,7 @@ const App = @import("App.zig");
 const ecs = @import("fluxion_ecs");
 const script = @import("script.zig");
 const scene = @import("scene.zig");
+const signals = @import("signals.zig");
 
 const flux = script.flux;
 const Entity = ecs.Entity;
@@ -29,13 +30,20 @@ const Marker = extern struct {
     pub const reflect_name = "Marker";
 };
 
+const Health = extern struct {
+    hp: f32 = 10,
+
+    pub const reflect_name = "Health";
+    pub const signals = .{ .hit = struct { damage: f32, by: Entity } };
+};
+
 /// A headless app running scripts: a quarter of a second a frame, and one
 /// step in each.
 fn scripted(options: script.Options) !*App {
     const app = try App.create(testing.allocator, .{ .headless = true, .fixed_delta = 0.25 });
     errdefer app.destroy();
     app.time.source = .{ .fixed = 0.25 };
-    try app.registerComponents(.{ Counter, Marker });
+    try app.registerComponents(.{ Counter, Marker, Health });
     try app.useScripts(options);
     return app;
 }
@@ -45,7 +53,7 @@ fn scriptedAt(root: []const u8) !*App {
     const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root, .fixed_delta = 0.25 });
     errdefer app.destroy();
     app.time.source = .{ .fixed = 0.25 };
-    try app.registerComponents(.{ Counter, Marker });
+    try app.registerComponents(.{ Counter, Marker, Health });
     try app.useScripts(.{});
     return app;
 }
@@ -478,4 +486,319 @@ test "an app that does not use scripts has none, and says so when asked for one"
     try testing.expect(!try app.reloadScript(.none));
     try testing.expect(app.findScript("res://door.flux") == null);
     _ = try app.step();
+}
+
+// ---------------------------------------------------------------------------
+// Signals, both ways
+// ---------------------------------------------------------------------------
+
+const door_signals =
+    \\struct Door {
+    \\    /// When it opens.
+    \\    signal opened(by: string, times: int);
+    \\    var times: int = 0;
+    \\
+    \\    fn update(self, dt: float) {
+    \\        self.times += 1;
+    \\        self.opened.emit("hand", self.times);
+    \\    }
+    \\}
+;
+
+/// What the engine's methods heard of a script's signal.
+const Heard = struct {
+    var calls: usize = 0;
+    var times: i64 = 0;
+    var by: [16]u8 = undefined;
+    var by_len: usize = 0;
+    var at: Entity = .none;
+
+    fn reset() void {
+        calls = 0;
+        times = 0;
+        by_len = 0;
+        at = .none;
+    }
+
+    fn onOpened(_: *App, self: Entity, who: []const u8, count: i64) !void {
+        calls += 1;
+        times = count;
+        at = self;
+        by_len = @min(who.len, by.len);
+        @memcpy(by[0..by_len], who[0..by_len]);
+    }
+};
+
+test "a script's signal is its entity's: listed, connected by name, and heard by the engine" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("door.flux", door_signals);
+    const door = try app.world.spawnWith(.{Script.of(file)});
+    const listener = try app.world.spawnWith(.{Counter{}});
+    try app.addMethod("_on_opened", Heard.onOpened);
+    Heard.reset();
+
+    // Listed before the first frame, from the struct: no instance is made yet.
+    var infos: [8]signals.Info = undefined;
+    const listed = app.signalsOf(door, &infos);
+    try testing.expectEqual(@as(usize, 1), listed.len);
+    try testing.expectEqualStrings("Script", listed[0].component);
+    try testing.expectEqualStrings("opened", listed[0].name);
+    try testing.expectEqualStrings("by: string, times: int", listed[0].signature);
+    try testing.expectEqual(@as(?u8, 2), listed[0].arity);
+    try testing.expectEqual(@as(usize, 0), listed[0].args.fields().len);
+    try testing.expect(app.hasSignal(door, "opened"));
+    try testing.expect(app.hasSignal(door, "Script.opened"));
+    try testing.expect(!app.hasSignal(door, "closed"));
+
+    try app.connectNamed(door, "opened", .method(listener, "_on_opened"), .{});
+    _ = try app.step();
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 2), Heard.calls);
+    try testing.expectEqual(@as(i64, 2), Heard.times);
+    try testing.expectEqualStrings("hand", Heard.by[0..Heard.by_len]);
+    try testing.expect(Heard.at.eql(listener));
+
+    // Kept as a component's is, and written bare.
+    var connections: [4]signals.Connection = undefined;
+    const kept = app.connectionsFrom(door, &connections);
+    try testing.expectEqual(@as(usize, 1), kept.len);
+    try testing.expect(kept[0].known);
+    try testing.expectEqualStrings("opened", kept[0].signal);
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
+test "an engine signal calls a method its target's script declares, an entity arriving as a handle" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("hud.flux",
+        \\var hits = 0;
+        \\var total = 0.0;
+        \\var who = "";
+        \\struct Hud {
+        \\    fn on_hit(self, damage: float, by: any) {
+        \\        hits += 1;
+        \\        total += damage;
+        \\        who = by.name();
+        \\    }
+        \\}
+    );
+    const player = try app.world.spawnWith(.{Health{}});
+    try app.setName(player, "player");
+    const hud = try app.world.spawnWith(.{Script.of(file)});
+
+    try testing.expect(app.hasMethod(hud, "on_hit"));
+    try testing.expect(app.hasMethod(hud, "Script.on_hit"));
+    try testing.expect(!app.hasMethod(hud, "on_miss"));
+    var infos: [8]signals.MethodInfo = undefined;
+    const methods = app.methodsOf(hud, &infos);
+    try testing.expectEqual(@as(usize, 1), methods.len);
+    try testing.expectEqualStrings("Script", methods[0].component);
+    try testing.expectEqualStrings("on_hit", methods[0].name);
+    // `any` is no type to write: the parameter is its name alone.
+    try testing.expectEqualStrings("damage: float, by", methods[0].signature);
+    try testing.expectEqual(@as(?u8, 2), methods[0].arity);
+
+    try app.signal(player, Health, .hit).connect(.method(hud, "on_hit"), .{});
+    // Before the first frame: the instance is made, and readied, to hear it.
+    try app.emit(player, Health, .hit, .{ .damage = 2.5, .by = player });
+    try app.signals.drain(app);
+    try testing.expectEqual(@as(i64, 1), global(app, file, "hits").asInt());
+    try testing.expectEqual(@as(usize, 1), app.scripts.?.instances.count());
+
+    try app.emit(player, Health, .hit, .{ .damage = 1.5, .by = player });
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 2), global(app, file, "hits").asInt());
+    try testing.expectEqual(@as(f64, 4.0), global(app, file, "total").asFloat());
+    try testing.expectEqualStrings("player", globalText(app, file, "who"));
+    try testing.expectEqual(@as(usize, 0), app.signals.failures);
+}
+
+test "a script's signal calls a method another script declares" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const door_file = try app.addScript("door.flux", door_signals);
+    const bell_file = try app.addScript("bell.flux",
+        \\var rung = 0;
+        \\var last = "";
+        \\struct Bell {
+        \\    fn ring(self, by: string, times: int) {
+        \\        rung = times;
+        \\        last = by;
+        \\    }
+        \\}
+    );
+    const door = try app.world.spawnWith(.{Script.of(door_file)});
+    const bell = try app.world.spawnWith(.{Script.of(bell_file)});
+    try app.connectNamed(door, "Script.opened", .method(bell, "ring"), .{});
+    for (0..3) |_| _ = try app.step();
+    try testing.expectEqual(@as(i64, 3), global(app, bell_file, "rung").asInt());
+    try testing.expectEqualStrings("hand", globalText(app, bell_file, "last"));
+}
+
+test "a connection made while its script did not compile is heard once it does" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("door.flux", "struct Door { signal opened(by: string, times: int)");
+    const door = try app.world.spawnWith(.{Script.of(file)});
+    const listener = try app.world.spawnWith(.{Counter{}});
+    try app.addMethod("_on_opened", Heard.onOpened);
+    Heard.reset();
+
+    // Nothing declares it yet: kept as written, and not heard.
+    try app.connectNamed(door, "opened", .method(listener, "_on_opened"), .{});
+    var connections: [4]signals.Connection = undefined;
+    try testing.expect(!app.connectionsFrom(door, &connections)[0].known);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), Heard.calls);
+
+    try app.setScriptText(file, door_signals);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Heard.calls);
+    try testing.expect(app.connectionsFrom(door, &connections)[0].known);
+}
+
+test "a scene keeps a connection to a script's signal, and it is heard after reading" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "door.flux", .data = door_signals });
+
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    const file = try app.loadScript("res://door.flux");
+    const door = try app.world.spawnWith(.{Script.of(file)});
+    const listener = try app.world.spawnWith(.{Counter{}});
+    try app.connectNamed(door, "opened", .method(listener, "_on_opened"), .{ .flags = .{ .persist = true } });
+    const written = try scene.write(app, testing.allocator, .{});
+    defer testing.allocator.free(written);
+    try testing.expect(std.mem.indexOf(u8, written, "\"opened\"") != null);
+
+    const copy = try scriptedAt(root);
+    defer copy.destroy();
+    try copy.addMethod("_on_opened", Heard.onOpened);
+    Heard.reset();
+    _ = try scene.read(copy, written, .{});
+    var connections: [4]signals.Connection = undefined;
+    _ = try copy.step();
+    try testing.expectEqual(@as(usize, 1), Heard.calls);
+    var found: usize = 0;
+    var query = try ecs.Query(.{Script}).over(&copy.world);
+    while (query.next()) |chunk| {
+        for (chunk.entities) |entity| {
+            const kept = copy.connectionsFrom(entity, &connections);
+            found += kept.len;
+            for (kept) |c| try testing.expect(c.known);
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), found);
+}
+
+const Touched = struct {
+    var by: Entity = .none;
+    var calls: usize = 0;
+
+    fn onTouched(_: *App, _: Entity, who: Entity) !void {
+        by = who;
+        calls += 1;
+    }
+};
+
+test "a script's instance or self.entity, emitted, reaches the engine as its entity" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("pad.flux",
+        \\struct Pad {
+        \\    signal touched(by: any);
+        \\    signal pressed(by: any);
+        \\    fn update(self, dt: float) {
+        \\        self.touched.emit(self.entity);
+        \\        self.pressed.emit(self);
+        \\    }
+        \\}
+    );
+    const pad = try app.world.spawnWith(.{Script.of(file)});
+    const listener = try app.world.spawnWith(.{Counter{}});
+    try app.addMethod("_on_touched", Touched.onTouched);
+    Touched.calls = 0;
+    try app.connectNamed(pad, "touched", .method(listener, "_on_touched"), .{});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Touched.calls);
+    try testing.expect(Touched.by.eql(pad));
+
+    app.disconnectNamed(pad, "touched", .method(listener, "_on_touched"));
+    try app.connectNamed(pad, "pressed", .method(listener, "_on_touched"), .{});
+    Touched.by = .none;
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 2), Touched.calls);
+    try testing.expect(Touched.by.eql(pad));
+    try testing.expectEqual(@as(usize, 0), app.signals.failures);
+}
+
+test "a signal a component and the script both declare is named by which" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("player.flux",
+        \\struct Player {
+        \\    signal hit(damage: float);
+        \\}
+    );
+    const player = try app.world.spawnWith(.{ Health{}, Script.of(file) });
+    try testing.expectError(error.AmbiguousSignal, app.signalNamed(player, "hit"));
+    try testing.expectEqualStrings("Health", (try app.signalNamed(player, "Health.hit")).component);
+    try testing.expectEqualStrings("Script", (try app.signalNamed(player, "Script.hit")).component);
+    var infos: [8]signals.Info = undefined;
+    try testing.expectEqual(@as(usize, 2), app.signalsOf(player, &infos).len);
+}
+
+test "an instance let go of is no longer its entity's: what it emits after is not the entity's" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("door.flux",
+        \\var kept: any = null;
+        \\struct Door {
+        \\    signal opened(by: string, times: int);
+        \\    fn ready(self) { kept = self; }
+        \\}
+        \\fn ring() { kept.opened.emit("ghost", 99); }
+    );
+    const door = try app.world.spawnWith(.{Script.of(file)});
+    const listener = try app.world.spawnWith(.{Counter{}});
+    try app.addMethod("_on_opened", Heard.onOpened);
+    Heard.reset();
+    try app.connectNamed(door, "opened", .method(listener, "_on_opened"), .{});
+    _ = try app.step();
+
+    // Heard while it is the entity's.
+    const scripts = app.scripts.?;
+    _ = try scripts.vm.callName(scripts.moduleOf(file).?, "ring", &.{});
+    try app.signals.drain(app);
+    try testing.expectEqual(@as(usize, 1), Heard.calls);
+
+    // Its `Script` taken off, the entity lives on with its connection, and
+    // the instance a script kept speaks for nobody.
+    try app.world.remove(door, Script);
+    _ = try app.step();
+    _ = try scripts.vm.callName(scripts.moduleOf(file).?, "ring", &.{});
+    try app.signals.drain(app);
+    try testing.expectEqual(@as(usize, 1), Heard.calls);
+}
+
+test "what a script emits that the engine cannot carry stops the script, and is counted" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("talker.flux",
+        \\struct Talker {
+        \\    signal said(what: any);
+        \\    fn update(self, dt: float) { self.said.emit([1, 2]); }
+        \\}
+    );
+    const talker = try app.world.spawnWith(.{Script.of(file)});
+    const listener = try app.world.spawnWith(.{Counter{}});
+    try app.addMethod("_on_opened", Heard.onOpened);
+    try app.connectNamed(talker, "said", .method(listener, "_on_opened"), .{});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), app.scripts.?.failures);
+    try testing.expectEqual(@as(usize, 0), app.signals.failures);
 }

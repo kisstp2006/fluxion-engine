@@ -48,6 +48,13 @@
 //! keeping it in a field is safe while rows move. Once the component or its
 //! entity is gone, using it stops the script with a panic that says so.
 //!
+//! **Signals both ways.** A script's signals are its entity's, under
+//! `Script`: listed by `App.signalsOf` from the struct as soon as the entity
+//! has its `Script`, connected by name, saved with a scene, and heard by the
+//! engine's connections when the script emits. A signal the engine sends -
+//! a component's, another script's - calls a method the target's script
+//! declares, an `Entity` arriving as a handle like `self.entity`.
+//!
 //! **A script cannot stop the game.** Each call into one gets a budget of
 //! loop rounds, and a call that runs past it is stopped. A panic is said in
 //! the log with its place in the file, the first time for each instance's
@@ -71,15 +78,33 @@ const reflect = @import("fluxion_reflect");
 /// The language: its VM, its values, its language service.
 pub const flux = @import("fluxion_script");
 
+const math = @import("fluxion_math");
+
 const App = @import("App.zig");
 const attr = @import("attr.zig");
 const Project = @import("Project.zig");
+const signals = @import("signals.zig");
+const Color = @import("color.zig").Color;
 
 const Entity = ecs.Entity;
 const log = std.log.scoped(.fluxion_engine);
 
 /// The largest script file read.
 const file_limit = 16 << 20;
+
+/// What the engine lists a script's signals and methods under, as a scene
+/// calls a component: `Script.died`.
+pub const component_name = "Script";
+
+/// The most arguments a signal carries between a script and the engine.
+pub const max_args = 16;
+
+/// The `signals.Info.args` of a script's signal: a struct with no fields,
+/// since no Zig struct describes what a script's signal gives. Its
+/// `signature` and `arity` say.
+pub const ScriptArguments = struct {
+    pub const reflect_name = "ScriptArguments";
+};
 
 pub const Options = struct {
     /// How many loop rounds one call into a script may take before it is
@@ -274,12 +299,20 @@ const Instance = struct {
     said: std.EnumSet(Lifecycle) = .initEmpty(),
 };
 
-/// What the frame calls in `Scripts`, through pointers `App.useScripts`
-/// sets.
+/// What the engine calls in `Scripts`, through pointers `App.useScripts`
+/// sets: the frame, and the signal table asking what an entity's script
+/// declares.
 pub const Calls = struct {
     pass: *const fn (self: *Scripts, moment: Moment) Allocator.Error!void,
     clear: *const fn (self: *Scripts) void,
     destroy: *const fn (self: *Scripts) void,
+    /// The signals the entity's script declares, as many as `found` holds.
+    signals: *const fn (self: *Scripts, entity: Entity, found: []signals.Info) []signals.Info,
+    /// The methods the entity's script declares, as many as `found` holds.
+    methods: *const fn (self: *Scripts, entity: Entity, found: []signals.MethodInfo) []signals.MethodInfo,
+    hasMethod: *const fn (self: *Scripts, entity: Entity, name: []const u8) bool,
+    /// Call a method of the entity's script with a signal's arguments.
+    callMethod: *const fn (self: *Scripts, entity: Entity, name: []const u8, args: []const reflect.Value) anyerror!void,
 };
 
 /// Where in the frame `Calls.pass` is called.
@@ -304,6 +337,8 @@ pub const Scripts = struct {
     files: FileTable = .empty,
     /// Each entity's instance, in the order they were made.
     instances: std.AutoArrayHashMapUnmanaged(Entity, Instance) = .empty,
+    /// Each instance's entity, by the instance: whose signal an emit is.
+    entity_of: std.AutoHashMapUnmanaged(*flux.object.Obj, Entity) = .empty,
     /// Entities whose script could not be made, with the `Script` that
     /// asked. It is not tried again until the `Script` or its file changes.
     refused: std.AutoHashMapUnmanaged(Entity, Script) = .empty,
@@ -323,7 +358,15 @@ pub const Scripts = struct {
             .app = app,
             .options = options,
             .vm = undefined,
-            .calls = .{ .pass = pass, .clear = clear, .destroy = destroy },
+            .calls = .{
+                .pass = pass,
+                .clear = clear,
+                .destroy = destroy,
+                .signals = signalsOf,
+                .methods = methodsOf,
+                .hasMethod = hasMethod,
+                .callMethod = callMethod,
+            },
             .resolver = .{
                 .context = app,
                 .resolve = findComponent,
@@ -335,6 +378,7 @@ pub const Scripts = struct {
             .max_bytes = options.max_bytes,
             .io = app.io,
             .on_task_panic = sayTaskPanic,
+            .on_emit = heardEmit,
         });
         errdefer vm.destroy();
         vm.host = self;
@@ -349,6 +393,7 @@ pub const Scripts = struct {
         // VM.
         self.vm.destroy();
         self.instances.deinit(gpa);
+        self.entity_of.deinit(gpa);
         self.refused.deinit(gpa);
         self.scratch.deinit(gpa);
         var it = self.files.iterator();
@@ -502,6 +547,8 @@ pub const Scripts = struct {
             inst.said = .initEmpty();
             self.lookUp(inst);
         }
+        // A signal the new code declares may have connections waiting.
+        for (self.instances.keys()) |entity| try self.knowConnections(entity);
     }
 
     /// Give each script of the project's that has no UUID one, in a `.uid`
@@ -644,6 +691,12 @@ pub const Scripts = struct {
             vm.release(value);
             return err;
         };
+        self.entity_of.put(self.app.gpa, value.obj(), entity) catch |err| {
+            _ = self.instances.orderedRemove(entity);
+            vm.release(value);
+            return err;
+        };
+        try self.knowConnections(entity);
     }
 
     fn refuse(self: *Scripts, entity: Entity, script: Script, comptime why: []const u8, args: anytype) Allocator.Error!void {
@@ -704,9 +757,11 @@ pub const Scripts = struct {
     /// An instance let go of: its `exit`, if it was readied, and then the
     /// collector may have it.
     fn letGo(self: *Scripts, entity: Entity, inst: Instance) void {
+        // What `exit` emits is still its entity's.
         if (inst.readied) {
             if (inst.methods.get(.exit)) |method| self.call(entity, method, &.{inst.value}, .exit);
         }
+        _ = self.entity_of.remove(inst.value.obj());
         self.vm.release(inst.value);
     }
 
@@ -719,6 +774,110 @@ pub const Scripts = struct {
         defer taken.deinit(self.app.gpa);
         for (taken.keys(), taken.values()) |entity, inst| self.letGo(entity, inst);
         self.refused.clearRetainingCapacity();
+    }
+
+    // ---------------------------------------------------------------------
+    // Signals, both ways
+    // ---------------------------------------------------------------------
+
+    /// The struct an entity's script makes, whether its instance is made
+    /// yet or not: what its signals and methods are listed from, so a scene
+    /// read before the first frame connects to them.
+    fn classOfEntity(self: *Scripts, entity: Entity) ?flux.Value {
+        if (self.instances.getPtr(entity)) |inst| return flux.classOf(inst.value);
+        const script = self.app.world.getConst(entity, Script) orelse return null;
+        const file = self.files.get(script.source.toId()) orelse return null;
+        const module = file.module orelse return null;
+        var spelled: [64]u8 = undefined;
+        return classFor(self.vm, module, script, file.source, &spelled);
+    }
+
+    fn signalsOf(self: *Scripts, entity: Entity, found: []signals.Info) []signals.Info {
+        const class = self.classOfEntity(entity) orelse return found[0..0];
+        var members: [64]flux.Member = undefined;
+        const listed = flux.signalsOf(class, members[0..@min(found.len, members.len)]);
+        for (listed, found[0..listed.len]) |m, *into| {
+            into.* = .{
+                .component = component_name,
+                .name = m.name,
+                .args = reflect.typeOf(ScriptArguments),
+                .signature = m.signature,
+                .arity = m.params,
+            };
+        }
+        return found[0..listed.len];
+    }
+
+    fn methodsOf(self: *Scripts, entity: Entity, found: []signals.MethodInfo) []signals.MethodInfo {
+        const class = self.classOfEntity(entity) orelse return found[0..0];
+        var members: [64]flux.Member = undefined;
+        const listed = flux.methodsOf(class, members[0..@min(found.len, members.len)]);
+        for (listed, found[0..listed.len]) |m, *into| {
+            into.* = .{ .component = component_name, .name = m.name, .params = &.{}, .signature = m.signature, .arity = m.params };
+        }
+        return found[0..listed.len];
+    }
+
+    fn hasMethod(self: *Scripts, entity: Entity, name: []const u8) bool {
+        const class = self.classOfEntity(entity) orelse return false;
+        return self.vm.hasMethod(class, name);
+    }
+
+    /// A signal's call of a method the entity's script declares, with the
+    /// signal's arguments as the script's own values: an entity as a handle
+    /// like `self.entity`, and the rest as a native's results are. An
+    /// instance not made yet - a signal emitted before the first frame - is
+    /// made and readied first.
+    fn callMethod(self: *Scripts, entity: Entity, name: []const u8, args: []const reflect.Value) anyerror!void {
+        const class = self.classOfEntity(entity) orelse return error.NoSuchMethod;
+        const method = self.vm.methodNamed(class, name) orelse return error.NoSuchMethod;
+        if (args.len >= max_args) return error.WrongArguments;
+        if (!self.instances.contains(entity)) {
+            const script = (self.app.world.getConst(entity, Script) orelse return error.NoSuchMethod).*;
+            if (!script.enabled) return error.NoSuchMethod;
+            try self.make(entity, script);
+            self.readyTheNew();
+        }
+        const inst = self.instances.getPtr(entity) orelse return error.NoSuchMethod;
+
+        const vm = self.vm;
+        var values: [max_args]flux.Value = undefined;
+        values[0] = inst.value;
+        var made: usize = 0;
+        // Each held until the call: making the next can collect.
+        defer for (values[1 .. made + 1]) |v| vm.release(v);
+        for (args, values[1 .. args.len + 1]) |arg, *into| {
+            into.* = if (arg.asConst(Entity)) |held| try entityHandle(self, held.*) else try vm.valueOf(arg);
+            try vm.hold(into.*);
+            made += 1;
+        }
+        vm.setBudget(self.options.budget);
+        _ = vm.call(method, values[0 .. args.len + 1]) catch |err| {
+            self.failures += 1;
+            switch (err) {
+                error.Panic => self.writePanic(entity, "a signal's call into the script of"),
+                error.OutOfMemory => {},
+            }
+            return err;
+        };
+    }
+
+    /// Connections kept unknown because the script's signal was not there
+    /// when they were made - a scene read while its script did not compile,
+    /// a script given to its entity later - heard from now on, where they
+    /// are in the order.
+    fn knowConnections(self: *Scripts, entity: Entity) Allocator.Error!void {
+        var found: [64]signals.Info = undefined;
+        for (signalsOf(self, entity, &found)) |info| {
+            const key: signals.Key = .{ .component = component_name, .name = info.name };
+            var buffer: [128]u8 = undefined;
+            if (std.fmt.bufPrint(&buffer, component_name ++ ".{s}", .{info.name})) |dotted| {
+                try self.app.signals.know(entity, dotted, key);
+            } else |_| {}
+            // By its bare name, unless a component of the entity says it too.
+            const resolved = self.app.signalNamed(entity, info.name) catch continue;
+            if (std.mem.eql(u8, resolved.component, component_name)) try self.app.signals.know(entity, info.name, key);
+        }
     }
 
     /// One call into a script, under the budget.
@@ -775,6 +934,109 @@ pub const Scripts = struct {
 fn findComponent(context: ?*anyopaque, key: u64, t: *const reflect.Type) ?reflect.Value {
     const app: *App = @ptrCast(@alignCast(context.?));
     return app.componentOfType(.fromInt(key), t);
+}
+
+/// A script's emit, heard by the engine's signal table as well: the signal
+/// `Script.<name>` of the entity the instance is on, its arguments copied
+/// as the table copies anyone's. An instance on no entity - one a script
+/// made for itself, or one let go of - is the script's business alone.
+fn heardEmit(vm: *flux.Vm, instance: flux.Value, signal: []const u8, args: []const flux.Value) flux.Vm.Error!void {
+    const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
+    const entity = self.entity_of.get(instance.obj()) orelse return;
+    if (args.len > max_args) return vm.fail("the engine hears signals of up to {d} arguments, and {s} gave {d}", .{ max_args, signal, args.len });
+    var held: [max_args]Carried = undefined;
+    var values: [max_args]reflect.Value = undefined;
+    for (args, held[0..args.len], values[0..args.len], 1..) |arg, *place, *into, n| {
+        into.* = try carried(self, vm, arg, place) orelse
+            return vm.fail("argument {d} of {s} is {s}, which the engine's signals cannot carry", .{ n, signal, typeName(arg) });
+    }
+    self.app.signals.emit(entity, component_name, signal, values[0..args.len]) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return vm.fail("{s} could not be sent: {t}", .{ signal, err }),
+    };
+}
+
+/// Where an argument a script emits is kept while the table copies it.
+const Carried = union {
+    int: i64,
+    float: f64,
+    boolean: bool,
+    text: []const u8,
+    vec2: math.Vec2,
+    vec3: math.Vec3,
+    color: Color,
+    entity: Entity,
+    nothing: ?Entity,
+};
+
+/// A script's value as the engine's: numbers, text and vectors as they
+/// are, a scripted entity's instance or its `self.entity` as its `Entity`,
+/// and a handle as what it stands for now. Null for what has no engine
+/// value: a list, a function.
+fn carried(self: *Scripts, vm: *flux.Vm, arg: flux.Value, place: *Carried) flux.Vm.Error!?reflect.Value {
+    switch (arg.tag) {
+        .int => {
+            place.* = .{ .int = arg.asInt() };
+            return .of(&place.int);
+        },
+        .float => {
+            place.* = .{ .float = arg.asFloat() };
+            return .of(&place.float);
+        },
+        .bool => {
+            place.* = .{ .boolean = arg.asBool() };
+            return .of(&place.boolean);
+        },
+        .string => {
+            place.* = .{ .text = arg.as(flux.object.String).bytes() };
+            return .of(&place.text);
+        },
+        .vec2 => {
+            const xy = arg.asVec2();
+            place.* = .{ .vec2 = .{ .x = xy[0], .y = xy[1] } };
+            return .of(&place.vec2);
+        },
+        .vec3 => {
+            const xyz = arg.asVec3();
+            place.* = .{ .vec3 = .{ .x = xyz[0], .y = xyz[1], .z = xyz[2] } };
+            return .of(&place.vec3);
+        },
+        .color => {
+            const rgba = arg.as(flux.object.Color).rgba;
+            place.* = .{ .color = .rgba(rgba[0], rgba[1], rgba[2], rgba[3]) };
+            return .of(&place.color);
+        },
+        .null => {
+            place.* = .{ .nothing = null };
+            return .of(&place.nothing);
+        },
+        .instance => {
+            const entity = self.entity_of.get(arg.obj()) orelse return null;
+            place.* = .{ .entity = entity };
+            return .of(&place.entity);
+        },
+        .handle => {
+            const now = vm.reflectOf(arg) orelse return vm.fail("an argument is gone: what it stood for is not there any more", .{});
+            if (now.asConst(EntityRef)) |ref| {
+                place.* = .{ .entity = ref.entity };
+                return .of(&place.entity);
+            }
+            return now;
+        },
+        else => return null,
+    }
+}
+
+fn typeName(arg: flux.Value) []const u8 {
+    return switch (arg.tag) {
+        .list => "a list",
+        .map => "a map",
+        .function, .native, .method => "a function",
+        .task => "a task",
+        .signal => "a signal",
+        .class => "a struct",
+        else => "a value",
+    };
 }
 
 /// A task nothing waits for stopped: said and counted.

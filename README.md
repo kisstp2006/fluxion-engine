@@ -1385,8 +1385,8 @@ struct Door {
 - **One VM, only in a game that asks.** `useScripts` makes the VM and
   registers `Script`. The frame reaches the scripts through pointers that
   only `useScripts` sets, so a game that never calls it has none of the
-  language in it: the ReleaseSmall examples grew by half a kilobyte to one
-  kilobyte.
+  language in it: the ReleaseSmall examples grew by half a kilobyte, and the
+  one that saves and reads scenes by two.
 - **What a script reaches.** `app` is the engine, with the calls
   `App.reflect_methods` lists. `self.entity` has `alive()`, `name()`,
   `uuid()`, `has(name)`, `get(name)`, `add(name)` and `remove(name)`.
@@ -1401,6 +1401,13 @@ struct Door {
   - Text that does not compile leaves the old code running, with the reasons in the log.
   - `app.setScriptText` does the same from text, such as an editor's unsaved buffer.
   - A file that does not compile at all still gets a handle, so a scene holding it opens, and it runs once a reload compiles.
+- **Signals both ways.** A script's signals are its entity's, under `Script`:
+  - `signal opened(by: string)` in the struct is listed by `app.signalsOf`, with its `signature` and `arity`, as soon as the entity has the `Script`.
+  - It is connected by `app.connectNamed(door, "opened", ...)`, and saved with a scene.
+  - It is heard by the table's connections when the script emits it.
+  - A signal from a component, or another script's, calls a method the target's script declares, listed by `app.methodsOf`.
+  - An `Entity` argument arrives as a handle like `self.entity`, and the script's instance or `self.entity` goes back to the engine as an `Entity`.
+  - A connection made while its script did not compile is heard once it does.
 - **In a scene**, a `Script` is its file's path and its struct, and once the
   scene is saved, the file's UUID as well. Reading the scene loads the file:
   `"Script": { "source": "res://scripts/door.flux", "struct_name": "Door" }`

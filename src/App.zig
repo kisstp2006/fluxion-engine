@@ -2120,6 +2120,9 @@ pub fn emit(self: *App, entity: ecs.Entity, comptime C: type, comptime name: @En
 /// was not compiled against the game: an editor, a console, a scene.
 pub fn signalNamed(self: *App, entity: ecs.Entity, name: []const u8) signals_mod.Error!Signal {
     if (std.mem.lastIndexOfScalar(u8, name, '.')) |dot| {
+        if (std.mem.eql(u8, name[0..dot], script_mod.component_name)) {
+            return self.scriptSignal(entity, name[dot + 1 ..]) orelse error.NoSuchSignal;
+        }
         const entry = self.scene_components.find(name[0..dot]) orelse return error.NoSuchSignal;
         if (self.valueOf(entity, entry) == null) return error.NoSuchSignal;
         for (entry.signals) |decl| {
@@ -2137,7 +2140,22 @@ pub fn signalNamed(self: *App, entity: ecs.Entity, name: []const u8) signals_mod
             found = .{ .app = self, .source = entity, .component = entry.name, .name = decl.name };
         }
     }
+    if (self.scriptSignal(entity, name)) |declared| {
+        if (found != null) return error.AmbiguousSignal;
+        found = declared;
+    }
     return found orelse error.NoSuchSignal;
+}
+
+/// The signal `name` the entity's script declares, if it has a script that
+/// does.
+fn scriptSignal(self: *App, entity: ecs.Entity, name: []const u8) ?Signal {
+    const scripts = self.scripts orelse return null;
+    var found: [64]signals_mod.Info = undefined;
+    for (scripts.calls.signals(scripts, entity, &found)) |info| {
+        if (std.mem.eql(u8, info.name, name)) return .{ .app = self, .source = entity, .component = script_mod.component_name, .name = info.name };
+    }
+    return null;
 }
 
 /// `signalNamed`, emitted with values: what a console or a script emits.
@@ -2153,11 +2171,16 @@ pub fn hasSignal(self: *App, entity: ecs.Entity, name: []const u8) bool {
 }
 
 /// Every signal `entity` has, component by component in the order they
-/// were registered, as many as `found` holds. Godot's `get_signal_list`.
+/// were registered - its script's where `Script` is - as many as `found`
+/// holds. Godot's `get_signal_list`.
 pub fn signalsOf(self: *App, entity: ecs.Entity, found: []signals_mod.Info) []signals_mod.Info {
     var count: usize = 0;
     var held: [64]ComponentValue = undefined;
     for (self.componentsOf(entity, &held)) |component| {
+        if (std.mem.eql(u8, component.name, script_mod.component_name)) {
+            if (self.scripts) |scripts| count += scripts.calls.signals(scripts, entity, found[count..]).len;
+            continue;
+        }
         const entry = self.scene_components.find(component.name) orelse continue;
         for (entry.signals) |decl| {
             if (count == found.len) return found[0..count];
@@ -2266,6 +2289,10 @@ pub fn methodsOf(self: *App, receiver: ecs.Entity, found: []signals_mod.MethodIn
     var count: usize = 0;
     var held: [64]ComponentValue = undefined;
     for (self.componentsOf(receiver, &held)) |component| {
+        if (std.mem.eql(u8, component.name, script_mod.component_name)) {
+            if (self.scripts) |scripts| count += scripts.calls.methods(scripts, receiver, found[count..]).len;
+            continue;
+        }
         for (component.value.type.methods.slice()) |*m| {
             if (count == found.len) return found[0..count];
             // The first is the component itself.
@@ -2291,23 +2318,32 @@ pub fn methodsOf(self: *App, receiver: ecs.Entity, found: []signals_mod.MethodIn
 
 /// Call the method a connection names, on `receiver`: a method one of its
 /// components lists in `reflect_methods` - `Text2D.set` names the one -
-/// else one given to `addMethod`.
+/// or its script declares - `Script.hit` - else one given to `addMethod`.
 pub fn callMethodOn(self: *App, receiver: ecs.Entity, name: []const u8, args: []const reflect.Value) anyerror!void {
     const dot = std.mem.indexOfScalar(u8, name, '.');
     const component: ?[]const u8 = if (dot) |at| name[0..at] else null;
     const method = if (dot) |at| name[at + 1 ..] else name;
 
     var owner: ?reflect.Value = null;
+    var scripted = false;
     var held: [64]ComponentValue = undefined;
     for (self.componentsOf(receiver, &held)) |found| {
         if (component) |wanted| {
             if (!std.mem.eql(u8, found.name, wanted)) continue;
         }
-        if (found.value.type.method(method) == null) continue;
-        if (owner != null) return error.AmbiguousMethod;
-        owner = found.value;
+        const has = if (std.mem.eql(u8, found.name, script_mod.component_name))
+            self.scriptHasMethod(receiver, method)
+        else
+            found.value.type.method(method) != null;
+        if (!has) continue;
+        if (owner != null or scripted) return error.AmbiguousMethod;
+        if (std.mem.eql(u8, found.name, script_mod.component_name)) scripted = true else owner = found.value;
     }
     if (owner) |value| return callValue(value, method, args, null);
+    if (scripted) {
+        const scripts = self.scripts.?;
+        return scripts.calls.callMethod(scripts, receiver, method, args);
+    }
     if (component == null) {
         if (self.signals.methods.get(name)) |m| return m.call(self, receiver, args);
     }
@@ -2315,7 +2351,7 @@ pub fn callMethodOn(self: *App, receiver: ecs.Entity, name: []const u8, args: []
 }
 
 /// Whether a connection naming `name` would find a method on `receiver`:
-/// one of its components', or one given to `addMethod`.
+/// one of its components', its script's, or one given to `addMethod`.
 pub fn hasMethod(self: *App, receiver: ecs.Entity, name: []const u8) bool {
     const dot = std.mem.indexOfScalar(u8, name, '.');
     const method = if (dot) |at| name[at + 1 ..] else name;
@@ -2324,9 +2360,18 @@ pub fn hasMethod(self: *App, receiver: ecs.Entity, name: []const u8) bool {
         if (dot) |at| {
             if (!std.mem.eql(u8, found.name, name[0..at])) continue;
         }
+        if (std.mem.eql(u8, found.name, script_mod.component_name)) {
+            if (self.scriptHasMethod(receiver, method)) return true;
+            continue;
+        }
         if (found.value.type.method(method) != null) return true;
     }
     return dot == null and self.signals.methods.contains(name);
+}
+
+fn scriptHasMethod(self: *App, entity: ecs.Entity, name: []const u8) bool {
+    const scripts = self.scripts orelse return false;
+    return scripts.calls.hasMethod(scripts, entity, name);
 }
 
 /// A connection's signal as the listings give it and a scene writes it: the
@@ -2342,6 +2387,10 @@ pub fn signalWritten(self: *App, c: signals_mod.Connection) []const u8 {
     var held: [64]ComponentValue = undefined;
     for (self.componentsOf(c.source, &held)) |found| {
         if (std.mem.eql(u8, found.name, component)) continue;
+        if (std.mem.eql(u8, found.name, script_mod.component_name)) {
+            if (self.scriptSignal(c.source, name) != null) return c.signal;
+            continue;
+        }
         const entry = self.scene_components.find(found.name) orelse continue;
         for (entry.signals) |decl| {
             if (std.mem.eql(u8, decl.name, name)) return c.signal;
