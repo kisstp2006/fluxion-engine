@@ -1137,7 +1137,7 @@ pub fn hasInterface(self: *const App) bool {
 /// Before the `.input` stage, so a game system can ask `app.ui.wantsPointer()`
 /// about this frame.
 fn feedInterface(self: *App) !void {
-    if (self.interfaceFace()) |face| self.ui.setMeasurer(Interface.measurer(face));
+    if (self.interfaceFaces().len != 0) self.ui.setMeasurer(Interface.measurer(&self.interface.faces));
     // Asked of the system when the wheel turned, so a changed setting is
     // taken at once - and only then, since on Linux asking reads a file.
     if (self.input.wheel.x != 0 or self.input.wheel.y != 0) {
@@ -1190,9 +1190,22 @@ fn cut(edge: u32) u16 {
     return @intCast(@min(edge, std.math.maxInt(u16)));
 }
 
-fn interfaceFace(self: *App) ?*const typeface.Font {
-    const font = self.assets.fontOf(self.interface.font) orelse return null;
-    return &font.face;
+/// The interface's faces, filled into `interface.faces` from its fonts: its
+/// `font` first, then each `addFont` gave it. A font that has been let go of
+/// takes the first face's place, so the indices after it stay where they
+/// are. None at all when `font` has no face, which lays the interface out
+/// and draws no text.
+fn interfaceFaces(self: *App) []const *const typeface.Font {
+    const faces = &self.interface.faces;
+    faces.len = 0;
+    const first = &(self.assets.fontOf(self.interface.font) orelse return faces.slice()).face;
+    faces.items[0] = first;
+    const others = self.interface.other_fonts[0..self.interface.other_font_count];
+    for (others, faces.items[1..][0..others.len]) |handle, *face| {
+        face.* = if (self.assets.fontOf(handle)) |font| &font.face else first;
+    }
+    faces.len = @intCast(1 + others.len);
+    return faces.slice();
 }
 
 /// Take a new size from the window: the numbers, the flag, and the swapchain.
@@ -2749,10 +2762,10 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
     // 3. The interface, on top, loading what the 2D layer left - with its
     //    glyphs drawn again when a font was read again since.
     if (self.interface.font_reloads != self.assets.font_reloads) {
-        self.interface.forgetRenderer();
+        self.interface.forgetGlyphs();
         self.interface.font_reloads = self.assets.font_reloads;
     }
-    try self.interface.draw(self.gpa, &self.device, self.interfaceFace(), into, width, height);
+    try self.interface.draw(self.gpa, &self.device, self.interfaceFaces(), into, width, height);
 
     // 4. `debug`, over all of it: the world through the 2D camera, and the
     //    screen in pixels.
@@ -3898,8 +3911,86 @@ test "the interface is drawn over the 2D layer, in the default font" {
     try app.run();
 
     try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
-    try testing.expectEqual(&app.assets.fontOf(.none).?.face, app.interface.face.?);
+    try testing.expectEqualSlices(*const typeface.Font, &.{&app.assets.fontOf(.none).?.face}, app.interface.faces.slice());
     try testing.expectEqual(@as(usize, 2), app.interface.renderer.?.instances.items.len);
+}
+
+const Code = struct {
+    var index: u16 = 0;
+
+    fn label(app: *App) anyerror!void {
+        box(app, "words narrow", "iiii", 0);
+        box(app, "words wide", "WWWW", 0);
+        box(app, "code narrow", "iiii", index);
+        box(app, "code wide", "WWWW", index);
+    }
+
+    /// A box as wide as its text.
+    fn box(app: *App, id: []const u8, letters: []const u8, font: u16) void {
+        app.ui.open(.{ .id = id });
+        defer app.ui.close();
+        app.ui.text(letters, .{ .font_size = 20, .font = font });
+    }
+};
+
+test "a second font for the interface is measured and drawn by the index it was given" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .io = testing.io });
+    defer app.destroy();
+    const words = app.assets.loadSystemFont(.{ .atlas = 256 }) catch return error.SkipZigTest;
+    const mono = app.assets.loadSystemFont(.{ .atlas = 256, .mono = true }) catch return error.SkipZigTest;
+    app.interface.font = words;
+    Code.index = try app.interface.addFont(mono);
+    try testing.expectEqual(@as(u16, 1), Code.index);
+    // Asked again, the same index; the interface's own font is 0.
+    try testing.expectEqual(@as(u16, 1), try app.interface.addFont(mono));
+    try testing.expectEqual(@as(u16, 0), try app.interface.addFont(words));
+    try app.addSystem(.ui, "label", Code.label);
+    try app.run();
+
+    // Measured in its own face: every letter as wide as every other in the
+    // code font, and not in the interface's.
+    const width = struct {
+        fn of(a: *App, id: []const u8) f32 {
+            return a.ui.boxOf(id).?.width;
+        }
+    }.of;
+    // Measured at all: with no measurer every width is nothing, and nothing
+    // is as wide as nothing.
+    try testing.expect(width(app, "code narrow") > 0);
+    try testing.expectApproxEqAbs(width(app, "code narrow"), width(app, "code wide"), 0.5);
+    try testing.expect(width(app, "words narrow") < width(app, "words wide"));
+    // And drawn from the same table, in the same order.
+    const table = [_]*const typeface.Font{ &app.assets.fontOf(words).?.face, &app.assets.fontOf(mono).?.face };
+    try testing.expectEqualSlices(*const typeface.Font, &table, app.interface.faces.slice());
+    try testing.expectEqualSlices(*const typeface.Font, &table, app.interface.renderer.?.faces.items);
+    try testing.expectEqual(@as(usize, 16), app.interface.renderer.?.instances.items.len);
+}
+
+test "an interface font let go of draws in the first, and the indices after it keep their fonts" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    const words = app.assets.loadSystemFont(.{ .atlas = 64 }) catch return error.SkipZigTest;
+    const mono = app.assets.loadSystemFont(.{ .atlas = 64, .mono = true }) catch return error.SkipZigTest;
+    app.interface.font = words;
+    // A handle to nothing, as one to a font since let go of is.
+    const gone: Assets.FontHandle = .{ .index = 99, .generation = 7 };
+    try testing.expectEqual(@as(u16, 1), try app.interface.addFont(gone));
+    try testing.expectEqual(@as(u16, 2), try app.interface.addFont(mono));
+
+    const faces = app.interfaceFaces();
+    try testing.expectEqual(@as(usize, 3), faces.len);
+    try testing.expectEqual(faces[0], faces[1]);
+    try testing.expectEqual(&app.assets.fontOf(mono).?.face, faces[2]);
+    // An index past the end is measured in the first, as it is drawn.
+    try testing.expectEqual(faces[0], app.interface.faces.faceFor(3));
+    try testing.expectEqual(faces[0], app.interface.faces.faceFor(9));
+
+    // As many as the table holds, and not one more.
+    for (3..Interface.max_fonts) |n| {
+        const filler: Assets.FontHandle = .{ .index = @intCast(100 + n), .generation = 1 };
+        try testing.expectEqual(@as(u16, @intCast(n)), try app.interface.addFont(filler));
+    }
+    try testing.expectError(error.TooManyFonts, app.interface.addFont(.{ .index = 500, .generation = 1 }));
 }
 
 test "a font read again is drawn again in the interface, not from the old one's glyphs" {
@@ -3910,15 +4001,22 @@ test "a font read again is drawn again in the interface, not from the old one's 
     try app.startup();
 
     _ = try app.step();
-    const first = app.interface.renderer.?.atlas_texture;
+    const renderer = &app.interface.renderer.?;
+    const texture = renderer.atlas_texture;
+    const packed_to = .{ renderer.atlas.pen_y, renderer.atlas.pen_x };
+    // Drawn again from the glyphs it has: nothing new is packed.
     _ = try app.step();
-    try testing.expect(std.meta.eql(first, app.interface.renderer.?.atlas_texture));
+    try testing.expectEqual(packed_to, .{ renderer.atlas.pen_y, renderer.atlas.pen_x });
 
-    // The face keeps its address, and the renderer is made again anyway.
+    // The face keeps its address, so its glyphs are forgotten by name and
+    // packed again, into room of their own - in the same renderer and
+    // texture.
     try testing.expect(try app.assets.reloadFont(font));
     _ = try app.step();
-    try testing.expect(!std.meta.eql(first, app.interface.renderer.?.atlas_texture));
-    try testing.expectEqual(&app.assets.fontOf(.none).?.face, app.interface.face.?);
+    try testing.expect(std.meta.eql(texture, app.interface.renderer.?.atlas_texture));
+    const now = .{ renderer.atlas.pen_y, renderer.atlas.pen_x };
+    try testing.expect(now[0] > packed_to[0] or (now[0] == packed_to[0] and now[1] > packed_to[1]));
+    try testing.expectEqualSlices(*const typeface.Font, &.{&app.assets.fontOf(.none).?.face}, app.interface.faces.slice());
 }
 
 const Clicks = struct {

@@ -43,9 +43,23 @@ pub const page_fraction: f32 = 0.875;
 /// How far a stick has to lean, past its dead zone, to step the focus.
 pub const stick_step = 0.5;
 
-/// What the interface is drawn and measured in. `.none` is the default font,
-/// as for a `Text2D`.
+/// How many fonts the interface can have: `font`, and the ones `addFont`
+/// gives it.
+pub const max_fonts = 16;
+
+/// What the interface is drawn and measured in when a style names no other
+/// font: index 0. `.none` is the default font, as for a `Text2D`.
 font: Assets.FontHandle = .none,
+
+/// The interface's other fonts, in the order `addFont` gave them: index 1 is
+/// the first.
+other_fonts: [max_fonts - 1]Assets.FontHandle = @splat(.none),
+other_font_count: u16 = 0,
+
+/// This frame's faces, by index: what the layout measures in and the
+/// renderer draws in, one table so the two agree. `App` fills it from `font`
+/// and `other_fonts` at the top of every frame, and again before drawing.
+faces: Faces = .{},
 
 /// Multiplies every length in the interface: what it is laid out at this
 /// frame, `zoom` times `display_scale`, worked out by `App` at the top of
@@ -99,10 +113,8 @@ follow_safe_area: bool = true,
 textures: []const rhi.Texture = &.{},
 
 renderer: ?ui_rhi.Renderer = null,
-/// The face `renderer` was made with.
-face: ?*const typeface.Font = null,
 /// The `Assets.font_reloads` the renderer's glyphs were drawn at: a font
-/// read again keeps its address, so the face alone cannot say.
+/// read again keeps its address, so its face alone cannot say.
 font_reloads: u32 = 0,
 
 /// This frame's, from `ui.end`.
@@ -117,6 +129,45 @@ seconds: f64 = 0,
 pub fn deinit(self: *Interface) void {
     if (self.renderer) |*renderer| renderer.deinit();
     self.* = undefined;
+}
+
+/// The faces a frame's text is in, by the index a style's `font` gives.
+pub const Faces = struct {
+    items: [max_fonts]*const typeface.Font = undefined,
+    len: u16 = 0,
+
+    /// The face a run with this index is in: its own, or the first for an
+    /// index past the end, as the renderer draws it.
+    pub fn faceFor(self: *const Faces, index: u16) *const typeface.Font {
+        return self.items[if (index < self.len) index else 0];
+    }
+
+    pub fn slice(self: *const Faces) []const *const typeface.Font {
+        return self.items[0..self.len];
+    }
+};
+
+/// Give the interface another font, and get back the index a style names it
+/// by. For a code editor's monospaced font beside the interface's own:
+///
+/// ```zig
+/// const mono = try app.assets.loadSystemFont(.{ .mono = true });
+/// const code = try app.interface.addFont(mono);
+/// app.ui.text(source, .{ .font = code, .font_size = 14 });
+/// ```
+///
+/// `font` is index 0. A font given already gets back the index it has. A
+/// style whose index names no font, or a font that has since been let go of,
+/// is measured and drawn in `font`.
+pub fn addFont(self: *Interface, handle: Assets.FontHandle) error{TooManyFonts}!u16 {
+    if (std.meta.eql(handle, self.font)) return 0;
+    for (self.other_fonts[0..self.other_font_count], 1..) |held, index| {
+        if (std.meta.eql(held, handle)) return @intCast(index);
+    }
+    if (self.other_font_count == self.other_fonts.len) return error.TooManyFonts;
+    self.other_fonts[self.other_font_count] = handle;
+    self.other_font_count += 1;
+    return self.other_font_count;
 }
 
 /// The surface this frame is laid out on.
@@ -273,60 +324,61 @@ fn padDirection(pad: Input.Pad) ?ui.Navigation {
     return if (stick.y < 0) .up else .down;
 }
 
-/// Measure the interface's text in `face`, the way the renderer draws it.
-pub fn measurer(face: *const typeface.Font) ui.Measurer {
-    return .{ .context = face, .measureFn = measure, .lineHeightFn = lineHeight };
+/// Measure the interface's text the way the renderer draws it: each run in
+/// the face its style's `font` names in `faces`. `faces` holds one at least,
+/// and outlives the layout.
+pub fn measurer(faces: *const Faces) ui.Measurer {
+    return .{ .context = faces, .measureFn = measure, .lineHeightFn = lineHeight };
 }
 
 fn measure(context: ?*const anyopaque, run: []const u8, style: ui.TextStyle) ui.text.Size {
-    const scaled = faceOf(context).at(@floatFromInt(style.font_size));
+    const scaled = facesOf(context).faceFor(style.font).at(@floatFromInt(style.font_size));
     return .{ .width = scaled.measure(run) catch 0, .height = scaled.lineHeight() };
 }
 
 fn lineHeight(context: ?*const anyopaque, style: ui.TextStyle) f32 {
-    return faceOf(context).at(@floatFromInt(style.font_size)).lineHeight();
+    return facesOf(context).faceFor(style.font).at(@floatFromInt(style.font_size)).lineHeight();
 }
 
-fn faceOf(context: ?*const anyopaque) *const typeface.Font {
+fn facesOf(context: ?*const anyopaque) *const Faces {
     return @ptrCast(@alignCast(context.?));
 }
 
-/// Draw this frame's interface over what `target` already holds. With no
-/// font it is laid out and not drawn, as a `Text2D` is.
+/// Draw this frame's interface over what `target` already holds, each run in
+/// the face its index names in `faces`. With no faces it is laid out and not
+/// drawn, as a `Text2D` with no font is.
 pub fn draw(
     self: *Interface,
     gpa: Allocator,
     device: *rhi.Device,
-    face: ?*const typeface.Font,
+    faces: []const *const typeface.Font,
     target: rhi.RenderTarget,
     width: f32,
     height: f32,
 ) !void {
-    if (self.commands.len == 0) return;
-    const drawn_in = face orelse return;
+    if (self.commands.len == 0 or faces.len == 0) return;
 
-    const renderer = try self.rendererFor(gpa, device, drawn_in);
+    const renderer = try self.rendererFor(gpa, device, faces[0]);
+    // Every frame: the renderer forgets the glyphs of a slot whose face is
+    // not the one it was, and keeps the rest.
+    try renderer.setFaces(faces);
     renderer.setTextures(self.textures);
     renderer.setTime(self.seconds);
     try renderer.draw(target, .init(width, height), self.commands, null);
 }
 
-/// Let the renderer go, and the glyphs it drew: the next `draw` makes
-/// another. For a font read again in place.
-pub fn forgetRenderer(self: *Interface) void {
-    if (self.renderer) |*renderer| renderer.deinit();
-    self.renderer = null;
-    self.face = null;
+/// Forget the glyphs of every face, so each is rasterised again from the
+/// face as it is now: for a font read again in place, which keeps its
+/// address, so `setFaces` cannot see that it changed. The renderer and its
+/// texture stay.
+pub fn forgetGlyphs(self: *Interface) void {
+    const renderer = if (self.renderer) |*held| held else return;
+    for (0..max_fonts) |slot| renderer.forgetFace(@intCast(slot));
 }
 
-fn rendererFor(self: *Interface, gpa: Allocator, device: *rhi.Device, face: *const typeface.Font) !*ui_rhi.Renderer {
-    if (self.renderer) |*renderer| {
-        if (self.face == face) return renderer;
-        renderer.deinit();
-        self.renderer = null;
-    }
-    self.renderer = try .init(gpa, device, face);
-    self.face = face;
+fn rendererFor(self: *Interface, gpa: Allocator, device: *rhi.Device, first: *const typeface.Font) !*ui_rhi.Renderer {
+    if (self.renderer) |*renderer| return renderer;
+    self.renderer = try .init(gpa, device, first);
     return &self.renderer.?;
 }
 

@@ -712,6 +712,19 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   `app.interface.font` names another - over the 2D layer, in a pass that loads
   what that one left. With no font loaded it is laid out and not drawn, as a
   `Text2D` is.
+- **More than one font.** `app.interface.addFont(handle)` gives back the
+  index a style names the font by: `.font = code` measures and draws that
+  run in it, and every other run stays in `app.interface.font`, index 0. The
+  layout measures and the renderer draws from one table, so a code editor's
+  carets land where its monospaced letters are. An index that names no font,
+  or a font since let go of, is measured and drawn in the first. The glyphs
+  of every face share one atlas, so text in two fonts is still one draw.
+
+  ```zig
+  const mono = try app.assets.loadSystemFont(.{ .mono = true });
+  const code = try app.interface.addFont(mono);
+  app.ui.text("const x = 1;", .{ .font = code, .font_size = 14 });
+  ```
 - **It hears the input before the game does**, so an `.input` or `.update`
   system can ask `app.ui.wantsPointer()` and `wantsKeyboard()` about this
   frame. The wheel goes to the list under the pointer first, and only what the
@@ -1557,7 +1570,8 @@ Here, and checked by the tests:
 - Culling against the camera, sprites and labels alike.
 - The interface: fluxion-ui laid out by `.ui` systems into one root, drawn
   over the 2D layer, fed from the keyboard, the mouse and the pads before the
-  game's systems, keeping the wheel it used, and setting the pointer's shape.
+  game's systems, keeping the wheel it used, and setting the pointer's shape;
+  up to sixteen fonts, a run measured and drawn in the one its style names.
 - Debug drawing: lines, shapes and text over the world or in screen pixels,
   for a frame, for some seconds, or until the next fixed step; views of
   colliders, bodies, transforms, sprites, cameras and frame stats the engine
