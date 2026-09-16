@@ -427,6 +427,12 @@ by_name: std.StringHashMapUnmanaged(ecs.Entity) = .empty,
 /// reason as `names`.
 uuids: std.AutoArrayHashMapUnmanaged(ecs.Entity, Uuid) = .empty,
 by_uuid: std.AutoHashMapUnmanaged(Uuid, ecs.Entity) = .empty,
+/// Each entity's place among its parent's children, for the ones given one
+/// by `setSiblingIndex` or a scene's list: kept beside the world as names
+/// are. See `childrenOf`.
+sibling_ranks: std.AutoArrayHashMapUnmanaged(ecs.Entity, u64) = .empty,
+/// The next place given out.
+next_rank: u64 = 0,
 /// What `newUuid` draws from: seeded by the operating system, or with no
 /// `Io` by a constant, so a test makes the same ones every run.
 uuid_source: std.Random.DefaultCsprng,
@@ -739,6 +745,7 @@ pub fn destroy(self: *App) void {
     self.by_name.deinit(gpa);
     self.uuids.deinit(gpa);
     self.by_uuid.deinit(gpa);
+    self.sibling_ranks.deinit(gpa);
     self.scene_components.deinit(gpa);
     self.signals.deinit();
     for (self.event_channels.values()) |channel| channel.deinit(channel.events, gpa);
@@ -1067,6 +1074,7 @@ pub fn step(self: *App) anyerror!bool {
     try self.despawnOrphans();
     self.forgetDeadNames();
     self.forgetDeadUuids();
+    self.forgetDeadPlaces();
     self.signals.forgetDead(&self.world);
     try self.animate();
     if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
@@ -1455,6 +1463,143 @@ fn forgetDeadUuids(self: *App) void {
 }
 
 // -------------------------------------------------------------------------
+// The order of a parent's children
+// -------------------------------------------------------------------------
+
+/// Ranks given out start below this, so every entity with a place comes
+/// before every one that has never been given one.
+const unplaced: u64 = 1 << 48;
+
+/// Where an entity comes among its siblings, as a number to sort by: the
+/// order `setSiblingIndex` and a scene's list gave it, and after all of
+/// those, the order the handles were given out in.
+fn siblingRank(self: *const App, entity: ecs.Entity) u64 {
+    return self.sibling_ranks.get(entity) orelse unplaced + entity.index;
+}
+
+/// Whether `a` comes before `b` among their parent's children: what to sort
+/// siblings by. Siblings are the entities with the same `Transform2D.parent`,
+/// and the roots - no parent, or no transform - are one family of their
+/// own. An editor that groups the world by parent itself sorts each group
+/// with this, rather than asking `childrenOf` of every entity.
+///
+/// ```zig
+/// std.mem.sort(fx.Entity, group, @as(*const fx.App, app), fx.App.siblingBefore);
+/// ```
+pub fn siblingBefore(self: *const App, a: ecs.Entity, b: ecs.Entity) bool {
+    return self.siblingRank(a) < self.siblingRank(b);
+}
+
+/// The parent an entity hangs from, `.none` for a root: the family its
+/// place is kept in.
+fn parentOf(self: *const App, entity: ecs.Entity) ecs.Entity {
+    const place = self.world.getConst(entity, components.Transform2D) orelse return .none;
+    return place.parent;
+}
+
+/// A parent's children in their order, as many as `found` holds, the first
+/// ones kept when there are more; `.none` for the roots. Godot's
+/// `get_children`. One walk over the world each time.
+pub fn childrenOf(self: *App, parent: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
+    if (found.len == 0) return found;
+    var count: usize = 0;
+    for (self.world.archetypeSlice()) |*archetype| {
+        for (archetype.entities.items) |entity| {
+            if (!self.parentOf(entity).eql(parent)) continue;
+            if (count < found.len) {
+                found[count] = entity;
+                count += 1;
+                continue;
+            }
+            // Full: this one replaces the last in order, if it comes before.
+            var last: usize = 0;
+            for (found[1..], 1..) |held, i| {
+                if (self.siblingBefore(found[last], held)) last = i;
+            }
+            if (self.siblingBefore(entity, found[last])) found[last] = entity;
+        }
+    }
+    std.mem.sort(ecs.Entity, found[0..count], @as(*const App, self), siblingBefore);
+    return found[0..count];
+}
+
+/// Where an entity is among its parent's children, from nought: Godot's
+/// `get_index`. Null for one that is not alive.
+pub fn siblingIndex(self: *App, entity: ecs.Entity) ?u32 {
+    if (!self.world.isAlive(entity)) return null;
+    const parent = self.parentOf(entity);
+    const rank = self.siblingRank(entity);
+    var before: u32 = 0;
+    for (self.world.archetypeSlice()) |*archetype| {
+        for (archetype.entities.items) |other| {
+            if (other.eql(entity) or !self.parentOf(other).eql(parent)) continue;
+            if (self.siblingRank(other) < rank) before += 1;
+        }
+    }
+    return before;
+}
+
+/// Put an entity at `index` among its parent's children, the ones from
+/// there on moving along one: Godot's `move_child`. An index past the end
+/// is the end. Kept beside the world, and written into a scene as the order
+/// its list is in, so it comes back as it was.
+pub fn setSiblingIndex(self: *App, entity: ecs.Entity, index: u32) (error{NoSuchEntity} || Allocator.Error)!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    const parent = self.parentOf(entity);
+
+    // Numbered afresh, the whole family, so none of it is left half placed.
+    var family: std.ArrayList(ecs.Entity) = .empty;
+    defer family.deinit(self.gpa);
+    for (self.world.archetypeSlice()) |*archetype| {
+        for (archetype.entities.items) |other| {
+            if (other.eql(entity) or !self.parentOf(other).eql(parent)) continue;
+            try family.append(self.gpa, other);
+        }
+    }
+    std.mem.sort(ecs.Entity, family.items, @as(*const App, self), siblingBefore);
+    try family.insert(self.gpa, @min(index, family.items.len), entity);
+    try self.placeInOrder(family.items);
+}
+
+/// Give entities places in the order given, after every place given out
+/// before: what a scene's list does to the entities it made.
+pub fn placeInOrder(self: *App, entities: []const ecs.Entity) Allocator.Error!void {
+    try self.sibling_ranks.ensureUnusedCapacity(self.gpa, entities.len);
+    for (entities) |entity| {
+        self.sibling_ranks.putAssumeCapacity(entity, self.next_rank);
+        self.next_rank += 1;
+    }
+}
+
+/// Give every living entity that has no place one, in the order of its
+/// handle - which is the order it is in now - so that what is placed next
+/// comes after it rather than before. A world nobody reorders never pays
+/// for this.
+pub fn placeTheRest(self: *App) Allocator.Error!void {
+    var rest: std.ArrayList(ecs.Entity) = .empty;
+    defer rest.deinit(self.gpa);
+    for (self.world.archetypeSlice()) |*archetype| {
+        for (archetype.entities.items) |entity| {
+            if (!self.sibling_ranks.contains(entity)) try rest.append(self.gpa, entity);
+        }
+    }
+    if (rest.items.len == 0) return;
+    std.mem.sort(ecs.Entity, rest.items, @as(*const App, self), siblingBefore);
+    try self.placeInOrder(rest.items);
+}
+
+/// Forget the places of everything that has died, as `forgetDeadNames`
+/// does the names.
+fn forgetDeadPlaces(self: *App) void {
+    var at = self.sibling_ranks.count();
+    while (at > 0) {
+        at -= 1;
+        const entity = self.sibling_ranks.keys()[at];
+        if (!self.world.isAlive(entity)) self.sibling_ranks.swapRemoveAt(at);
+    }
+}
+
+// -------------------------------------------------------------------------
 // Scenes
 // -------------------------------------------------------------------------
 
@@ -1556,6 +1701,7 @@ pub fn clearWorld(self: *App) void {
     self.by_name.clearRetainingCapacity();
     self.uuids.clearRetainingCapacity();
     self.by_uuid.clearRetainingCapacity();
+    self.sibling_ranks.clearRetainingCapacity();
     self.signals.clear();
 }
 
@@ -4695,4 +4841,90 @@ test "under the world as over it, a fixed step's shapes last until the next step
         try testing.expectEqual(@as(u32, if (frame < 4) 0 else 1), app.debug_under_stats.lines);
     }
     try testing.expect(app.debug_under.canvas == &app.debug_under_frame);
+}
+
+test "a parent's children keep the order they are put in, and a new one comes last" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const parent = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
+    const a = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 1, 0)});
+    const b = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 2, 0)});
+    const c = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 3, 0)});
+    var found: [8]ecs.Entity = undefined;
+
+    // Never placed: the order the handles were given out in.
+    try testing.expectEqualSlices(ecs.Entity, &.{ a, b, c }, app.childrenOf(parent, &found));
+    try testing.expectEqual(@as(?u32, 2), app.siblingIndex(c));
+
+    try app.setSiblingIndex(c, 0);
+    try testing.expectEqualSlices(ecs.Entity, &.{ c, a, b }, app.childrenOf(parent, &found));
+    try testing.expectEqual(@as(?u32, 0), app.siblingIndex(c));
+    try testing.expectEqual(@as(?u32, 2), app.siblingIndex(b));
+
+    // Past the end is the end.
+    try app.setSiblingIndex(a, 99);
+    try testing.expectEqualSlices(ecs.Entity, &.{ c, b, a }, app.childrenOf(parent, &found));
+
+    // A child made afterwards comes after the ones placed.
+    const d = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 4, 0)});
+    try testing.expectEqualSlices(ecs.Entity, &.{ c, b, a, d }, app.childrenOf(parent, &found));
+
+    // The roots are a family of their own, untouched.
+    try testing.expectEqualSlices(ecs.Entity, &.{parent}, app.childrenOf(.none, &found));
+
+    // Fewer places than children: the first ones, still in order.
+    var two: [2]ecs.Entity = undefined;
+    try testing.expectEqualSlices(ecs.Entity, &.{ c, b }, app.childrenOf(parent, &two));
+
+    // The dead give their places back.
+    app.world.despawn(b);
+    _ = try app.step();
+    try testing.expect(!app.sibling_ranks.contains(b));
+    try testing.expect(app.siblingIndex(b) == null);
+    try testing.expectError(error.NoSuchEntity, app.setSiblingIndex(b, 0));
+    try testing.expectEqualSlices(ecs.Entity, &.{ c, a, d }, app.childrenOf(parent, &found));
+}
+
+test "the order of a parent's children goes through a scene and back" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const parent = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
+    const first = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 1, 0)});
+    const second = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 2, 0)});
+    const third = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 3, 0)});
+    try app.setName(first, "first");
+    try app.setName(second, "second");
+    try app.setName(third, "third");
+    try app.setSiblingIndex(third, 0);
+    try app.setSiblingIndex(first, 2);
+
+    const bytes = try scene.write(app, testing.allocator, .{});
+    defer testing.allocator.free(bytes);
+
+    const copy = try App.create(testing.allocator, .{ .headless = true });
+    defer copy.destroy();
+    // Handles given back out of order, so the scene's entities are not
+    // made in the order of their handles and only the list can say it.
+    var scratch: [4]ecs.Entity = undefined;
+    for (&scratch) |*made| made.* = try copy.world.spawnWith(.{components.Transform2D{}});
+    for (scratch) |made| copy.world.despawn(made);
+    // Something already there, which keeps its place before the scene's.
+    const before = try copy.world.spawnWith(.{components.Transform2D.at(9, 9)});
+    _ = try scene.read(copy, bytes, .{});
+
+    var found: [8]ecs.Entity = undefined;
+    const copied_parent = copy.findUuid(app.uuidOf(parent).?).?;
+    const children = copy.childrenOf(copied_parent, &found);
+    try testing.expectEqual(@as(usize, 3), children.len);
+    try testing.expectEqualStrings("third", copy.nameOf(children[0]).?);
+    try testing.expectEqualStrings("second", copy.nameOf(children[1]).?);
+    try testing.expectEqualStrings("first", copy.nameOf(children[2]).?);
+    const roots = copy.childrenOf(.none, &found);
+    try testing.expect(roots[0].eql(before));
+
+    // Written again without `before`, it is the same scene.
+    copy.world.despawn(before);
+    const again = try scene.write(copy, testing.allocator, .{});
+    defer testing.allocator.free(again);
+    try testing.expectEqualStrings(bytes, again);
 }

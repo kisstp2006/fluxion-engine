@@ -630,6 +630,14 @@ _ = try world.spawnWith(.{
   that does not tip over. **What hangs from something goes with it**: despawn
   the tank and the turret goes at the end of the frame, and the barrel on the
   turret with it - Unity's rule and Godot's.
+- **A parent's children keep an order**: `app.childrenOf(parent, &buf)` in
+  it - `.none` for the roots - `app.siblingIndex(entity)` for one's place, and
+  `app.setSiblingIndex(entity, i)` to move one, the ones from there on moving
+  along: Godot's `get_children`, `get_index` and `move_child`. A child never
+  placed comes after the ones that were, in the order it was made. A scene
+  writes its list in this order and a read keeps it, so the tree comes back as
+  it was, after whatever was in the world already. `app.siblingBefore` sorts
+  siblings a caller has grouped itself.
 - **An `Animation` is a sheet and a rate**, and the engine writes the cell it
   lands on into `Sprite.region` once a frame. One sheet holds a walk, an idle
   and an attack; swapping between them is writing two numbers.

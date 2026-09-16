@@ -352,21 +352,20 @@ const Saving = struct {
         s.files.deinit(gpa);
     }
 
-    /// Every entity in the world, in the order their slots were handed out -
-    /// for a world built and never thinned, the order it was built in - and
-    /// each given a UUID, if it had none, for what names it to be written by.
+    /// Every entity in the world, in the order a parent's children are in -
+    /// the order `App.setSiblingIndex` and the scenes read put them in, and
+    /// then the order their slots were handed out, which for a world built
+    /// and never thinned is the order it was built in - and each given a
+    /// UUID, if it had none, for what names it to be written by. So the list
+    /// is the order, and a scene needs nothing more to keep it.
     fn placeAll(s: *Saving) Allocator.Error!void {
         const gpa = s.app.gpa;
         for (s.app.world.archetypeSlice()) |*archetype| try s.order.appendSlice(gpa, archetype.entities.items);
-        std.mem.sort(Entity, s.order.items, {}, earlier);
+        std.mem.sort(Entity, s.order.items, @as(*const App, s.app), App.siblingBefore);
         for (s.order.items) |e| _ = s.app.ensureUuid(e) catch |err| switch (err) {
             error.NoSuchEntity => unreachable,
             error.OutOfMemory => return error.OutOfMemory,
         };
-    }
-
-    fn earlier(_: void, a: Entity, b: Entity) bool {
-        return a.index < b.index;
     }
 
     fn writeEntity(s: *Saving, w: *json.Writer, e: Entity) json.Writer.Error!void {
@@ -640,6 +639,9 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     defer spawned.deinit(gpa);
     errdefer for (spawned.items) |e| app.world.despawn(e);
 
+    // What is in the world already keeps its place before the scene's.
+    try app.placeTheRest();
+
     var told: Told = .{};
     {
         var reader: json.Reader = .init(gpa, bytes, readerOptions(options));
@@ -675,6 +677,8 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
             .told = &told,
         };
         try l.fill();
+        // The list is the order of every parent's children.
+        try app.placeInOrder(spawned.items);
         loaded.moved = l.moved;
         loaded.connections_unknown = l.connections_unknown;
         loaded.connections_skipped = l.connections_skipped;
