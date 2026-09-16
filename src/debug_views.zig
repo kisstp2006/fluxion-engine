@@ -120,11 +120,11 @@ fn drawTransforms(app: *App) !void {
     var it = try ecs.Query(.{Transform2D}).over(&app.world);
     while (it.next()) |chunk| {
         for (chunk.entities, chunk.slice(Transform2D)) |e, local| {
-            const placed = app.worldTransform(e) orelse continue;
+            const placed = app.drawnTransform(e) orelse continue;
             const at: Vec2 = .init(placed.x, placed.y);
             app.debug.axes2d(at, placed.rotation, reach);
             if (local.parent.isNone()) continue;
-            const parent = app.worldTransform(local.parent) orelse continue;
+            const parent = app.drawnTransform(local.parent) orelse continue;
             app.debug.line2d(at, .init(parent.x, parent.y), .gray);
         }
     }
@@ -154,7 +154,7 @@ fn drawCameras(app: *App) !void {
     while (it.next()) |chunk| {
         for (chunk.entities, chunk.slice(components.Camera2D)) |e, camera| {
             if (!camera.active or camera.fit_width <= 0 or camera.fit_height <= 0) continue;
-            const placed = app.worldTransform(e) orelse continue;
+            const placed = app.drawnTransform(e) orelse continue;
             const pose: Pose = .of(placed.x, placed.y, camera.rotation + placed.rotation);
             const w = camera.fit_width / 2;
             const h = camera.fit_height / 2;
@@ -188,7 +188,7 @@ fn poseOf(app: *App, handle: physics.BodyId, body: *const physics.Body) Pose {
     if (!owner.isNone()) {
         if (app.bodies.idOf(owner)) |made| {
             if (made.eql(handle)) {
-                if (app.worldTransform(owner)) |placed| return .of(placed.x, placed.y, placed.rotation);
+                if (app.drawnTransform(owner)) |placed| return .of(placed.x, placed.y, placed.rotation);
             }
         }
     }
@@ -274,7 +274,7 @@ test "a collider is drawn where its sprite is between fixed steps" {
 
     // Two frames a step: the second of each pair is halfway between steps.
     for (0..3) |_| _ = try app.step();
-    const drawn = app.worldTransform(puck).?;
+    const drawn = app.drawnTransform(puck).?;
     const step = app.bodyOf(puck).?.position();
     try testing.expect(@abs(drawn.x - step.x) > 1);
     const left = app.debug_frame.lines.items[0].start;

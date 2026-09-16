@@ -1301,12 +1301,204 @@ fn despawnOrphans(self: *App) !void {
     }
 }
 
+// -------------------------------------------------------------------------
+// Where things are: Godot 3's Node2D, through the parent chain
+// -------------------------------------------------------------------------
+
+/// Resolving against no snapshots is resolving where things are, not where
+/// they are drawn.
+const still: hierarchy.Snapshots = .empty;
+
 /// Where an entity really is, with every parent above it applied: Godot's
-/// `global_position`. Null when it has no transform, or when something it
+/// `global_transform`. Null when it has no transform, or when something it
 /// hangs from was despawned this frame. The result has no parent, so writing
 /// it over the entity's own transform lets go while keeping it in place.
+///
+/// Where it is, not where it is drawn: an entity that `interpolate`s is drawn
+/// between its last two fixed steps, which `drawnTransform` says.
 pub fn worldTransform(self: *App, entity: ecs.Entity) ?components.Transform2D {
+    return hierarchy.resolveEntity(&self.world, &still, entity, 1);
+}
+
+/// Where an entity is drawn this frame: `worldTransform`, with every link
+/// that `interpolate`s blended between its last two fixed steps as the
+/// renderer blends it. For drawing beside a sprite, not for the game's sums.
+pub fn drawnTransform(self: *App, entity: ecs.Entity) ?components.Transform2D {
     return hierarchy.resolveEntity(&self.world, &self.snapshots, entity, self.time.alpha());
+}
+
+/// What a call that writes where an entity is can fail with.
+pub const PlaceError = error{
+    /// It has no `Transform2D` to write.
+    NoTransform,
+    /// Something above it cannot be placed: a parent despawned this frame,
+    /// or a chain deeper than `Transform2D.max_depth`.
+    Unplaced,
+};
+
+/// Put an entity where `placed` says in the world, and keep its parent: its
+/// own transform becomes the one that, under its parents, lands there.
+/// Godot's `global_transform =`. Its parent, its inherit switches and its
+/// `interpolate` stay its own; `placed`'s are not read.
+pub fn setWorldTransform(self: *App, entity: ecs.Entity, placed: components.Transform2D) PlaceError!void {
+    const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
+    const above = try self.parentPlace(own.*);
+    const at = above.unapply(placed.x, placed.y);
+    own.x = at.x;
+    own.y = at.y;
+    own.rotation = if (own.inherit_rotation) placed.rotation - above.rotation else placed.rotation;
+    own.scale_x = if (own.inherit_scale) placed.scale_x / nonZero(above.scale_x) else placed.scale_x;
+    own.scale_y = if (own.inherit_scale) placed.scale_y / nonZero(above.scale_y) else placed.scale_y;
+}
+
+/// Where a transform's parent is in the world: nothing at all for none, or
+/// for a living parent with no transform of its own, which places nothing.
+fn parentPlace(self: *App, own: components.Transform2D) PlaceError!components.Transform2D {
+    if (own.parent.isNone()) return .{};
+    if (self.world.get(own.parent, components.Transform2D) == null and self.world.isAlive(own.parent)) return .{};
+    return self.worldTransform(own.parent) orelse error.Unplaced;
+}
+
+/// A scale of zero is left out rather than divided by, as `unapply` does.
+fn nonZero(scale: f32) f32 {
+    return if (scale != 0) scale else 1;
+}
+
+/// The world transform of an entity to write, or why there is none.
+fn placeOf(self: *App, entity: ecs.Entity) PlaceError!components.Transform2D {
+    if (!self.world.has(entity, components.Transform2D)) return error.NoTransform;
+    return self.worldTransform(entity) orelse error.Unplaced;
+}
+
+/// Where an entity is in the world: Godot's `global_position`.
+pub fn globalPosition(self: *App, entity: ecs.Entity) ?math.Vec2 {
+    const placed = self.worldTransform(entity) orelse return null;
+    return .init(placed.x, placed.y);
+}
+
+pub fn setGlobalPosition(self: *App, entity: ecs.Entity, position: math.Vec2) PlaceError!void {
+    var placed = try self.placeOf(entity);
+    placed.x = position.x;
+    placed.y = position.y;
+    try self.setWorldTransform(entity, placed);
+}
+
+/// Which way an entity faces in the world, in radians: Godot's
+/// `global_rotation`.
+pub fn globalRotation(self: *App, entity: ecs.Entity) ?f32 {
+    const placed = self.worldTransform(entity) orelse return null;
+    return placed.rotation;
+}
+
+pub fn setGlobalRotation(self: *App, entity: ecs.Entity, radians: f32) PlaceError!void {
+    var placed = try self.placeOf(entity);
+    placed.rotation = radians;
+    try self.setWorldTransform(entity, placed);
+}
+
+/// How big an entity is in the world: Godot's `global_scale`.
+pub fn globalScale(self: *App, entity: ecs.Entity) ?math.Vec2 {
+    const placed = self.worldTransform(entity) orelse return null;
+    return .init(placed.scale_x, placed.scale_y);
+}
+
+pub fn setGlobalScale(self: *App, entity: ecs.Entity, scale: math.Vec2) PlaceError!void {
+    var placed = try self.placeOf(entity);
+    placed.scale_x = scale.x;
+    placed.scale_y = scale.y;
+    try self.setWorldTransform(entity, placed);
+}
+
+/// Move an entity by `offset` in the world, whatever its parents have done
+/// to its axes: Godot's `global_translate`.
+pub fn globalTranslate(self: *App, entity: ecs.Entity, offset: math.Vec2) PlaceError!void {
+    const placed = try self.placeOf(entity);
+    try self.setGlobalPosition(entity, .init(placed.x + offset.x, placed.y + offset.y));
+}
+
+/// A point in the world, in an entity's own space: Godot's `to_local`.
+pub fn toLocal(self: *App, entity: ecs.Entity, global_point: math.Vec2) ?math.Vec2 {
+    const placed = self.worldTransform(entity) orelse return null;
+    const local = placed.unapply(global_point.x, global_point.y);
+    return .init(local.x, local.y);
+}
+
+/// A point in an entity's own space, in the world: Godot's `to_global`.
+pub fn toGlobal(self: *App, entity: ecs.Entity, local_point: math.Vec2) ?math.Vec2 {
+    const placed = self.worldTransform(entity) orelse return null;
+    const global = placed.apply(local_point.x, local_point.y);
+    return .init(global.x, global.y);
+}
+
+/// How far an entity would turn to face a point with its `+x`, in radians:
+/// Godot's `get_angle_to`, measured in its own space and scale.
+pub fn getAngleTo(self: *App, entity: ecs.Entity, point: math.Vec2) ?f32 {
+    const local = self.toLocal(entity, point) orelse return null;
+    const own = self.world.get(entity, components.Transform2D).?;
+    return std.math.atan2(local.y * own.scale_y, local.x * own.scale_x);
+}
+
+/// Turn an entity so that its `+x` faces a point in the world: Godot's
+/// `look_at`.
+pub fn lookAt(self: *App, entity: ecs.Entity, point: math.Vec2) PlaceError!void {
+    const angle = self.getAngleTo(entity, point) orelse return if (self.world.has(entity, components.Transform2D)) error.Unplaced else error.NoTransform;
+    self.world.get(entity, components.Transform2D).?.rotation += angle;
+}
+
+/// Where an entity is in the space of `ancestor`, something it hangs from:
+/// Godot's `get_relative_transform_to_parent`. Nothing moved for the entity
+/// itself, and null for an entity `ancestor` is not above.
+pub fn getRelativeTransformToParent(self: *App, entity: ecs.Entity, ancestor: ecs.Entity) ?components.Transform2D {
+    var chain: [components.Transform2D.max_depth]components.Transform2D = undefined;
+    var depth: usize = 0;
+    var at = entity;
+    while (!at.eql(ancestor)) {
+        if (depth == chain.len) return null;
+        const own = self.world.get(at, components.Transform2D) orelse return null;
+        if (own.parent.isNone()) return null;
+        chain[depth] = own.*;
+        depth += 1;
+        at = own.parent;
+    }
+    var placed: components.Transform2D = .{};
+    while (depth > 0) {
+        depth -= 1;
+        placed = components.Transform2D.compose(placed, chain[depth]);
+    }
+    return placed;
+}
+
+/// Move an entity along its own `+x`, in its parent's space: Godot's
+/// `move_local_x`. By `delta` units, or with `scaled` by `delta` of its own
+/// scaled lengths.
+pub fn moveLocalX(self: *App, entity: ecs.Entity, delta: f32, scaled: bool) PlaceError!void {
+    const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
+    moveAlong(own, .init(@cos(own.rotation) * own.scale_x, @sin(own.rotation) * own.scale_x), delta, scaled);
+}
+
+/// The same along its own `+y`: Godot's `move_local_y`.
+pub fn moveLocalY(self: *App, entity: ecs.Entity, delta: f32, scaled: bool) PlaceError!void {
+    const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
+    moveAlong(own, .init(-@sin(own.rotation) * own.scale_y, @cos(own.rotation) * own.scale_y), delta, scaled);
+}
+
+fn moveAlong(own: *components.Transform2D, axis: math.Vec2, delta: f32, scaled: bool) void {
+    const along = if (scaled) axis else axis.norm();
+    own.x += along.x * delta;
+    own.y += along.y * delta;
+}
+
+/// Turn an entity by `radians` more: Godot's `rotate`.
+pub fn rotate(self: *App, entity: ecs.Entity, radians: f32) PlaceError!void {
+    const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
+    own.rotation += radians;
+}
+
+/// Multiply an entity's scale by `ratio`: Godot's `apply_scale`.
+pub fn applyScale(self: *App, entity: ecs.Entity, ratio: math.Vec2) PlaceError!void {
+    const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
+    own.scale_x *= ratio.x;
+    own.scale_y *= ratio.y;
 }
 
 /// The one entity's `T`: a score, a game's state - the component there is
@@ -2044,6 +2236,23 @@ pub const reflect_methods = .{
     .saveScene,
     .loadScene,
     .worldTransform,
+    .setWorldTransform,
+    .globalPosition,
+    .setGlobalPosition,
+    .globalRotation,
+    .setGlobalRotation,
+    .globalScale,
+    .setGlobalScale,
+    .globalTranslate,
+    .toLocal,
+    .toGlobal,
+    .getAngleTo,
+    .lookAt,
+    .getRelativeTransformToParent,
+    .moveLocalX,
+    .moveLocalY,
+    .rotate,
+    .applyScale,
     .screenToWorld,
     .worldToScreen,
     .pointerInWorld,
@@ -2511,7 +2720,7 @@ pub fn pointerInWorld(self: *App) math.Vec2 {
 /// can be placed. What a click on a sprite is tested against.
 pub fn spriteCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     const drawn = (self.world.get(entity, components.Sprite) orelse return null).*;
-    const placed = self.worldTransform(entity) orelse return null;
+    const placed = self.drawnTransform(entity) orelse return null;
     const texture = self.assets.get(drawn.texture) orelse self.assets.get(self.assets.white) orelse return null;
     return sprite.cornersOf(drawn, placed, texture);
 }
@@ -2523,7 +2732,7 @@ pub fn spriteCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
 /// or one that cannot be placed.
 pub fn textCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     const label = (self.world.get(entity, components.Text2D) orelse return null).*;
-    const placed = self.worldTransform(entity) orelse return null;
+    const placed = self.drawnTransform(entity) orelse return null;
     const face = self.assets.fontOf(label.font) orelse return null;
     return sprite.labelCornersOf(label, placed, face);
 }
@@ -2840,14 +3049,7 @@ pub fn warpPointer(self: *App, x: f32, y: f32) void {
 /// dial_angle = std.math.atan2(at.y, at.x);
 /// ```
 pub fn pointerIn(self: *App, entity: ecs.Entity) ?math.Vec2 {
-    return self.pointIn(entity, self.pointerInWorld());
-}
-
-/// The same for any point in the world.
-pub fn pointIn(self: *App, entity: ecs.Entity, point: math.Vec2) ?math.Vec2 {
-    const place = self.worldTransform(entity) orelse return null;
-    const local = place.unapply(point.x, point.y);
-    return .init(local.x, local.y);
+    return self.toLocal(entity, self.pointerInWorld());
 }
 
 /// A pointer event as an entity sees it: the same event, with its place in
@@ -2855,7 +3057,7 @@ pub fn pointIn(self: *App, entity: ecs.Entity, point: math.Vec2) ?math.Vec2 {
 /// `make_input_local`.
 pub fn localEvent(self: *App, entity: ecs.Entity, event: pointer.InputEvent) pointer.InputEvent {
     const at = self.screenToWorld(event.position().x, event.position().y);
-    const local = self.pointIn(entity, at) orelse return event;
+    const local = self.toLocal(entity, at) orelse return event;
     var made = event;
     switch (made) {
         inline else => |*held| held.position = local,
@@ -3349,6 +3551,146 @@ test "a grandchild is composed through the whole chain" {
     try testing.expectApproxEqAbs(@as(f32, 17), app.worldTransform(leaf).?.x, 0.0001);
 }
 
+test "an entity put somewhere in the world lands there under its parents, and keeps them" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    // A parent turned a quarter, twice the size.
+    const tank = try app.world.spawnWith(.{components.Transform2D{ .x = 100, .y = 50, .rotation = std.math.pi / 2.0, .scale_x = 2, .scale_y = 2 }});
+    const turret = try app.world.spawnWith(.{components.Transform2D.childOf(tank, 10, 0)});
+
+    // Ten along the tank's +x, which the quarter turn points down the
+    // screen, at twice the length.
+    const at = app.globalPosition(turret).?;
+    try testing.expectApproxEqAbs(@as(f32, 100), at.x, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 70), at.y, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), app.globalRotation(turret).?, 1e-5);
+    try testing.expectEqual(@as(f32, 2), app.globalScale(turret).?.x);
+
+    try app.setGlobalPosition(turret, .init(0, 0));
+    try app.setGlobalRotation(turret, 0);
+    try app.setGlobalScale(turret, .init(1, 3));
+    const placed = app.worldTransform(turret).?;
+    try testing.expectApproxEqAbs(@as(f32, 0), placed.x, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 0), placed.y, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 0), placed.rotation, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 3), placed.scale_y, 1e-5);
+    // Its own numbers are still the tank's space.
+    const own = app.world.get(turret, components.Transform2D).?;
+    try testing.expect(own.parent.eql(tank));
+    try testing.expectApproxEqAbs(@as(f32, -std.math.pi / 2.0), own.rotation, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), own.scale_x, 1e-5);
+
+    // By an amount in the world, whichever way the tank's axes point.
+    try app.globalTranslate(turret, .init(5, -3));
+    try testing.expectApproxEqAbs(@as(f32, 5), app.globalPosition(turret).?.x, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, -3), app.globalPosition(turret).?.y, 1e-3);
+
+    // And the whole of it at once.
+    try app.setWorldTransform(turret, .{ .x = -7, .y = 9, .rotation = 1, .scale_x = 4, .scale_y = 4 });
+    const again = app.worldTransform(turret).?;
+    try testing.expectApproxEqAbs(@as(f32, -7), again.x, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 9), again.y, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 1), again.rotation, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 4), again.scale_x, 1e-5);
+}
+
+test "what does not inherit its parent's turn or scale is put in the world by its own numbers" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const post = try app.world.spawnWith(.{components.Transform2D{ .x = 10, .rotation = 1, .scale_x = 4, .scale_y = 4 }});
+    const plate = try app.world.spawnWith(.{components.Transform2D{ .parent = post, .inherit_rotation = false, .inherit_scale = false }});
+    try app.setGlobalRotation(plate, 0.25);
+    try app.setGlobalScale(plate, .init(2, 2));
+    const own = app.world.get(plate, components.Transform2D).?;
+    try testing.expectApproxEqAbs(@as(f32, 0.25), own.rotation, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 2), own.scale_x, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 0.25), app.globalRotation(plate).?, 1e-5);
+}
+
+test "a point goes into an entity's space and back, and an entity turns to face one" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const arm = try app.world.spawnWith(.{components.Transform2D{ .x = 30, .y = -20, .rotation = 0.5, .scale_x = 2, .scale_y = 0.5 }});
+    const hand = try app.world.spawnWith(.{components.Transform2D{ .x = 4, .y = 6, .rotation = -0.25, .parent = arm }});
+    const point: math.Vec2 = .init(-12, 40);
+    const back = app.toGlobal(hand, app.toLocal(hand, point).?).?;
+    try testing.expectApproxEqAbs(point.x, back.x, 1e-3);
+    try testing.expectApproxEqAbs(point.y, back.y, 1e-3);
+
+    // A parent as big one way as the other, so facing is exact.
+    const body = try app.world.spawnWith(.{components.Transform2D{ .x = 5, .y = 5, .rotation = 2, .scale_x = 3, .scale_y = 3 }});
+    // Its own scale not the same both ways: facing still is, in its own
+    // space.
+    const eye = try app.world.spawnWith(.{components.Transform2D{ .x = 1, .y = -2, .rotation = 0.7, .scale_x = 2, .scale_y = 0.5, .parent = body }});
+    try app.lookAt(eye, point);
+    try testing.expectApproxEqAbs(@as(f32, 0), app.getAngleTo(eye, point).?, 1e-4);
+    const from = app.globalPosition(eye).?;
+    const ahead = app.toGlobal(eye, .init(1, 0)).?;
+    const facing = ahead.sub(from).norm();
+    const wanted = point.sub(from).norm();
+    try testing.expectApproxEqAbs(@as(f32, 1), facing.dot(wanted), 1e-4);
+}
+
+test "an entity moves along its own axes, turns and grows by its own numbers" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    // A quarter turn: its +x points down the screen and its +y to the left.
+    const ship = try app.world.spawnWith(.{components.Transform2D{ .x = 1, .y = 2, .rotation = std.math.pi / 2.0, .scale_x = 2, .scale_y = 3 }});
+    const own = app.world.get(ship, components.Transform2D).?;
+    try app.moveLocalX(ship, 5, false);
+    try testing.expectApproxEqAbs(@as(f32, 7), own.y, 1e-4);
+    try app.moveLocalX(ship, 5, true);
+    try testing.expectApproxEqAbs(@as(f32, 17), own.y, 1e-4);
+    try app.moveLocalY(ship, 1, true);
+    try testing.expectApproxEqAbs(@as(f32, -2), own.x, 1e-4);
+    try app.moveLocalY(ship, 1, false);
+    try testing.expectApproxEqAbs(@as(f32, -3), own.x, 1e-4);
+
+    try app.rotate(ship, 0.5);
+    try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0 + 0.5), own.rotation, 1e-5);
+    try app.applyScale(ship, .init(0.5, 2));
+    try testing.expectEqual(@as(f32, 1), own.scale_x);
+    try testing.expectEqual(@as(f32, 6), own.scale_y);
+}
+
+test "where an entity is in the space of something above it" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const root = try app.world.spawnWith(.{components.Transform2D.at(100, 0)});
+    const middle = try app.world.spawnWith(.{components.Transform2D{ .x = 10, .rotation = std.math.pi / 2.0, .parent = root }});
+    const leaf = try app.world.spawnWith(.{components.Transform2D.childOf(middle, 5, 0)});
+
+    const within = app.getRelativeTransformToParent(leaf, root).?;
+    try testing.expectApproxEqAbs(@as(f32, 10), within.x, 1e-4);
+    try testing.expectApproxEqAbs(@as(f32, 5), within.y, 1e-4);
+    try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), within.rotation, 1e-5);
+    try testing.expectEqual(@as(f32, 0), app.getRelativeTransformToParent(leaf, leaf).?.x);
+    try testing.expect(app.getRelativeTransformToParent(root, leaf) == null);
+}
+
+test "writing where an entity is says why it cannot: no transform, or a parent that is gone" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const bare = try app.world.spawnWith(.{components.Camera2D{}});
+    try testing.expectError(error.NoTransform, app.setGlobalPosition(bare, .init(1, 1)));
+    try testing.expectError(error.NoTransform, app.rotate(bare, 1));
+    try testing.expectError(error.NoTransform, app.lookAt(bare, .init(1, 1)));
+    try testing.expect(app.globalPosition(bare) == null);
+
+    const parent = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
+    const orphan = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 1, 1)});
+    app.world.despawn(parent);
+    try testing.expectError(error.Unplaced, app.setGlobalPosition(orphan, .init(0, 0)));
+    try testing.expectError(error.Unplaced, app.lookAt(orphan, .init(5, 5)));
+
+    // A living parent with no transform of its own places nothing.
+    const holder = try app.world.spawnWith(.{components.Camera2D{}});
+    const held = try app.world.spawnWith(.{components.Transform2D.childOf(holder, 3, 4)});
+    try app.setGlobalPosition(held, .init(7, 8));
+    try testing.expectEqual(@as(f32, 7), app.world.get(held, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 8), app.world.get(held, components.Transform2D).?.y);
+}
+
 test "what hangs from something that died goes with it" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();
@@ -3495,11 +3837,16 @@ test "a previous transform is taken before each fixed step" {
     const entity = chunk.entities[0];
     const now = chunk.slice(components.Transform2D)[0];
 
-    // Where it is, where it was, and halfway between: what is drawn.
+    // Where it is, where it was, and halfway between: what is drawn. The
+    // game's sums see where it is.
     try testing.expectEqual(@as(f32, 10), now.x);
     try testing.expectEqual(@as(f32, 0), app.snapshots.get(entity).?.x);
     try testing.expectApproxEqAbs(@as(f32, 0.5), app.time.alpha(), 0.001);
-    try testing.expectApproxEqAbs(@as(f32, 5), app.worldTransform(entity).?.x, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 5), app.drawnTransform(entity).?.x, 0.01);
+    try testing.expectEqual(@as(f32, 10), app.worldTransform(entity).?.x);
+    // Its sprite's corners are where it is drawn: eight wide, round x = 5.
+    const corners = app.spriteCorners(entity).?;
+    try testing.expectApproxEqAbs(@as(f32, 1), corners[0].x, 0.01);
 }
 
 test "a transform that never asked is not remembered at all" {

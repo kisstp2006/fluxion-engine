@@ -630,6 +630,13 @@ _ = try world.spawnWith(.{
   that does not tip over. **What hangs from something goes with it**: despawn
   the tank and the turret goes at the end of the frame, and the barrel on the
   turret with it - Unity's rule and Godot's.
+- **Godot's Node2D calls work through the chain**, on the app:
+  - `globalPosition`, `globalRotation`, `globalScale` and `worldTransform` read where an entity is in the world, and their `set` twins put it there under the parents it keeps.
+  - `globalTranslate` moves it by an amount in the world, and `toLocal`/`toGlobal` take a point in and out of its space.
+  - `lookAt` turns its `+x` to a point, and `getAngleTo` says how far that is.
+  - `moveLocalX`/`moveLocalY`, `rotate` and `applyScale` change its own numbers along its own axes.
+  - `getRelativeTransformToParent` says where it is in an ancestor's space.
+  - These are where the entity is. What an entity that `interpolate`s is drawn at between two steps is `drawnTransform`.
 - **A parent's children keep an order**: `app.childrenOf(parent, &buf)` in
   it - `.none` for the roots - `app.siblingIndex(entity)` for one's place, and
   `app.setSiblingIndex(entity, i)` to move one, the ones from there on moving

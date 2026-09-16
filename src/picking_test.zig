@@ -505,7 +505,7 @@ test "the pointer is put where a warp says, and read in an entity's own space" {
 
     // A quarter turn takes the dial's +x to the world's +y, and the scale
     // halves what a step in the world is worth in its own space.
-    const along = app.pointIn(dial, .init(40, 30)).?;
+    const along = app.toLocal(dial, .init(40, 30)).?;
     try testing.expectApproxEqAbs(@as(f32, 10), along.x, 0.001);
     try testing.expectApproxEqAbs(@as(f32, 0), along.y, 0.001);
     try testing.expect(app.pointerIn(.none) == null);
