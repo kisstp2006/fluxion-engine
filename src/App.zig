@@ -455,6 +455,9 @@ uuid_source: std.Random.DefaultCsprng,
 /// engine's own from the start, and a game's once `registerComponents` has
 /// been told about them.
 scene_components: scene.Registry = .{},
+/// The components scenes held that nothing here is registered as, each kept
+/// with its entity and written back with it. See `unknownComponentsOf`.
+unknown_components: scene.Unknown = .{},
 
 /// Every signal's connections, the calls waiting for their sync point, and
 /// `dispatch`, the switch that makes none. See `signal`.
@@ -772,6 +775,7 @@ pub fn destroy(self: *App) void {
     self.by_uuid.deinit(gpa);
     self.sibling_ranks.deinit(gpa);
     self.scene_components.deinit(gpa);
+    self.unknown_components.deinit(gpa);
     self.signals.deinit();
     for (self.event_channels.values()) |channel| channel.deinit(channel.events, gpa);
     self.event_channels.deinit(gpa);
@@ -1118,6 +1122,7 @@ pub fn step(self: *App) anyerror!bool {
     self.forgetDeadNames();
     self.forgetDeadUuids();
     self.forgetDeadPlaces();
+    self.unknown_components.forgetDead(self.gpa, &self.world);
     self.signals.forgetDead(&self.world);
     try self.animate();
     if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
@@ -1962,6 +1967,7 @@ pub fn clearWorld(self: *App) void {
     self.uuids.clearRetainingCapacity();
     self.by_uuid.clearRetainingCapacity();
     self.sibling_ranks.clearRetainingCapacity();
+    self.unknown_components.clear(self.gpa);
     self.signals.clear();
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
@@ -2210,6 +2216,16 @@ pub fn componentsOf(self: *App, entity: ecs.Entity, found: []ComponentValue) []C
     return found[0..count];
 }
 
+/// The components an entity was read from a scene with that nothing here is
+/// registered as - a game's own, in an editor that has not got them - each
+/// its name and its value as compact JSON, in the order the scene had them.
+/// Saving a scene writes them back as they were, and `removeComponentNamed`
+/// takes one off.
+pub fn unknownComponentsOf(self: *const App, entity: ecs.Entity) []const scene.Unknown.Component {
+    if (!self.world.isAlive(entity)) return &.{};
+    return self.unknown_components.of(entity);
+}
+
 /// Put the component called `name` on an entity, holding its defaults, and
 /// hand it back to fill in: an inspector's Add Component. One the entity has
 /// already is handed back as it is. Not from inside a query, since it moves
@@ -2221,10 +2237,15 @@ pub fn addComponentNamed(self: *App, entity: ecs.Entity, name: []const u8) Compo
     return self.valueOf(entity, entry).?;
 }
 
-/// Take the component called `name` off an entity. One it has not got does
-/// nothing. Not from inside a query either.
+/// Take the component called `name` off an entity: a registered one, which
+/// does nothing when the entity has none, or one it was read with that
+/// nothing here is registered as. Not from inside a query either.
 pub fn removeComponentNamed(self: *App, entity: ecs.Entity, name: []const u8) ComponentError!void {
-    const entry = self.scene_components.find(name) orelse return error.NoSuchComponent;
+    const entry = self.scene_components.find(name) orelse {
+        if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+        if (!self.unknown_components.remove(self.gpa, entity, name)) return error.NoSuchComponent;
+        return;
+    };
     try entry.removeFrom(&self.world, entity);
 }
 

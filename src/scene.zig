@@ -58,9 +58,11 @@
 //!
 //! **A scene holds the components it has been told about.** The engine's are
 //! registered from the start, and a game adds its own with
-//! `App.registerComponents`. A component in a file that nothing registered
-//! is passed over and counted in `Loaded.skipped`, so a scene from a newer
-//! build still opens. A scene of another version is refused, and the
+//! `App.registerComponents`. A component in a file that nothing here is
+//! registered as is kept with its entity as the file has it, and written
+//! back so when the scene is saved: a scene from a newer build still opens,
+//! and an editor without a game's own components saves the game's scenes
+//! whole. See `Unknown`. A scene of another version is refused, and the
 //! refusal says which version it is.
 //!
 //! **A scene that is wrong is an error, never a crash**: what the file holds
@@ -113,9 +115,10 @@ pub const LoadOptions = struct {
 pub const Loaded = struct {
     /// How many entities it spawned.
     entities: usize = 0,
-    /// Components the file has that nothing here is registered as, passed
-    /// over.
-    skipped: usize = 0,
+    /// Components the file has that nothing here is registered as: kept
+    /// with their entities, saved back as they were, and never run. An
+    /// editor without the game's components meets these. See `Unknown`.
+    components_unknown: usize = 0,
     /// Entities given a new UUID, because one in the world had the one the
     /// file gave them: the same scene loaded twice, say. References inside
     /// the scene still find them.
@@ -232,6 +235,116 @@ pub const Registry = struct {
     }
 };
 
+/// Components scenes held that nothing here is registered as, each kept with
+/// its entity as the scene had it and written back with it when a scene is
+/// saved. A value is kept as compact JSON, which holds a number to its last
+/// digit whether the scene was JSON or CBOR. A string is kept as a string:
+/// a UUID in one naming an entity is not pointed anywhere new, as a
+/// registered component's `Entity` is when a scene is loaded twice.
+pub const Unknown = struct {
+    /// Each entity's, in the order its scene had them. An array map, so that
+    /// `forgetDead` can walk it by index while removing from it.
+    by_entity: std.AutoArrayHashMapUnmanaged(Entity, std.ArrayList(Component)) = .empty,
+
+    pub const Component = struct {
+        name: []const u8,
+        /// Its value, as compact JSON.
+        value: []const u8,
+    };
+
+    pub fn deinit(self: *Unknown, gpa: Allocator) void {
+        for (self.by_entity.values()) |*list| freeAll(gpa, list);
+        self.by_entity.deinit(gpa);
+    }
+
+    /// Every one forgotten: the world was cleared.
+    pub fn clear(self: *Unknown, gpa: Allocator) void {
+        for (self.by_entity.values()) |*list| freeAll(gpa, list);
+        self.by_entity.clearRetainingCapacity();
+    }
+
+    /// An entity's, in the order its scene had them.
+    pub fn of(self: *const Unknown, entity: Entity) []const Component {
+        const list = self.by_entity.getPtr(entity) orelse return &.{};
+        return list.items;
+    }
+
+    /// Keep one for `entity`. It takes `name` and `value`, which `gpa`
+    /// made, once it has returned.
+    fn keep(self: *Unknown, gpa: Allocator, entity: Entity, name: []const u8, value: []const u8) Allocator.Error!void {
+        const slot = try self.by_entity.getOrPut(gpa, entity);
+        if (!slot.found_existing) slot.value_ptr.* = .empty;
+        try slot.value_ptr.append(gpa, .{ .name = name, .value = value });
+    }
+
+    /// Forget the one called `name` of an entity's. Whether there was one.
+    pub fn remove(self: *Unknown, gpa: Allocator, entity: Entity, name: []const u8) bool {
+        const list = self.by_entity.getPtr(entity) orelse return false;
+        for (list.items, 0..) |kept, at| {
+            if (!std.mem.eql(u8, kept.name, name)) continue;
+            gpa.free(kept.name);
+            gpa.free(kept.value);
+            _ = list.orderedRemove(at);
+            return true;
+        }
+        return false;
+    }
+
+    /// Forget those of every entity that has died. Once a frame, as the
+    /// names are.
+    pub fn forgetDead(self: *Unknown, gpa: Allocator, world: *const World) void {
+        // Backwards, so the entry a swap-remove moves into the gap has
+        // already been looked at.
+        var at = self.by_entity.count();
+        while (at > 0) {
+            at -= 1;
+            if (world.isAlive(self.by_entity.keys()[at])) continue;
+            freeAll(gpa, &self.by_entity.values()[at]);
+            self.by_entity.swapRemoveAt(at);
+        }
+    }
+
+    fn freeAll(gpa: Allocator, list: *std.ArrayList(Component)) void {
+        for (list.items) |kept| {
+            gpa.free(kept.name);
+            gpa.free(kept.value);
+        }
+        list.deinit(gpa);
+    }
+};
+
+/// One whole value from `r` into `w`, token by token: a number as the digits
+/// it was read as, a string as its text.
+fn copyValue(r: *json.Reader, w: *json.Writer) (json.Reader.Error || json.Writer.Error)!void {
+    var depth: usize = 0;
+    while (true) {
+        switch ((try r.next()) orelse return error.SyntaxError) {
+            .object_begin => {
+                try w.beginObject();
+                depth += 1;
+            },
+            .array_begin => {
+                try w.beginArray();
+                depth += 1;
+            },
+            .object_end => {
+                try w.endObject();
+                depth -= 1;
+            },
+            .array_end => {
+                try w.endArray();
+                depth -= 1;
+            },
+            .key => |name| try w.key(name),
+            .string => |text| try w.writeString(text),
+            .number => |number| try w.writeNumber(number),
+            .bool => |value| try w.writeBool(value),
+            .null => try w.writeNull(),
+        }
+        if (depth == 0) return;
+    }
+}
+
 /// What `T` is called in a scene, and by `App.componentOf`: its `scene_name`
 /// if it declares one, then its `reflect_name`, and otherwise its type name
 /// without the path in front - `Wander`, not `creatures.Wander`.
@@ -325,9 +438,10 @@ const Document = struct {
     }
 };
 
-/// One entity as a scene writes it - its UUID, its name and its registered
-/// components - for `json.stringify` or `json.Document.from`: what an
-/// editor's inspector shows. An entity it names is written as its UUID.
+/// One entity as a scene writes it - its UUID, its name, its registered
+/// components and those it was read with that nothing here knows - for
+/// `json.stringify` or `json.Document.from`: what an editor's inspector
+/// shows. An entity it names is written as its UUID.
 pub const EntityJson = struct {
     app: *App,
     entity: Entity,
@@ -385,7 +499,26 @@ const Saving = struct {
             try w.key(entry.name);
             try entry.write(s, w, cell);
         }
+        try s.writeUnknown(w, e);
         try w.endObject();
+    }
+
+    /// The components the entity was read with that nothing here knows, as
+    /// they were read. One of a name the entity has a registered component
+    /// of now is left out: that component is what it holds.
+    fn writeUnknown(s: *Saving, w: *json.Writer, e: Entity) json.Writer.Error!void {
+        const app = s.app;
+        for (app.unknown_components.of(e)) |kept| {
+            if (app.componentOf(e, kept.name) != null) continue;
+            try w.key(kept.name);
+            var reader: json.Reader = .init(app.gpa, kept.value, .{ .syntax = .json5 });
+            defer reader.deinit();
+            copyValue(&reader, w) catch |err| return switch (err) {
+                error.OutOfMemory, error.WriteFailed, error.TooDeep, error.NonFiniteNumber => |held| held,
+                // `Loading.keepUnknown` wrote it, and it reads.
+                error.SyntaxError => unreachable,
+            };
+        }
     }
 
     /// `connections`: every one made with `persist` from an entity written,
@@ -664,7 +797,7 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     // Each entity the UUID the file gives it - unless an entity already in
     // the world has that one, when it is given a new one, and the file's
     // stays the scene's own name for it.
-    var loaded: Loaded = .{ .entities = spawned.items.len, .skipped = told.skipped };
+    var loaded: Loaded = .{ .entities = spawned.items.len };
     for (spawned.items, told.uuids.items) |e, given| {
         const uuid = given orelse continue;
         if (app.findUuid(uuid) != null) {
@@ -691,6 +824,7 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
         // The list is the order of every parent's children.
         try app.placeInOrder(spawned.items);
         loaded.moved = l.moved;
+        loaded.components_unknown = l.components_unknown;
         loaded.connections_unknown = l.connections_unknown;
         loaded.connections_skipped = l.connections_skipped;
     }
@@ -863,7 +997,6 @@ const Glance = struct {
 
 /// What the first pass learns for the second. Kept in the arena.
 const Told = struct {
-    skipped: usize = 0,
     /// Each entity's UUID in the file, at its place in the list.
     uuids: std.ArrayList(?Uuid) = .empty,
     /// Each UUID's place in the list: what a reference inside the scene
@@ -898,6 +1031,7 @@ const Loading = struct {
     /// Files found by their UUIDs somewhere other than the scene says.
     moved: usize = 0,
     /// See `Loaded`.
+    components_unknown: usize = 0,
     connections_unknown: usize = 0,
     connections_skipped: usize = 0,
     path: Path = .{},
@@ -946,7 +1080,7 @@ const Loading = struct {
                                 if (count == ids.len) return error.TooManyComponents;
                                 ids[count] = try entry.idIn(&app.world);
                                 count += 1;
-                            } else told.skipped += 1;
+                            }
                         }
                         try l.reader.skipValue();
                     }
@@ -1046,7 +1180,7 @@ const Loading = struct {
                         continue;
                     }
                     const entry = app.scene_components.find(member) orelse {
-                        try l.reader.skipValue();
+                        try l.keepUnknown(e, member);
                         continue;
                     };
                     const mark = l.path.push("{s}", .{entry.name});
@@ -1059,6 +1193,23 @@ const Loading = struct {
             // Past the list's end, for what comes after it: the connections.
             try l.open(.array_end, "the end of the entities");
         }
+    }
+
+    /// A component nothing here is registered as, kept with its entity as
+    /// the scene has it. See `Unknown`.
+    fn keepUnknown(l: *Loading, e: Entity, name: []const u8) anyerror!void {
+        const gpa = l.app.gpa;
+        // The reader's, until its next token.
+        const owned = try gpa.dupe(u8, name);
+        errdefer gpa.free(owned);
+        var text: std.Io.Writer.Allocating = .init(gpa);
+        defer text.deinit();
+        var w: json.Writer = .init(&text.writer, .{ .non_finite = .literal });
+        try copyValue(l.reader, &w);
+        const value = try text.toOwnedSlice();
+        errdefer gpa.free(value);
+        try l.app.unknown_components.keep(gpa, e, owned, value);
+        l.components_unknown += 1;
     }
 
     /// `connections`: each made again, with `persist`, whether this build
@@ -1722,7 +1873,7 @@ test "a scene comes back as it went, from JSON and from CBOR" {
         try copy.registerComponents(.{Wander});
         const loaded = try copy.loadScene(path, .{});
         try testing.expectEqual(@as(usize, 4), loaded.entities);
-        try testing.expectEqual(@as(usize, 0), loaded.skipped);
+        try testing.expectEqual(@as(usize, 0), loaded.components_unknown);
 
         const again = try write(copy, testing.allocator, .{});
         defer testing.allocator.free(again);
@@ -1904,23 +2055,104 @@ test "a UUID given twice, or naming nothing, is a mistake that says where it is"
     try testing.expectEqual(@as(usize, 0), app.world.count());
 }
 
-test "what a scene has that nothing here knows is passed over, and what it lacks is the default" {
+test "a component nothing here knows is kept, a field or a member nothing knows is passed over, and what a scene lacks is the default" {
     const app = try headless();
     defer app.destroy();
     const loaded = try read(app,
         \\{ "fluxion_scene": 2, "entities": [
-        \\  { "Transform2D": { "x": 5, "wobble": 3 }, "Mystery": { "a": [1, 2] } },
+        \\  { "name": "odd", "Transform2D": { "x": 5, "wobble": 3 }, "Mystery": { "a": [1, 2] } },
         \\  { "name": "empty" }
         \\], "future": true }
     , .{});
     try testing.expectEqual(@as(usize, 2), loaded.entities);
-    try testing.expectEqual(@as(usize, 1), loaded.skipped);
+    try testing.expectEqual(@as(usize, 1), loaded.components_unknown);
+    const kept = app.unknownComponentsOf(app.find("odd").?);
+    try testing.expectEqual(@as(usize, 1), kept.len);
+    try testing.expectEqualStrings("Mystery", kept[0].name);
+    try testing.expectEqualStrings("{\"a\":[1,2]}", kept[0].value);
+    try testing.expectEqual(@as(usize, 0), app.unknownComponentsOf(app.find("empty").?).len);
 
     const place = app.single(Transform2D).?;
     try testing.expectEqual(@as(f32, 5), place.x);
     try testing.expectEqual(@as(f32, 1), place.scale_x);
     try testing.expect(place.parent.isNone());
     try testing.expect(app.find("empty") != null);
+}
+
+/// A game's component that an editor meets only later, if at all.
+const Later = extern struct {
+    n: i32 = 0,
+
+    pub const scene_name = "Later";
+};
+
+test "a component nothing here knows is written back as it was read, from JSON and from CBOR" {
+    const app = try headless();
+    defer app.destroy();
+    const loaded = try read(app,
+        \\{ "fluxion_scene": 2, "entities": [
+        \\  { "name": "odd", "Mystery": { "big": 18446744073709551615, "half": -0.5, "odd": NaN,
+        \\      "text": "a \"quoted\"\nline ✓", "list": [true, false, null, { "deep": [[]] }] },
+        \\    "Transform2D": { "x": 5 }, "Later": 7 },
+        \\  { "name": "plain", "Transform2D": {} }
+        \\] }
+    , .{});
+    try testing.expectEqual(@as(usize, 2), loaded.components_unknown);
+    const odd = app.find("odd").?;
+    const mystery = "{\"big\":18446744073709551615,\"half\":-0.5,\"odd\":NaN,\"text\":\"a \\\"quoted\\\"\\nline ✓\",\"list\":[true,false,null,{\"deep\":[[]]}]}";
+    const kept = app.unknownComponentsOf(odd);
+    try testing.expectEqual(@as(usize, 2), kept.len);
+    try testing.expectEqualStrings("Mystery", kept[0].name);
+    try testing.expectEqualStrings(mystery, kept[0].value);
+    try testing.expectEqualStrings("Later", kept[1].name);
+    try testing.expectEqualStrings("7", kept[1].value);
+
+    // Written after the registered ones, in the order read.
+    const text = try write(app, testing.allocator, .{ .indent = 0 });
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "\"Transform2D\":{\"x\":5.0},\"Mystery\":" ++ mystery ++ ",\"Later\":7}") != null);
+    const one = try json.stringify(testing.allocator, EntityJson{ .app = app, .entity = odd }, .{});
+    defer testing.allocator.free(one);
+    try testing.expect(std.mem.indexOf(u8, one, "\"Later\":7") != null);
+
+    // Through CBOR and back, every digit and every character stays.
+    const bytes = try write(app, testing.allocator, .{ .format = .cbor });
+    defer testing.allocator.free(bytes);
+    const again = try headless();
+    defer again.destroy();
+    _ = try read(again, bytes, .{});
+    const round = again.unknownComponentsOf(again.find("odd").?);
+    try testing.expectEqual(@as(usize, 2), round.len);
+    try testing.expectEqualStrings(mystery, round[0].value);
+    try testing.expectEqualStrings("7", round[1].value);
+    const text_again = try write(again, testing.allocator, .{ .indent = 0 });
+    defer testing.allocator.free(text_again);
+    try testing.expectEqualStrings(text, text_again);
+
+    // Once the game's component is here and on the entity, it is what the
+    // entity holds, and what is written.
+    try app.registerComponents(.{Later});
+    _ = try app.addComponentNamed(odd, "Later");
+    const known = try write(app, testing.allocator, .{ .indent = 0 });
+    defer testing.allocator.free(known);
+    try testing.expect(std.mem.indexOf(u8, known, "\"Later\":{}") != null);
+    try testing.expect(std.mem.indexOf(u8, known, "\"Later\":7") == null);
+
+    // Taken off by name, and forgotten with the entity or the world.
+    try app.removeComponentNamed(odd, "Mystery");
+    try testing.expectEqual(@as(usize, 1), app.unknownComponentsOf(odd).len);
+    try testing.expectError(error.NoSuchComponent, app.removeComponentNamed(odd, "Mystery"));
+    const plain = again.find("plain").?;
+    try testing.expectError(error.NoSuchComponent, again.removeComponentNamed(plain, "Mystery"));
+    app.world.despawn(odd);
+    try testing.expectEqual(@as(usize, 0), app.unknownComponentsOf(odd).len);
+    try testing.expectError(error.NoSuchEntity, app.removeComponentNamed(odd, "Later2"));
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.unknown_components.by_entity.count());
+    _ = try again.step();
+    try testing.expectEqual(@as(usize, 1), again.unknown_components.by_entity.count());
+    again.clearWorld();
+    try testing.expectEqual(@as(usize, 0), again.unknown_components.by_entity.count());
 }
 
 test "a mistake in a scene says where it is, and leaves the world as it was" {

@@ -1271,8 +1271,11 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   are registered from the start, and a game's own under their type's name -
   or a `pub const scene_name`, for two types called the same, or failing
   that its `reflect_name`. A component in a file that nothing here is
-  registered as is passed over and counted in `loaded.skipped`, so a scene
-  from a newer build still opens.
+  registered as is kept with its entity as the file has it, and saved back
+  that way, counted in `loaded.components_unknown`. So a scene from a newer
+  build still opens, and an editor without a game's own components saves
+  the game's scenes whole. `app.unknownComponentsOf(entity)` lists them,
+  each with its value as JSON, and `app.removeComponentNamed` takes one off.
 - **A mistake says where it is** - the line and column, or the byte in CBOR,
   and the path to the value - and leaves the world as it was:
 
