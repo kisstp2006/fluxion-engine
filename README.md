@@ -1449,6 +1449,8 @@ struct Door {
   `uuid()`, `has(name)`, `get(name)`, `add(name)` and `remove(name)`.
   - A component from `get` is looked up again each time the script uses it, so keeping it in a field is safe while the world's rows move.
   - Once it is gone, using it stops the script with a panic saying so.
+  - An entity is one handle wherever a script is handed it: `self.entity`, `app.find("door")`, a field such as `Transform2D.parent`, a signal's argument. So `app.find("door") == self.entity` says whether it is this one, and none is null.
+  - Where a call or a field wants an entity, `app.nameOf(app.find("door"))`, the script gives that handle, a scripted entity's instance, or null. Anything else stops it with a panic saying what it gave.
 - **A script cannot stop the game.**
   - Each call has a budget of loop rounds, `Options.budget`, ten million by default, and a call that runs past it is stopped.
   - A panic is said in the log with its line, once for each instance's method, and counted in `app.scripts.?.failures`; the other scripts go on.
@@ -1464,7 +1466,7 @@ struct Door {
   - It is connected by `app.connectNamed(door, "opened", ...)`, and saved with a scene.
   - It is heard by the table's connections when the script emits it.
   - A signal from a component, or another script's, calls a method the target's script declares, listed by `app.methodsOf`.
-  - An `Entity` argument arrives as a handle like `self.entity`, and the script's instance or `self.entity` goes back to the engine as an `Entity`.
+  - An `Entity` argument arrives as the entity's handle, and the script's instance or its entity's handle goes back to the engine as an `Entity`.
   - A connection made while its script did not compile is heard once it does.
 - **In a scene**, a `Script` is its file's path and its struct, and once the
   scene is saved, the file's UUID as well. Reading the scene loads the file:

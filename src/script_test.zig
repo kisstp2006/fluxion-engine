@@ -15,6 +15,7 @@ const signals = @import("signals.zig");
 
 const flux = script.flux;
 const Entity = ecs.Entity;
+const Transform2D = @import("components.zig").Transform2D;
 const Script = script.Script;
 const ScriptHandle = script.ScriptHandle;
 
@@ -642,6 +643,110 @@ test "an engine signal calls a method its target's script declares, an entity ar
     try testing.expectEqual(@as(i64, 2), global(app, file, "hits").asInt());
     try testing.expectEqual(@as(f64, 4.0), global(app, file, "total").asFloat());
     try testing.expectEqualStrings("player", globalText(app, file, "who"));
+    try testing.expectEqual(@as(usize, 0), app.signals.failures);
+}
+
+test "an entity is one handle to the scripts, wherever they are handed it" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("finder.flux",
+        \\var name = "";
+        \\var nobody = false;
+        \\var mine = false;
+        \\var placed = 0.0;
+        \\var parented = false;
+        \\var heard = false;
+        \\var kept: any = null;
+        \\var me: any = null;
+        \\struct Finder {
+        \\    fn ready(self) {
+        \\        app.find("other").get("Transform2D").x += 1;
+        \\        name = app.nameOf(app.find("other"));
+        \\        nobody = app.find("nobody") == null;
+        \\        mine = app.find("finder") == self.entity;
+        \\        // A struct handed back is the script's own, which the next
+        \\        // call does not write over.
+        \\        var place = app.worldTransform(app.find("other"));
+        \\        app.nameOf(self.entity);
+        \\        placed = place.x;
+        \\        var transform = self.entity.get("Transform2D");
+        \\        transform.parent = app.find("other");
+        \\        parented = transform.parent == app.find("other");
+        \\        kept = app.find("other");
+        \\        me = self;
+        \\    }
+        \\    fn on_hit(self, damage: float, by: any) {
+        \\        heard = by == kept;
+        \\    }
+        \\}
+        \\struct Point {
+        \\    var x: int = 0;
+        \\}
+        \\fn unparent() { app.find("finder").get("Transform2D").parent = null; }
+        \\fn parentOf() { return app.find("finder").get("Transform2D").parent; }
+        \\fn byInstance() { return app.nameOf(me); }
+        \\fn keptAlive() { return kept.alive(); }
+        \\fn number() { return app.nameOf(5); }
+        \\fn fraction() { return app.nameOf(1.5); }
+        \\fn text() { return app.nameOf("other"); }
+        \\fn component() { return app.nameOf(app.find("finder").get("Transform2D")); }
+        \\fn stray() { return app.nameOf(Point{}); }
+    );
+    const finder = try app.world.spawnWith(.{ Transform2D.at(0, 0), Health{}, Script.of(file) });
+    try app.setName(finder, "finder");
+    const other = try app.world.spawnWith(.{ Transform2D.at(5, 0), Health{} });
+    try app.setName(other, "other");
+    try app.signal(other, Health, .hit).connect(.method(finder, "on_hit"), .{});
+    _ = try app.step();
+
+    // Found, reached through, named and compared.
+    try testing.expectEqual(@as(f32, 6), app.world.get(other, Transform2D).?.x);
+    try testing.expectEqualStrings("other", globalText(app, file, "name"));
+    try testing.expect(global(app, file, "nobody").asBool());
+    try testing.expect(global(app, file, "mine").asBool());
+    try testing.expectEqual(@as(f64, 6), global(app, file, "placed").asFloat());
+    // Written into a component's field, and read back as the same handle.
+    try testing.expect(global(app, file, "parented").asBool());
+    try testing.expect(app.world.get(finder, Transform2D).?.parent.eql(other));
+
+    // A signal's entity is the same handle too.
+    try app.emit(other, Health, .hit, .{ .damage = 1, .by = other });
+    _ = try app.step();
+    try testing.expect(global(app, file, "heard").asBool());
+
+    const scripts = app.scripts.?;
+    const module = scripts.moduleOf(file).?;
+    _ = try scripts.vm.callName(module, "unparent", &.{});
+    try testing.expect(app.world.get(finder, Transform2D).?.parent.isNone());
+    try testing.expect((try scripts.vm.callName(module, "parentOf", &.{})).tag == .null);
+    try testing.expectEqualStrings("finder", (try scripts.vm.callName(module, "byInstance", &.{})).as(flux.object.String).bytes());
+
+    // Anything else stops the script, saying what it gave.
+    for ([_][2][]const u8{
+        .{ "number", "an entity is wanted here, not a number" },
+        .{ "fraction", "an entity is wanted here, not a number" },
+        .{ "text", "an entity is wanted here, not a string" },
+        .{ "component", "an entity is wanted here, not a Transform2D" },
+        .{ "stray", "an entity is wanted here, not a Point on no entity" },
+    }) |case| {
+        try testing.expectError(error.Panic, scripts.vm.callName(module, case[0], &.{}));
+        try testing.expectEqualStrings(case[1], scripts.vm.panic.?.message);
+        scripts.vm.clearPanic();
+    }
+
+    // Each handle is held while its entity lives, so the collector leaves
+    // it though no script has it. A dead entity's is let go of at the end
+    // of the frame, and the one the script kept answers as a dead entity's.
+    var handles = scripts.handles.valueIterator();
+    while (handles.next()) |handle| try testing.expect(scripts.vm.held.contains(handle.obj()));
+    const other_handle = scripts.handles.get(other).?;
+    app.world.despawn(other);
+    _ = try app.step();
+    try testing.expect(!scripts.handles.contains(other));
+    try testing.expect(!scripts.vm.held.contains(other_handle.obj()));
+    try testing.expect(scripts.handles.contains(finder));
+    try testing.expect(!(try scripts.vm.callName(module, "keptAlive", &.{})).asBool());
+    try testing.expectEqual(@as(usize, 0), scripts.failures);
     try testing.expectEqual(@as(usize, 0), app.signals.failures);
 }
 

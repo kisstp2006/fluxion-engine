@@ -53,7 +53,15 @@
 //! has its `Script`, connected by name, saved with a scene, and heard by the
 //! engine's connections when the script emits. A signal the engine sends -
 //! a component's, another script's - calls a method the target's script
-//! declares, an `Entity` arriving as a handle like `self.entity`.
+//! declares.
+//!
+//! **An entity is one handle.** Wherever a script is handed an entity -
+//! `self.entity`, `app.find("door")`, a field such as `Transform2D.parent`,
+//! a signal's argument - it is the same handle for as long as the entity
+//! lives, so `==` says whether two are the same entity, and null is none.
+//! Where a call or a field wants an entity, a script gives that handle, a
+//! scripted entity's instance as an emit may, or null for none. Anything
+//! else stops it with a panic that says what it gave.
 //!
 //! **A script cannot stop the game.** Each call into one gets a budget of
 //! loop rounds, and a call that runs past it is stopped. A panic is said in
@@ -378,6 +386,9 @@ pub const Scripts = struct {
     instances: std.AutoArrayHashMapUnmanaged(Entity, Instance) = .empty,
     /// Each instance's entity, by the instance: whose signal an emit is.
     entity_of: std.AutoHashMapUnmanaged(*flux.object.Obj, Entity) = .empty,
+    /// The handle each entity is to the scripts, held from the first time
+    /// one is handed to them until the end of the frame it dies in.
+    handles: std.AutoHashMapUnmanaged(Entity, flux.Value) = .empty,
     /// Entities whose script could not be made, with the `Script` that
     /// asked. It is not tried again until the `Script` or its file changes.
     refused: std.AutoHashMapUnmanaged(Entity, Script) = .empty,
@@ -422,6 +433,7 @@ pub const Scripts = struct {
             .io = app.io,
             .on_task_panic = sayTaskPanic,
             .on_emit = heardEmit,
+            .host_types = &.{entity_type},
         });
         errdefer vm.destroy();
         vm.host = self;
@@ -437,6 +449,7 @@ pub const Scripts = struct {
         self.vm.destroy();
         self.instances.deinit(gpa);
         self.entity_of.deinit(gpa);
+        self.handles.deinit(gpa);
         self.refused.deinit(gpa);
         self.scratch.deinit(gpa);
         self.changed.deinit(gpa);
@@ -726,6 +739,14 @@ pub const Scripts = struct {
                 while (it.next()) |entity| {
                     if (!self.app.world.isAlive(entity.*)) self.refused.removeByPtr(entity);
                 }
+                // So is a dead entity's handle. A script that kept it keeps
+                // it, and it answers as a dead entity's.
+                var handles = self.handles.iterator();
+                while (handles.next()) |entry| {
+                    if (self.app.world.isAlive(entry.key_ptr.*)) continue;
+                    self.vm.release(entry.value_ptr.*);
+                    self.handles.removeByPtr(entry.key_ptr);
+                }
             },
         }
     }
@@ -944,10 +965,9 @@ pub const Scripts = struct {
     }
 
     /// A signal's call of a method the entity's script declares, with the
-    /// signal's arguments as the script's own values: an entity as a handle
-    /// like `self.entity`, and the rest as a native's results are. An
-    /// instance not made yet - a signal emitted before the first frame - is
-    /// made and readied first.
+    /// signal's arguments as the script's own values, as `flux.Vm.valueOf`
+    /// makes them: an entity as its handle. An instance not made yet - a
+    /// signal emitted before the first frame - is made and readied first.
     fn callMethod(self: *Scripts, entity: Entity, name: []const u8, args: []const reflect.Value) anyerror!void {
         if (!self.options.run) return error.NotRunning;
         const class = self.classOfEntity(entity) orelse return error.NoSuchMethod;
@@ -968,7 +988,7 @@ pub const Scripts = struct {
         // Each held until the call: making the next can collect.
         defer for (values[1 .. made + 1]) |v| vm.release(v);
         for (args, values[1 .. args.len + 1]) |arg, *into| {
-            into.* = if (arg.asConst(Entity)) |held| try entityHandle(self, held.*) else try vm.valueOf(arg);
+            into.* = try vm.valueOf(arg);
             try vm.hold(into.*);
             made += 1;
         }
@@ -1150,6 +1170,8 @@ fn carried(self: *Scripts, vm: *flux.Vm, arg: flux.Value, place: *Carried) flux.
 
 fn typeName(arg: flux.Value) []const u8 {
     return switch (arg.tag) {
+        .int, .float => "a number",
+        .string => "a string",
         .list => "a list",
         .map => "a map",
         .function, .native, .method => "a function",
@@ -1170,15 +1192,58 @@ fn sayTaskPanic(vm: *flux.Vm, panic: *const flux.Vm.Panic) void {
     log.warn("a script's task stopped:\n{s}", .{writer.buffered()});
 }
 
-/// `self.entity` for an entity: an `EntityRef` the collector frees with the
-/// handle, once no script can reach it.
+/// The handle an entity is to the scripts: an `EntityRef`, made the first
+/// time and the same one after, until the end of the frame the entity dies
+/// in. The collector frees it once no script can reach it either.
 fn entityHandle(scripts: *Scripts, entity: Entity) flux.Vm.Error!flux.Value {
+    if (scripts.handles.get(entity)) |known| return known;
     const vm = scripts.vm;
+    try scripts.handles.ensureUnusedCapacity(scripts.app.gpa, 1);
     const ref = try vm.gpa.create(EntityRef);
     ref.* = .{ .scripts = scripts, .entity = entity };
-    return vm.adoptHandle(ref) catch |err| {
+    const handle = vm.adoptHandle(ref) catch |err| {
         vm.gpa.destroy(ref);
         return err;
+    };
+    try vm.hold(handle);
+    scripts.handles.putAssumeCapacityNoClobber(entity, handle);
+    return handle;
+}
+
+/// How a script sees an `Entity`: see "An entity is one handle" above.
+const entity_type: flux.HostType = .{
+    .type = reflect.typeOf(Entity),
+    .to_script = entityToScript,
+    .from_script = entityFromScript,
+};
+
+fn entityToScript(vm: *flux.Vm, value: reflect.Value) flux.Vm.Error!flux.Value {
+    const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
+    const entity = value.get(Entity).?;
+    if (entity.isNone()) return .null;
+    return entityHandle(self, entity);
+}
+
+fn entityFromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flux.Vm.Error!void {
+    const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
+    const entity: Entity = switch (value.tag) {
+        .null => .none,
+        .instance => self.entity_of.get(value.obj()) orelse return notAnEntity(vm, value),
+        .handle => blk: {
+            const now = vm.reflectOf(value) orelse return notAnEntity(vm, value);
+            const ref = now.asConst(EntityRef) orelse return notAnEntity(vm, value);
+            break :blk ref.entity;
+        },
+        else => return notAnEntity(vm, value),
+    };
+    into.set(Entity, entity) catch return vm.fail("this entity can only be read", .{});
+}
+
+fn notAnEntity(vm: *flux.Vm, value: flux.Value) flux.Vm.Error {
+    return switch (value.tag) {
+        .handle => vm.fail("an entity is wanted here, not a {s}", .{value.as(flux.object.Handle).value.type.name.slice()}),
+        .instance => vm.fail("an entity is wanted here, not a {s} on no entity", .{value.as(flux.object.Instance).class.name.bytes()}),
+        else => vm.fail("an entity is wanted here, not {s}", .{typeName(value)}),
     };
 }
 
