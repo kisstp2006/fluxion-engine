@@ -36,8 +36,8 @@
         // The interface layer: the layout `.ui` systems declare into, and the
         // renderer that draws it over the 2D layer.
         .fluxion_ui = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-ui#c94a5ac5157cb6798f9eca4c5e371b4c801637c1",
-            .hash = "fluxion_ui-0.1.0-lw4Ws99jDgDcVD6VQ__TgEY_XPDX5L6sSJllWm-blMT2",
+            .url = "git+https://github.com/kisstp2006/fluxion-ui#40b8ef5eac2c8b60c3c37a890914152ff56bdcfa",
+            .hash = "fluxion_ui-0.1.0-lw4Ws2qCDgC9qPJIJmQfp5NCEMCdg5UnaQXaH_P-IrbL",
         },
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.

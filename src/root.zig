@@ -36,6 +36,7 @@ pub const Input = @import("input.zig");
 pub const Time = @import("time.zig");
 pub const Assets = @import("assets.zig");
 pub const Interface = @import("interface.zig");
+pub const WorldUi = @import("world_ui.zig");
 pub const Clipboard = @import("clipboard.zig");
 
 /// Spawns, despawns, adds and removes that wait for the system asking for
@@ -232,6 +233,11 @@ pub const GamepadAxis = platform.GamepadAxis;
 
 /// The keys, stick and d-pad that move one axis, as component data.
 pub const AxisBinding = Input.AxisBinding;
+
+/// A game's named keyboard and controller actions, held as data and rebound
+/// without changing the systems that ask for them.
+pub const ButtonBinding = Input.ButtonBinding;
+pub const ActionMap = Input.ActionMap;
 
 /// Godot's Timer: a component that counts down and says `timeout`. See
 /// `timer.zig`.

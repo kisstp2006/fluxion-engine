@@ -53,6 +53,7 @@ const Interface = @import("interface.zig");
 const Input = @import("input.zig");
 const Time = @import("time.zig");
 const Window = @import("window.zig");
+const world_ui = @import("world_ui.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
 const timer = @import("timer.zig");
@@ -2749,6 +2750,33 @@ pub fn worldToScreen(self: *App, x: f32, y: f32) math.Vec2 {
     return self.currentView().toScreen(.init(x, y));
 }
 
+/// Open a regular Fluxion UI element over a point in the 2D world. Call it
+/// from a `.ui` system and close it like `ui.open`.
+pub fn openWorldUi(
+    self: *App,
+    point: math.Vec2,
+    declaration: ui_lib.Declaration,
+    placement: world_ui.Placement,
+) void {
+    const screen = self.worldToScreen(point.x, point.y);
+    const scale = if (self.interface.scale > 0) self.interface.scale else 1;
+    var placed = declaration;
+    placed.floating = .{
+        .attach = .root,
+        .anchor = .{
+            .element_x = placement.anchor_x,
+            .element_y = placement.anchor_y,
+        },
+        .offset = .{
+            .x = screen.x / scale + placement.offset.x,
+            .y = screen.y / scale + placement.offset.y,
+        },
+        .z_index = placement.z_index,
+        .clip = placement.clip,
+    };
+    self.ui.open(placed);
+}
+
 /// Where the pointer is in the world.
 pub fn pointerInWorld(self: *App) math.Vec2 {
     return self.screenToWorld(self.input.pointer.x, self.input.pointer.y);
@@ -4486,6 +4514,51 @@ const Panel = struct {
         app.ui.text("Hi", .{ .font_size = 16 });
     }
 };
+
+const WorldPanel = struct {
+    var released: u32 = 0;
+
+    fn declare(app: *App) anyerror!void {
+        app.openWorldUi(.init(40, 50), .{
+            .id = "world panel",
+            .width = .fixed(20),
+            .height = .fixed(10),
+            .background_color = .white,
+        }, .{ .offset = .{ .x = 3, .y = -4 } });
+        defer app.ui.close();
+        if (app.ui.justReleased()) released += 1;
+    }
+};
+
+test "world UI uses the regular interface scale and follows a world point" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240, .frames = 2 });
+    defer app.destroy();
+    app.interface.zoom = 2;
+    try app.addSystem(.ui, "world panel", WorldPanel.declare);
+    try app.run();
+
+    const box = app.ui.boxOf("world panel").?;
+    try testing.expectApproxEqAbs(@as(f32, 26), box.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 22), box.y, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 40), box.width, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 20), box.height, 0.001);
+}
+
+test "world UI receives input through the regular interface" {
+    WorldPanel.released = 0;
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240 });
+    defer app.destroy();
+    try app.addSystem(.ui, "world panel", WorldPanel.declare);
+    try app.startup();
+
+    _ = try app.step();
+    app.input.apply(leftButton(true, 40, 40));
+    _ = try app.step();
+    app.input.apply(leftButton(false, 40, 40));
+    _ = try app.step();
+
+    try testing.expectEqual(@as(u32, 1), WorldPanel.released);
+}
 
 test "every .ui system declares into one root the size of the window" {
     const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240, .frames = 2 });

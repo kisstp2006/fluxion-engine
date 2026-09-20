@@ -408,6 +408,123 @@ pub const AxisBinding = extern struct {
     }
 };
 
+/// A button's keyboard and controller inputs, as plain data. `no_key` and
+/// `no_pad_input` mean no second input.
+pub const ButtonBinding = extern struct {
+    keys: [2]i32 = @splat(no_key),
+    pad: u8 = any_pad,
+    buttons: [2]u8 = @splat(no_pad_input),
+
+    pub const no_key: i32 = -1;
+    pub const any_pad: u8 = 0xFF;
+    pub const no_pad_input: u8 = 0xFF;
+
+    pub fn key(value: platform.Key) ButtonBinding {
+        return .{ .keys = .{ @intFromEnum(value), no_key } };
+    }
+
+    pub fn orKey(self: ButtonBinding, value: platform.Key) ButtonBinding {
+        var out = self;
+        out.keys[1] = @intFromEnum(value);
+        return out;
+    }
+
+    pub fn withPad(self: ButtonBinding, slot: u8, button: platform.GamepadButton) ButtonBinding {
+        var out = self;
+        out.pad = slot;
+        out.buttons[0] = @intFromEnum(button);
+        return out;
+    }
+
+    pub fn orPad(self: ButtonBinding, button: platform.GamepadButton) ButtonBinding {
+        var out = self;
+        out.buttons[1] = @intFromEnum(button);
+        return out;
+    }
+};
+
+/// A game's named controls. The names and bindings live in parallel arrays:
+/// changing one never changes another action's storage or identity.
+pub const ActionMap = struct {
+    names: std.ArrayList([]const u8) = .empty,
+    bindings: std.ArrayList(Binding) = .empty,
+
+    pub const Binding = union(enum) {
+        button: ButtonBinding,
+        axis: AxisBinding,
+    };
+
+    pub fn deinit(self: *ActionMap, gpa: std.mem.Allocator) void {
+        for (self.names.items) |name| gpa.free(name);
+        self.names.deinit(gpa);
+        self.bindings.deinit(gpa);
+    }
+
+    pub fn bindButton(self: *ActionMap, gpa: std.mem.Allocator, name: []const u8, binding: ButtonBinding) !void {
+        try self.bind(gpa, name, .{ .button = binding });
+    }
+
+    pub fn bindAxis(self: *ActionMap, gpa: std.mem.Allocator, name: []const u8, binding: AxisBinding) !void {
+        try self.bind(gpa, name, .{ .axis = binding });
+    }
+
+    pub fn remove(self: *ActionMap, gpa: std.mem.Allocator, name: []const u8) bool {
+        const index = self.indexOf(name) orelse return false;
+        gpa.free(self.names.orderedRemove(index));
+        _ = self.bindings.orderedRemove(index);
+        return true;
+    }
+
+    pub fn bindingOf(self: *const ActionMap, name: []const u8) ?Binding {
+        const index = self.indexOf(name) orelse return null;
+        return self.bindings.items[index];
+    }
+
+    pub fn down(self: *const ActionMap, input: *const Input, name: []const u8) bool {
+        const binding = self.bindingOf(name) orelse return false;
+        return switch (binding) {
+            .button => |button| input.buttonBindingDown(button),
+            .axis => |action_axis| input.axisOf(action_axis) != 0,
+        };
+    }
+
+    pub fn justPressed(self: *const ActionMap, input: *const Input, name: []const u8) bool {
+        const binding = self.bindingOf(name) orelse return false;
+        return switch (binding) {
+            .button => |button| input.buttonBindingJustPressed(button),
+            .axis => false,
+        };
+    }
+
+    pub fn axis(self: *const ActionMap, input: *const Input, name: []const u8) f32 {
+        const binding = self.bindingOf(name) orelse return 0;
+        return switch (binding) {
+            .button => |button| if (input.buttonBindingDown(button)) 1 else 0,
+            .axis => |action_axis| input.axisOf(action_axis),
+        };
+    }
+
+    fn bind(self: *ActionMap, gpa: std.mem.Allocator, name: []const u8, binding: Binding) !void {
+        if (self.indexOf(name)) |index| {
+            self.bindings.items[index] = binding;
+            return;
+        }
+        const owned = try gpa.dupe(u8, name);
+        errdefer gpa.free(owned);
+        try self.names.ensureUnusedCapacity(gpa, 1);
+        try self.bindings.ensureUnusedCapacity(gpa, 1);
+        self.names.appendAssumeCapacity(owned);
+        self.bindings.appendAssumeCapacity(binding);
+    }
+
+    fn indexOf(self: *const ActionMap, name: []const u8) ?usize {
+        for (self.names.items, 0..) |stored, index| {
+            if (std.mem.eql(u8, stored, name)) return index;
+        }
+        return null;
+    }
+};
+
 /// Which edges the questions answer from. See `clock`.
 pub const Clock = enum {
     /// Since the top of this frame. What every stage but `.fixed` sees.
@@ -517,6 +634,26 @@ pub fn axisOf(self: *const Input, binding: AxisBinding) f32 {
         sum -= 1;
     }
     return std.math.clamp(sum, -1, 1);
+}
+
+fn buttonBindingDown(self: *const Input, binding: ButtonBinding) bool {
+    if (self.anyKeyOf(binding.keys) != 0) return true;
+    const controller = if (binding.pad == ButtonBinding.any_pad) self.anyPad() else self.pad(binding.pad);
+    for (binding.buttons) |raw| {
+        if (raw < platform.GamepadButton.count and controller.down(@enumFromInt(raw))) return true;
+    }
+    return false;
+}
+
+fn buttonBindingJustPressed(self: *const Input, binding: ButtonBinding) bool {
+    for (binding.keys) |raw| {
+        if (raw >= 0 and raw < key_span and self.justPressed(@enumFromInt(raw))) return true;
+    }
+    const controller = if (binding.pad == ButtonBinding.any_pad) self.anyPad() else self.pad(binding.pad);
+    for (binding.buttons) |raw| {
+        if (raw < platform.GamepadButton.count and controller.justPressed(@enumFromInt(raw))) return true;
+    }
+    return false;
 }
 
 /// One if any of these keys is down: two keys for the same end of an axis
@@ -1031,6 +1168,27 @@ test "two keys for one end of an axis count once" {
     // A and the left arrow together are still -1, not -2.
     input.apply(keyEvent(.a, .press));
     try testing.expectEqual(@as(f32, -1), input.axisOf(walk));
+}
+
+test "an action map keeps named bindings together and lets one change" {
+    var map: ActionMap = .{};
+    defer map.deinit(testing.allocator);
+    try map.bindButton(testing.allocator, "jump", ButtonBinding.key(.space).withPad(ButtonBinding.any_pad, .a));
+    try map.bindAxis(testing.allocator, "move", AxisBinding.keys(.a, .d));
+
+    var input: Input = .{};
+    input.apply(keyEvent(.space, .press));
+    try testing.expect(map.down(&input, "jump"));
+    try testing.expect(map.justPressed(&input, "jump"));
+    try testing.expectEqual(@as(f32, 0), map.axis(&input, "move"));
+
+    try map.bindButton(testing.allocator, "jump", ButtonBinding.key(.enter));
+    try testing.expectEqual(@as(usize, 2), map.names.items.len);
+    try testing.expect(!map.down(&input, "jump"));
+    input.apply(keyEvent(.enter, .press));
+    try testing.expect(map.down(&input, "jump"));
+    try testing.expect(map.remove(testing.allocator, "jump"));
+    try testing.expect(!map.down(&input, "jump"));
 }
 
 test "losing focus lets go of everything" {
