@@ -59,6 +59,7 @@ const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
 const timer = @import("timer.zig");
 const tilemap = @import("tilemap.zig");
+const theme = @import("theme.zig");
 const tileset = @import("tileset.zig");
 const scene = @import("scene.zig");
 const signals_mod = @import("signals.zig");
@@ -363,6 +364,9 @@ bodies: Bodies = .{},
 /// Every `.tileset` file read, and the handles a `TileMap` points at one
 /// with. See `loadTileSet`.
 tile_sets: tileset.TileSets = .{},
+/// Every `.theme` file read, and the handles a `Control` points at one with.
+/// See `loadTheme`.
+themes: theme.Themes = .{},
 /// Which entity holds each chunk of each map, so painting a tile finds its
 /// chunk without walking every chunk in the world. Kept beside the world,
 /// as the names are: a chunk holds no handle of its own.
@@ -552,6 +556,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .physics_2d = options.physics_2d,
         .bodies = .{},
         .tile_sets = .{},
+        .themes = .{},
         .tile_chunks = .empty,
         .project = undefined,
         .assets = undefined,
@@ -648,11 +653,6 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         tilemap.TileMap,
         tilemap.TileChunk,
         control.Control,
-        control.Theme,
-        control.ThemePalette,
-        control.StyleBox,
-        control.StyleBoxTexture,
-        control.StyleBoxText,
         control.CanvasLayer,
         control.Viewport,
         control.BoxContainer,
@@ -822,6 +822,7 @@ pub fn destroy(self: *App) void {
     self.types.deinit();
     self.bodies.deinit(gpa);
     self.tile_sets.deinit(gpa);
+    self.themes.deinit(gpa);
     self.tile_chunks.deinit(gpa);
     self.areas.deinit(gpa);
     self.picking.deinit(gpa);
@@ -1814,7 +1815,6 @@ pub fn siblingBefore(self: *const App, a: ecs.Entity, b: ecs.Entity) bool {
 fn parentOf(self: *const App, entity: ecs.Entity) ecs.Entity {
     if (self.world.getConst(entity, components.Transform2D)) |place| return place.parent;
     if (self.world.getConst(entity, control.Control)) |box| return box.parent;
-    if (self.world.getConst(entity, control.StyleBox)) |style| return style.theme;
     return .none;
 }
 
@@ -1936,6 +1936,36 @@ pub fn tileSetOf(self: *App, handle: tileset.TileSetHandle) ?*const tileset.Tile
 /// place, and what an editor shows.
 pub fn tileSetSource(self: *App, handle: tileset.TileSetHandle) ?[]const u8 {
     return self.tile_sets.sourceOf(handle);
+}
+
+/// Read a `.theme` file, or find the one read from there already. See
+/// `theme.Themes`.
+pub fn loadTheme(self: *App, path: []const u8) !theme.ThemeHandle {
+    return self.themes.load(self, path);
+}
+
+/// A theme from text rather than a file: a test's, or a tool's.
+pub fn addTheme(self: *App, name: []const u8, text: []const u8) !theme.ThemeHandle {
+    return self.themes.add(self, name, text);
+}
+
+pub fn findTheme(self: *App, path: []const u8) ?theme.ThemeHandle {
+    return self.themes.find(path);
+}
+
+/// Read a theme's file again, for an editor that has just saved it.
+pub fn reloadTheme(self: *App, handle: theme.ThemeHandle) !bool {
+    return self.themes.reload(self, handle);
+}
+
+pub fn themeOf(self: *App, handle: theme.ThemeHandle) ?*const theme.Theme {
+    return self.themes.get(handle);
+}
+
+/// The path a theme was read from: what a scene writes in a handle's place,
+/// and what an editor shows.
+pub fn themeSource(self: *App, handle: theme.ThemeHandle) ?[]const u8 {
+    return self.themes.sourceOf(handle);
 }
 
 /// A parent's children in their order, as many as `found` holds, the first
@@ -2273,6 +2303,7 @@ pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
     try self.project.moveFile(old, new);
     try self.assets.renamed(old, new);
     try self.tile_sets.renamed(self.gpa, old, new);
+    try self.themes.renamed(self.gpa, old, new);
     if (self.scripts) |scripts| try scripts.renamed(old, new);
 }
 
@@ -5348,7 +5379,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 33), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 28), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

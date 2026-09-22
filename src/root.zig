@@ -191,12 +191,12 @@ pub const tileset = @import("tileset.zig");
 pub const TileSet = tileset.TileSet;
 pub const TileSetHandle = tileset.TileSetHandle;
 
+pub const theme = @import("theme.zig");
+/// What a `Control` is drawn from: a `.theme` file.
+pub const Theme = theme.Theme;
+pub const ThemeHandle = theme.ThemeHandle;
+
 pub const Control = control.Control;
-pub const Theme = control.Theme;
-pub const ThemePalette = control.ThemePalette;
-pub const StyleBox = control.StyleBox;
-pub const StyleBoxTexture = control.StyleBoxTexture;
-pub const StyleBoxText = control.StyleBoxText;
 pub const CanvasLayer = control.CanvasLayer;
 pub const Viewport = control.Viewport;
 pub const BoxContainer = control.BoxContainer;

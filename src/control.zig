@@ -16,6 +16,13 @@ const Region = @import("components.zig").Region;
 const Transform2D = @import("components.zig").Transform2D;
 const View = @import("render/view.zig").View;
 const attr = @import("attr.zig");
+const theme_file = @import("theme.zig");
+
+/// What a control looks like lives in a `.theme` file rather than in the
+/// world: see `theme.zig`. These are its words.
+pub const ThemeHandle = theme_file.ThemeHandle;
+pub const Part = theme_file.Part;
+pub const State = theme_file.State;
 
 pub const Entity = ecs.Entity;
 
@@ -43,109 +50,33 @@ pub const Size = extern struct {
     }
 };
 
-pub const Insets = extern struct {
-    left: u16 = 0,
-    right: u16 = 0,
-    top: u16 = 0,
-    bottom: u16 = 0,
+pub const Insets = theme_file.Insets;
+pub const Corners = theme_file.Corners;
 
-    pub fn all(value: u16) Insets {
-        return .{ .left = value, .right = value, .top = value, .bottom = value };
-    }
+fn padding(self: Insets) ui.Padding {
+    return .{ .left = self.left, .right = self.right, .top = self.top, .bottom = self.bottom };
+}
 
-    fn padding(self: Insets) ui.Padding {
-        return .{ .left = self.left, .right = self.right, .top = self.top, .bottom = self.bottom };
-    }
-};
-
-pub const Corners = extern struct {
-    top_left: f32 = 0,
-    top_right: f32 = 0,
-    bottom_right: f32 = 0,
-    bottom_left: f32 = 0,
-
-    pub fn all(value: f32) Corners {
-        return .{ .top_left = value, .top_right = value, .bottom_right = value, .bottom_left = value };
-    }
-
-    fn radius(self: Corners) ui.CornerRadius {
-        return .{
-            .top_left = self.top_left,
-            .top_right = self.top_right,
-            .bottom_right = self.bottom_right,
-            .bottom_left = self.bottom_left,
-        };
-    }
-};
-
-pub const Theme = extern struct {
-    fallback: Entity = .none,
-    font: Assets.FontHandle = .none,
-    font_size: u16 = 16,
-    text_color: Color = .white,
-    disabled_text_color: Color = .hex(0x808080),
-    corner_radius: f32 = 6,
-    border_width: u16 = 1,
-    padding: Insets = .all(6),
-    pub const reflect_name = "Theme";
-};
-
-pub const ThemePalette = extern struct {
-    panel_color: Color = .hex(0x20242A),
-    field_color: Color = .hex(0x171A1F),
-    button_color: Color = .hex(0x3A6EA5),
-    button_hover_color: Color = .hex(0x4B82BA),
-    button_pressed_color: Color = .hex(0x285780),
-    disabled_color: Color = .hex(0x30343A),
-    accent_color: Color = .hex(0x3A80D8),
-    border_color: Color = .hex(0x59616B),
-    focus_color: Color = .hex(0x72A7E8),
-    pub const reflect_name = "ThemePalette";
-};
-
-pub const StyleBox = extern struct {
-    theme: Entity = .none,
-    role: Role = .panel,
-    state: State = .normal,
-    background_color: Color = .transparent,
-    border_color: Color = .transparent,
-    border_width: u16 = 0,
-    corner_radius: Corners = .{},
-    padding: Insets = .{},
-
-    pub const Role = enum(u8) { panel, button, check_box, line_edit, slider_track, slider_fill, progress_track, progress_fill, tab, tab_active, focus };
-    pub const State = enum(u8) { normal, hover, pressed, disabled, focus };
-    pub const reflect_name = "StyleBox";
-};
-
-pub const StyleBoxTexture = extern struct {
-    texture: Assets.TextureHandle = .none,
-    tint: Color = .white,
-    source_left: f32 = 0.25,
-    source_right: f32 = 0.25,
-    source_top: f32 = 0.25,
-    source_bottom: f32 = 0.25,
-    patch_margin: Insets = .all(8),
-    pub const reflect_name = "StyleBoxTexture";
-    pub const reflect_fields = .{
-        .source_left = .{attr.Range{ .min = 0, .max = 1 }},
-        .source_right = .{attr.Range{ .min = 0, .max = 1 }},
-        .source_top = .{attr.Range{ .min = 0, .max = 1 }},
-        .source_bottom = .{attr.Range{ .min = 0, .max = 1 }},
+fn radius(self: Corners) ui.CornerRadius {
+    return .{
+        .top_left = self.top_left,
+        .top_right = self.top_right,
+        .bottom_right = self.bottom_right,
+        .bottom_left = self.bottom_left,
     };
-};
-
-pub const StyleBoxText = extern struct {
-    text_color: Color = .white,
-    font: Assets.FontHandle = .none,
-    font_size: u16 = 0,
-    pub const reflect_name = "StyleBoxText";
-};
+}
 
 /// The rectangular base of every UI entity.
 pub const Control = extern struct {
     parent: Entity = .none,
-    theme: Entity = .none,
+    /// The `.theme` file this control and everything under it is drawn from.
+    /// `.none` takes whatever the control above it uses.
+    theme: ThemeHandle = .none,
+    /// A name in that theme to be drawn as, over the kind of control this is:
+    /// Godot's type variation. A "Header" built on "Label" is one Label among
+    /// many that is drawn differently.
+    variation: [variation_capacity]u8 = @splat(0),
+    variation_len: u8 = 0,
     width: Size = .{},
     height: Size = .{},
     position: Position = .flow,
@@ -158,17 +89,33 @@ pub const Control = extern struct {
     mouse_filter: MouseFilter = .pass,
     z_index: i16 = 0,
 
+    pub const variation_capacity = 31;
     pub const Position = enum(u8) { flow, anchored };
     pub const AnchorX = enum(u8) { left, center, right };
     pub const AnchorY = enum(u8) { top, center, bottom };
     pub const MouseFilter = enum(u8) { stop, pass, ignore };
 
     pub const reflect_name = "Control";
+    pub const reflect_attributes = .{attr.Property{ .name = "type_variation", .get = "variationSlice", .set = "setVariation" }};
     pub const reflect_fields = .{
         .parent = .{attr.Doc{ .text = "The UI entity whose box contains this one" }},
+        .variation = .{attr.Hidden{}},
+        .variation_len = .{attr.Hidden{}},
         .offset_x = .{attr.Unit{ .text = "px" }},
         .offset_y = .{attr.Unit{ .text = "px" }},
     };
+    pub const reflect_methods = .{ .setVariation = .{}, .variationSlice = .{} };
+
+    pub fn setVariation(self: *Control, name: []const u8) void {
+        var cut = @min(name.len, variation_capacity);
+        while (cut > 0 and cut < name.len and name[cut] & 0xC0 == 0x80) cut -= 1;
+        @memcpy(self.variation[0..cut], name[0..cut]);
+        self.variation_len = @intCast(cut);
+    }
+
+    pub fn variationSlice(self: *const Control) []const u8 {
+        return self.variation[0..@min(self.variation_len, variation_capacity)];
+    }
 };
 
 /// A screen-space UI root, independent of the 2D camera.
@@ -232,24 +179,23 @@ pub const ScrollContainer = extern struct {
     pub const reflect_name = "ScrollContainer";
 };
 
+/// A box drawn in the theme's `Panel` style. What it looks like is the
+/// theme's to say; what it holds is its children's.
 pub const PanelContainer = extern struct {
-    color: Color = .transparent,
-    border_color: Color = .transparent,
-    border_width: u16 = 0,
-    corner_radius: Corners = .{},
+    /// Whether the theme's panel is drawn behind its children at all. Off,
+    /// it is a box that only holds things together.
+    background: bool = true,
     pub const reflect_name = "PanelContainer";
 };
 
 pub const Label = extern struct {
     bytes: [capacity]u8 = @splat(0),
     len: u8 = 0,
-    font: Assets.FontHandle = .none,
-    font_size: u16 = 16,
-    color: Color = .white,
+    /// Drawn round the letters, which no theme says: a label over a picture
+    /// needs it and a label on a panel does not.
     outline_color: Color = .black,
     outline_width: u16 = 0,
     wrap: Wrap = .words,
-    use_theme: bool = true,
 
     pub const capacity = 127;
     pub const Wrap = enum(u8) { words, newline, none };
@@ -258,7 +204,6 @@ pub const Label = extern struct {
     pub const reflect_fields = .{
         .bytes = .{attr.Hidden{}},
         .len = .{attr.Hidden{}},
-        .font_size = .{ attr.Range{ .min = 1, .max = 512 }, attr.Unit{ .text = "px" } },
     };
     pub const reflect_methods = .{
         .set = .{attr.Multiline{}},
@@ -283,20 +228,55 @@ pub const Label = extern struct {
     }
 };
 
+/// A box that says what it does and hears that it was clicked. It carries
+/// its own words and picture: a button is one thing, not a button with a
+/// label inside it.
 pub const Button = extern struct {
+    bytes: [capacity]u8 = @splat(0),
+    len: u8 = 0,
+    /// Drawn before the words, where there is one.
+    icon: Assets.TextureHandle = .none,
     disabled: bool = false,
+    /// Whether it stays down when clicked, as a switch does.
+    toggle_mode: bool = false,
+    /// Whether it is down now, for one that stays down.
+    button_pressed: bool = false,
     hovered: bool = false,
     held: bool = false,
+
+    pub const capacity = 63;
     pub const reflect_name = "Button";
-    pub const reflect_fields = .{ .hovered = .{attr.ReadOnly{}}, .held = .{attr.ReadOnly{}} };
-    pub const signals = .{ .pressed = struct {} };
+    pub const reflect_attributes = .{attr.Property{ .name = "text", .get = "slice", .set = "set" }};
+    pub const reflect_fields = .{
+        .bytes = .{attr.Hidden{}},
+        .len = .{attr.Hidden{}},
+        .hovered = .{attr.ReadOnly{}},
+        .held = .{attr.ReadOnly{}},
+    };
+    pub const reflect_methods = .{ .set = .{}, .slice = .{} };
+    pub const signals = .{ .pressed = struct {}, .toggled = struct { pressed: bool } };
+
+    pub fn of(text: []const u8) Button {
+        var out: Button = .{};
+        out.set(text);
+        return out;
+    }
+
+    pub fn set(self: *Button, text: []const u8) void {
+        var cut = @min(text.len, capacity);
+        while (cut > 0 and cut < text.len and text[cut] & 0xC0 == 0x80) cut -= 1;
+        @memcpy(self.bytes[0..cut], text[0..cut]);
+        self.len = @intCast(cut);
+    }
+
+    pub fn slice(self: *const Button) []const u8 {
+        return self.bytes[0..@min(self.len, capacity)];
+    }
 };
 
 pub const CheckBox = extern struct {
     checked: bool = false,
     disabled: bool = false,
-    box_color: Color = .hex(0x30343A),
-    check_color: Color = .white,
     pub const reflect_name = "CheckBox";
     pub const signals = .{ .toggled = struct { checked: bool } };
 };
@@ -306,14 +286,9 @@ pub const LineEdit = extern struct {
     len: u16 = 0,
     placeholder: [capacity]u8 = @splat(0),
     placeholder_len: u16 = 0,
-    font_size: u16 = 16,
-    text_color: Color = .white,
-    placeholder_color: Color = .hex(0x808080),
-    cursor_color: Color = .white,
     multiline: bool = false,
     password: bool = false,
     disabled: bool = false,
-    use_theme: bool = true,
 
     pub const capacity = 255;
     pub const reflect_name = "LineEdit";
@@ -326,7 +301,6 @@ pub const LineEdit = extern struct {
         .len = .{attr.Hidden{}},
         .placeholder = .{attr.Hidden{}},
         .placeholder_len = .{attr.Hidden{}},
-        .font_size = .{ attr.Range{ .min = 1, .max = 512 }, attr.Unit{ .text = "px" } },
     };
     pub const reflect_methods = .{ .set = .{attr.Multiline{}}, .slice = .{}, .setPlaceholder = .{}, .placeholderSlice = .{} };
     pub const signals = .{ .changed = struct {}, .submitted = struct {} };
@@ -361,8 +335,6 @@ pub const Slider = extern struct {
     step: f32 = 1,
     vertical: bool = false,
     disabled: bool = false,
-    track_color: Color = .hex(0x30343A),
-    fill_color: Color = .hex(0x3A80D8),
     pub const reflect_name = "Slider";
     pub const signals = .{ .changed = struct { value: f32 } };
 };
@@ -372,17 +344,12 @@ pub const ProgressBar = extern struct {
     max: f32 = 100,
     value: f32 = 0,
     show_percentage: bool = true,
-    track_color: Color = .hex(0x30343A),
-    fill_color: Color = .hex(0x3A80D8),
-    text_color: Color = .white,
     pub const reflect_name = "ProgressBar";
 };
 
 pub const TabContainer = extern struct {
     current: u16 = 0,
     separation: u16 = 4,
-    tab_color: Color = .hex(0x30343A),
-    active_color: Color = .hex(0x3A80D8),
     pub const reflect_name = "TabContainer";
     pub const signals = .{ .tab_changed = struct { index: u16 } };
 };
@@ -418,14 +385,12 @@ pub const NinePatchRect = extern struct {
 
 pub const Nodes = struct {
     textures: std.ArrayList(rhi.Texture) = .empty,
-    styles: std.ArrayList(StyleEntry) = .empty,
     preview_ui: ?ui.Ui = null,
     preview_interface: Interface = .{},
     enabled: bool = false,
 
     pub fn deinit(self: *Nodes, gpa: std.mem.Allocator) void {
         self.textures.deinit(gpa);
-        self.styles.deinit(gpa);
         if (self.preview_ui) |*held_ui| held_ui.deinit();
         self.preview_interface.deinit();
         self.* = .{};
@@ -446,13 +411,6 @@ pub const Nodes = struct {
     fn drawRoots(self: *Nodes, context: Context) !void {
         const app = context.app;
         self.textures.clearRetainingCapacity();
-        self.styles.clearRetainingCapacity();
-        for (app.world.archetypeSlice()) |*archetype| {
-            for (archetype.entities.items) |entity| {
-                const style = app.world.get(entity, StyleBox) orelse continue;
-                try self.styles.append(app.gpa, .{ .theme = style.theme, .role = style.role, .state = style.state, .entity = entity });
-            }
-        }
         for (app.world.archetypeSlice()) |*archetype| {
             for (archetype.entities.items) |entity| {
                 if (!app.world.has(entity, Control)) continue;
@@ -549,7 +507,7 @@ pub const Nodes = struct {
             out.align_x = boxAlignX(box.alignment_x);
             out.align_y = boxAlignY(box.alignment_y);
         }
-        if (app.world.get(entity, MarginContainer)) |margin| out.padding = margin.margin.padding();
+        if (app.world.get(entity, MarginContainer)) |margin| out.padding = padding(margin.margin);
         if (app.world.get(entity, CenterContainer)) |center| {
             if (center.horizontal) out.align_x = .center;
             if (center.vertical) out.align_y = .center;
@@ -562,12 +520,6 @@ pub const Nodes = struct {
             .no_drag_scroll = !scroll.drag,
             .scrollbar = if (scroll.scrollbar) .{} else null,
         };
-        if (app.world.get(entity, PanelContainer)) |panel| {
-            out.background_color = color(panel.color);
-            out.corner_radius = panel.corner_radius.radius();
-            if (panel.border_width > 0) out.border = .all(color(panel.border_color), panel.border_width);
-        }
-        if (app.world.get(entity, ProgressBar)) |progress| out.background_color = color(progress.track_color);
         if (app.world.get(entity, TextureRect)) |picture| if (self.image(app, picture.texture, picture.tint, picture.region)) |drawn| {
             out.image = drawn;
             switch (picture.stretch) {
@@ -583,7 +535,7 @@ pub const Nodes = struct {
                 .source_right = picture.source_right,
                 .source_top = picture.source_top,
                 .source_bottom = picture.source_bottom,
-                .border = picture.patch_margin.padding(),
+                .border = padding(picture.patch_margin),
             };
         };
         if ((app.world.has(entity, Button) or app.world.has(entity, CheckBox) or app.world.has(entity, Slider)) and control.mouse_filter != .ignore) {
@@ -591,7 +543,13 @@ pub const Nodes = struct {
             out.cursor = .pointing_hand;
             out.capture = true;
         }
-        if (roleOf(app, entity)) |role| if (self.resolvedStyle(context, entity, role, stateOf(context, entity))) |style| self.applyStyle(app, &out, style);
+        if (roleOf(app, entity)) |role| {
+            // A label is words, not a box: it takes the theme's text but none
+            // of its background. Nor does a panel told not to draw one.
+            const plain = role == .label or
+                (app.world.get(entity, PanelContainer) != null and !app.world.get(entity, PanelContainer).?.background);
+            if (!plain) self.applyStyle(app, &out, self.resolvedStyle(context, entity, role, stateOf(context, entity)));
+        }
         return out;
     }
 
@@ -613,8 +571,12 @@ pub const Nodes = struct {
             progressContent(context.layout, progress, self.resolvedStyle(context, entity, .progress_fill, .normal));
             return;
         }
-        if (app.world.get(entity, Label)) |label| drawLabel(context, label, self.resolvedStyle(context, entity, roleOf(app, entity) orelse .panel, stateOf(context, entity)));
+        const style = self.resolvedStyle(context, entity, roleOf(app, entity) orelse .panel, stateOf(context, entity));
+        if (app.world.get(entity, Label)) |label| drawLabel(context, label, style);
         if (app.world.get(entity, Button)) |button| {
+            // Its own face, unless the entity carries a Label that has
+            // already drawn one: that is how scenes said it before.
+            if (!app.world.has(entity, Label)) buttonFace(self, context, button, style);
             const control = app.world.get(entity, Control).?;
             if (control.mouse_filter == .ignore) {
                 button.hovered = false;
@@ -623,7 +585,13 @@ pub const Nodes = struct {
             }
             button.hovered = context.interactive and context.layout.hovered();
             button.held = context.interactive and !button.disabled and context.layout.pressed();
-            if (context.interactive and !button.disabled and context.layout.justReleased()) try app.signal(entity, Button, .pressed).emit(.{});
+            if (context.interactive and !button.disabled and context.layout.justReleased()) {
+                if (button.toggle_mode) {
+                    button.button_pressed = !button.button_pressed;
+                    try app.signal(entity, Button, .toggled).emit(.{ .pressed = button.button_pressed });
+                }
+                try app.signal(entity, Button, .pressed).emit(.{});
+            }
         }
     }
 
@@ -635,7 +603,7 @@ pub const Nodes = struct {
             if (!app.world.has(child, Control)) continue;
             var id: [64]u8 = undefined;
             const name = std.fmt.bufPrint(&id, "tab-{d}-{d}", .{ child.index, child.generation }) catch "tab";
-            const state: StyleBox.State = if (!context.interactive)
+            const state: State = if (!context.interactive)
                 .normal
             else if (layout.isElementPressed(name))
                 .pressed
@@ -645,18 +613,17 @@ pub const Nodes = struct {
                 .focus
             else
                 .normal;
-            const role: StyleBox.Role = if (index == tab_container.current) .tab_active else .tab;
+            const role: Part = if (index == tab_container.current) .tab_active else .tab;
             const style = self.resolvedStyle(context, parent, role, state);
             var tab_decl: ui.Declaration = .{
                 .id = name,
                 .padding = .xy(10, 6),
-                .background_color = color(if (index == tab_container.current) tab_container.active_color else tab_container.tab_color),
                 .focus = .{},
                 .capture = true,
             };
-            if (style) |held| self.applyStyle(app, &tab_decl, held);
+            self.applyStyle(app, &tab_decl, style);
             layout.open(tab_decl);
-            layout.text(app.nameOf(child) orelse "Tab", .{ .wrap = .none, .font = app.interface.addFont(if (style) |held| held.font else .none) catch 0, .font_size = if (style) |held| held.font_size else 16, .color = color(if (style) |held| held.text_color else .white) });
+            layout.text(app.nameOf(child) orelse "Tab", .{ .wrap = .none, .font = app.interface.addFont(style.font) catch 0, .font_size = style.font_size, .color = color(style.text_color) });
             if (context.interactive and layout.justReleased() and index != tab_container.current) {
                 tab_container.current = @intCast(index);
                 try app.signal(parent, TabContainer, .tab_changed).emit(.{ .index = tab_container.current });
@@ -671,36 +638,21 @@ pub const Nodes = struct {
         if (control.visible) try self.node(context, child, control.*, depth);
     }
 
-    fn resolvedStyle(self: *Nodes, context: Context, entity: Entity, role: StyleBox.Role, state: StyleBox.State) ?ResolvedStyle {
+    /// What a piece of a control looks like: what the theme it is under says,
+    /// over the look this engine is born with. There is always one, so a
+    /// scene with no theme at all still draws.
+    fn resolvedStyle(self: *Nodes, context: Context, entity: Entity, part: Part, state: State) ResolvedStyle {
+        _ = self;
         const app = context.app;
-        var theme_entity = themeOf(app, entity) orelse return null;
-        const base_theme = app.world.get(theme_entity, Theme) orelse return null;
-        const base = themedStyle(base_theme.*, app.world.get(theme_entity, ThemePalette) orelse &.{}, role, state);
-        for (0..9) |_| {
-            if (self.findStyle(theme_entity, role, state)) |style| return inheritStyle(app, base, style);
-            if (state != .normal) if (self.findStyle(theme_entity, role, .normal)) |style| return inheritStyle(app, base, style);
-            if (state == .focus) if (self.findStyle(theme_entity, .focus, .normal)) |style| return inheritStyle(app, base, style);
-            const theme = app.world.get(theme_entity, Theme) orelse break;
-            if (theme.fallback.isNone() or !app.world.isAlive(theme.fallback)) break;
-            theme_entity = theme.fallback;
-        }
-        return base;
-    }
-
-    fn findStyle(self: *Nodes, theme: Entity, role: StyleBox.Role, state: StyleBox.State) ?Entity {
-        var found: ?Entity = null;
-        for (self.styles.items) |entry| {
-            if (!entry.theme.eql(theme) or entry.role != role or entry.state != state) continue;
-            if (found == null or entry.entity.index > found.?.index or (entry.entity.index == found.?.index and entry.entity.generation > found.?.generation)) found = entry.entity;
-        }
-        return found;
+        const found = themeOf(app, entity);
+        return .from(app.themes.styleOf(found.handle, part, state, found.variation));
     }
 
     fn applyStyle(self: *Nodes, app: *App, out: *ui.Declaration, style: ResolvedStyle) void {
         out.background_color = color(style.background_color);
         out.border = if (style.border_width > 0) .all(color(style.border_color), style.border_width) else .{};
-        out.corner_radius = style.corner_radius.radius();
-        out.padding = style.padding.padding();
+        out.corner_radius = radius(style.corner_radius);
+        out.padding = padding(style.padding);
         if (self.image(app, style.texture, style.tint, .full)) |drawn| {
             out.image = drawn;
             out.image.?.nine_slice = .{
@@ -708,7 +660,7 @@ pub const Nodes = struct {
                 .source_right = style.source_right,
                 .source_top = style.source_top,
                 .source_bottom = style.source_bottom,
-                .border = style.patch_margin.padding(),
+                .border = padding(style.patch_margin),
             };
         }
     }
@@ -759,13 +711,9 @@ const Context = struct {
     view: ?View = null,
 };
 
-const StyleEntry = struct {
-    theme: Entity,
-    role: StyleBox.Role,
-    state: StyleBox.State,
-    entity: Entity,
-};
-
+/// A theme's style with every question answered: what the drawing code
+/// reads. Whatever the theme leaves unsaid the engine's own look fills in,
+/// so nothing here is optional.
 const ResolvedStyle = struct {
     background_color: Color = .transparent,
     border_color: Color = .transparent,
@@ -782,9 +730,31 @@ const ResolvedStyle = struct {
     text_color: Color = .white,
     font: Assets.FontHandle = .none,
     font_size: u16 = 16,
+
+    fn from(style: theme_file.Style) ResolvedStyle {
+        var out: ResolvedStyle = .{};
+        if (style.background) |value| out.background_color = value;
+        if (style.border_color) |value| out.border_color = value;
+        if (style.border_width) |value| out.border_width = value;
+        if (style.corners) |value| out.corner_radius = value;
+        if (style.padding) |value| out.padding = value;
+        if (style.texture) |value| out.texture = value;
+        if (style.tint) |value| out.tint = value;
+        if (style.slices) |value| {
+            out.source_left = value[0];
+            out.source_right = value[1];
+            out.source_top = value[2];
+            out.source_bottom = value[3];
+        }
+        if (style.patch_margin) |value| out.patch_margin = value;
+        if (style.font_color) |value| out.text_color = value;
+        if (style.font) |value| out.font = value;
+        if (style.font_size) |value| out.font_size = value;
+        return out;
+    }
 };
 
-fn roleOf(app: *App, entity: Entity) ?StyleBox.Role {
+fn roleOf(app: *App, entity: Entity) ?Part {
     const world = &app.world;
     if (world.has(entity, Button)) return .button;
     if (world.has(entity, CheckBox)) return .check_box;
@@ -792,12 +762,17 @@ fn roleOf(app: *App, entity: Entity) ?StyleBox.Role {
     if (world.has(entity, Slider)) return .slider_track;
     if (world.has(entity, ProgressBar)) return .progress_track;
     if (world.has(entity, PanelContainer)) return .panel;
+    if (world.has(entity, Label)) return .label;
     return null;
 }
 
-fn stateOf(context: Context, entity: Entity) StyleBox.State {
+fn stateOf(context: Context, entity: Entity) State {
     const app = context.app;
-    if (app.world.get(entity, Button)) |button| if (button.disabled) return .disabled;
+    if (app.world.get(entity, Button)) |button| {
+        if (button.disabled) return .disabled;
+        // One that stays down is drawn down, whatever the pointer is doing.
+        if (button.toggle_mode and button.button_pressed) return .pressed;
+    }
     if (app.world.get(entity, CheckBox)) |checkbox| if (checkbox.disabled) return .disabled;
     if (app.world.get(entity, LineEdit)) |line| if (line.disabled) return .disabled;
     if (app.world.get(entity, Slider)) |slider| if (slider.disabled) return .disabled;
@@ -814,78 +789,28 @@ fn stateOf(context: Context, entity: Entity) StyleBox.State {
     return .normal;
 }
 
-fn themeOf(app: *App, entity: Entity) ?Entity {
+/// Which theme a control is drawn from, and the name it asked to be drawn
+/// as: its own, or the nearest one above it that names either.
+fn themeOf(app: *App, entity: Entity) struct { handle: ThemeHandle, variation: []const u8 } {
+    var found: ThemeHandle = .none;
+    var variation: []const u8 = "";
     var at = entity;
     for (0..33) |_| {
-        if (app.world.get(at, Control)) |control| {
-            if (!control.theme.isNone() and app.world.has(control.theme, Theme)) return control.theme;
-            if (app.world.has(at, Theme)) return at;
-            if (control.parent.isNone() or !app.world.isAlive(control.parent)) return null;
-            at = control.parent;
-        } else return if (app.world.has(at, Theme)) at else null;
+        const control = app.world.get(at, Control) orelse break;
+        // The control's own name, not one inherited: a variation says what
+        // this control is, and saying it once should not paint its children.
+        if (at.eql(entity)) variation = control.variationSlice();
+        if (!control.theme.isNone()) {
+            found = control.theme;
+            break;
+        }
+        if (control.parent.isNone() or !app.world.isAlive(control.parent)) break;
+        at = control.parent;
     }
-    return null;
+    return .{ .handle = found, .variation = variation };
 }
 
-fn themedStyle(theme: Theme, palette: *const ThemePalette, role: StyleBox.Role, state: StyleBox.State) ResolvedStyle {
-    const disabled = state == .disabled;
-    const background: Color = switch (role) {
-        .panel => palette.panel_color,
-        .line_edit => if (disabled) palette.disabled_color else palette.field_color,
-        .button, .tab, .tab_active => if (disabled)
-            palette.disabled_color
-        else switch (state) {
-            .hover, .focus => palette.button_hover_color,
-            .pressed => palette.button_pressed_color,
-            else => if (role == .tab_active) palette.accent_color else palette.button_color,
-        },
-        .check_box => Color.transparent,
-        .slider_track, .progress_track => if (disabled) palette.disabled_color else palette.field_color,
-        .slider_fill, .progress_fill => if (disabled) palette.disabled_color else palette.accent_color,
-        .focus => Color.transparent,
-    };
-    return .{
-        .background_color = background,
-        .border_color = if (state == .focus) palette.focus_color else palette.border_color,
-        .border_width = theme.border_width,
-        .corner_radius = .all(theme.corner_radius),
-        .padding = theme.padding,
-        .text_color = if (disabled) theme.disabled_text_color else theme.text_color,
-        .font = theme.font,
-        .font_size = theme.font_size,
-    };
-}
-
-fn inheritStyle(app: *App, base: ResolvedStyle, entity: Entity) ResolvedStyle {
-    const style = app.world.get(entity, StyleBox) orelse return base;
-    var out: ResolvedStyle = .{
-        .background_color = style.background_color,
-        .border_color = style.border_color,
-        .border_width = style.border_width,
-        .corner_radius = style.corner_radius,
-        .padding = style.padding,
-        .text_color = base.text_color,
-        .font = base.font,
-        .font_size = base.font_size,
-    };
-    if (app.world.get(entity, StyleBoxTexture)) |texture| {
-        out.texture = texture.texture;
-        out.tint = texture.tint;
-        out.source_left = texture.source_left;
-        out.source_right = texture.source_right;
-        out.source_top = texture.source_top;
-        out.source_bottom = texture.source_bottom;
-        out.patch_margin = texture.patch_margin;
-    }
-    if (app.world.get(entity, StyleBoxText)) |text_style| {
-        out.text_color = text_style.text_color;
-        if (!text_style.font.isNone()) out.font = text_style.font;
-        if (text_style.font_size > 0) out.font_size = text_style.font_size;
-    }
-    return out;
-}
-
-fn checkboxContent(context: Context, entity: Entity, checkbox: *CheckBox, style: ?ResolvedStyle) !void {
+fn checkboxContent(context: Context, entity: Entity, checkbox: *CheckBox, style: ResolvedStyle) !void {
     const app = context.app;
     const layout = context.layout;
     const ignored = app.world.get(entity, Control).?.mouse_filter == .ignore;
@@ -897,23 +822,27 @@ fn checkboxContent(context: Context, entity: Entity, checkbox: *CheckBox, style:
         .width = .fixed(18),
         .height = .fixed(18),
         .padding = .all(3),
-        .background_color = color(checkbox.box_color),
+        .background_color = color(style.background_color),
         .corner_radius = .all(3),
     });
-    if (checkbox.checked) layout.empty(.{ .width = .grow, .height = .grow, .background_color = color(checkbox.check_color), .corner_radius = .all(2) });
+    // The tick is the box's mark, drawn in what the theme writes its words
+    // in: one colour for the pair, rather than two that can disagree.
+    if (checkbox.checked) layout.empty(.{ .width = .grow, .height = .grow, .background_color = color(style.text_color), .corner_radius = .all(2) });
     layout.close();
     if (app.world.get(entity, Label)) |label| drawLabel(context, label, style);
 }
 
-fn lineEditContent(context: Context, entity: Entity, line: *LineEdit, style: ?ResolvedStyle) !void {
+fn lineEditContent(context: Context, entity: Entity, line: *LineEdit, style: ResolvedStyle) !void {
     const app = context.app;
     const layout = context.layout;
     var id: [48]u8 = undefined;
     const name = std.fmt.bufPrint(&id, "control-{d}-{d}-input", .{ entity.index, entity.generation }) catch "control-input";
+    // What is not there yet is written the way anything disabled is.
+    const quiet = ResolvedStyle.from(app.themes.styleOf(themeOf(app, entity).handle, .line_edit, .disabled, "")).text_color;
     if (line.disabled) {
         layout.text(if (line.len > 0) line.slice() else line.placeholderSlice(), .{
-            .font_size = if (line.use_theme and style != null) style.?.font_size else line.font_size,
-            .color = color(if (line.len > 0 and line.use_theme and style != null) style.?.text_color else if (line.len > 0) line.text_color else line.placeholder_color),
+            .font_size = style.font_size,
+            .color = color(if (line.len > 0) style.text_color else quiet),
             .wrap = if (line.multiline) .words else .none,
         });
         return;
@@ -924,10 +853,10 @@ fn lineEditContent(context: Context, entity: Entity, line: *LineEdit, style: ?Re
         .password = line.password,
         .multiline = line.multiline,
         .drag_select = true,
-        .font_size = if (line.use_theme and style != null) style.?.font_size else line.font_size,
-        .text_color = color(if (line.use_theme and style != null) style.?.text_color else line.text_color),
-        .placeholder_color = color(line.placeholder_color),
-        .cursor_color = color(line.cursor_color),
+        .font_size = style.font_size,
+        .text_color = color(style.text_color),
+        .placeholder_color = color(quiet),
+        .cursor_color = color(style.text_color),
     });
     if (context.interactive and layout.textChanged(name)) {
         line.set(layout.textValueOf(name) orelse "");
@@ -938,7 +867,7 @@ fn lineEditContent(context: Context, entity: Entity, line: *LineEdit, style: ?Re
     if (context.interactive and layout.textSubmitted(name)) try app.signal(entity, LineEdit, .submitted).emit(.{});
 }
 
-fn sliderContent(context: Context, entity: Entity, slider: *Slider, fill_style: ?ResolvedStyle) !void {
+fn sliderContent(context: Context, entity: Entity, slider: *Slider, fill_style: ResolvedStyle) !void {
     const app = context.app;
     const layout = context.layout;
     const span = slider.max - slider.min;
@@ -961,37 +890,56 @@ fn sliderContent(context: Context, entity: Entity, slider: *Slider, fill_style: 
             }
         }
     }
-    layout.open(.{ .width = .grow, .height = .grow, .background_color = color(slider.track_color), .corner_radius = .all(4) });
+    // The track is the slider's own box, which the theme has already drawn;
+    // only the fill is left.
+    layout.open(.{ .width = .grow, .height = .grow });
     layout.empty(.{
         .width = if (slider.vertical) .grow else .percent(fraction),
         .height = if (slider.vertical) .percent(fraction) else .grow,
-        .background_color = color(if (fill_style) |style| style.background_color else slider.fill_color),
-        .corner_radius = if (fill_style) |style| style.corner_radius.radius() else .all(4),
+        .background_color = color(fill_style.background_color),
+        .corner_radius = radius(fill_style.corner_radius),
     });
     layout.close();
 }
 
-fn progressContent(layout: *ui.Ui, progress: *const ProgressBar, fill_style: ?ResolvedStyle) void {
+fn progressContent(layout: *ui.Ui, progress: *const ProgressBar, fill_style: ResolvedStyle) void {
     const span = progress.max - progress.min;
     const fraction = std.math.clamp(if (span > 0) (progress.value - progress.min) / span else 0, 0, 1);
     layout.empty(.{
         .width = .percent(fraction),
         .height = .grow,
-        .background_color = color(if (fill_style) |style| style.background_color else progress.fill_color),
-        .corner_radius = if (fill_style) |style| style.corner_radius.radius() else .all(4),
+        .background_color = color(fill_style.background_color),
+        .corner_radius = radius(fill_style.corner_radius),
     });
     if (progress.show_percentage) {
         var text: [16]u8 = undefined;
-        layout.text(std.fmt.bufPrint(&text, "{d:.0}%", .{fraction * 100}) catch "", .{ .color = color(progress.text_color), .wrap = .none });
+        layout.text(std.fmt.bufPrint(&text, "{d:.0}%", .{fraction * 100}) catch "", .{ .color = color(fill_style.text_color), .wrap = .none });
     }
 }
 
-fn drawLabel(context: Context, label: *const Label, style: ?ResolvedStyle) void {
-    const themed = label.use_theme and style != null;
+/// What a button shows: its picture, then its words.
+fn buttonFace(self: *Nodes, context: Context, button: *const Button, style: ResolvedStyle) void {
+    const layout = context.layout;
+    if (self.image(context.app, button.icon, .white, .full)) |drawn| {
+        const side: f32 = @floatFromInt(@max(style.font_size, 1));
+        var picture = drawn;
+        picture.background_color = .transparent;
+        layout.empty(.{ .width = .fixed(side), .height = .fixed(side), .image = picture });
+    }
+    if (button.len == 0) return;
+    layout.text(button.slice(), .{
+        .font = context.app.interface.addFont(style.font) catch 0,
+        .font_size = style.font_size,
+        .color = color(style.text_color),
+        .wrap = .none,
+    });
+}
+
+fn drawLabel(context: Context, label: *const Label, style: ResolvedStyle) void {
     context.layout.text(label.slice(), .{
-        .font = context.app.interface.addFont(if (themed) style.?.font else label.font) catch 0,
-        .font_size = if (themed) style.?.font_size else label.font_size,
-        .color = color(if (themed) style.?.text_color else label.color),
+        .font = context.app.interface.addFont(style.font) catch 0,
+        .font_size = style.font_size,
+        .color = color(style.text_color),
         .outline = if (label.outline_width > 0) .{ .color = color(label.outline_color), .width = label.outline_width } else null,
         .wrap = switch (label.wrap) {
             .words => .words,
@@ -1065,7 +1013,7 @@ test "control components build one screen-space Fluxion UI tree" {
     });
     const panel = try app.world.spawnWith(.{
         Control{ .parent = root, .width = .{ .mode = .fixed, .value = 100 }, .height = .{ .mode = .fixed, .value = 40 } },
-        PanelContainer{ .color = .hex(0x223344), .corner_radius = .all(5) },
+        PanelContainer{},
         ScrollContainer{},
         Label.of("Outlined"),
         NinePatchRect{ .texture = app.assets.white, .patch_margin = .all(4) },
@@ -1099,7 +1047,7 @@ test "a world Viewport projects its Control tree through the camera" {
         Transform2D.at(100, 80),
         Control{},
         Viewport{ .width = 40, .height = 20 },
-        PanelContainer{ .color = .white },
+        PanelContainer{},
     });
     try app.run();
 
@@ -1130,31 +1078,70 @@ test "form controls share the retained Control tree" {
     try testing.expectEqualStrings("Player", app.world.get(field, LineEdit).?.slice());
 }
 
-test "themes inherit registered StyleBox parts by role and state" {
+test "a scene keeps the theme a control names, what it is drawn as, and a button's words" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    _ = try app.addTheme("ui.theme",
+        \\{ "fluxion_theme": 1, "types": { "Danger": { "base_type": "Button", "styles": { "normal": { "background": "#C8434F" } } } } }
+    );
+    const loaded = try @import("scene.zig").read(app,
+        \\{ "fluxion_scene": 2, "entities": [
+        \\  { "uuid": "40000000-0000-4000-8000-000000000001", "name": "Delete",
+        \\    "Control": { "theme": "ui.theme", "type_variation": "Danger" },
+        \\    "Button": { "text": "Delete" } }
+        \\] }
+    , .{});
+    _ = loaded;
+
+    const entity = app.find("Delete").?;
+    const control = app.world.get(entity, Control).?;
+    try testing.expectEqualStrings("Danger", control.variationSlice());
+    try testing.expectEqualStrings("Delete", app.world.get(entity, Button).?.slice());
+    try testing.expect(!control.theme.isNone());
+
+    const style = app.control_nodes.resolvedStyle(.{ .app = app, .layout = &app.ui }, entity, .button, .normal);
+    try testing.expectEqual(@import("theme.zig").parseHex("#C8434F").?, style.background_color);
+}
+
+test "a control is drawn from the theme the control above it names" {
     const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 200, .frames = 1 });
     defer app.destroy();
     try app.useControlNodes();
 
-    const fallback = try app.world.spawnWith(.{ Theme{}, ThemePalette{} });
+    const handle = try app.addTheme("ui.theme",
+        \\{
+        \\  "fluxion_theme": 1,
+        \\  "font_size": 18,
+        \\  "types": {
+        \\    "Button": {
+        \\      "font_color": "#DDEEFF",
+        \\      "styles": { "pressed": { "background": "#AABBCC", "padding": [9, 9] } }
+        \\    },
+        \\    "Loud": { "base_type": "Button", "font_size": 23 }
+        \\  }
+        \\}
+    );
     const root = try app.world.spawnWith(.{
-        Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } },
+        Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow }, .theme = handle },
         CanvasLayer{},
-        Theme{ .fallback = fallback, .font_size = 18 },
-        ThemePalette{ .button_color = .hex(0x112233) },
     });
     const button = try app.world.spawnWith(.{ Control{ .parent = root }, Button{}, Label.of("Styled") });
-    _ = try app.world.spawnWith(.{
-        StyleBox{ .theme = fallback, .role = .button, .background_color = .hex(0xAABBCC), .padding = .all(9) },
-        StyleBoxText{ .text_color = .hex(0xDDEEFF), .font_size = 23 },
-        StyleBoxTexture{ .texture = app.assets.white, .patch_margin = .all(5) },
-    });
+    var loud: Control = .{ .parent = root };
+    loud.setVariation("Loud");
+    const shouty = try app.world.spawnWith(.{ loud, Button{}, Label.of("Loud") });
     try app.run();
 
-    const style = app.control_nodes.resolvedStyle(.{ .app = app, .layout = &app.ui }, button, .button, .pressed).?;
+    const context: Context = .{ .app = app, .layout = &app.ui };
+    const style = app.control_nodes.resolvedStyle(context, button, .button, .pressed);
     try testing.expectEqual(Color.hex(0xAABBCC), style.background_color);
     try testing.expectEqual(Color.hex(0xDDEEFF), style.text_color);
-    try testing.expectEqual(@as(u16, 23), style.font_size);
+    try testing.expectEqual(@as(u16, 18), style.font_size);
     try testing.expectEqual(@as(u16, 9), style.padding.left);
-    try testing.expectEqual(@as(u16, 5), style.patch_margin.left);
-    try testing.expect(style.texture.eql(app.assets.white));
+    // Nothing was said about the border, so the engine's own look holds.
+    try testing.expectEqual(@import("theme.zig").Palette.border_width, style.border_width);
+
+    // The theme is the root's, and the variation is this control's own.
+    const louder = app.control_nodes.resolvedStyle(context, shouty, .button, .pressed);
+    try testing.expectEqual(@as(u16, 23), louder.font_size);
+    try testing.expectEqual(Color.hex(0xAABBCC), louder.background_color);
 }

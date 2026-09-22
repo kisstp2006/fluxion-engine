@@ -92,12 +92,15 @@ const FontHandle = Assets.FontHandle;
 const Text2D = components.Text2D;
 const Label = @import("control.zig").Label;
 const LineEdit = @import("control.zig").LineEdit;
+const Button = @import("control.zig").Button;
+const Control = @import("control.zig").Control;
 const ScriptHandle = @import("script.zig").ScriptHandle;
 const Script = @import("script.zig").Script;
 const tilemap = @import("tilemap.zig");
 const TileMap = tilemap.TileMap;
 const TileChunk = tilemap.TileChunk;
 const TileSetHandle = @import("tileset.zig").TileSetHandle;
+const ThemeHandle = @import("theme.zig").ThemeHandle;
 const Uuid = @import("fluxion_id").Uuid;
 const math = @import("fluxion_math");
 const Color = @import("color.zig").Color;
@@ -386,6 +389,7 @@ const TextureOptions = struct {
 pub fn save(app: *App, io: std.Io, path: []const u8, options: SaveOptions) !void {
     try app.assets.ensureUids();
     try app.tile_sets.ensureUids(&app.project);
+    try app.themes.ensureUids(&app.project);
     if (app.scripts) |scripts| try scripts.ensureUids();
     const file = try app.project.osPath(app.gpa, path);
     defer app.gpa.free(file);
@@ -695,9 +699,11 @@ fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T
     try w.beginObject();
     if (comptime isBufferedText(T)) if (value.len > 0 or s.every_field) try w.field("text", value.slice());
     if (T == LineEdit and (value.placeholder_len > 0 or s.every_field)) try w.field("placeholder_text", value.placeholderSlice());
+    if (T == Control and (value.variation_len > 0 or s.every_field)) try w.field("type_variation", value.variationSlice());
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const held = &@field(value.*, field.name);
         const skip = (comptime isBufferedText(T) and isTextBuffer(field.name)) or (T == LineEdit and isPlaceholderBuffer(field.name)) or
+            (comptime T == Control and isVariationBuffer(field.name)) or
             (if (field.defaultValue()) |default| !s.every_field and std.meta.eql(held.*, default) else false);
         if (!skip) {
             try w.key(field.name);
@@ -733,6 +739,12 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
     }
     if (T == TileSetHandle) {
         const source = s.app.tileSetSource(value.*) orelse return w.writeNull();
+        const kept = try s.files.getOrPut(s.app.gpa, source);
+        if (!kept.found_existing) kept.value_ptr.* = .{};
+        return w.writeString(source);
+    }
+    if (T == ThemeHandle) {
+        const source = s.app.themeSource(value.*) orelse return w.writeNull();
         const kept = try s.files.getOrPut(s.app.gpa, source);
         if (!kept.found_existing) kept.value_ptr.* = .{};
         return w.writeString(source);
@@ -1105,6 +1117,7 @@ const Loading = struct {
     fonts: std.StringHashMapUnmanaged(FontHandle) = .empty,
     scripts: std.StringHashMapUnmanaged(ScriptHandle) = .empty,
     tile_sets: std.StringHashMapUnmanaged(TileSetHandle) = .empty,
+    themes: std.StringHashMapUnmanaged(ThemeHandle) = .empty,
     /// The entity being filled in, for a value kept beside its component:
     /// a map's tiles.
     entity: Entity = .none,
@@ -1502,6 +1515,18 @@ const Loading = struct {
         return handle;
     }
 
+    /// A theme the scene names. One that does not read is still loaded, and
+    /// the scene opens with it: its controls are drawn the way they are with
+    /// no theme at all until it does.
+    fn themeAt(l: *Loading, path: []const u8) anyerror!ThemeHandle {
+        if (l.themes.get(path)) |known| return known;
+        const where, _ = try l.file(path);
+        const handle = l.app.loadTheme(where) catch |err|
+            return l.fail(err, "cannot read the theme \"{s}\": {t}", .{ where, err });
+        try l.themes.put(l.arena, try l.arena.dupe(u8, path), handle);
+        return handle;
+    }
+
     fn font(l: *Loading, path: []const u8, member: u32) anyerror!FontHandle {
         // Kept by the file and the member: two fonts of one collection are
         // two fonts.
@@ -1568,6 +1593,10 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
         out.placeholder = @splat(0);
         out.placeholder_len = 0;
     }
+    if (T == Control) {
+        out.variation = @splat(0);
+        out.variation_len = 0;
+    }
     while (try l.key()) |name| {
         if (comptime isBufferedText(T)) if (std.mem.eql(u8, name, "text")) {
             try readText(l, out);
@@ -1583,9 +1612,14 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
             try readPlaceholder(l, out);
             continue;
         }
+        if (T == Control and std.mem.eql(u8, name, "type_variation")) {
+            try readVariation(l, out);
+            continue;
+        }
         var matched = false;
         inline for (fields, 0..) |field, i| {
-            const hidden = (comptime isBufferedText(T) and isTextBuffer(field.name)) or (T == LineEdit and isPlaceholderBuffer(field.name));
+            const hidden = (comptime isBufferedText(T) and isTextBuffer(field.name)) or (T == LineEdit and isPlaceholderBuffer(field.name)) or
+                (comptime T == Control and isVariationBuffer(field.name));
             if (!hidden and !matched and std.mem.eql(u8, name, field.name)) {
                 matched = true;
                 seen.set(i);
@@ -1604,7 +1638,8 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
 
 fn defaultTheRest(l: *Loading, comptime T: type, out: *T, seen: anytype) anyerror!void {
     inline for (@typeInfo(T).@"struct".fields, 0..) |field, i| {
-        const hidden = (comptime isBufferedText(T) and isTextBuffer(field.name)) or (T == LineEdit and isPlaceholderBuffer(field.name));
+        const hidden = (comptime isBufferedText(T) and isTextBuffer(field.name)) or (T == LineEdit and isPlaceholderBuffer(field.name)) or
+            (comptime T == Control and isVariationBuffer(field.name));
         if (!hidden and !seen.isSet(i)) {
             @field(out.*, field.name) = field.defaultValue() orelse
                 return l.fail(error.MissingField, "{s} has no {s}, and it has no default to take", .{ nameOf(T), field.name });
@@ -1645,8 +1680,25 @@ fn readPlaceholder(l: *Loading, out: *LineEdit) anyerror!void {
     out.setPlaceholder(text);
 }
 
+/// The name a control is drawn as, written as the text it is.
+fn readVariation(l: *Loading, out: *Control) anyerror!void {
+    const token = try l.next();
+    const text = switch (token) {
+        .string => |held| held,
+        else => return l.wrong("the name a control is drawn as", token),
+    };
+    if (text.len > Control.variation_capacity) return l.fail(error.OutOfRange, "this name is {d} bytes, and a Control holds {d}", .{ text.len, Control.variation_capacity });
+    out.setVariation(text);
+}
+
 fn isBufferedText(comptime T: type) bool {
-    return T == Text2D or T == Label or T == LineEdit;
+    return T == Text2D or T == Label or T == LineEdit or T == Button;
+}
+
+/// The buffer and the length a `Control` keeps the name it is drawn as in,
+/// written as one string called `type_variation` instead.
+fn isVariationBuffer(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "variation") or std.mem.eql(u8, name, "variation_len");
 }
 
 /// One chunk of a map's tiles, read and waiting for the scene to be over.
@@ -1732,6 +1784,15 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
         out.* = switch (token) {
             .null => .none,
             .string => |path| try l.tileSet(path),
+            else => return l.wrong("the file it was read from, or null", token),
+        };
+        return;
+    }
+    if (T == ThemeHandle) {
+        const token = try l.next();
+        out.* = switch (token) {
+            .null => .none,
+            .string => |path| try l.themeAt(path),
             else => return l.wrong("the file it was read from, or null", token),
         };
         return;
