@@ -568,7 +568,12 @@ pub const Nodes = struct {
             return;
         }
         if (app.world.get(entity, ProgressBar)) |progress| {
-            progressContent(context.layout, progress, self.resolvedStyle(context, entity, .progress_fill, .normal));
+            progressContent(
+                context,
+                progress,
+                self.resolvedStyle(context, entity, .progress_track, .normal),
+                self.resolvedStyle(context, entity, .progress_fill, .normal),
+            );
             return;
         }
         const style = self.resolvedStyle(context, entity, roleOf(app, entity) orelse .panel, stateOf(context, entity));
@@ -905,7 +910,8 @@ fn sliderContent(context: Context, entity: Entity, slider: *Slider, fill_style: 
     layout.close();
 }
 
-fn progressContent(layout: *ui.Ui, progress: *const ProgressBar, fill_style: ResolvedStyle) void {
+fn progressContent(context: Context, progress: *const ProgressBar, style: ResolvedStyle, fill_style: ResolvedStyle) void {
+    const layout = context.layout;
     const span = progress.max - progress.min;
     const fraction = std.math.clamp(if (span > 0) (progress.value - progress.min) / span else 0, 0, 1);
     layout.empty(.{
@@ -914,10 +920,24 @@ fn progressContent(layout: *ui.Ui, progress: *const ProgressBar, fill_style: Res
         .background_color = color(fill_style.background_color),
         .corner_radius = radius(fill_style.corner_radius),
     });
-    if (progress.show_percentage) {
-        var text: [16]u8 = undefined;
-        layout.text(std.fmt.bufPrint(&text, "{d:.0}%", .{fraction * 100}) catch "", .{ .color = color(fill_style.text_color), .wrap = .none });
-    }
+    if (!progress.show_percentage) return;
+    // Over the middle of the whole bar, not after the filled part: the
+    // number says how full the bar is, so it belongs to the bar and not to
+    // the fill, and floating keeps it from pushing the fill about.
+    layout.open(.{
+        .floating = .{
+            .anchor = .{ .element_x = .center, .element_y = .center, .parent_x = .center, .parent_y = .center },
+            .z_index = 1,
+        },
+    });
+    defer layout.close();
+    var text: [16]u8 = undefined;
+    layout.text(std.fmt.bufPrint(&text, "{d:.0}%", .{fraction * 100}) catch "", .{
+        .font = context.app.interface.addFont(style.font) catch 0,
+        .font_size = style.font_size,
+        .color = color(style.text_color),
+        .wrap = .none,
+    });
 }
 
 /// What a button shows: its picture, then its words.
