@@ -94,6 +94,10 @@ const Label = @import("control.zig").Label;
 const LineEdit = @import("control.zig").LineEdit;
 const ScriptHandle = @import("script.zig").ScriptHandle;
 const Script = @import("script.zig").Script;
+const tilemap = @import("tilemap.zig");
+const TileMap = tilemap.TileMap;
+const TileChunk = tilemap.TileChunk;
+const TileSetHandle = @import("tileset.zig").TileSetHandle;
 const Uuid = @import("fluxion_id").Uuid;
 const math = @import("fluxion_math");
 const Color = @import("color.zig").Color;
@@ -381,6 +385,7 @@ const TextureOptions = struct {
 /// by that.
 pub fn save(app: *App, io: std.Io, path: []const u8, options: SaveOptions) !void {
     try app.assets.ensureUids();
+    try app.tile_sets.ensureUids(&app.project);
     if (app.scripts) |scripts| try scripts.ensureUids();
     const file = try app.project.osPath(app.gpa, path);
     defer app.gpa.free(file);
@@ -461,6 +466,9 @@ pub const EntityJson = struct {
 const Saving = struct {
     app: *App,
     every_field: bool = false,
+    /// The entity being written, for a component whose value is kept beside
+    /// it: a map's tiles.
+    entity: Entity = .none,
     /// Every entity, in the order a scene lists them.
     order: std.ArrayList(Entity) = .empty,
     /// Every file written, under the name it was written by, for `assets`.
@@ -479,7 +487,14 @@ const Saving = struct {
     /// is the order, and a scene needs nothing more to keep it.
     fn placeAll(s: *Saving) Allocator.Error!void {
         const gpa = s.app.gpa;
-        for (s.app.world.archetypeSlice()) |*archetype| try s.order.appendSlice(gpa, archetype.entities.items);
+        for (s.app.world.archetypeSlice()) |*archetype| {
+            for (archetype.entities.items) |e| {
+                // A chunk is not a thing in the scene: its map writes its
+                // tiles, and reading them makes the chunks again.
+                if (s.app.world.has(e, TileChunk)) continue;
+                try s.order.append(gpa, e);
+            }
+        }
         std.mem.sort(Entity, s.order.items, @as(*const App, s.app), App.siblingBefore);
         for (s.order.items) |e| _ = s.app.ensureUuid(e) catch |err| switch (err) {
             error.NoSuchEntity => unreachable,
@@ -489,6 +504,7 @@ const Saving = struct {
 
     fn writeEntity(s: *Saving, w: *json.Writer, e: Entity) json.Writer.Error!void {
         const app = s.app;
+        s.entity = e;
         try w.beginObject();
         if (app.uuidOf(e)) |uuid| {
             const text = uuid.toString();
@@ -638,6 +654,41 @@ const Saving = struct {
     }
 };
 
+/// How many bytes a chunk's cells are, and the text they become.
+const chunk_bytes = tilemap.tiles_per_chunk * @sizeOf(tilemap.Cell);
+const chunk_text_len = std.base64.standard.Encoder.calcSize(chunk_bytes);
+
+/// A map's tiles: one line of text a chunk, under the chunk's place.
+///
+/// Godot 3 writes a TileMap's cells as one flat list for the same reasons.
+/// A chunk at a time rather than one long line so that a change to a corner
+/// of a level is a change to one line of the file, and base64 rather than
+/// numbers because a chunk is a kilobyte of them and nobody reads a
+/// thousand numbers.
+fn writeCells(s: *Saving, w: *json.Writer) json.Writer.Error!void {
+    const app = s.app;
+    var any = false;
+    // In the order the chunks were made, which for a level painted left to
+    // right is the order it was painted: a scene saved again keeps its
+    // lines where they were.
+    var it = app.tile_chunks.iterator();
+    while (it.next()) |entry| {
+        if (!entry.key_ptr.map.eql(s.entity)) continue;
+        const chunk = app.world.getConst(entry.value_ptr.*, TileChunk) orelse continue;
+        if (chunk.isEmpty()) continue;
+        if (!any) {
+            try w.key("cells");
+            try w.beginObject();
+            any = true;
+        }
+        var name: [32]u8 = undefined;
+        var text: [chunk_text_len]u8 = undefined;
+        try w.key(std.fmt.bufPrint(&name, "{d},{d}", .{ chunk.x, chunk.y }) catch unreachable);
+        try w.writeString(std.base64.standard.Encoder.encode(&text, std.mem.asBytes(&chunk.cells)));
+    }
+    if (any) try w.endObject();
+}
+
 /// A component: an object of the fields that do not hold their defaults.
 fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
     if (@typeInfo(T) != .@"struct") return writeValue(s, w, T, value);
@@ -655,6 +706,7 @@ fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T
             } else try writeValue(s, w, field.type, held);
         }
     }
+    if (T == TileMap) try writeCells(s, w);
     try w.endObject();
 }
 
@@ -675,6 +727,12 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
     }
     if (T == ScriptHandle) {
         const source = s.app.scriptSource(value.*) orelse return w.writeNull();
+        const kept = try s.files.getOrPut(s.app.gpa, source);
+        if (!kept.found_existing) kept.value_ptr.* = .{};
+        return w.writeString(source);
+    }
+    if (T == TileSetHandle) {
+        const source = s.app.tileSetSource(value.*) orelse return w.writeNull();
         const kept = try s.files.getOrPut(s.app.gpa, source);
         if (!kept.found_existing) kept.value_ptr.* = .{};
         return w.writeString(source);
@@ -812,6 +870,8 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
         };
     }
 
+    var chunks: std.ArrayList(PendingChunk) = .empty;
+    defer chunks.deinit(gpa);
     {
         var reader: json.Reader = .init(gpa, bytes, readerOptions(options));
         defer reader.deinit();
@@ -822,6 +882,7 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
             .diagnostics = options.diagnostics,
             .entities = spawned.items,
             .told = &told,
+            .chunks = &chunks,
         };
         try l.fill();
         // The list is the order of every parent's children.
@@ -830,6 +891,18 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
         loaded.components_unknown = l.components_unknown;
         loaded.connections_unknown = l.connections_unknown;
         loaded.connections_skipped = l.connections_skipped;
+    }
+
+    // Last of all: a chunk is an entity, and making one while the values
+    // above were being written would have moved the rows they went into.
+    var made: std.ArrayList(Entity) = .empty;
+    defer made.deinit(gpa);
+    errdefer for (made.items) |e| app.world.despawn(e);
+    for (chunks.items) |pending| {
+        const entity = try app.makeTileChunk(pending.map, pending.x, pending.y);
+        try made.append(gpa, entity);
+        const chunk = app.world.get(entity, TileChunk).?;
+        chunk.cells = pending.cells;
     }
     return loaded;
 }
@@ -1031,6 +1104,14 @@ const Loading = struct {
     textures: std.StringHashMapUnmanaged(TextureHandle) = .empty,
     fonts: std.StringHashMapUnmanaged(FontHandle) = .empty,
     scripts: std.StringHashMapUnmanaged(ScriptHandle) = .empty,
+    tile_sets: std.StringHashMapUnmanaged(TileSetHandle) = .empty,
+    /// The entity being filled in, for a value kept beside its component:
+    /// a map's tiles.
+    entity: Entity = .none,
+    /// The chunks the maps' cells make, kept until the whole scene is read:
+    /// making an entity now would move the rows the values are being
+    /// written into.
+    chunks: ?*std.ArrayList(PendingChunk) = null,
     /// Files found by their UUIDs somewhere other than the scene says.
     moved: usize = 0,
     /// See `Loaded`.
@@ -1164,6 +1245,7 @@ const Loading = struct {
             _ = try l.next();
             for (l.entities, 0..) |e, place| {
                 const entity_mark = l.path.push("entities/{d}", .{place});
+                l.entity = e;
                 _ = try l.next();
                 while (try l.key()) |member| {
                     if (std.mem.eql(u8, member, "uuid")) {
@@ -1408,6 +1490,18 @@ const Loading = struct {
         return handle;
     }
 
+    /// A tile set the scene names. One that does not read is still loaded,
+    /// and the scene opens with it: its maps draw white squares until it
+    /// does.
+    fn tileSet(l: *Loading, path: []const u8) anyerror!TileSetHandle {
+        if (l.tile_sets.get(path)) |known| return known;
+        const where, _ = try l.file(path);
+        const handle = l.app.loadTileSet(where) catch |err|
+            return l.fail(err, "cannot read the tile set \"{s}\": {t}", .{ where, err });
+        try l.tile_sets.put(l.arena, try l.arena.dupe(u8, path), handle);
+        return handle;
+    }
+
     fn font(l: *Loading, path: []const u8, member: u32) anyerror!FontHandle {
         // Kept by the file and the member: two fonts of one collection are
         // two fonts.
@@ -1479,6 +1573,12 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
             try readText(l, out);
             continue;
         };
+        if (T == TileMap and std.mem.eql(u8, name, "cells")) {
+            const mark = l.path.push("cells", .{});
+            try readCells(l);
+            l.path.pop(mark);
+            continue;
+        }
         if (T == LineEdit and std.mem.eql(u8, name, "placeholder_text")) {
             try readPlaceholder(l, out);
             continue;
@@ -1549,6 +1649,46 @@ fn isBufferedText(comptime T: type) bool {
     return T == Text2D or T == Label or T == LineEdit;
 }
 
+/// One chunk of a map's tiles, read and waiting for the scene to be over.
+const PendingChunk = struct {
+    map: Entity,
+    x: i32,
+    y: i32,
+    cells: [tilemap.tiles_per_chunk]tilemap.Cell,
+};
+
+/// A map's `cells`: a line of base64 under each chunk's place, as
+/// `writeCells` put them. The chunks themselves are made once every value in
+/// the scene has been written, by `read`.
+fn readCells(l: *Loading) anyerror!void {
+    try l.open(.object_begin, "the map's tiles, which is an object of its chunks");
+    while (try l.key()) |name| {
+        const mark = l.path.push("{s}", .{name});
+        const comma = std.mem.indexOfScalar(u8, name, ',') orelse
+            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+        const x = std.fmt.parseInt(i32, name[0..comma], 10) catch
+            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+        const y = std.fmt.parseInt(i32, name[comma + 1 ..], 10) catch
+            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+
+        const token = try l.next();
+        const text = switch (token) {
+            .string => |held| held,
+            else => return l.wrong("a chunk's tiles, which is a line of base64", token),
+        };
+        var pending: PendingChunk = .{ .map = l.entity, .x = x, .y = y, .cells = undefined };
+        const room = std.mem.asBytes(&pending.cells);
+        const size = std.base64.standard.Decoder.calcSizeForSlice(text) catch
+            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
+        if (size != room.len) return l.fail(error.OutOfRange, "a chunk is {d} bytes of tiles, and this is {d}", .{ room.len, size });
+        std.base64.standard.Decoder.decode(room, text) catch
+            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
+
+        if (l.chunks) |waiting| try waiting.append(l.app.gpa, pending);
+        l.path.pop(mark);
+    }
+}
+
 fn isPlaceholderBuffer(name: []const u8) bool {
     return std.mem.eql(u8, name, "placeholder") or std.mem.eql(u8, name, "placeholder_len");
 }
@@ -1583,6 +1723,15 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
         out.* = switch (token) {
             .null => .none,
             .string => |path| try l.script(path),
+            else => return l.wrong("the file it was read from, or null", token),
+        };
+        return;
+    }
+    if (T == TileSetHandle) {
+        const token = try l.next();
+        out.* = switch (token) {
+            .null => .none,
+            .string => |path| try l.tileSet(path),
             else => return l.wrong("the file it was read from, or null", token),
         };
         return;
@@ -1831,26 +1980,47 @@ test "a UI label keeps its buffered text through a scene round trip" {
     try testing.expectEqualStrings("Name", line.placeholderSlice());
 }
 
-test "tile chunks keep their map reference and cells through a scene round trip" {
-    const tiles = @import("tilemap.zig");
+test "a map writes its tiles with itself, and its chunks are not in the scene" {
     const source = try headless();
     defer source.destroy();
-    const map = try source.world.spawnWith(.{ Transform2D{}, tiles.TileMap{} });
+    const map = try source.world.spawnWith(.{ Transform2D{}, TileMap{} });
     try source.setName(map, "level");
-    _ = try source.setTile(map, -2, 18, .{ .atlas = 7, .solid = true, .flip_x = true });
+    _ = try source.setTile(map, -2, 18, tilemap.Cell.at(1, 7, 3).with(tilemap.Cell.flip_h, true));
+    _ = try source.setTile(map, 0, 0, .at(0, 1, 1));
 
     const text = try write(source, testing.allocator, .{});
     defer testing.allocator.free(text);
+    // Two chunks of tiles, and no entity of their own for either.
+    try testing.expect(std.mem.indexOf(u8, text, "\"cells\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"TileChunk\"") == null);
+    // A kilobyte of tiles is a line, not a thousand numbers.
+    try testing.expect(text.len < 4000);
+
     const copy = try headless();
     defer copy.destroy();
     _ = try read(copy, text, .{});
 
     const loaded = copy.find("level").?;
-    const tile = copy.tileAt(loaded, -2, 18).?;
-    try testing.expectEqual(@as(u16, 7), tile.atlas);
-    try testing.expect(tile.solid);
-    try testing.expect(tile.flip_x);
+    const cell = copy.tileAt(loaded, -2, 18);
+    try testing.expectEqual(@as(u8, 1), cell.source);
+    try testing.expectEqual(@as(u8, 7), cell.x);
+    try testing.expectEqual(@as(u8, 3), cell.y);
+    try testing.expect(cell.has(tilemap.Cell.flip_h));
     try testing.expect(copy.tileChunkAt(loaded, -1, 1) != null);
+    try testing.expectEqual(@as(u8, 1), copy.tileAt(loaded, 0, 0).x);
+    try testing.expect(copy.tileAt(loaded, 5, 5).isEmpty());
+}
+
+test "a map keeps the tile set it was saved with" {
+    const source = try headless();
+    defer source.destroy();
+    const set = try source.addTileSet("res://terrain.tileset", "{ \"fluxion_tileset\": 1 }");
+    const map = try source.world.spawnWith(.{ Transform2D{}, TileMap{ .tile_set = set } });
+    try source.setName(map, "level");
+
+    const text = try write(source, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "res://terrain.tileset") != null);
 }
 
 test "every entity written is given a UUID, and keeps it" {

@@ -27,6 +27,7 @@ const Assets = @import("../assets.zig");
 const components = @import("../components.zig");
 const hierarchy = @import("../hierarchy.zig");
 const tilemap = @import("../tilemap.zig");
+const tileset = @import("../tileset.zig");
 const view_mod = @import("view.zig");
 
 const Transform2D = components.Transform2D;
@@ -258,6 +259,7 @@ pub const Renderer = struct {
         gpa: Allocator,
         world: *ecs.World,
         assets: *Assets,
+        tile_sets: *tileset.TileSets,
         snapshots: *const hierarchy.Snapshots,
         target: rhi.RenderTarget,
         view: View,
@@ -266,7 +268,7 @@ pub const Renderer = struct {
     ) !void {
         // The box that culls and the matrix that draws are two readings of
         // the same view.
-        try self.gather(gpa, world, assets, snapshots, alpha, view.bounds());
+        try self.gather(gpa, world, assets, tile_sets, snapshots, alpha, view.bounds());
 
         // Gathering the text may have rasterised new letters, so the atlases
         // go up once, before anything samples them.
@@ -332,6 +334,7 @@ pub const Renderer = struct {
         gpa: Allocator,
         world: *ecs.World,
         assets: *Assets,
+        tile_sets: *tileset.TileSets,
         snapshots: *const hierarchy.Snapshots,
         alpha: f32,
         bounds: Bounds,
@@ -397,17 +400,25 @@ pub const Renderer = struct {
             }
         }
 
-        try self.gatherTiles(gpa, world, assets, snapshots, alpha, bounds, &sequence);
+        try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, alpha, bounds, &sequence);
         try self.gatherText(gpa, world, assets, snapshots, alpha, bounds, &sequence);
 
         std.sort.pdq(Item, self.items.items, {}, Item.before);
     }
 
+    /// Every tile of every chunk near the camera, as one instance each: a
+    /// chunk is culled as a whole, and the tiles of one sheet are one draw.
+    ///
+    /// A cell that is turned - `Cell.transpose` - is drawn as a quad turned
+    /// a quarter about its middle, because the shader reads a corner's `u`
+    /// from the quad's own `x` and no region can swap the two. See
+    /// `tilemap.drawn`.
     fn gatherTiles(
         self: *Renderer,
         gpa: Allocator,
         world: *ecs.World,
         assets: *Assets,
+        tile_sets: *tileset.TileSets,
         snapshots: *const hierarchy.Snapshots,
         alpha: f32,
         bounds: Bounds,
@@ -420,8 +431,9 @@ pub const Renderer = struct {
                 if (!map.visible or map.tint.a <= 0) continue;
                 const local = world.get(tiles.map, Transform2D) orelse continue;
                 const placed = hierarchy.resolve(world, snapshots, tiles.map, local.*, alpha) orelse continue;
-                const tile_width: f32 = @floatFromInt(@max(map.tile_width, 1));
-                const tile_height: f32 = @floatFromInt(@max(map.tile_height, 1));
+                const set = tile_sets.get(map.tile_set);
+                const tile_width: f32 = if (set) |held| @floatFromInt(held.tile_width) else tileset.default_tile_size;
+                const tile_height: f32 = if (set) |held| @floatFromInt(held.tile_height) else tileset.default_tile_size;
                 const chunk_width = tile_width * tilemap.chunk_side;
                 const chunk_height = tile_height * tilemap.chunk_side;
                 const chunk_left = @as(f32, @floatFromInt(tiles.x)) * chunk_width;
@@ -434,30 +446,41 @@ pub const Renderer = struct {
                 }
                 self.tile_chunks_drawn += 1;
 
-                const texture = assets.get(map.texture) orelse assets.get(assets.white) orelse continue;
-                const c = @cos(placed.rotation);
-                const s = @sin(placed.rotation);
-                for (tiles.tiles, 0..) |tile, index| {
-                    if (tile.isEmpty()) continue;
+                const turn = std.math.pi / 2.0;
+                for (tiles.cells, 0..) |cell, index| {
+                    if (cell.isEmpty()) continue;
                     const x: f32 = @floatFromInt(index % tilemap.chunk_side);
                     const y: f32 = @floatFromInt(index / tilemap.chunk_side);
-                    const at = placed.apply(chunk_left + x * tile_width, chunk_top + y * tile_height);
-                    var region = components.Region.cell(tile.atlasIndex(), map.columns, map.rows);
-                    if (tile.flip_x) region = region.flippedX();
-                    if (tile.flip_y) region = region.flippedY();
+
+                    // A map with no tile set draws white squares its tint
+                    // colours: a level blocked out before its art exists.
+                    const picture: tileset.Picture = if (set) |held|
+                        held.pictureOf(assets, cell)
+                    else
+                        .{ .texture = assets.white, .region = .full };
+                    const texture = assets.get(picture.texture) orelse assets.get(assets.white) orelse continue;
+                    const how = tilemap.drawn(cell, picture.region);
+
+                    // The middle of the cell, so a turned quad turns about
+                    // itself rather than about a corner.
+                    const at = placed.apply(chunk_left + (x + 0.5) * tile_width, chunk_top + (y + 0.5) * tile_height);
+                    const rotation = if (how.turned) placed.rotation - turn else placed.rotation;
+                    const across = if (how.turned) tile_height * placed.scale_y else tile_width * placed.scale_x;
+                    const down = if (how.turned) tile_width * placed.scale_x else tile_height * placed.scale_y;
+
                     sequence.* += 1;
                     try self.items.append(gpa, .{
-                        .key = sortKey(map.layer, map.texture),
+                        .key = sortKey(map.layer, picture.texture),
                         .order = map.order,
                         .sequence = sequence.*,
                         .texture = texture.gpu,
                         .sampler = assets.samplerFor(texture.filter, texture.wrap),
                         .blend = .alpha,
                         .instance = .{
-                            .placement = .{ at.x, at.y, tile_width * placed.scale_x, tile_height * placed.scale_y },
-                            .spin = .{ 0, 0, c, s },
+                            .placement = .{ at.x, at.y, across, down },
+                            .spin = .{ 0.5, 0.5, @cos(rotation), @sin(rotation) },
                             .tint = .{ map.tint.r, map.tint.g, map.tint.b, map.tint.a },
-                            .uv_rect = .{ region.u0, region.v0, region.u1, region.v1 },
+                            .uv_rect = .{ how.region.u0, how.region.v0, how.region.u1, how.region.v1 },
                         },
                     });
                 }

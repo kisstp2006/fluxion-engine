@@ -178,10 +178,18 @@ pub const Collider2D = components.Collider2D;
 /// pickup, a hurtbox. Godot's Area2D.
 pub const Area2D = components.Area2D;
 
+/// A grid of tiles from a `TileSet`: Godot's TileMap. Its cells live in
+/// `TileChunk`s the map owns; `App.setTile` paints one.
 pub const TileMap = @import("tilemap.zig").TileMap;
 pub const TileChunk = @import("tilemap.zig").TileChunk;
-pub const Tile = @import("tilemap.zig").Tile;
+/// One tile of a map: which tile of which source, and how it is turned.
+pub const Cell = @import("tilemap.zig").Cell;
 pub const tile_chunk_side = @import("tilemap.zig").chunk_side;
+
+pub const tileset = @import("tileset.zig");
+/// What a map's cells name their tiles in: a `.tileset` file.
+pub const TileSet = tileset.TileSet;
+pub const TileSetHandle = tileset.TileSetHandle;
 
 pub const Control = control.Control;
 pub const Theme = control.Theme;
@@ -340,6 +348,8 @@ pub const Query = ecs.Query;
 
 test {
     _ = control;
+    _ = tileset;
+    _ = @import("tilemap.zig");
     _ = App;
     _ = Window;
     _ = Input;

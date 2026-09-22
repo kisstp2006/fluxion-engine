@@ -59,6 +59,7 @@ const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
 const timer = @import("timer.zig");
 const tilemap = @import("tilemap.zig");
+const tileset = @import("tileset.zig");
 const scene = @import("scene.zig");
 const signals_mod = @import("signals.zig");
 const events_mod = @import("events.zig");
@@ -358,6 +359,14 @@ physics: physics_lib.World,
 physics_2d: Project.Physics2D,
 /// Which body is which entity's. See `bodies.zig`.
 bodies: Bodies = .{},
+
+/// Every `.tileset` file read, and the handles a `TileMap` points at one
+/// with. See `loadTileSet`.
+tile_sets: tileset.TileSets = .{},
+/// Which entity holds each chunk of each map, so painting a tile finds its
+/// chunk without walking every chunk in the world. Kept beside the world,
+/// as the names are: a chunk holds no handle of its own.
+tile_chunks: std.AutoHashMapUnmanaged(ChunkKey, ecs.Entity) = .empty,
 /// What is inside each `Area2D`, and the signals that say so. See
 /// `areas.zig`.
 areas: Areas = .{},
@@ -542,6 +551,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .physics = .init(gpa, godotRules(options.physics)),
         .physics_2d = options.physics_2d,
         .bodies = .{},
+        .tile_sets = .{},
+        .tile_chunks = .empty,
         .project = undefined,
         .assets = undefined,
         .sprites = undefined,
@@ -662,7 +673,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle }) catch |err| switch (err) {
+    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -810,6 +821,8 @@ pub fn destroy(self: *App) void {
     self.event_channels.deinit(gpa);
     self.types.deinit();
     self.bodies.deinit(gpa);
+    self.tile_sets.deinit(gpa);
+    self.tile_chunks.deinit(gpa);
     self.areas.deinit(gpa);
     self.picking.deinit(gpa);
     self.physics.deinit();
@@ -1335,6 +1348,17 @@ fn despawnOrphans(self: *App) !void {
             }
         }
 
+        // A chunk is its map's rather than its child, and goes the same way:
+        // a map despawned takes its tiles with it.
+        var chunks = try ecs.Query(.{tilemap.TileChunk}).over(&self.world);
+        while (chunks.next()) |chunk| {
+            for (chunk.slice(tilemap.TileChunk), chunk.entities) |tiles, entity| {
+                if (self.world.has(tiles.map, tilemap.TileMap)) continue;
+                try self.orphans.append(self.gpa, entity);
+                _ = self.tile_chunks.remove(.{ .map = tiles.map, .x = tiles.x, .y = tiles.y });
+            }
+        }
+
         // Found first and despawned after: a despawn moves rows, and the
         // slices above point at rows.
         if (self.orphans.items.len == 0) return;
@@ -1791,39 +1815,127 @@ fn parentOf(self: *const App, entity: ecs.Entity) ecs.Entity {
     if (self.world.getConst(entity, components.Transform2D)) |place| return place.parent;
     if (self.world.getConst(entity, control.Control)) |box| return box.parent;
     if (self.world.getConst(entity, control.StyleBox)) |style| return style.theme;
-    if (self.world.getConst(entity, tilemap.TileChunk)) |chunk| return chunk.map;
     return .none;
 }
 
+// -------------------------------------------------------------------------
+// Tiles
+// -------------------------------------------------------------------------
+
+/// Which chunk of which map: what `tile_chunks` finds an entity by.
+pub const ChunkKey = struct {
+    map: ecs.Entity,
+    x: i32,
+    y: i32,
+};
+
 pub const SetTileError = error{ NotATileMap, OutOfMemory };
 
-pub fn setTile(self: *App, map: ecs.Entity, x: i32, y: i32, tile: tilemap.Tile) SetTileError!ecs.Entity {
+/// Put `cell` at `x`, `y` of `map`, counted in tiles from the map's origin
+/// and negative above it and to its left. The chunk it lands in is made when
+/// there is none.
+///
+/// Gives back the chunk holding the cell, or null when an empty cell was put
+/// where there was no chunk - or emptied the last tile of one, which takes
+/// the chunk away with it.
+pub fn setTile(self: *App, map: ecs.Entity, x: i32, y: i32, cell: tilemap.Cell) SetTileError!?ecs.Entity {
     if (!self.world.has(map, tilemap.TileMap)) return error.NotATileMap;
     const chunk_x = @divFloor(x, tilemap.chunk_side);
     const chunk_y = @divFloor(y, tilemap.chunk_side);
-    var entity = self.tileChunkAt(map, chunk_x, chunk_y);
-    if (entity == null) entity = self.world.spawnWith(.{tilemap.TileChunk{ .map = map, .x = chunk_x, .y = chunk_y }}) catch return error.OutOfMemory;
     const local_x: u8 = @intCast(@mod(x, tilemap.chunk_side));
     const local_y: u8 = @intCast(@mod(y, tilemap.chunk_side));
-    _ = self.world.get(entity.?, tilemap.TileChunk).?.set(local_x, local_y, tile);
-    return entity.?;
+
+    const entity = self.tileChunkAt(map, chunk_x, chunk_y) orelse {
+        // Nothing there to empty.
+        if (cell.isEmpty()) return null;
+        const made = try self.makeTileChunk(map, chunk_x, chunk_y);
+        _ = self.world.get(made, tilemap.TileChunk).?.set(local_x, local_y, cell);
+        return made;
+    };
+
+    const chunk = self.world.get(entity, tilemap.TileChunk).?;
+    _ = chunk.set(local_x, local_y, cell);
+    if (cell.isEmpty() and chunk.isEmpty()) {
+        _ = self.tile_chunks.remove(.{ .map = map, .x = chunk_x, .y = chunk_y });
+        self.world.despawn(entity);
+        return null;
+    }
+    return entity;
 }
 
-pub fn tileAt(self: *App, map: ecs.Entity, x: i32, y: i32) ?tilemap.Tile {
+/// What is at `x`, `y` of `map`: `Cell.empty` where nothing was painted.
+pub fn tileAt(self: *App, map: ecs.Entity, x: i32, y: i32) tilemap.Cell {
     const chunk_x = @divFloor(x, tilemap.chunk_side);
     const chunk_y = @divFloor(y, tilemap.chunk_side);
-    const entity = self.tileChunkAt(map, chunk_x, chunk_y) orelse return null;
-    return self.world.get(entity, tilemap.TileChunk).?.get(@intCast(@mod(x, tilemap.chunk_side)), @intCast(@mod(y, tilemap.chunk_side)));
+    const entity = self.tileChunkAt(map, chunk_x, chunk_y) orelse return .empty;
+    const chunk = self.world.get(entity, tilemap.TileChunk).?;
+    return chunk.get(@intCast(@mod(x, tilemap.chunk_side)), @intCast(@mod(y, tilemap.chunk_side))).?;
 }
 
+/// The entity holding a map's chunk at `x`, `y`, in chunks. Found through
+/// the index rather than by walking every chunk in the world.
 pub fn tileChunkAt(self: *App, map: ecs.Entity, x: i32, y: i32) ?ecs.Entity {
-    var it = ecs.Query(.{tilemap.TileChunk}).over(&self.world) catch return null;
-    while (it.next()) |chunk| {
-        for (chunk.entities, chunk.slice(tilemap.TileChunk)) |entity, tiles| {
-            if (tiles.map.eql(map) and tiles.x == x and tiles.y == y) return entity;
-        }
+    const key: ChunkKey = .{ .map = map, .x = x, .y = y };
+    const entity = self.tile_chunks.get(key) orelse return null;
+    // A chunk despawned elsewhere leaves its key behind; the first look
+    // after that gives it back.
+    const chunk = self.world.get(entity, tilemap.TileChunk) orelse {
+        _ = self.tile_chunks.remove(key);
+        return null;
+    };
+    if (!chunk.map.eql(map) or chunk.x != x or chunk.y != y) {
+        _ = self.tile_chunks.remove(key);
+        return null;
     }
-    return null;
+    return entity;
+}
+
+/// A chunk of a map, made and put in the index. Its cells start empty.
+pub fn makeTileChunk(self: *App, map: ecs.Entity, x: i32, y: i32) SetTileError!ecs.Entity {
+    if (!self.world.has(map, tilemap.TileMap)) return error.NotATileMap;
+    try self.tile_chunks.ensureUnusedCapacity(self.gpa, 1);
+    const entity = self.world.spawnWith(.{tilemap.TileChunk{ .map = map, .x = x, .y = y }}) catch return error.OutOfMemory;
+    self.tile_chunks.putAssumeCapacity(.{ .map = map, .x = x, .y = y }, entity);
+    return entity;
+}
+
+/// How big one tile of a map is, in its own pixels: what its tile set says,
+/// or the default for a map without one.
+pub fn tileSizeOf(self: *App, map: ecs.Entity) [2]f32 {
+    const held = self.world.getConst(map, tilemap.TileMap) orelse return .{ tileset.default_tile_size, tileset.default_tile_size };
+    const set = self.tile_sets.get(held.tile_set) orelse return .{ tileset.default_tile_size, tileset.default_tile_size };
+    return .{ @floatFromInt(set.tile_width), @floatFromInt(set.tile_height) };
+}
+
+/// Read a `.tileset` file, or find the one read from there already. See
+/// `tileset.TileSets`.
+pub fn loadTileSet(self: *App, path: []const u8) !tileset.TileSetHandle {
+    return self.tile_sets.load(self, path);
+}
+
+/// A tile set from text rather than a file: a test's, or a tool's.
+pub fn addTileSet(self: *App, name: []const u8, text: []const u8) !tileset.TileSetHandle {
+    return self.tile_sets.add(self, name, text);
+}
+
+pub fn findTileSet(self: *App, path: []const u8) ?tileset.TileSetHandle {
+    return self.tile_sets.find(path);
+}
+
+/// Read a tile set's file again, for an editor that has just saved it.
+/// Whatever was built from it is built again.
+pub fn reloadTileSet(self: *App, handle: tileset.TileSetHandle) !bool {
+    return self.tile_sets.reload(self, handle);
+}
+
+pub fn tileSetOf(self: *App, handle: tileset.TileSetHandle) ?*const tileset.TileSet {
+    return self.tile_sets.get(handle);
+}
+
+/// The path a tile set was read from: what a scene writes in a handle's
+/// place, and what an editor shows.
+pub fn tileSetSource(self: *App, handle: tileset.TileSetHandle) ?[]const u8 {
+    return self.tile_sets.sourceOf(handle);
 }
 
 /// A parent's children in their order, as many as `found` holds, the first
@@ -2026,6 +2138,7 @@ pub fn clearWorld(self: *App) void {
     self.world = .init(self.gpa);
     self.snapshots.clearRetainingCapacity();
     self.orphans.clearRetainingCapacity();
+    self.tile_chunks.clearRetainingCapacity();
     for (self.names.values()) |name| self.gpa.free(name);
     self.names.clearRetainingCapacity();
     self.by_name.clearRetainingCapacity();
@@ -2159,6 +2272,7 @@ pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
     defer self.gpa.free(new);
     try self.project.moveFile(old, new);
     try self.assets.renamed(old, new);
+    try self.tile_sets.renamed(self.gpa, old, new);
     if (self.scripts) |scripts| try scripts.renamed(old, new);
 }
 
@@ -2918,8 +3032,11 @@ pub fn textCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     return sprite.labelCornersOf(label, placed, face);
 }
 
+/// The box a map's painted tiles fill, in the map's own pixels: left, top,
+/// right and bottom. Null for an entity with no `TileMap`, or one with no
+/// tiles in it.
 pub fn tileMapBounds(self: *App, entity: ecs.Entity) ?[4]f32 {
-    const map = self.world.get(entity, tilemap.TileMap) orelse return null;
+    if (!self.world.has(entity, tilemap.TileMap)) return null;
     var min_x: i32 = std.math.maxInt(i32);
     var min_y: i32 = std.math.maxInt(i32);
     var max_x: i32 = std.math.minInt(i32);
@@ -2927,8 +3044,8 @@ pub fn tileMapBounds(self: *App, entity: ecs.Entity) ?[4]f32 {
     var it = ecs.Query(.{tilemap.TileChunk}).over(&self.world) catch return null;
     while (it.next()) |chunk| for (chunk.slice(tilemap.TileChunk)) |tiles| {
         if (!tiles.map.eql(entity)) continue;
-        for (tiles.tiles, 0..) |tile, index| {
-            if (tile.isEmpty()) continue;
+        for (tiles.cells, 0..) |cell, index| {
+            if (cell.isEmpty()) continue;
             const x = tiles.x * tilemap.chunk_side + @as(i32, @intCast(index % tilemap.chunk_side));
             const y = tiles.y * tilemap.chunk_side + @as(i32, @intCast(index / tilemap.chunk_side));
             min_x = @min(min_x, x);
@@ -2938,13 +3055,12 @@ pub fn tileMapBounds(self: *App, entity: ecs.Entity) ?[4]f32 {
         }
     };
     if (min_x > max_x) return null;
-    const tile_width = @max(map.tile_width, 1);
-    const tile_height = @max(map.tile_height, 1);
+    const tile = self.tileSizeOf(entity);
     return .{
-        @as(f32, @floatFromInt(min_x)) * @as(f32, @floatFromInt(tile_width)),
-        @as(f32, @floatFromInt(min_y)) * @as(f32, @floatFromInt(tile_height)),
-        @as(f32, @floatFromInt(max_x)) * @as(f32, @floatFromInt(tile_width)),
-        @as(f32, @floatFromInt(max_y)) * @as(f32, @floatFromInt(tile_height)),
+        @as(f32, @floatFromInt(min_x)) * tile[0],
+        @as(f32, @floatFromInt(min_y)) * tile[1],
+        @as(f32, @floatFromInt(max_x)) * tile[0],
+        @as(f32, @floatFromInt(max_y)) * tile[1],
     };
 }
 
@@ -3396,7 +3512,7 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
     const view: View = .of(&self.world, &self.snapshots, width, height);
     if (self.world_on_screen) {
         const clear = try self.drawDebugUnder(into, view);
-        try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, into, view, clear, self.time.alpha());
+        try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, into, view, clear, self.time.alpha());
     } else try self.clearTarget(into);
 
     // 3. The interface, on top, loading what the 2D layer left - with its
@@ -3430,7 +3546,7 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
 /// interface it wants its `source` turned over; see `drawnUpsideDown`.
 pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
     const clear = try self.drawDebugUnder(.{ .texture = into }, view);
-    try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, .{ .texture = into }, view, clear, self.time.alpha());
+    try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, .{ .texture = into }, view, clear, self.time.alpha());
     if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
 }
 
@@ -3605,13 +3721,24 @@ test "a sprite nowhere near the camera is not drawn" {
     try testing.expectEqual(@as(u32, 1), app.sprites.culled);
 }
 
+/// A tile set of one untextured source: its first tile solid, its second a
+/// picture and nothing more.
+const solid_tiles =
+    \\{
+    \\  "fluxion_tileset": 1,
+    \\  "tile_size": [16, 16],
+    \\  "sources": [{ "id": 0, "tiles": [{ "at": [0, 0], "collision": "full" }] }]
+    \\}
+;
+
 test "tile maps create signed chunks and cull them before their tiles" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 320, .height = 240 });
     defer app.destroy();
-    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .texture = app.assets.white } });
-    const near = try app.setTile(map, -1, -1, tilemap.Tile.of(0));
-    _ = try app.setTile(map, 0, 0, tilemap.Tile.of(0));
-    const far = try app.setTile(map, 1024, 1024, tilemap.Tile.of(0));
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    const near = (try app.setTile(map, -1, -1, .at(0, 0, 0))).?;
+    _ = try app.setTile(map, 0, 0, .at(0, 0, 0));
+    const far = (try app.setTile(map, 1024, 1024, .at(0, 0, 0))).?;
     try app.run();
 
     try testing.expectEqual(@as(i32, -1), app.world.get(near, tilemap.TileChunk).?.x);
@@ -3620,14 +3747,38 @@ test "tile maps create signed chunks and cull them before their tiles" {
     try testing.expectEqual(@as(u32, 2), app.sprites.tile_chunks_drawn);
     try testing.expectEqual(@as(u32, 1), app.sprites.tile_chunks_culled);
     try testing.expectEqual(@as(u32, 2), app.sprites.drawn);
+
+    // The index finds a chunk, and an emptied one goes away with its key.
+    try testing.expect(app.tileChunkAt(map, -1, -1).?.eql(near));
+    try testing.expect(app.tileAt(map, -1, -1).has(tilemap.Cell.present));
+    try testing.expect(try app.setTile(map, -1, -1, .empty) == null);
+    try testing.expect(app.tileChunkAt(map, -1, -1) == null);
+    try testing.expect(app.tileAt(map, -1, -1).isEmpty());
+    try testing.expect(!app.world.isAlive(near));
 }
 
-test "solid tiles generate static colliders from the same chunk data" {
+test "a map's chunks go when the map does" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    const chunk = (try app.setTile(map, 2, 2, .at(0, 0, 0))).?;
+
+    app.world.despawn(map);
+    try app.run();
+    try testing.expect(!app.world.isAlive(chunk));
+    try testing.expectEqual(@as(usize, 0), app.tile_chunks.count());
+}
+
+test "the tile set says which tiles are solid, and they become one body" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 64, .height = 64 });
     defer app.destroy();
-    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{} });
-    _ = try app.setTile(map, 0, 0, .{ .atlas = 1, .solid = true });
-    _ = try app.setTile(map, 1, 0, .{ .atlas = 1, .solid = true });
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    _ = try app.setTile(map, 0, 0, .at(0, 0, 0));
+    _ = try app.setTile(map, 1, 0, .at(0, 0, 0));
+    // A tile the set says nothing of is a picture and no more.
+    _ = try app.setTile(map, 2, 0, .at(0, 3, 0));
     try app.run();
 
     try testing.expectEqual(@as(usize, 1), app.physics.bodyCount());
@@ -3635,20 +3786,50 @@ test "solid tiles generate static colliders from the same chunk data" {
     const hit = app.castRay(.init(8, -8), .init(8, 24), .{}) orelse return error.TestExpectedEqual;
     try testing.expect(hit.entity.eql(map));
 
-    _ = try app.setTile(map, 0, 0, .{});
-    _ = try app.setTile(map, 1, 0, .{});
+    _ = try app.setTile(map, 0, 0, .empty);
+    _ = try app.setTile(map, 1, 0, .empty);
     try app.bodies.sync(app);
     try testing.expectEqual(@as(usize, 0), app.physics.shapeCount());
+}
+
+test "a tile's own shape is a polygon, turned the way its cell is" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const set = try app.addTileSet("slope.tileset",
+        \\{
+        \\  "fluxion_tileset": 1,
+        \\  "tile_size": [16, 16],
+        \\  "sources": [{ "id": 0, "tiles": [
+        \\    { "at": [0, 0], "collision": "polygon", "polygon": [[0, 16], [16, 16], [16, 0]] }
+        \\  ] }]
+        \\}
+    );
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    _ = try app.setTile(map, 0, 0, .at(0, 0, 0));
+    try app.syncBodies();
+    try testing.expectEqual(@as(usize, 1), app.physics.shapeCount());
+
+    // The ramp rises to the right: at its left edge only the last two
+    // pixels are solid, at its right edge all but the first two.
+    try testing.expect(app.castRay(.init(2, 0), .init(2, 10), .{}) == null);
+    try testing.expect(app.castRay(.init(14, 0), .init(14, 10), .{}) != null);
+
+    // Flipped, it rises to the left instead.
+    _ = try app.setTile(map, 0, 0, tilemap.Cell.at(0, 0, 0).with(tilemap.Cell.flip_h, true));
+    try app.syncBodies();
+    try testing.expect(app.castRay(.init(2, 0), .init(2, 10), .{}) != null);
+    try testing.expect(app.castRay(.init(14, 0), .init(14, 10), .{}) == null);
 }
 
 test "a rigid body detects a tile floor below its collider" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
     const map = try app.world.spawnWith(.{
         components.Transform2D{},
-        tilemap.TileMap{ .collision_layer = 1, .collision_mask = 2 },
+        tilemap.TileMap{ .tile_set = set, .collision_layer = 1, .collision_mask = 2 },
     });
-    _ = try app.setTile(map, 0, 0, .{ .atlas = 1, .solid = true });
+    _ = try app.setTile(map, 0, 0, .at(0, 0, 0));
     const player = try app.world.spawnWith(.{
         components.Transform2D.at(8, -5),
         components.RigidBody2D{},

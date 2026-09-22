@@ -19,6 +19,7 @@ const components = @import("components.zig");
 const hierarchy = @import("hierarchy.zig");
 const sprite = @import("render/sprite.zig");
 const tilemap = @import("tilemap.zig");
+const tileset = @import("tileset.zig");
 
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;
@@ -129,8 +130,8 @@ const TileBody = struct {
 };
 
 const TileSettings = struct {
-    tile_width: u16,
-    tile_height: u16,
+    tile_set: tileset.TileSetHandle,
+    tile_set_revision: u32,
     collision_layer: u32,
     collision_mask: u32,
     friction: f32,
@@ -216,9 +217,12 @@ fn syncTiles(self: *Bodies, app: *App) !void {
             const local = app.world.get(tiles.map, Transform2D) orelse continue;
             const world = hierarchy.resolve(&app.world, &still, tiles.map, local.*, 1) orelse continue;
             const at = Pose.of(world);
+            const set = app.tile_sets.get(map.tile_set);
             const settings: TileSettings = .{
-                .tile_width = map.tile_width,
-                .tile_height = map.tile_height,
+                .tile_set = map.tile_set,
+                // The set's own revision: a shape edited in an editor
+                // reaches the physics as a saved file would.
+                .tile_set_revision = if (set) |held| held.revision else 0,
                 .collision_layer = map.collision_layer,
                 .collision_mask = map.collision_mask,
                 .friction = map.friction,
@@ -238,7 +242,7 @@ fn syncTiles(self: *Bodies, app: *App) !void {
                 .user_data = tiles.map.toInt(),
             });
             errdefer app.physics.destroyBody(body);
-            try addTileShapes(app, body, tiles, map.*, at);
+            try addTileShapes(app, body, tiles, map.*, set, at);
             try self.tile_bodies.put(app.gpa, entity, .{
                 .body = body,
                 .map = tiles.map,
@@ -261,20 +265,42 @@ fn syncTiles(self: *Bodies, app: *App) !void {
     }
 }
 
-fn addTileShapes(app: *App, body: BodyId, chunk: tilemap.TileChunk, map: tilemap.TileMap, placed_map: Pose) !void {
+/// One chunk's shapes on its body: the tiles their tile set calls `full`,
+/// merged into as few boxes as they make, and one polygon for each tile with
+/// a shape of its own.
+///
+/// A map with no tile set stops nothing: what is solid is the set's to say.
+fn addTileShapes(app: *App, body: BodyId, chunk: tilemap.TileChunk, map: tilemap.TileMap, set: ?*const tileset.TileSet, placed_map: Pose) !void {
+    const held = set orelse return;
     var used = [_]bool{false} ** tilemap.tiles_per_chunk;
-    const tile_width: f32 = @floatFromInt(@max(map.tile_width, 1));
-    const tile_height: f32 = @floatFromInt(@max(map.tile_height, 1));
+    const tile_width: f32 = @floatFromInt(@max(held.tile_width, 1));
+    const tile_height: f32 = @floatFromInt(@max(held.tile_height, 1));
+    const material: physics.Material = .{ .friction = map.friction, .restitution = map.bounce, .density = 1 };
+    const filter: physics.Filter = .{ .category = map.collision_layer, .mask = map.collision_mask };
+
     for (0..tilemap.chunk_side) |y| for (0..tilemap.chunk_side) |x| {
         const start = y * tilemap.chunk_side + x;
-        if (used[start] or !chunk.tiles[start].solid) continue;
+        if (used[start]) continue;
+        const tile = held.tileOf(chunk.cells[start]);
+        switch (tile.collision) {
+            .none => continue,
+            .polygon => {
+                used[start] = true;
+                try addTilePolygon(app, body, chunk, chunk.cells[start], tile, x, y, tile_width, tile_height, placed_map, material, filter);
+                continue;
+            },
+            .full => {},
+        }
+
+        // A run to the right, then as many rows below it as are full all the
+        // way across: the fewest boxes this chunk's solid tiles make.
         var width: usize = 1;
-        while (x + width < tilemap.chunk_side and !used[start + width] and chunk.tiles[start + width].solid) : (width += 1) {}
+        while (x + width < tilemap.chunk_side and !used[start + width] and held.tileOf(chunk.cells[start + width]).collision == .full) : (width += 1) {}
         var height: usize = 1;
         rows: while (y + height < tilemap.chunk_side) : (height += 1) {
             for (0..width) |across| {
                 const at = (y + height) * tilemap.chunk_side + x + across;
-                if (used[at] or !chunk.tiles[at].solid) break :rows;
+                if (used[at] or held.tileOf(chunk.cells[at]).collision != .full) break :rows;
             }
         }
         for (0..height) |down| {
@@ -287,11 +313,52 @@ fn addTileShapes(app: *App, body: BodyId, chunk: tilemap.TileChunk, map: tilemap
         const half_height = @as(f32, @floatFromInt(height)) * tile_height * @abs(placed_map.scale_y) / 2;
         _ = try app.physics.addShape(body, .{
             .geometry = .{ .polygon = .offsetBox(half_width, half_height, .init(local_x, local_y), 0) },
-            .material = .{ .friction = map.friction, .restitution = map.bounce, .density = 1 },
-            .filter = .{ .category = map.collision_layer, .mask = map.collision_mask },
+            .material = material,
+            .filter = filter,
             .user_data = chunk.map.toInt(),
         });
     };
+}
+
+/// One tile's own shape, put where the cell turns it: `tilemap.place` says
+/// where a corner of the picture lands, and a corner of the shape lands
+/// there too.
+fn addTilePolygon(
+    app: *App,
+    body: BodyId,
+    chunk: tilemap.TileChunk,
+    cell: tilemap.Cell,
+    tile: tileset.Tile,
+    x: usize,
+    y: usize,
+    tile_width: f32,
+    tile_height: f32,
+    placed_map: Pose,
+    material: physics.Material,
+    filter: physics.Filter,
+) !void {
+    const corner_x = (@as(f32, @floatFromInt(chunk.x * tilemap.chunk_side)) + @as(f32, @floatFromInt(x))) * tile_width;
+    const corner_y = (@as(f32, @floatFromInt(chunk.y * tilemap.chunk_side)) + @as(f32, @floatFromInt(y))) * tile_height;
+
+    var points: [tileset.max_points]Vec2 = undefined;
+    const given = tile.polygon();
+    for (given, 0..) |point, i| {
+        const at = tilemap.place(cell, point.x / tile_width, point.y / tile_height);
+        points[i] = .init(
+            (corner_x + at[0] * tile_width) * placed_map.scale_x,
+            (corner_y + at[1] * tile_height) * placed_map.scale_y,
+        );
+    }
+    const polygon = physics.Polygon.fromPoints(points[0..given.len]) catch |err| {
+        log.warn("a tile's shape is not a polygon the physics can hold: {t}", .{err});
+        return;
+    };
+    _ = try app.physics.addShape(body, .{
+        .geometry = .{ .polygon = polygon },
+        .material = material,
+        .filter = filter,
+        .user_data = chunk.map.toInt(),
+    });
 }
 
 fn grow(comptime T: type, gpa: Allocator, list: *std.ArrayList(T), len: usize, empty: T) Allocator.Error!void {
@@ -825,6 +892,12 @@ pub fn clear(self: *Bodies, app: *App) void {
     for (self.bodies.items) |link| {
         if (!link.entity.isNone()) app.physics.destroyBody(link.body);
     }
+    // A chunk's body is kept by its entity, and a fresh world hands those
+    // entities out again: left here, an old body would be taken for the new
+    // world's.
+    var tiles = self.tile_bodies.valueIterator();
+    while (tiles.next()) |held| app.physics.destroyBody(held.body);
+    self.tile_bodies.clearRetainingCapacity();
     self.bodies.clearRetainingCapacity();
     self.shapes.clearRetainingCapacity();
     self.body_seen.clearRetainingCapacity();
