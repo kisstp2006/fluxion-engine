@@ -121,6 +121,7 @@ pub const Uuid = @import("fluxion_id").Uuid;
 
 pub const assets = @import("assets.zig");
 pub const components = @import("components.zig");
+pub const control = @import("control.zig");
 pub const color = @import("color.zig");
 pub const schedule = @import("schedule.zig");
 
@@ -176,6 +177,34 @@ pub const Collider2D = components.Collider2D;
 /// A place that tells what is in it and pushes nothing: a trigger, a
 /// pickup, a hurtbox. Godot's Area2D.
 pub const Area2D = components.Area2D;
+
+pub const TileMap = @import("tilemap.zig").TileMap;
+pub const TileChunk = @import("tilemap.zig").TileChunk;
+pub const Tile = @import("tilemap.zig").Tile;
+pub const tile_chunk_side = @import("tilemap.zig").chunk_side;
+
+pub const Control = control.Control;
+pub const Theme = control.Theme;
+pub const ThemePalette = control.ThemePalette;
+pub const StyleBox = control.StyleBox;
+pub const StyleBoxTexture = control.StyleBoxTexture;
+pub const StyleBoxText = control.StyleBoxText;
+pub const CanvasLayer = control.CanvasLayer;
+pub const Viewport = control.Viewport;
+pub const BoxContainer = control.BoxContainer;
+pub const MarginContainer = control.MarginContainer;
+pub const CenterContainer = control.CenterContainer;
+pub const ScrollContainer = control.ScrollContainer;
+pub const PanelContainer = control.PanelContainer;
+pub const Label = control.Label;
+pub const Button = control.Button;
+pub const CheckBox = control.CheckBox;
+pub const LineEdit = control.LineEdit;
+pub const Slider = control.Slider;
+pub const ProgressBar = control.ProgressBar;
+pub const TabContainer = control.TabContainer;
+pub const TextureRect = control.TextureRect;
+pub const NinePatchRect = control.NinePatchRect;
 
 /// What the pointer did, as an `input_event` signal is handed it.
 pub const pointer = @import("pointer.zig");
@@ -310,6 +339,7 @@ pub const Entity = ecs.Entity;
 pub const Query = ecs.Query;
 
 test {
+    _ = control;
     _ = App;
     _ = Window;
     _ = Input;

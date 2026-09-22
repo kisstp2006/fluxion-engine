@@ -26,6 +26,7 @@ const typeface = @import("fluxion_font");
 const Assets = @import("../assets.zig");
 const components = @import("../components.zig");
 const hierarchy = @import("../hierarchy.zig");
+const tilemap = @import("../tilemap.zig");
 const view_mod = @import("view.zig");
 
 const Transform2D = components.Transform2D;
@@ -37,6 +38,7 @@ const Bounds = view_mod.Bounds;
 
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
 const Labels = ecs.Query(.{ Transform2D, Text2D });
+const TileChunks = ecs.Query(.{tilemap.TileChunk});
 
 pub const Error = rhi.Error || Allocator.Error || error{ShaderFailed};
 
@@ -139,6 +141,9 @@ pub const Renderer = struct {
 
     /// How many sprites the last frame drew.
     drawn: u32 = 0,
+
+    tile_chunks_drawn: u32 = 0,
+    tile_chunks_culled: u32 = 0,
 
     pub fn init(gpa: Allocator, device: *rhi.Device) Error!Renderer {
         var log: std.Io.Writer.Allocating = .init(gpa);
@@ -333,6 +338,8 @@ pub const Renderer = struct {
     ) !void {
         self.items.clearRetainingCapacity();
         self.culled = 0;
+        self.tile_chunks_drawn = 0;
+        self.tile_chunks_culled = 0;
 
         var sequence: u32 = 0;
 
@@ -390,9 +397,72 @@ pub const Renderer = struct {
             }
         }
 
+        try self.gatherTiles(gpa, world, assets, snapshots, alpha, bounds, &sequence);
         try self.gatherText(gpa, world, assets, snapshots, alpha, bounds, &sequence);
 
         std.sort.pdq(Item, self.items.items, {}, Item.before);
+    }
+
+    fn gatherTiles(
+        self: *Renderer,
+        gpa: Allocator,
+        world: *ecs.World,
+        assets: *Assets,
+        snapshots: *const hierarchy.Snapshots,
+        alpha: f32,
+        bounds: Bounds,
+        sequence: *u32,
+    ) !void {
+        var it = try TileChunks.over(world);
+        while (it.next()) |chunk| {
+            for (chunk.slice(tilemap.TileChunk)) |tiles| {
+                const map = world.get(tiles.map, tilemap.TileMap) orelse continue;
+                if (!map.visible or map.tint.a <= 0) continue;
+                const local = world.get(tiles.map, Transform2D) orelse continue;
+                const placed = hierarchy.resolve(world, snapshots, tiles.map, local.*, alpha) orelse continue;
+                const tile_width: f32 = @floatFromInt(@max(map.tile_width, 1));
+                const tile_height: f32 = @floatFromInt(@max(map.tile_height, 1));
+                const chunk_width = tile_width * tilemap.chunk_side;
+                const chunk_height = tile_height * tilemap.chunk_side;
+                const chunk_left = @as(f32, @floatFromInt(tiles.x)) * chunk_width;
+                const chunk_top = @as(f32, @floatFromInt(tiles.y)) * chunk_height;
+                const chunk_center = placed.apply(chunk_left + chunk_width / 2, chunk_top + chunk_height / 2);
+                const reach = spriteRadius(chunk_width * @abs(placed.scale_x), chunk_height * @abs(placed.scale_y));
+                if (!bounds.admits(chunk_center.x, chunk_center.y, reach)) {
+                    self.tile_chunks_culled += 1;
+                    continue;
+                }
+                self.tile_chunks_drawn += 1;
+
+                const texture = assets.get(map.texture) orelse assets.get(assets.white) orelse continue;
+                const c = @cos(placed.rotation);
+                const s = @sin(placed.rotation);
+                for (tiles.tiles, 0..) |tile, index| {
+                    if (tile.isEmpty()) continue;
+                    const x: f32 = @floatFromInt(index % tilemap.chunk_side);
+                    const y: f32 = @floatFromInt(index / tilemap.chunk_side);
+                    const at = placed.apply(chunk_left + x * tile_width, chunk_top + y * tile_height);
+                    var region = components.Region.cell(tile.atlasIndex(), map.columns, map.rows);
+                    if (tile.flip_x) region = region.flippedX();
+                    if (tile.flip_y) region = region.flippedY();
+                    sequence.* += 1;
+                    try self.items.append(gpa, .{
+                        .key = sortKey(map.layer, map.texture),
+                        .order = map.order,
+                        .sequence = sequence.*,
+                        .texture = texture.gpu,
+                        .sampler = assets.samplerFor(texture.filter, texture.wrap),
+                        .blend = .alpha,
+                        .instance = .{
+                            .placement = .{ at.x, at.y, tile_width * placed.scale_x, tile_height * placed.scale_y },
+                            .spin = .{ 0, 0, c, s },
+                            .tint = .{ map.tint.r, map.tint.g, map.tint.b, map.tint.a },
+                            .uv_rect = .{ region.u0, region.v0, region.u1, region.v1 },
+                        },
+                    });
+                }
+            }
+        }
     }
 
     /// Turn every `Text2D` into one instance per glyph, in the same list and

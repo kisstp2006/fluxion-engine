@@ -18,6 +18,7 @@ const App = @import("App.zig");
 const components = @import("components.zig");
 const hierarchy = @import("hierarchy.zig");
 const sprite = @import("render/sprite.zig");
+const tilemap = @import("tilemap.zig");
 
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;
@@ -83,6 +84,7 @@ refused: std.AutoHashMapUnmanaged(Entity, void) = .empty,
 /// Godot's collision exceptions, by entity, so they outlast a body made
 /// anew. The physics is told of each pair once, while both bodies are there.
 exceptions: std.AutoArrayHashMapUnmanaged(EntityPair, u32) = .empty,
+tile_bodies: std.AutoHashMapUnmanaged(Entity, TileBody) = .empty,
 
 /// Two entities, the lower first, so either order names the pair.
 pub const EntityPair = struct {
@@ -115,6 +117,24 @@ const ShapeLink = struct {
     shape: ShapeId = .none,
     body: BodyId = .none,
     made_from: Inputs = undefined,
+};
+
+const TileBody = struct {
+    body: BodyId,
+    map: Entity,
+    revision: u32,
+    settings: TileSettings,
+    placed: Pose,
+    seen: u32,
+};
+
+const TileSettings = struct {
+    tile_width: u16,
+    tile_height: u16,
+    collision_layer: u32,
+    collision_mask: u32,
+    friction: f32,
+    bounce: f32,
 };
 
 /// Everything a shape is made from: when any of it changes, the shape is
@@ -162,6 +182,7 @@ pub fn deinit(self: *Bodies, gpa: Allocator) void {
     self.ended_frame.deinit(gpa);
     self.refused.deinit(gpa);
     self.exceptions.deinit(gpa);
+    self.tile_bodies.deinit(gpa);
     self.* = undefined;
 }
 
@@ -183,7 +204,94 @@ pub fn sync(self: *Bodies, app: *App) !void {
     try self.syncRigid(app);
     try self.syncAreas(app);
     try self.syncColliders(app);
+    try self.syncTiles(app);
     try self.sweep(app);
+}
+
+fn syncTiles(self: *Bodies, app: *App) !void {
+    var it = try ecs.Query(.{tilemap.TileChunk}).over(&app.world);
+    while (it.next()) |chunk| {
+        for (chunk.entities, chunk.slice(tilemap.TileChunk)) |entity, tiles| {
+            const map = app.world.get(tiles.map, tilemap.TileMap) orelse continue;
+            const local = app.world.get(tiles.map, Transform2D) orelse continue;
+            const world = hierarchy.resolve(&app.world, &still, tiles.map, local.*, 1) orelse continue;
+            const at = Pose.of(world);
+            const settings: TileSettings = .{
+                .tile_width = map.tile_width,
+                .tile_height = map.tile_height,
+                .collision_layer = map.collision_layer,
+                .collision_mask = map.collision_mask,
+                .friction = map.friction,
+                .bounce = map.bounce,
+            };
+            if (self.tile_bodies.getPtr(entity)) |held| {
+                if (held.map.eql(tiles.map) and held.revision == tiles.revision and std.meta.eql(held.settings, settings) and std.meta.eql(held.placed, at)) {
+                    held.seen = self.mark;
+                    continue;
+                }
+                try self.destroy(app, held.body);
+            }
+            const body = try app.physics.createBody(.{
+                .type = .static,
+                .position = .init(at.x, at.y),
+                .angle = at.rotation,
+                .user_data = tiles.map.toInt(),
+            });
+            errdefer app.physics.destroyBody(body);
+            try addTileShapes(app, body, tiles, map.*, at);
+            try self.tile_bodies.put(app.gpa, entity, .{
+                .body = body,
+                .map = tiles.map,
+                .revision = tiles.revision,
+                .settings = settings,
+                .placed = at,
+                .seen = self.mark,
+            });
+        }
+    }
+
+    var stale: std.ArrayList(Entity) = .empty;
+    defer stale.deinit(app.gpa);
+    var links = self.tile_bodies.iterator();
+    while (links.next()) |entry| if (entry.value_ptr.seen != self.mark) try stale.append(app.gpa, entry.key_ptr.*);
+    for (stale.items) |entity| {
+        const held = self.tile_bodies.get(entity) orelse continue;
+        try self.destroy(app, held.body);
+        _ = self.tile_bodies.remove(entity);
+    }
+}
+
+fn addTileShapes(app: *App, body: BodyId, chunk: tilemap.TileChunk, map: tilemap.TileMap, placed_map: Pose) !void {
+    var used = [_]bool{false} ** tilemap.tiles_per_chunk;
+    const tile_width: f32 = @floatFromInt(@max(map.tile_width, 1));
+    const tile_height: f32 = @floatFromInt(@max(map.tile_height, 1));
+    for (0..tilemap.chunk_side) |y| for (0..tilemap.chunk_side) |x| {
+        const start = y * tilemap.chunk_side + x;
+        if (used[start] or !chunk.tiles[start].solid) continue;
+        var width: usize = 1;
+        while (x + width < tilemap.chunk_side and !used[start + width] and chunk.tiles[start + width].solid) : (width += 1) {}
+        var height: usize = 1;
+        rows: while (y + height < tilemap.chunk_side) : (height += 1) {
+            for (0..width) |across| {
+                const at = (y + height) * tilemap.chunk_side + x + across;
+                if (used[at] or !chunk.tiles[at].solid) break :rows;
+            }
+        }
+        for (0..height) |down| {
+            for (0..width) |across| used[(y + down) * tilemap.chunk_side + x + across] = true;
+        }
+
+        const local_x = (@as(f32, @floatFromInt(chunk.x * tilemap.chunk_side)) + @as(f32, @floatFromInt(x)) + @as(f32, @floatFromInt(width)) / 2) * tile_width * placed_map.scale_x;
+        const local_y = (@as(f32, @floatFromInt(chunk.y * tilemap.chunk_side)) + @as(f32, @floatFromInt(y)) + @as(f32, @floatFromInt(height)) / 2) * tile_height * placed_map.scale_y;
+        const half_width = @as(f32, @floatFromInt(width)) * tile_width * @abs(placed_map.scale_x) / 2;
+        const half_height = @as(f32, @floatFromInt(height)) * tile_height * @abs(placed_map.scale_y) / 2;
+        _ = try app.physics.addShape(body, .{
+            .geometry = .{ .polygon = .offsetBox(half_width, half_height, .init(local_x, local_y), 0) },
+            .material = .{ .friction = map.friction, .restitution = map.bounce, .density = 1 },
+            .filter = .{ .category = map.collision_layer, .mask = map.collision_mask },
+            .user_data = chunk.map.toInt(),
+        });
+    };
 }
 
 fn grow(comptime T: type, gpa: Allocator, list: *std.ArrayList(T), len: usize, empty: T) Allocator.Error!void {
@@ -748,6 +856,7 @@ pub fn idOf(self: *const Bodies, e: Entity) ?BodyId {
 pub fn entityOf(self: *const Bodies, app: *App, shape: ShapeId) ?Entity {
     if (app.physics.shape(shape)) |entry| {
         const e: Entity = .fromInt(entry.def.user_data);
+        if (app.world.has(e, tilemap.TileMap)) return e;
         if (e.index >= self.shapes.items.len) return null;
         const link = self.shapes.items[e.index];
         return if (link.entity.eql(e) and link.shape.eql(shape)) e else null;

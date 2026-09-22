@@ -90,6 +90,8 @@ const ComponentId = ecs.component.Id;
 const TextureHandle = Assets.TextureHandle;
 const FontHandle = Assets.FontHandle;
 const Text2D = components.Text2D;
+const Label = @import("control.zig").Label;
+const LineEdit = @import("control.zig").LineEdit;
 const ScriptHandle = @import("script.zig").ScriptHandle;
 const Script = @import("script.zig").Script;
 const Uuid = @import("fluxion_id").Uuid;
@@ -640,10 +642,11 @@ const Saving = struct {
 fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
     if (@typeInfo(T) != .@"struct") return writeValue(s, w, T, value);
     try w.beginObject();
-    if (T == Text2D and (value.len > 0 or s.every_field)) try w.field("text", value.slice());
+    if (comptime isBufferedText(T)) if (value.len > 0 or s.every_field) try w.field("text", value.slice());
+    if (T == LineEdit and (value.placeholder_len > 0 or s.every_field)) try w.field("placeholder_text", value.placeholderSlice());
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const held = &@field(value.*, field.name);
-        const skip = (T == Text2D and comptime isTextBuffer(field.name)) or
+        const skip = (comptime isBufferedText(T) and isTextBuffer(field.name)) or (T == LineEdit and isPlaceholderBuffer(field.name)) or
             (if (field.defaultValue()) |default| !s.every_field and std.meta.eql(held.*, default) else false);
         if (!skip) {
             try w.key(field.name);
@@ -1463,18 +1466,26 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
     try l.open(.object_begin, "an object of the component's fields");
     const fields = @typeInfo(T).@"struct".fields;
     var seen: std.StaticBitSet(fields.len) = .initEmpty();
-    if (T == Text2D) {
+    if (comptime isBufferedText(T)) {
         out.bytes = @splat(0);
         out.len = 0;
     }
+    if (T == LineEdit) {
+        out.placeholder = @splat(0);
+        out.placeholder_len = 0;
+    }
     while (try l.key()) |name| {
-        if (T == Text2D and std.mem.eql(u8, name, "text")) {
+        if (comptime isBufferedText(T)) if (std.mem.eql(u8, name, "text")) {
             try readText(l, out);
+            continue;
+        };
+        if (T == LineEdit and std.mem.eql(u8, name, "placeholder_text")) {
+            try readPlaceholder(l, out);
             continue;
         }
         var matched = false;
         inline for (fields, 0..) |field, i| {
-            const hidden = T == Text2D and comptime isTextBuffer(field.name);
+            const hidden = (comptime isBufferedText(T) and isTextBuffer(field.name)) or (T == LineEdit and isPlaceholderBuffer(field.name));
             if (!hidden and !matched and std.mem.eql(u8, name, field.name)) {
                 matched = true;
                 seen.set(i);
@@ -1493,7 +1504,7 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
 
 fn defaultTheRest(l: *Loading, comptime T: type, out: *T, seen: anytype) anyerror!void {
     inline for (@typeInfo(T).@"struct".fields, 0..) |field, i| {
-        const hidden = T == Text2D and comptime isTextBuffer(field.name);
+        const hidden = (comptime isBufferedText(T) and isTextBuffer(field.name)) or (T == LineEdit and isPlaceholderBuffer(field.name));
         if (!hidden and !seen.isSet(i)) {
             @field(out.*, field.name) = field.defaultValue() orelse
                 return l.fail(error.MissingField, "{s} has no {s}, and it has no default to take", .{ nameOf(T), field.name });
@@ -1513,14 +1524,33 @@ fn readStructName(l: *Loading, out: *Script) anyerror!void {
     @memcpy(out.struct_name[0..text.len], text);
 }
 
-fn readText(l: *Loading, out: *Text2D) anyerror!void {
+fn readText(l: *Loading, out: anytype) anyerror!void {
+    const T = @TypeOf(out.*);
     const token = try l.next();
     const text = switch (token) {
         .string => |text| text,
         else => return l.wrong("the words of the text", token),
     };
-    if (text.len > Text2D.capacity) return l.fail(error.OutOfRange, "this text is {d} bytes, and a Text2D holds {d}", .{ text.len, Text2D.capacity });
+    if (text.len > T.capacity) return l.fail(error.OutOfRange, "this text is {d} bytes, and a {s} holds {d}", .{ text.len, nameOf(T), T.capacity });
     out.set(text);
+}
+
+fn readPlaceholder(l: *Loading, out: *LineEdit) anyerror!void {
+    const token = try l.next();
+    const text = switch (token) {
+        .string => |text| text,
+        else => return l.wrong("the placeholder text", token),
+    };
+    if (text.len > LineEdit.capacity) return l.fail(error.OutOfRange, "this placeholder is {d} bytes, and a LineEdit holds {d}", .{ text.len, LineEdit.capacity });
+    out.setPlaceholder(text);
+}
+
+fn isBufferedText(comptime T: type) bool {
+    return T == Text2D or T == Label or T == LineEdit;
+}
+
+fn isPlaceholderBuffer(name: []const u8) bool {
+    return std.mem.eql(u8, name, "placeholder") or std.mem.eql(u8, name, "placeholder_len");
 }
 
 /// A value inside a component. A nested struct may leave fields out too.
@@ -1773,6 +1803,54 @@ test "a scene reads as what it holds, and leaves out what is the default" {
         \\  ]
         \\}
     , text);
+}
+
+test "a UI label keeps its buffered text through a scene round trip" {
+    const source = try headless();
+    defer source.destroy();
+    var words = Label.of("Hello UI");
+    words.outline_width = 2;
+    try source.setName(try source.world.spawnWith(.{words}), "words");
+    var field = LineEdit.of("Player");
+    field.setPlaceholder("Name");
+    try source.setName(try source.world.spawnWith(.{field}), "field");
+
+    const text = try write(source, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "\"text\": \"Hello UI\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"placeholder_text\": \"Name\"") != null);
+
+    const copy = try headless();
+    defer copy.destroy();
+    _ = try read(copy, text, .{});
+    const label = copy.world.get(copy.find("words").?, Label).?;
+    try testing.expectEqualStrings("Hello UI", label.slice());
+    try testing.expectEqual(@as(u16, 2), label.outline_width);
+    const line = copy.world.get(copy.find("field").?, LineEdit).?;
+    try testing.expectEqualStrings("Player", line.slice());
+    try testing.expectEqualStrings("Name", line.placeholderSlice());
+}
+
+test "tile chunks keep their map reference and cells through a scene round trip" {
+    const tiles = @import("tilemap.zig");
+    const source = try headless();
+    defer source.destroy();
+    const map = try source.world.spawnWith(.{ Transform2D{}, tiles.TileMap{} });
+    try source.setName(map, "level");
+    _ = try source.setTile(map, -2, 18, .{ .atlas = 7, .solid = true, .flip_x = true });
+
+    const text = try write(source, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    const copy = try headless();
+    defer copy.destroy();
+    _ = try read(copy, text, .{});
+
+    const loaded = copy.find("level").?;
+    const tile = copy.tileAt(loaded, -2, 18).?;
+    try testing.expectEqual(@as(u16, 7), tile.atlas);
+    try testing.expect(tile.solid);
+    try testing.expect(tile.flip_x);
+    try testing.expect(copy.tileChunkAt(loaded, -1, 1) != null);
 }
 
 test "every entity written is given a UUID, and keeps it" {

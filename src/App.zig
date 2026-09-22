@@ -45,6 +45,7 @@ const Picking = @import("picking.zig");
 const pointer = @import("pointer.zig");
 const Clipboard = @import("clipboard.zig");
 const Commands = @import("commands.zig");
+const control = @import("control.zig");
 const DebugViews = @import("debug_views.zig");
 const dialog = @import("dialog.zig");
 const Project = @import("Project.zig");
@@ -57,6 +58,7 @@ const world_ui = @import("world_ui.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
 const timer = @import("timer.zig");
+const tilemap = @import("tilemap.zig");
 const scene = @import("scene.zig");
 const signals_mod = @import("signals.zig");
 const events_mod = @import("events.zig");
@@ -407,6 +409,7 @@ debug_views: DebugViews = .{},
 
 /// What `.ui` systems declare the interface into.
 ui: ui_lib.Ui,
+control_nodes: control.Nodes = .{},
 /// How the interface is fed and drawn: its font, scale and safe area.
 interface: Interface = .{},
 
@@ -552,6 +555,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .debug_visible = true,
         .debug_views = .{},
         .ui = .init(gpa),
+        .control_nodes = .{},
         .interface = .{},
         .clipboard = .{},
         .next_dialog = 1,
@@ -630,6 +634,30 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Collider2D,
         components.Area2D,
         timer.Timer,
+        tilemap.TileMap,
+        tilemap.TileChunk,
+        control.Control,
+        control.Theme,
+        control.ThemePalette,
+        control.StyleBox,
+        control.StyleBoxTexture,
+        control.StyleBoxText,
+        control.CanvasLayer,
+        control.Viewport,
+        control.BoxContainer,
+        control.MarginContainer,
+        control.CenterContainer,
+        control.ScrollContainer,
+        control.PanelContainer,
+        control.Label,
+        control.Button,
+        control.CheckBox,
+        control.LineEdit,
+        control.Slider,
+        control.ProgressBar,
+        control.TabContainer,
+        control.TextureRect,
+        control.NinePatchRect,
     }) catch |err| switch (err) {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
@@ -792,6 +820,7 @@ pub fn destroy(self: *App) void {
     self.debug_under_frame.deinit();
     self.interface.deinit();
     self.clipboard.deinit(gpa);
+    self.control_nodes.deinit(gpa);
     self.ui.deinit();
     self.sprites.deinit(gpa);
     self.assets.deinit();
@@ -1759,8 +1788,42 @@ pub fn siblingBefore(self: *const App, a: ecs.Entity, b: ecs.Entity) bool {
 /// The parent an entity hangs from, `.none` for a root: the family its
 /// place is kept in.
 fn parentOf(self: *const App, entity: ecs.Entity) ecs.Entity {
-    const place = self.world.getConst(entity, components.Transform2D) orelse return .none;
-    return place.parent;
+    if (self.world.getConst(entity, components.Transform2D)) |place| return place.parent;
+    if (self.world.getConst(entity, control.Control)) |box| return box.parent;
+    if (self.world.getConst(entity, control.StyleBox)) |style| return style.theme;
+    if (self.world.getConst(entity, tilemap.TileChunk)) |chunk| return chunk.map;
+    return .none;
+}
+
+pub const SetTileError = error{ NotATileMap, OutOfMemory };
+
+pub fn setTile(self: *App, map: ecs.Entity, x: i32, y: i32, tile: tilemap.Tile) SetTileError!ecs.Entity {
+    if (!self.world.has(map, tilemap.TileMap)) return error.NotATileMap;
+    const chunk_x = @divFloor(x, tilemap.chunk_side);
+    const chunk_y = @divFloor(y, tilemap.chunk_side);
+    var entity = self.tileChunkAt(map, chunk_x, chunk_y);
+    if (entity == null) entity = self.world.spawnWith(.{tilemap.TileChunk{ .map = map, .x = chunk_x, .y = chunk_y }}) catch return error.OutOfMemory;
+    const local_x: u8 = @intCast(@mod(x, tilemap.chunk_side));
+    const local_y: u8 = @intCast(@mod(y, tilemap.chunk_side));
+    _ = self.world.get(entity.?, tilemap.TileChunk).?.set(local_x, local_y, tile);
+    return entity.?;
+}
+
+pub fn tileAt(self: *App, map: ecs.Entity, x: i32, y: i32) ?tilemap.Tile {
+    const chunk_x = @divFloor(x, tilemap.chunk_side);
+    const chunk_y = @divFloor(y, tilemap.chunk_side);
+    const entity = self.tileChunkAt(map, chunk_x, chunk_y) orelse return null;
+    return self.world.get(entity, tilemap.TileChunk).?.get(@intCast(@mod(x, tilemap.chunk_side)), @intCast(@mod(y, tilemap.chunk_side)));
+}
+
+pub fn tileChunkAt(self: *App, map: ecs.Entity, x: i32, y: i32) ?ecs.Entity {
+    var it = ecs.Query(.{tilemap.TileChunk}).over(&self.world) catch return null;
+    while (it.next()) |chunk| {
+        for (chunk.entities, chunk.slice(tilemap.TileChunk)) |entity, tiles| {
+            if (tiles.map.eql(map) and tiles.x == x and tiles.y == y) return entity;
+        }
+    }
+    return null;
 }
 
 /// A parent's children in their order, as many as `found` holds, the first
@@ -1881,6 +1944,7 @@ fn forgetDeadPlaces(self: *App) void {
 /// nothing. Each is described in `types` as well, so `componentOf` can find
 /// it by that name, and an `attr.Property` it declares is checked.
 pub fn registerComponents(self: *App, comptime list: anytype) scene.Registry.Error!void {
+    @setEvalBranchQuota(10_000);
     inline for (list) |T| {
         comptime attr.check(T);
         // Described first: a description nothing uses is harmless, and a
@@ -2294,6 +2358,9 @@ pub const reflect_methods = .{
     .moveLocalY,
     .rotate,
     .applyScale,
+    .keyDown,
+    .keyAxis,
+    .isOnFloor,
     .screenToWorld,
     .worldToScreen,
     .pointerInWorld,
@@ -2777,9 +2844,55 @@ pub fn openWorldUi(
     self.ui.open(placed);
 }
 
+/// Draw the scene's `Control` trees every frame. Calling it again does
+/// nothing, so a reusable game module may safely ask for it too.
+pub fn useControlNodes(self: *App) !void {
+    try self.control_nodes.enable(self);
+}
+
 /// Where the pointer is in the world.
 pub fn pointerInWorld(self: *App) math.Vec2 {
     return self.screenToWorld(self.input.pointer.x, self.input.pointer.y);
+}
+
+pub fn keyDown(self: *const App, name: []const u8) bool {
+    const key = std.meta.stringToEnum(platform.Key, name) orelse return false;
+    return self.input.isDown(key);
+}
+
+pub fn keyAxis(self: *const App, negative: []const u8, positive: []const u8) f32 {
+    var value: f32 = 0;
+    if (self.keyDown(negative)) value -= 1;
+    if (self.keyDown(positive)) value += 1;
+    return value;
+}
+
+pub fn isOnFloor(self: *App, entity: ecs.Entity, distance: f32) bool {
+    const placed = self.worldTransform(entity) orelse return false;
+    const collider = self.world.get(entity, components.Collider2D) orelse return false;
+    const drawn_sprite = self.world.get(entity, components.Sprite);
+    const half_height = switch (collider.shape) {
+        .rectangle => if (collider.extents.y > 0)
+            collider.extents.y
+        else if (drawn_sprite) |drawn|
+            drawn.height / 2
+        else
+            0,
+        .circle => if (collider.radius > 0)
+            collider.radius
+        else if (drawn_sprite) |drawn|
+            drawn.width / 2
+        else
+            0,
+    };
+    if (half_height <= 0) return false;
+    const bottom = placed.y + (collider.offset.y + half_height) * @abs(placed.scale_y) + 0.05;
+    const hit = self.castRay(
+        .init(placed.x, bottom),
+        .init(placed.x, bottom + @max(distance, 0)),
+        .{ .category = collider.collision_layer, .mask = collider.collision_mask },
+    ) orelse return false;
+    return !hit.entity.eql(entity) and hit.normal.y < -0.5;
 }
 
 /// Where an entity's sprite is drawn, as its four corners in the world, round
@@ -2805,11 +2918,56 @@ pub fn textCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     return sprite.labelCornersOf(label, placed, face);
 }
 
+pub fn tileMapBounds(self: *App, entity: ecs.Entity) ?[4]f32 {
+    const map = self.world.get(entity, tilemap.TileMap) orelse return null;
+    var min_x: i32 = std.math.maxInt(i32);
+    var min_y: i32 = std.math.maxInt(i32);
+    var max_x: i32 = std.math.minInt(i32);
+    var max_y: i32 = std.math.minInt(i32);
+    var it = ecs.Query(.{tilemap.TileChunk}).over(&self.world) catch return null;
+    while (it.next()) |chunk| for (chunk.slice(tilemap.TileChunk)) |tiles| {
+        if (!tiles.map.eql(entity)) continue;
+        for (tiles.tiles, 0..) |tile, index| {
+            if (tile.isEmpty()) continue;
+            const x = tiles.x * tilemap.chunk_side + @as(i32, @intCast(index % tilemap.chunk_side));
+            const y = tiles.y * tilemap.chunk_side + @as(i32, @intCast(index / tilemap.chunk_side));
+            min_x = @min(min_x, x);
+            min_y = @min(min_y, y);
+            max_x = @max(max_x, x + 1);
+            max_y = @max(max_y, y + 1);
+        }
+    };
+    if (min_x > max_x) return null;
+    const tile_width = @max(map.tile_width, 1);
+    const tile_height = @max(map.tile_height, 1);
+    return .{
+        @as(f32, @floatFromInt(min_x)) * @as(f32, @floatFromInt(tile_width)),
+        @as(f32, @floatFromInt(min_y)) * @as(f32, @floatFromInt(tile_height)),
+        @as(f32, @floatFromInt(max_x)) * @as(f32, @floatFromInt(tile_width)),
+        @as(f32, @floatFromInt(max_y)) * @as(f32, @floatFromInt(tile_height)),
+    };
+}
+
+pub fn tileMapCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
+    const bounds = self.tileMapBounds(entity) orelse return null;
+    const placed = self.drawnTransform(entity) orelse return null;
+    const top_left = placed.apply(bounds[0], bounds[1]);
+    const top_right = placed.apply(bounds[2], bounds[1]);
+    const bottom_right = placed.apply(bounds[2], bounds[3]);
+    const bottom_left = placed.apply(bounds[0], bounds[3]);
+    return .{
+        .init(top_left.x, top_left.y),
+        .init(top_right.x, top_right.y),
+        .init(bottom_right.x, bottom_right.y),
+        .init(bottom_left.x, bottom_left.y),
+    };
+}
+
 /// Whichever of the two an entity is drawn as: its sprite's corners, else
 /// its label's. What an editor outlines, frames and tests a click against
 /// without asking which it is.
 pub fn drawnCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
-    return self.spriteCorners(entity) orelse self.textCorners(entity);
+    return self.spriteCorners(entity) orelse self.textCorners(entity) orelse self.tileMapCorners(entity);
 }
 
 /// What the camera sees, at the size of the window.
@@ -3276,6 +3434,22 @@ pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
     if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
 }
 
+/// Draw the registered Control trees over an editor's scene texture, using
+/// the same declarations and renderer as the running game.
+pub fn drawControlPreview(self: *App, into: rhi.Texture, view: View) !void {
+    try self.control_nodes.preview(self, into, view, view.width, view.height, self.interface.faces);
+}
+
+/// Draw this frame's world-space debug lines over an editor preview.
+pub fn drawDebugOverlay(self: *App, into: rhi.Texture, view: View) !void {
+    if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
+}
+
+/// A Control's box in the last editor preview, in preview pixels.
+pub fn controlPreviewBox(self: *App, entity: ecs.Entity) ?ui_lib.BoundingBox {
+    return self.control_nodes.previewBox(entity);
+}
+
 /// Whether a texture `drawWorld` drew into comes out upside down when drawn
 /// as a picture: true on OpenGL, whose framebuffers count rows from the
 /// bottom.
@@ -3429,6 +3603,63 @@ test "a sprite nowhere near the camera is not drawn" {
 
     try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
     try testing.expectEqual(@as(u32, 1), app.sprites.culled);
+}
+
+test "tile maps create signed chunks and cull them before their tiles" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 320, .height = 240 });
+    defer app.destroy();
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .texture = app.assets.white } });
+    const near = try app.setTile(map, -1, -1, tilemap.Tile.of(0));
+    _ = try app.setTile(map, 0, 0, tilemap.Tile.of(0));
+    const far = try app.setTile(map, 1024, 1024, tilemap.Tile.of(0));
+    try app.run();
+
+    try testing.expectEqual(@as(i32, -1), app.world.get(near, tilemap.TileChunk).?.x);
+    try testing.expectEqual(@as(i32, -1), app.world.get(near, tilemap.TileChunk).?.y);
+    try testing.expectEqual(@as(i32, 64), app.world.get(far, tilemap.TileChunk).?.x);
+    try testing.expectEqual(@as(u32, 2), app.sprites.tile_chunks_drawn);
+    try testing.expectEqual(@as(u32, 1), app.sprites.tile_chunks_culled);
+    try testing.expectEqual(@as(u32, 2), app.sprites.drawn);
+}
+
+test "solid tiles generate static colliders from the same chunk data" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 64, .height = 64 });
+    defer app.destroy();
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{} });
+    _ = try app.setTile(map, 0, 0, .{ .atlas = 1, .solid = true });
+    _ = try app.setTile(map, 1, 0, .{ .atlas = 1, .solid = true });
+    try app.run();
+
+    try testing.expectEqual(@as(usize, 1), app.physics.bodyCount());
+    try testing.expectEqual(@as(usize, 1), app.physics.shapeCount());
+    const hit = app.castRay(.init(8, -8), .init(8, 24), .{}) orelse return error.TestExpectedEqual;
+    try testing.expect(hit.entity.eql(map));
+
+    _ = try app.setTile(map, 0, 0, .{});
+    _ = try app.setTile(map, 1, 0, .{});
+    try app.bodies.sync(app);
+    try testing.expectEqual(@as(usize, 0), app.physics.shapeCount());
+}
+
+test "a rigid body detects a tile floor below its collider" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const map = try app.world.spawnWith(.{
+        components.Transform2D{},
+        tilemap.TileMap{ .collision_layer = 1, .collision_mask = 2 },
+    });
+    _ = try app.setTile(map, 0, 0, .{ .atlas = 1, .solid = true });
+    const player = try app.world.spawnWith(.{
+        components.Transform2D.at(8, -5),
+        components.RigidBody2D{},
+        components.Collider2D{ .extents = .init(4, 4), .collision_layer = 2, .collision_mask = 1 },
+    });
+    try app.syncBodies();
+    try testing.expect(app.isOnFloor(player, 5));
+
+    app.world.get(player, components.Transform2D).?.y = -20;
+    try app.syncBodies();
+    try testing.expect(!app.isOnFloor(player, 5));
 }
 
 test "the world is drawn into a texture through a view of its own" {
@@ -3941,6 +4172,18 @@ fn pressOf(key: platform.Key) platform.Event {
         .action = .press,
         .mods = .{},
     } };
+}
+
+test "key names expose held input and axes to reflected callers" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    app.input.apply(pressOf(.a));
+    try testing.expect(app.keyDown("a"));
+    try testing.expectEqual(@as(f32, -1), app.keyAxis("a", "d"));
+    app.input.apply(pressOf(.d));
+    try testing.expectEqual(@as(f32, 0), app.keyAxis("a", "d"));
+    try testing.expect(!app.keyDown("not-a-key"));
 }
 
 /// One press of space on a chosen frame, and a count of the fixed steps
@@ -4924,7 +5167,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 9), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 33), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);
