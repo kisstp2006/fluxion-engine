@@ -818,10 +818,13 @@ fn checkboxContent(context: Context, entity: Entity, checkbox: *CheckBox, style:
         checkbox.checked = !checkbox.checked;
         try app.signal(entity, CheckBox, .toggled).emit(.{ .checked = checkbox.checked });
     }
+    // As tall as the words beside it, so the pair agrees at any text size
+    // rather than only at the one this was written for.
+    const side: f32 = @max(12, @as(f32, @floatFromInt(style.font_size)));
     layout.open(.{
-        .width = .fixed(18),
-        .height = .fixed(18),
-        .padding = .all(3),
+        .width = .fixed(side),
+        .height = .fixed(side),
+        .padding = .all(@intFromFloat(@round(side / 6))),
         .background_color = color(style.background_color),
         .corner_radius = .all(3),
     });

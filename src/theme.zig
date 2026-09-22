@@ -557,7 +557,13 @@ pub fn builtIn(part: Part, state: State) Style {
         .border_color = if (state == .focus) Palette.focus else Palette.border,
         .border_width = if (part == .label) 0 else Palette.border_width,
         .corners = .all(Palette.corner_radius),
-        .padding = Palette.padding,
+        // A part with nothing drawn behind it has nothing to pad, and room
+        // taken there is room its words do not get: a check box whose line of
+        // text no longer fits is a line of text pushed off its middle.
+        .padding = switch (part) {
+            .check_box, .focus, .label => .all(0),
+            else => Palette.padding,
+        },
         .font_color = if (off) Palette.disabled_text else Palette.text,
         .font_size = Palette.font_size,
     };
