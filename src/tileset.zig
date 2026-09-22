@@ -109,6 +109,25 @@ pub const Tile = struct {
     pub fn polygon(self: *const Tile) []const math.Vec2 {
         return self.points[0..self.point_count];
     }
+
+    /// Whether nothing is said of this tile beyond its picture, so that a
+    /// source need not keep it and a file need not name it.
+    pub fn isPlain(self: *const Tile) bool {
+        return self.collision == .none;
+    }
+
+    /// The corners a shape is drawn round, keeping at most `max_points` of
+    /// them. Fewer than three is no shape at all.
+    pub fn setPolygon(self: *Tile, points: []const math.Vec2) void {
+        self.point_count = @intCast(@min(points.len, max_points));
+        for (points[0..self.point_count], 0..) |point, i| self.points[i] = point;
+        if (self.point_count < 3) {
+            self.point_count = 0;
+            self.collision = .none;
+        } else {
+            self.collision = .polygon;
+        }
+    }
 };
 
 /// One sheet, cut into a grid of tiles.
@@ -128,6 +147,16 @@ pub const Source = struct {
 
     fn key(x: u8, y: u8) u16 {
         return @as(u16, y) << 8 | x;
+    }
+
+    /// Say something of the tile at `x`, `y`; a tile with nothing to say is
+    /// forgotten, so that a set holds only what it means.
+    pub fn setTileAt(self: *Source, gpa: Allocator, x: u8, y: u8, tile: Tile) Allocator.Error!void {
+        if (tile.isPlain()) {
+            _ = self.tiles.remove(key(x, y));
+            return;
+        }
+        try self.tiles.put(gpa, key(x, y), tile);
     }
 
     /// What the tile at column `x` and row `y` is. One nothing is said of has
@@ -182,6 +211,43 @@ pub const TileSet = struct {
             if (held.id == source_id) return held;
         }
         return null;
+    }
+
+    /// The same, to change: for the tile set editor.
+    pub fn sourceMut(self: *TileSet, source_id: u8) ?*Source {
+        for (self.sources.items) |*held| {
+            if (held.id == source_id) return held;
+        }
+        return null;
+    }
+
+    /// Say that what the set holds has changed, so that what was built from
+    /// it - a map's physics - is built again.
+    pub fn touched(self: *TileSet) void {
+        self.revision +%= 1;
+    }
+
+    /// Add a sheet, numbered with the lowest number no source has, and answer
+    /// that number. A set holds at most 256 sources: a cell names one in a
+    /// byte.
+    pub fn addSource(self: *TileSet, gpa: Allocator, texture: Assets.TextureHandle) !u8 {
+        var number: u16 = 0;
+        while (number < 256) : (number += 1) {
+            if (self.sourceById(@intCast(number)) == null) break;
+        } else return error.TooManySources;
+        try self.sources.append(gpa, .{ .id = @intCast(number), .texture = texture });
+        return @intCast(number);
+    }
+
+    /// Take a sheet out. Cells that named it draw the white texel until they
+    /// are painted again, as they do for a source a file never had.
+    pub fn removeSource(self: *TileSet, gpa: Allocator, source_id: u8) void {
+        for (self.sources.items, 0..) |*held, at| {
+            if (held.id != source_id) continue;
+            held.deinit(gpa);
+            _ = self.sources.orderedRemove(at);
+            return;
+        }
     }
 
     /// What the tile a cell holds is. An empty cell, or one naming a source
@@ -309,6 +375,31 @@ pub const TileSets = struct {
         return self.table.get(handle.toId());
     }
 
+    /// A set to change, for a tool: the tile set editor. Whoever changes one
+    /// calls `TileSet.touched` when it is done.
+    pub fn edit(self: *TileSets, handle: TileSetHandle) ?*TileSet {
+        return self.table.get(handle.toId());
+    }
+
+    /// The set as its file would be, into fresh memory: what an editor saves,
+    /// and what it keeps to undo by. The caller frees it.
+    pub fn textOf(self: *TileSets, app: *App, gpa: Allocator, handle: TileSetHandle) ![]u8 {
+        const held = self.table.get(handle.toId()) orelse return error.NoSuchTileSet;
+        return json.stringify(gpa, Document{ .set = held, .assets = &app.assets }, write_options);
+    }
+
+    /// Write a set back to the file it was read from, and give it a UUID if
+    /// it has none, as saving a scene does.
+    pub fn save(self: *TileSets, app: *App, handle: TileSetHandle) !void {
+        const io = app.io orelse return error.NoIo;
+        const held = self.table.get(handle.toId()) orelse return error.NoSuchTileSet;
+        if (!held.on_disc) return error.NotAFile;
+        const file = try app.project.osPath(app.gpa, held.source);
+        defer app.gpa.free(file);
+        try json.save(io, file, Document{ .set = held, .assets = &app.assets }, write_options);
+        if (Project.isProjectPath(held.source)) _ = try app.project.ensureUid(held.source);
+    }
+
     pub fn sourceOf(self: *TileSets, handle: TileSetHandle) ?[]const u8 {
         const held = self.table.get(handle.toId()) orelse return null;
         return held.source;
@@ -334,6 +425,67 @@ pub const TileSets = struct {
             gpa.free(entry.value.source);
             entry.value.source = moved;
         }
+    }
+};
+
+// -------------------------------------------------------------------------
+// Writing
+// -------------------------------------------------------------------------
+
+/// Two spaces and a newline, as the rest of the project's files are written.
+const write_options: json.WriteOptions = .{ .indent = 2 };
+
+/// A tile set as its file, for `json.save` and `json.stringify`. Only what
+/// differs from the default is written, as a scene is written.
+const Document = struct {
+    set: *const TileSet,
+    assets: *Assets,
+
+    pub fn toJson(self: Document, w: *json.Writer) json.Writer.Error!void {
+        try w.beginObject();
+        try w.field("fluxion_tileset", @as(u32, version));
+        try w.field("tile_size", [2]u16{ self.set.tile_width, self.set.tile_height });
+        try w.key("sources");
+        try w.beginArray();
+        for (self.set.sources.items) |*source| try self.writeSource(w, source);
+        try w.endArray();
+        try w.endObject();
+    }
+
+    fn writeSource(self: Document, w: *json.Writer, source: *const Source) json.Writer.Error!void {
+        try w.beginObject();
+        try w.field("id", source.id);
+        if (self.assets.get(source.texture)) |texture| try w.field("texture", texture.source);
+        if (source.margin_x != 0 or source.margin_y != 0) try w.field("margin", [2]u16{ source.margin_x, source.margin_y });
+        if (source.separation_x != 0 or source.separation_y != 0) try w.field("separation", [2]u16{ source.separation_x, source.separation_y });
+        try w.key("tiles");
+        try w.beginArray();
+        // Over every place a tile may be, in reading order, rather than over
+        // the map that holds them: a map has no order of its own, and a file
+        // that changes when nothing did is a file that fights its history.
+        var y: u16 = 0;
+        while (y < 256) : (y += 1) {
+            var x: u16 = 0;
+            while (x < 256) : (x += 1) {
+                const tile = source.tiles.get(Source.key(@intCast(x), @intCast(y))) orelse continue;
+                try writeTile(w, @intCast(x), @intCast(y), tile);
+            }
+        }
+        try w.endArray();
+        try w.endObject();
+    }
+
+    fn writeTile(w: *json.Writer, x: u8, y: u8, tile: Tile) json.Writer.Error!void {
+        try w.beginObject();
+        try w.field("at", [2]u8{ x, y });
+        try w.field("collision", tile.collision);
+        if (tile.collision == .polygon) {
+            try w.key("polygon");
+            try w.beginArray();
+            for (tile.points[0..tile.point_count]) |point| try w.write([2]f32{ point.x, point.y });
+            try w.endArray();
+        }
+        try w.endObject();
     }
 };
 
@@ -476,6 +628,51 @@ test "a tile set that does not read is kept empty, and new text that does not re
     try app.tile_sets.setText(app, set, "{ \"fluxion_tileset\": 1, \"tile_size\": [32, 32] }");
     try testing.expect(app.tile_sets.get(set).?.revision != before);
     try testing.expectEqual(@as(u16, 32), app.tile_sets.get(set).?.tile_width);
+}
+
+test "a set written back reads as the set it was, with what an editor changed" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const handle = try app.tile_sets.add(app, "slope.tileset", slope);
+
+    // What the editor does: another sheet, a tile given a shape, and the
+    // first tile's shape taken away again.
+    const set = app.tile_sets.edit(handle).?;
+    const second = try set.addSource(app.gpa, .none);
+    try testing.expectEqual(@as(u8, 1), second);
+    const source = set.sourceMut(0).?;
+    try source.setTileAt(app.gpa, 0, 0, .{});
+    var ledge: Tile = .{};
+    ledge.setPolygon(&.{ .init(0, 8), .init(16, 8), .init(16, 16), .init(0, 16) });
+    try source.setTileAt(app.gpa, 2, 1, ledge);
+    set.touched();
+
+    const text = try app.tile_sets.textOf(app, testing.allocator, handle);
+    defer testing.allocator.free(text);
+    const again = app.tile_sets.get(try app.tile_sets.add(app, "again.tileset", text)).?;
+
+    try testing.expectEqual(@as(usize, 2), again.sources.items.len);
+    try testing.expectEqual(@as(u16, 16), again.tile_width);
+    // The tile nothing is said of any more is gone; the slope is as it was.
+    try testing.expectEqual(Collision.none, again.tileOf(.at(0, 0, 0)).collision);
+    try testing.expectEqual(@as(usize, 3), again.tileOf(.at(0, 1, 0)).polygon().len);
+    const kept = again.tileOf(.at(0, 2, 1));
+    try testing.expectEqual(Collision.polygon, kept.collision);
+    try testing.expectEqual(@as(usize, 4), kept.polygon().len);
+    try testing.expectEqual(@as(f32, 8), kept.polygon()[0].y);
+
+    // Written twice, the same file both times.
+    const twice = try app.tile_sets.textOf(app, testing.allocator, handle);
+    defer testing.allocator.free(twice);
+    try testing.expectEqualStrings(text, twice);
+}
+
+test "a shape of fewer than three corners is no shape" {
+    var tile: Tile = .{ .collision = .full };
+    tile.setPolygon(&.{ .init(0, 0), .init(8, 8) });
+    try testing.expectEqual(Collision.none, tile.collision);
+    try testing.expectEqual(@as(usize, 0), tile.polygon().len);
+    try testing.expect(tile.isPlain());
 }
 
 test "a sheet is cut past its margin, with the separation between tiles" {
