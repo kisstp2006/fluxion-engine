@@ -188,6 +188,11 @@ pub const Options = struct {
     /// texture.
     headless: bool = false,
 
+    /// The window's close button - and Alt+F4 - only ask: `close_pressed`
+    /// says so, and the program ends the run with `quit` if it agrees. For a
+    /// program with unsaved work to ask about; a game closes at once.
+    ask_before_closing: bool = false,
+
     /// What the frame is cleared to.
     background: Color = .hex(0x0E1013),
 
@@ -531,6 +536,14 @@ vsync_on: bool = true,
 
 /// Cleared by `quit`, and by the frame counter running out.
 running: bool = true,
+
+/// From `Options`: whether the close button only sets `close_pressed`.
+ask_before_closing: bool = false,
+
+/// Set when the window's close button was pressed and `ask_before_closing`
+/// kept that from ending the run, until the program has answered it and sets
+/// it back.
+close_pressed: bool = false,
 frames_left: ?u32,
 started: bool = false,
 
@@ -604,10 +617,12 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .height = options.height,
         .resized = false,
         .quit_key = options.quit_key,
+        .ask_before_closing = options.ask_before_closing,
         .fullscreen_key = options.fullscreen_key,
         .debug_key = options.debug_key,
         .vsync_on = options.vsync,
         .running = true,
+        .close_pressed = false,
         .frames_left = options.frames,
         .started = false,
     };
@@ -1059,6 +1074,14 @@ pub fn step(self: *App) anyerror!bool {
         if (!window.pump(&self.input)) {
             self.running = false;
             return false;
+        }
+        if (window.close_pressed) {
+            window.close_pressed = false;
+            if (!self.ask_before_closing) {
+                self.running = false;
+                return false;
+            }
+            self.close_pressed = true;
         }
         if (window.resized) {
             window.resized = false;

@@ -117,8 +117,12 @@ height: u32,
 /// Whether the framebuffer changed size since `App` last read this.
 resized: bool = false,
 
-/// Set by the close button, by Alt+F4, and by `requestClose`.
+/// Set by `requestClose`: the loop ends after this frame.
 closing: bool = false,
+
+/// Set by the close button and by Alt+F4, and taken by `App`, which decides
+/// whether that ends the run or only asks the program whether it may.
+close_pressed: bool = false,
 
 /// What the game asked the pointer to do.
 cursor_wanted: Cursor = .normal,
@@ -422,7 +426,7 @@ pub fn pump(self: *Window, input: *Input) bool {
 
         input.apply(ev);
         switch (ev) {
-            .close => self.closing = true,
+            .close => self.close_pressed = true,
             .focus => |change| self.focused = change.value,
             .scale => |to| self.content_scale = to.x,
             .framebuffer_resize => |size| {
