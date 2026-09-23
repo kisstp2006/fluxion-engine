@@ -64,6 +64,24 @@ pub const Condition = union(enum) {
     }
 };
 
+/// Whether a system runs while the game is paused. See `App.setPaused`.
+pub const Pause = enum {
+    /// Not while it is paused: every system, unless it was added otherwise.
+    pausable,
+    /// Only while it is paused: a pause menu's. `App.addSystemWhenPaused`.
+    when_paused,
+    /// Paused or not: the key that pauses and unpauses. `App.addSystemAlways`.
+    always,
+
+    pub fn allows(self: Pause, paused: bool) bool {
+        return switch (self) {
+            .pausable => !paused,
+            .when_paused => paused,
+            .always => true,
+        };
+    }
+};
+
 /// One registered system, and what to call it in a message.
 pub const Entry = struct {
     name: []const u8,
@@ -74,6 +92,9 @@ pub const Entry = struct {
     condition: ?Condition = null,
     /// The one it was added under, from `App.addSystemsIn`.
     gate: ?Condition = null,
+    /// Whether it runs while the game is paused. Asked of the stages of a
+    /// frame, not of `.startup`, `.shutdown` or a change of state.
+    pause: Pause = .pausable,
 
     fn mayRun(self: *const Entry, app: *App) bool {
         if (self.condition) |condition| if (!condition.holds(app)) return false;
@@ -130,6 +151,10 @@ pub const Schedule = struct {
     /// The systems run on entering and leaving states' values.
     hooks: std.ArrayList(Hook) = .empty,
 
+    /// Whether the game is paused, as `App.setPaused` last said: which of the
+    /// systems of a frame's stages run. See `Pause`.
+    paused: bool = false,
+
     pub const empty: Schedule = .{};
 
     pub fn deinit(self: *Schedule, gpa: Allocator) void {
@@ -169,6 +194,7 @@ pub const Schedule = struct {
         while (at < self.stages[@intFromEnum(stage)].items.len) : (at += 1) {
             const entry = &self.stages[@intFromEnum(stage)].items[at];
             if (!entry.mayRun(app)) continue;
+            if (stage != .startup and stage != .shutdown and !entry.pause.allows(self.paused)) continue;
             const took = try self.call(stage, entry.*, app);
             self.stages[@intFromEnum(stage)].items[at].time_this_frame.nanoseconds += took;
         }

@@ -6,12 +6,18 @@
 //! declares:
 //!
 //! - `ready(self)` before anything else of it;
-//! - `physics(self, dt: float)` every fixed step, before the game's `.fixed`
+//! - `fixed(self, dt: float)` every fixed step, before the game's `.fixed`
 //!   systems;
 //! - `update(self, dt: float)` every frame, before the game's `.update`
 //!   systems;
 //! - `exit(self)` when the entity dies, when its `Script` is taken off or
 //!   turned off, or when the world is cleared.
+//!
+//! `fixed` and `update` are called while the entity runs: not while the game
+//! is paused, unless its `Processing` - or the nearest one above it - says
+//! otherwise. A task a script starts belongs to the entity whose script
+//! started it, and its `await wait(...)` stands still while that entity does
+//! not run. See `App.setPaused`.
 //!
 //! ```zig
 //! try app.useScripts(.{});
@@ -129,7 +135,7 @@ pub const ScriptArguments = struct {
 pub const Options = struct {
     /// How many loop rounds one call into a script may take before it is
     /// stopped as a loop that would never end. One call is a frame's
-    /// `update`, a step's `physics`, or the frame's waiting tasks. Null for
+    /// `update`, a step's `fixed`, or the frame's waiting tasks. Null for
     /// no limit.
     budget: ?u64 = 10_000_000,
     /// The most the scripts' objects may take, in bytes. Past it, what
@@ -145,7 +151,7 @@ pub const Options = struct {
     watch: ?f32 = null,
     /// Whether the scripts run. Off is an editor's: a file is compiled and
     /// never run, not even its top level; no instance is made, so no
-    /// default, `ready`, `physics`, `update` or `exit` runs, no task wakes,
+    /// default, `ready`, `fixed`, `update` or `exit` runs, no task wakes,
     /// and `watch` is not looked at. The structs' signals and methods are
     /// listed all the same, and connections to them kept. A signal's call
     /// into a method is `error.NotRunning`.
@@ -321,7 +327,7 @@ const Stamp = struct {
 
 const Lifecycle = enum {
     ready,
-    physics,
+    fixed,
     update,
     exit,
 
@@ -329,7 +335,7 @@ const Lifecycle = enum {
     fn params(self: Lifecycle) u8 {
         return switch (self) {
             .ready, .exit => 0,
-            .physics, .update => 1,
+            .fixed, .update => 1,
         };
     }
 };
@@ -365,7 +371,7 @@ pub const Calls = struct {
 /// Where in the frame `Calls.pass` is called.
 pub const Moment = union(enum) {
     /// Before the game's `.fixed` systems, with the step.
-    physics: f32,
+    fixed: f32,
     /// Before the game's `.update` systems, with the frame's delta.
     update: f32,
     /// After the game's `.late` systems: the instances of the dead, and of
@@ -706,10 +712,10 @@ pub const Scripts = struct {
         // An editor's scripts are never made, stepped or looked for.
         if (!self.options.run) return;
         switch (moment) {
-            .physics => |dt| {
+            .fixed => |dt| {
                 try self.sync();
                 self.readyTheNew();
-                self.callEach(.physics, dt);
+                self.callEach(.fixed, dt);
             },
             .update => |dt| {
                 // First, so what was saved runs this frame.
@@ -723,9 +729,10 @@ pub const Scripts = struct {
                 try self.sync();
                 self.readyTheNew();
                 self.callEach(.update, dt);
-                // The scripts' own clock, so `await wait(1.0)` wakes.
+                // The scripts' own clock, so `await wait(1.0)` wakes - but
+                // not the waits of the entities that do not run now.
                 self.vm.setBudget(self.options.budget);
-                self.vm.update(dt) catch |err| switch (err) {
+                self.vm.updateHolding(dt, .{ .context = self.app, .held = heldOwner }) catch |err| switch (err) {
                     error.OutOfMemory => self.outOfMemory(null),
                     error.Panic => self.sayPanic(null, "the tasks of"),
                 };
@@ -891,8 +898,21 @@ pub const Scripts = struct {
             const inst = self.instances.values()[at];
             if (!inst.readied) continue;
             const method = inst.methods.get(which) orelse continue;
-            self.call(self.instances.keys()[at], method, &.{ inst.value, .float(dt) }, which);
+            const entity = self.instances.keys()[at];
+            if (!self.app.isProcessing(entity)) continue;
+            self.call(entity, method, &.{ inst.value, .float(dt) }, which);
         }
+    }
+
+    /// Whether the tasks of an owner - an entity, as `call` gives them one -
+    /// wait. A task of no entity's waits while the game is paused, as a
+    /// root with no `Processing` would.
+    fn heldOwner(context: ?*anyopaque, owner: u64) bool {
+        const app: *App = @ptrCast(@alignCast(context.?));
+        if (owner == 0) return app.paused;
+        const entity = Entity.fromInt(owner);
+        if (!app.world.isAlive(entity)) return app.paused;
+        return !app.isProcessing(entity);
     }
 
     /// An instance let go of: its `exit`, if it was readied, and then the
@@ -993,6 +1013,9 @@ pub const Scripts = struct {
             made += 1;
         }
         vm.setBudget(self.options.budget);
+        // What the call starts belongs to the entity.
+        const owner = vm.setTaskOwner(entity.toInt());
+        defer _ = vm.setTaskOwner(owner);
         _ = vm.call(method, values[0 .. args.len + 1]) catch |err| {
             self.failures += 1;
             switch (err) {
@@ -1021,9 +1044,12 @@ pub const Scripts = struct {
         }
     }
 
-    /// One call into a script, under the budget.
+    /// One call into a script, under the budget. The tasks it starts are the
+    /// entity's.
     fn call(self: *Scripts, entity: Entity, method: flux.Value, args: []const flux.Value, which: Lifecycle) void {
         self.vm.setBudget(self.options.budget);
+        const owner = self.vm.setTaskOwner(entity.toInt());
+        defer _ = self.vm.setTaskOwner(owner);
         _ = self.vm.call(method, args) catch |err| {
             self.failures += 1;
             // Said once for each of an instance's methods. `ready` and

@@ -86,7 +86,7 @@ const door_script =
     \\        readied += 1;
     \\        named = self.entity.name();
     \\    }
-    \\    fn physics(self, dt: float) {
+    \\    fn fixed(self, dt: float) {
     \\        steps += 1;
     \\        self.entity.get("Counter").value += 1;
     \\    }
@@ -139,20 +139,57 @@ test "a script is readied once, then stepped and updated before the game's own s
     const door = try app.world.spawnWith(.{ Counter{}, Script.of(file) });
     try app.setName(door, "front door");
     Seen.reset(door, file);
-    try app.addSystem(.fixed, "look after physics", Seen.fixed);
+    try app.addSystem(.fixed, "look after fixed", Seen.fixed);
     try app.addSystem(.update, "look after update", Seen.update);
 
     for (0..3) |_| _ = try app.step();
 
     try testing.expectEqual(@as(i64, 1), global(app, file, "readied").asInt());
     try testing.expectEqualStrings("front door", globalText(app, file, "named"));
-    // Each step's system saw that step's `physics`, and each frame's system
+    // Each step's system saw that step's `fixed`, and each frame's system
     // that frame's `update`.
     try testing.expectEqualSlices(i64, &.{ 1, 2, 3 }, Seen.in_fixed[0..Seen.fixed_count]);
     try testing.expectEqualSlices(i64, &.{ 1, 2, 3 }, Seen.in_update[0..Seen.update_count]);
     // The instance keeps its own fields from frame to frame.
     const instance = app.scripts.?.instanceOf(door).?;
     try testing.expectEqual(@as(i64, 3), (try app.scripts.?.vm.callMethod(instance, "framesSoFar", &.{})).asInt());
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
+test "a paused game's scripts wait, and their tasks with them, but a pause menu's run" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("pause.flux",
+        \\var games = 0;
+        \\var menus = 0;
+        \\var rang = 0;
+        \\fn bell(by: int) { await wait(0.5); rang += by; }
+        \\struct Game {
+        \\    fn ready(self) { bell(1); }
+        \\    fn update(self, dt: float) { games += 1; }
+        \\}
+        \\struct Menu {
+        \\    fn ready(self) { bell(10); }
+        \\    fn update(self, dt: float) { menus += 1; }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.named(file, "Game")});
+    const menu = try app.world.spawnWith(.{ Script.named(file, "Menu"), @import("inherited.zig").Processing{ .mode = .when_paused } });
+    _ = menu;
+
+    app.setPaused(true);
+    for (0..3) |_| _ = try app.step();
+    try testing.expectEqual(@as(i64, 0), global(app, file, "games").asInt());
+    try testing.expectEqual(@as(i64, 3), global(app, file, "menus").asInt());
+    // The menu's bell rang; the game's is still waiting where it was.
+    try testing.expectEqual(@as(i64, 10), global(app, file, "rang").asInt());
+
+    app.setPaused(false);
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 10), global(app, file, "rang").asInt());
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 11), global(app, file, "rang").asInt());
+    try testing.expectEqual(@as(i64, 3), global(app, file, "menus").asInt());
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
 }
 

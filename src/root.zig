@@ -283,6 +283,9 @@ pub const ActionMap = Input.ActionMap;
 
 /// A component that counts down and says `timeout`. See `timer.zig`.
 pub const Timer = @import("timer.zig").Timer;
+pub const inherited = @import("inherited.zig");
+pub const Processing = inherited.Processing;
+pub const Appearance = inherited.Appearance;
 
 /// A point or a direction in the plane.
 pub const Vec2 = math.Vec2;
@@ -383,6 +386,7 @@ test {
     _ = @import("areas_test.zig");
     _ = @import("picking_test.zig");
     _ = @import("timer.zig");
+    _ = @import("inherited.zig");
     _ = @import("script.zig");
     _ = @import("script_test.zig");
     _ = Project;

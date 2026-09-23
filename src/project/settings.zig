@@ -91,6 +91,7 @@ pub const Application = struct {
     icon: []const u8 = "",
     main_scene: []const u8 = "",
     tags: []const []const u8 = &.{},
+    max_fps: u16 = 0,
 
     pub const reflect_fields = .{
         .name = .{ attr.Required{}, attr.Doc{ .text = "What the project is called: the game window's title, and what the project list shows." } },
@@ -98,6 +99,7 @@ pub const Application = struct {
         .icon = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "The project's picture: the game window's icon, and the project list's." } },
         .main_scene = .{ attr.ProjectFile{ .kind = .scene }, attr.Doc{ .text = "The scene the game opens with, and what Play runs." } },
         .tags = .{attr.Doc{ .text = "Words to find the project by in the project list." }},
+        .max_fps = .{ attr.Range{ .min = 0, .max = 1000, .step = 1 }, attr.Advanced{}, attr.Doc{ .text = "The most frames a second the game draws; nought for no limit." } },
     };
 };
 

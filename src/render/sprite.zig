@@ -26,6 +26,7 @@ const typeface = @import("fluxion_font");
 const Assets = @import("../assets.zig");
 const components = @import("../components.zig");
 const hierarchy = @import("../hierarchy.zig");
+const Inherited = @import("../inherited.zig").Inherited;
 const tilemap = @import("../tilemap.zig");
 const tileset = @import("../tileset.zig");
 const view_mod = @import("view.zig");
@@ -261,6 +262,7 @@ pub const Renderer = struct {
         assets: *Assets,
         tile_sets: *tileset.TileSets,
         snapshots: *const hierarchy.Snapshots,
+        inherited: *Inherited,
         target: rhi.RenderTarget,
         view: View,
         clear: ?Color,
@@ -268,7 +270,7 @@ pub const Renderer = struct {
     ) !void {
         // The box that culls and the matrix that draws are two readings of
         // the same view.
-        try self.gather(gpa, world, assets, tile_sets, snapshots, alpha, view.bounds());
+        try self.gather(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view.bounds());
 
         // Gathering the text may have rasterised new letters, so the atlases
         // go up once, before anything samples them.
@@ -328,7 +330,9 @@ pub const Renderer = struct {
         try self.device.submit();
     }
 
-    /// Walk the world and turn every visible sprite into an instance.
+    /// Walk the world and turn every visible sprite into an instance: shown
+    /// as its `Appearance` and everything above it say - hidden, its colour
+    /// multiplied, its layer raised.
     fn gather(
         self: *Renderer,
         gpa: Allocator,
@@ -336,6 +340,7 @@ pub const Renderer = struct {
         assets: *Assets,
         tile_sets: *tileset.TileSets,
         snapshots: *const hierarchy.Snapshots,
+        inherited: *Inherited,
         alpha: f32,
         bounds: Bounds,
     ) !void {
@@ -353,6 +358,9 @@ pub const Renderer = struct {
 
             for (transforms, sprites, chunk.entities) |local, sprite, entity| {
                 if (!sprite.visible or sprite.tint.a <= 0) continue;
+                const looks = inherited.of(gpa, world, entity);
+                const tint = looks.tint(sprite.tint);
+                if (!looks.visible or tint.a <= 0) continue;
 
                 // Interpolated, then carried through whatever it hangs from.
                 // What cannot be placed - its parent died this frame, or its
@@ -379,7 +387,7 @@ pub const Renderer = struct {
 
                 defer sequence += 1;
                 try self.items.append(gpa, .{
-                    .key = sortKey(sprite.layer, sprite.texture),
+                    .key = sortKey(looks.layer(sprite.layer), sprite.texture),
                     .order = sprite.order,
                     .sequence = sequence,
                     .texture = texture.gpu,
@@ -388,7 +396,7 @@ pub const Renderer = struct {
                     .instance = .{
                         .placement = .{ transform.x, transform.y, drawn_width, drawn_height },
                         .spin = .{ sprite.pivot_x, sprite.pivot_y, c, s },
-                        .tint = .{ sprite.tint.r, sprite.tint.g, sprite.tint.b, sprite.tint.a },
+                        .tint = .{ tint.r, tint.g, tint.b, tint.a },
                         .uv_rect = .{
                             sprite.region.u0,
                             sprite.region.v0,
@@ -400,8 +408,8 @@ pub const Renderer = struct {
             }
         }
 
-        try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, alpha, bounds, &sequence);
-        try self.gatherText(gpa, world, assets, snapshots, alpha, bounds, &sequence);
+        try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, inherited, alpha, bounds, &sequence);
+        try self.gatherText(gpa, world, assets, snapshots, inherited, alpha, bounds, &sequence);
 
         std.sort.pdq(Item, self.items.items, {}, Item.before);
     }
@@ -420,6 +428,7 @@ pub const Renderer = struct {
         assets: *Assets,
         tile_sets: *tileset.TileSets,
         snapshots: *const hierarchy.Snapshots,
+        inherited: *Inherited,
         alpha: f32,
         bounds: Bounds,
         sequence: *u32,
@@ -429,6 +438,11 @@ pub const Renderer = struct {
             for (chunk.slice(tilemap.TileChunk)) |tiles| {
                 const map = world.get(tiles.map, tilemap.TileMap) orelse continue;
                 if (!map.visible or map.tint.a <= 0) continue;
+                // A chunk is shown as its map is.
+                const looks = inherited.of(gpa, world, tiles.map);
+                const tint = looks.tint(map.tint);
+                if (!looks.visible or tint.a <= 0) continue;
+                const layer = looks.layer(map.layer);
                 const local = world.get(tiles.map, Transform2D) orelse continue;
                 const placed = hierarchy.resolve(world, snapshots, tiles.map, local.*, alpha) orelse continue;
                 const set = tile_sets.get(map.tile_set);
@@ -470,7 +484,7 @@ pub const Renderer = struct {
 
                     sequence.* += 1;
                     try self.items.append(gpa, .{
-                        .key = sortKey(map.layer, picture.texture),
+                        .key = sortKey(layer, picture.texture),
                         .order = map.order,
                         .sequence = sequence.*,
                         .texture = texture.gpu,
@@ -479,7 +493,7 @@ pub const Renderer = struct {
                         .instance = .{
                             .placement = .{ at.x, at.y, across, down },
                             .spin = .{ 0.5, 0.5, @cos(rotation), @sin(rotation) },
-                            .tint = .{ map.tint.r, map.tint.g, map.tint.b, map.tint.a },
+                            .tint = .{ tint.r, tint.g, tint.b, tint.a },
                             .uv_rect = .{ how.region.u0, how.region.v0, how.region.u1, how.region.v1 },
                         },
                     });
@@ -497,6 +511,7 @@ pub const Renderer = struct {
         world: *ecs.World,
         assets: *Assets,
         snapshots: *const hierarchy.Snapshots,
+        inherited: *Inherited,
         alpha: f32,
         bounds: Bounds,
         sequence: *u32,
@@ -508,6 +523,8 @@ pub const Renderer = struct {
 
             for (transforms, labels, chunk.entities) |local, label, entity| {
                 if (!label.visible or label.len == 0 or label.color.a <= 0) continue;
+                const looks = inherited.of(gpa, world, entity);
+                if (!looks.visible or looks.modulate.a <= 0) continue;
                 // A scene's words are UTF-8 by the time they are read, but a
                 // label's bytes can be written by hand, and the walk through
                 // its characters below takes them on trust.
@@ -517,7 +534,10 @@ pub const Renderer = struct {
                 const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse continue;
                 const face = assets.fontOf(label.font) orelse continue;
 
-                try self.layOut(gpa, assets, face, label, transform, bounds, sequence);
+                var shown = label;
+                shown.color = looks.tint(label.color);
+                shown.layer = looks.layer(label.layer);
+                try self.layOut(gpa, assets, face, shown, transform, bounds, sequence);
             }
         }
     }

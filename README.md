@@ -223,6 +223,38 @@ if (app.state(Mode) == .game_over) showScore(app);
   // and back to Play.paused from the frame it ran in
   ```
 
+## ⏸️ Pause
+
+```zig
+app.setPaused(true);                                           // the game waits
+try app.world.add(pause_menu, fx.Processing{ .mode = .when_paused });
+try app.addSystemAlways(.input, "pause key", togglePause);     // runs paused or not
+try app.addSystemWhenPaused(.ui, "pause screen", drawPauseScreen);
+
+if (app.isPaused()) ...
+if (app.isProcessing(door)) ...
+```
+
+- **Paused, only what asked to run runs.** Everything else waits where it
+  is: its script's `fixed` and `update`, its timers, its `await wait(...)`,
+  its animation, its buttons and the pointer over it, and the game's
+  systems. The physics stops for everything - there is one physics.
+- **What an entity does is a `Processing`**, or the nearest one above it:
+  `.pausable` - what a root with none is - `.when_paused`, `.always`, or
+  `.disabled`, which never runs. So a pause menu says `.when_paused` once,
+  at its top, and every button in it answers while the game waits.
+- **A system runs while the game runs**, unless it was added with
+  `addSystemAlways` - the key that pauses and unpauses - or
+  `addSystemWhenPaused`. `.startup`, `.shutdown` and the systems run on a
+  change of state run either way.
+- **Time goes on.** A paused game still ticks, so a pause menu can fade in
+  and a `.when_paused` timer counts; `time.scale` at nought is the other
+  thing, a world held still, which is what an editor does to the scene it
+  edits.
+- **Worked out once a part of the frame**, as it is asked: see
+  `inherited.zig`. A system that changes a `Processing` is heard from the
+  next part - the next fixed step, the update, the drawing - on.
+
 ## 📨 Events
 
 ```zig
@@ -541,8 +573,11 @@ for (app.input.dropped()) |drop| {
 ```zig
 try app.setVsync(false);
 app.time.max_fps = 144;                     // null is no cap
-if (!app.input.focused) pause(app);
+if (!app.input.focused) app.setPaused(true);
 ```
+
+- **A project caps its frames with `application.max_fps`** - nought for no
+  cap - and a game's `Options.max_fps` overrules it.
 
 - **The cap keeps a schedule**, so a late frame is caught up with and the
   average holds; after a stall longer than `time.max_delta` it starts again.
@@ -571,13 +606,15 @@ try app.signal(fuse, fx.Timer, .timeout).connectFn(explode, .{});
   - `start`, `stop` and `isStopped`.
   - The `timeout` signal, and it is saved with a scene.
 - **Counted by the engine**: once a frame before the `.update` systems, or
-  with `process_mode = .physics` once a fixed step before `.fixed`, so a
-  game's pause is the same length on every machine.
+  with `clock = .fixed` once a fixed step before `.fixed`, so a wait the
+  game's simulation depends on is the same length on every machine.
   - What it says is heard before that stage's systems run.
   - A repeating timer keeps what a frame ran past, so it keeps its rhythm.
-- **No time, no count.** A paused game's timers wait, and an editor, which
-  gives its world no time, starts none in the scene it edits. A timer read
-  back from a scene saved while it ran goes on from where it was.
+- **Counted while its entity runs.** A paused game's timers wait - but for
+  those whose `Processing` runs while it is paused - and a frame with no
+  time counts nothing: an editor, which gives its world no time, starts none
+  in the scene it edits. A timer read back from a scene saved while it ran
+  goes on from where it was.
 - **`app.createTimer(seconds)`** makes a one-shot timer on an entity of its
   own, which goes once it has said `timeout`.
 
@@ -682,6 +719,14 @@ _ = try world.spawnWith(.{
 });
 ```
 
+- **An `Appearance` shows what hangs from it.** `visible` false hides the
+  entity and everything under it; `modulate` is multiplied into its own
+  colour - a sprite's `tint`, a label's `color`, a tile map's `tint` - and
+  into everything under it; `z` raises the layer it and everything under it
+  is drawn on, added to the one it inherits unless `z_relative` is off. It is
+  optional, as `Processing` is: an entity without one is shown as its parent
+  is. A control takes the alpha and the visibility: see
+  [Controls and themes](#-controls-and-themes).
 - **Sorted back to front, blended, with no depth test.** A depth buffer and
   half-transparent pixels disagree about what is behind what. The sort is by
   `layer`, then `order`, then blend mode, then texture, then the order the
@@ -935,6 +980,12 @@ try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{}); 
   `CenterContainer` and `ScrollContainer`. A root is a `Control` with a
   `CanvasLayer` over the screen, or a `Viewport` placed in the world.
   `app.useControlNodes()` lays them out into the interface every frame.
+- **They fade and pop.** A control's `Appearance` - and whatever is above
+  its tree, controls or not - fades it and everything in it by its
+  `modulate`'s alpha and hides it with `visible`; its `scale` draws it and
+  everything in it bigger or smaller about its middle, and the layout does
+  not move. A paused game's controls do not answer the pointer, unless their
+  `Processing` says so. See [Pause](#️-pause).
 - **They say what happened as signals**: `pressed` and
   `toggled` on a button, `toggled` on a check box, `changed` and `submitted`
   on a line edit, `changed` on a slider, `tab_changed` on tabs - connected in
@@ -1710,8 +1761,9 @@ struct Door {
 
 - **What is called, and when.**
   - `ready(self)` comes first.
-  - `physics(self, dt)` runs every fixed step, before the game's `.fixed` systems.
+  - `fixed(self, dt)` runs every fixed step, before the game's `.fixed` systems.
   - `update(self, dt)` runs every frame, before its `.update` systems.
+  - Both only while the entity runs: see [Pause](#️-pause). A task a script starts - a call of a function that `await`s - is the entity's, and its waits stand still while the entity does not run.
   - `exit(self)` runs at the end of the frame in which the entity dies, or its `Script` is taken off or turned off, and when the world is cleared.
 
   A method the struct does not declare is not called. One with the wrong parameters is said once in the log and not called.
@@ -1960,6 +2012,10 @@ Here, and checked by the tests:
   drawn until the program is back, and the system's call for memory.
 - Frame pacing: vsync switched while running, a frame cap that holds its
   average, and a minimised window that sleeps instead of drawing.
+- A pause that stops what did not ask to run - systems, scripts and their
+  tasks, timers, animation, controls, the pointer and the physics - with
+  `Processing` inherited down the tree, and an `Appearance` that hides,
+  colours and raises everything under it.
 - Every system timed, under the name it was added with: its time over the
   last frame, and the whole schedule printable with `{f}`.
 - Textures loaded from PNG, handed out as generational handles, and a white
@@ -2093,7 +2149,7 @@ before this package existed - the seam was cut for it deliberately.
 
 ## 🧩 What counts as a component
 
-`Parent`, which every entity may have. In 2D: `Transform2D`, `Sprite`,
+`Parent`, `Processing` and `Appearance`, which every entity may have. In 2D: `Transform2D`, `Sprite`,
 `Text2D`, `Animation`, `Camera2D`, `RigidBody2D`, `Collider2D`, `Area2D` and
 `TileMap`; `Timer`; and the interface's `Control` with what goes beside it -
 see [Controls and themes](#-controls-and-themes). Each one is something a

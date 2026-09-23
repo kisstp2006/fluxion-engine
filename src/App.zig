@@ -57,6 +57,7 @@ const Window = @import("window.zig");
 const world_ui = @import("world_ui.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
+const inherited_mod = @import("inherited.zig");
 const timer = @import("timer.zig");
 const tilemap = @import("tilemap.zig");
 const geometry = @import("geometry.zig");
@@ -148,6 +149,9 @@ pub const Options = struct {
     height: ?u32 = null,
     backend: Backend = .auto,
     vsync: ?bool = null,
+    /// The most frames a second, slept down to. Null is what the project
+    /// file's `application.max_fps` says - no limit, with nought or none.
+    max_fps: ?f32 = null,
 
     /// Whether the player may drag the window's edges. `setWindowSize` works
     /// either way.
@@ -498,6 +502,11 @@ tree: Tree = .{},
 /// The groups entities are in, by name, each with its members in the order
 /// they joined. See `addToGroup`.
 groups: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(ecs.Entity)) = .empty,
+/// Whether the game is paused. See `setPaused`.
+paused: bool = false,
+/// What each entity inherits - `Processing` and `Appearance` - worked out
+/// as it is asked for. See `inherited.zig`.
+inherited: inherited_mod.Inherited = .{},
 /// What `newUuid` draws from: seeded by the operating system, or with no
 /// `Io` by a constant, so a test makes the same ones every run.
 uuid_source: std.Random.DefaultCsprng,
@@ -695,6 +704,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.height = resolved.height;
     self.vsync_on = resolved.vsync;
     self.time.fixed_delta = resolved.fixed_delta;
+    self.time.max_fps = resolved.max_fps;
     if (options.frame_time == null and (options.fixed_frame_time or options.io == null)) {
         self.time.source = .{ .fixed = resolved.fixed_delta };
     }
@@ -711,6 +721,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Collider2D,
         components.Area2D,
         timer.Timer,
+        inherited_mod.Processing,
+        inherited_mod.Appearance,
         tilemap.TileMap,
         tilemap.TileChunk,
         control.Control,
@@ -876,12 +888,14 @@ const Resolved = struct {
     fullscreen: Fullscreen,
     background: Color,
     fixed_delta: f32,
+    max_fps: ?f32,
 
     const default_fixed_delta: f32 = 1.0 / @as(f32, @floatFromInt((Project.Physics2D{}).ticks_per_second));
 
     fn of(options: Options, settings: ?*const Project.Settings, physics_2d: Project.Physics2D) Resolved {
         const display: Project.Display = if (settings) |held| held.display else .{};
         const rendering: Project.Rendering = if (settings) |held| held.rendering else .{};
+        const application: Project.Application = if (settings) |held| held.application else .{};
         return .{
             .width = options.width orelse display.width,
             .height = options.height orelse display.height,
@@ -891,6 +905,7 @@ const Resolved = struct {
             .fullscreen = options.fullscreen orelse if (display.mode == .fullscreen) .borderless else .windowed,
             .background = options.background orelse rendering.clear_color,
             .fixed_delta = options.fixed_delta orelse 1.0 / @as(f32, @floatFromInt(@max(physics_2d.ticks_per_second, 1))),
+            .max_fps = options.max_fps orelse if (application.max_fps > 0) @floatFromInt(application.max_fps) else null,
         };
     }
 };
@@ -910,6 +925,7 @@ pub fn destroy(self: *App) void {
     self.tree.deinit(gpa);
     self.freeGroups();
     self.groups.deinit(gpa);
+    self.inherited.deinit(gpa);
     self.uuids.deinit(gpa);
     self.by_uuid.deinit(gpa);
     self.sibling_ranks.deinit(gpa);
@@ -967,6 +983,23 @@ pub fn addSystem(self: *App, stage: Stage, comptime name: []const u8, system: Sy
     return self.schedule.addEntry(self.gpa, stage, .{ .name = name, .run = system, .gate = self.gate });
 }
 
+/// `addSystem`, for a system that runs whether the game is paused or not:
+/// the key that pauses and unpauses it. The rest stop while it is paused.
+/// See `setPaused`.
+///
+/// ```zig
+/// try app.addSystemAlways(.input, "pause key", togglePause);
+/// ```
+pub fn addSystemAlways(self: *App, stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
+    return self.schedule.addEntry(self.gpa, stage, .{ .name = name, .run = system, .gate = self.gate, .pause = .always });
+}
+
+/// `addSystem`, for a system that runs only while the game is paused: a
+/// pause menu's. See `setPaused`.
+pub fn addSystemWhenPaused(self: *App, stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
+    return self.schedule.addEntry(self.gpa, stage, .{ .name = name, .run = system, .gate = self.gate, .pause = .when_paused });
+}
+
 /// Add a system that runs only while `value`'s state has that value.
 ///
 /// ```zig
@@ -1015,6 +1048,48 @@ pub fn addSystemsIn(self: *App, value: anytype, register: *const fn (app: *App) 
     defer self.gate = outer;
     self.gate = .{ .state = .of(value) };
     try register(self);
+}
+
+// -------------------------------------------------------------------------
+// Pause
+// -------------------------------------------------------------------------
+
+/// Pause the game, or let it go on.
+///
+/// ```zig
+/// app.setPaused(true);
+/// try app.world.add(pause_menu, fx.Processing{ .mode = .when_paused });
+/// try app.addSystemAlways(.input, "pause key", togglePause);
+/// ```
+///
+/// While it is paused only what asked to run does: an entity whose
+/// `Processing` says `.when_paused` or `.always` - and what hangs from it -
+/// and the systems added with `addSystemWhenPaused` or `addSystemAlways`.
+/// The rest wait where they are: their timers, their scripts' `fixed` and
+/// `update`, their tasks, their animation, their controls and the pointer
+/// over them, and the game's other systems. The physics stops for
+/// everything. Time goes on, unlike with `time.scale` at nought, so a pause
+/// menu can fade in.
+pub fn setPaused(self: *App, paused: bool) void {
+    self.paused = paused;
+    self.schedule.paused = paused;
+}
+
+pub fn isPaused(self: *const App) bool {
+    return self.paused;
+}
+
+/// Whether an entity runs now: its `Processing`, or the nearest one above
+/// it, against the pause.
+pub fn isProcessing(self: *App, entity: ecs.Entity) bool {
+    return self.inherited.of(self.gpa, &self.world, entity).processing.runs(self.paused);
+}
+
+/// How an entity shows, everything above it counted: whether it is drawn,
+/// the colour its own is multiplied by, and what its layer is raised by.
+/// See `Appearance`.
+pub fn resolvedAppearance(self: *App, entity: ecs.Entity) inherited_mod.Resolved {
+    return self.inherited.of(self.gpa, &self.world, entity);
 }
 
 // -------------------------------------------------------------------------
@@ -1185,6 +1260,9 @@ pub fn step(self: *App) anyerror!bool {
     if (self.input.justResumed()) self.time.restart();
 
     self.time.tick();
+    self.inherited.forget();
+    // A game that wrote `paused` itself is taken at its word from here on.
+    self.schedule.paused = self.paused;
     self.debug_frame.advance(self.time.delta);
     self.debug_under_frame.advance(self.time.delta);
     if (self.hasInterface()) try self.feedInterface();
@@ -1195,11 +1273,12 @@ pub fn step(self: *App) anyerror!bool {
     try self.commands.apply();
     try self.changeStates();
 
-    // Bodies are synced before each fixed step. A paused frame - and the
-    // first, which has no time to step - is synced here instead, so the
-    // queries find what was spawned.
+    // Bodies are synced before each fixed step. A frame with no time - and
+    // the first, which has no time to step - is synced here instead, so the
+    // queries find what was spawned, and so is a paused game's, whose steps
+    // move no body.
     self.bodies.beginFrame();
-    if (self.time.delta == 0) try self.bodies.sync(self);
+    if (self.time.delta == 0 or self.paused) try self.bodies.sync(self);
 
     try self.schedule.run(.input, self);
     self.shortcuts();
@@ -1228,18 +1307,20 @@ pub fn step(self: *App) anyerror!bool {
         defer self.debug_under.canvas = &self.debug_under_frame;
 
         while (self.time.takeFixedStep()) |_| {
+            self.inherited.forget();
             self.debug_steps.advance(self.time.fixed_delta);
             self.debug_under_steps.advance(self.time.fixed_delta);
             // Where everything was before this step, to draw between steps.
             try self.snapshotPrevious();
-            try timer.count(self, .physics, self.time.fixed_delta);
+            try timer.count(self, .fixed, self.time.fixed_delta);
             try self.signals.drain(self);
             if (self.scripts) |scripts| {
-                try scripts.calls.pass(scripts, .{ .physics = self.time.fixed_delta });
+                try scripts.calls.pass(scripts, .{ .fixed = self.time.fixed_delta });
                 try self.signals.drain(self);
             }
             try self.schedule.run(.fixed, self);
-            try self.stepPhysics();
+            // Nothing moves a paused game's bodies: there is one physics.
+            if (!self.paused) try self.stepPhysics();
             // Seen, so gone: the next step hears only what comes after.
             self.input.endFixedStep();
         }
@@ -1248,7 +1329,8 @@ pub fn step(self: *App) anyerror!bool {
     // pressed on a pause menu must not reach the first step after it.
     if (self.time.delta == 0) self.input.endFixedStep();
 
-    try timer.count(self, .idle, self.time.delta);
+    self.inherited.forget();
+    try timer.count(self, .update, self.time.delta);
     try self.signals.drain(self);
     if (self.scripts) |scripts| {
         try scripts.calls.pass(scripts, .{ .update = self.time.delta });
@@ -1279,6 +1361,8 @@ pub fn step(self: *App) anyerror!bool {
     try self.animate();
     if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
 
+    // What the systems changed of how things show is seen by the drawing.
+    self.inherited.forget();
     if (self.hasInterface()) try self.layOutInterface();
 
     // Nothing to draw on while Android has taken the surface away.
@@ -1435,7 +1519,9 @@ fn animate(self: *App) !void {
 
     var it = try ecs.Query(.{ components.Sprite, components.Animation }).over(&self.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(components.Sprite), chunk.slice(components.Animation)) |*drawn, *animation| {
+        for (chunk.entities, chunk.slice(components.Sprite), chunk.slice(components.Animation)) |entity, *drawn, *animation| {
+            // One that does not run now keeps its cell.
+            if (!self.isProcessing(entity)) continue;
             drawn.region = animation.advance(delta);
         }
     }
@@ -3121,6 +3207,9 @@ pub const reflect_methods = .{
     .groupSize,
     .groupMember,
     .callGroup,
+    .setPaused,
+    .isPaused,
+    .isProcessing,
     .clearWorld,
     .addComponentNamed,
     .removeComponentNamed,
@@ -4208,7 +4297,7 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
     const view: View = .of(&self.world, &self.snapshots, width, height);
     if (self.world_on_screen) {
         const clear = try self.drawDebugUnder(into, view);
-        try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, into, view, clear, self.time.alpha());
+        try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, &self.inherited, into, view, clear, self.time.alpha());
     } else try self.clearTarget(into);
 
     // 3. The interface, on top, loading what the 2D layer left - with its
@@ -4242,7 +4331,7 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
 /// interface it wants its `source` turned over; see `drawnUpsideDown`.
 pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
     const clear = try self.drawDebugUnder(.{ .texture = into }, view);
-    try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, .{ .texture = into }, view, clear, self.time.alpha());
+    try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, &self.inherited, .{ .texture = into }, view, clear, self.time.alpha());
     if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
 }
 
@@ -6079,6 +6168,182 @@ test "a click presses what the interface drew under it, and the game is told" {
     try testing.expectEqual(@as(u32, 1), Clicks.released);
 }
 
+const Paused = struct {
+    var game: u32 = 0;
+    var menu: u32 = 0;
+    var key: u32 = 0;
+    var pressed: u32 = 0;
+
+    fn reset() void {
+        game = 0;
+        menu = 0;
+        key = 0;
+        pressed = 0;
+    }
+    fn countGame(_: *App) anyerror!void {
+        game += 1;
+    }
+    fn countMenu(_: *App) anyerror!void {
+        menu += 1;
+    }
+    fn countKey(_: *App) anyerror!void {
+        key += 1;
+    }
+    fn press(_: *App, _: struct {}) !void {
+        pressed += 1;
+    }
+};
+
+test "a paused game runs only the systems that asked to, and moves no body" {
+    Paused.reset();
+    const app = try App.create(testing.allocator, .{ .headless = true, .fixed_delta = 0.25 });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 0.25 };
+    try app.addSystem(.update, "game", Paused.countGame);
+    try app.addSystemWhenPaused(.update, "menu", Paused.countMenu);
+    try app.addSystemAlways(.input, "key", Paused.countKey);
+    const ball = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.RigidBody2D{}, components.Collider2D.circle(4) });
+
+    for (0..3) |_| _ = try app.step();
+    try testing.expectEqual(@as(u32, 3), Paused.game);
+    try testing.expectEqual(@as(u32, 0), Paused.menu);
+    try testing.expectEqual(@as(u32, 3), Paused.key);
+    const fallen = app.world.get(ball, components.Transform2D).?.y;
+    try testing.expect(fallen > 0);
+
+    app.setPaused(true);
+    for (0..2) |_| _ = try app.step();
+    try testing.expectEqual(@as(u32, 3), Paused.game);
+    try testing.expectEqual(@as(u32, 2), Paused.menu);
+    try testing.expectEqual(@as(u32, 5), Paused.key);
+    try testing.expectEqual(fallen, app.world.get(ball, components.Transform2D).?.y);
+    // Time goes on: it is not a clock stopped at nought.
+    try testing.expect(app.time.delta > 0);
+
+    app.setPaused(false);
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 4), Paused.game);
+    try testing.expect(app.world.get(ball, components.Transform2D).?.y > fallen);
+}
+
+test "an animation waits while its entity does not run" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 0.25 };
+    const strip: components.Animation = .{ .columns = 4, .length = 4, .fps = 4 };
+    const walker = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip });
+    const menu = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip, inherited_mod.Processing{ .mode = .always } });
+
+    app.setPaused(true);
+    for (0..2) |_| _ = try app.step();
+    try testing.expectEqual(@as(f32, 0), app.world.get(walker, components.Animation).?.time);
+    try testing.expect(app.world.get(menu, components.Animation).?.time > 0);
+}
+
+test "an Appearance hides, fades and raises what hangs from it" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const faded = try app.world.spawnWith(.{
+        components.Transform2D.at(0, 0),
+        components.Sprite.solid(.white, 10, 10),
+        inherited_mod.Appearance{ .modulate = Color.white.withAlpha(0.5), .z = 3 },
+    });
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(2, 0), components.Parent.of(faded), components.Sprite.solid(.white, 4, 4) });
+    const hidden = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), inherited_mod.Appearance{ .visible = false } });
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Parent.of(hidden), components.Sprite.solid(.white, 4, 4) });
+    const plain = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4) });
+    _ = try app.step();
+
+    try testing.expectEqual(@as(u32, 3), app.sprites.drawn);
+    var halves: usize = 0;
+    for (app.sprites.items.items) |item| {
+        if (item.instance.tint[3] == 0.5) halves += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), halves);
+    try testing.expectEqual(@as(i16, 3), app.resolvedAppearance(app.childAt(faded, 0).?).layer(0));
+    try testing.expectEqual(@as(i16, 0), app.resolvedAppearance(plain).layer(0));
+}
+
+test "a button answers while it runs: not while the game is paused, unless it asked to" {
+    Paused.reset();
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100 });
+    defer app.destroy();
+    try app.useControlNodes();
+    const root = try app.world.spawnWith(.{ control.Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, control.CanvasLayer{} });
+    const button = try app.world.spawnWith(.{
+        control.Control{ .width = .{ .mode = .fixed, .value = 100 }, .height = .{ .mode = .fixed, .value = 40 } },
+        components.Parent.of(root),
+        control.Button.of("Go"),
+    });
+    try app.signal(button, control.Button, .pressed).connectFn(Paused.press, .{});
+    try app.startup();
+    _ = try app.step();
+
+    const Click = struct {
+        fn at(a: *App) !void {
+            a.input.apply(leftButton(true, 20, 10));
+            _ = try a.step();
+            a.input.apply(leftButton(false, 20, 10));
+            _ = try a.step();
+        }
+    };
+    try Click.at(app);
+    try testing.expectEqual(@as(u32, 1), Paused.pressed);
+
+    app.setPaused(true);
+    try Click.at(app);
+    try testing.expectEqual(@as(u32, 1), Paused.pressed);
+
+    // A pause menu's button: it answers while the game is paused.
+    try app.world.add(button, inherited_mod.Processing{ .mode = .when_paused });
+    try Click.at(app);
+    try testing.expectEqual(@as(u32, 2), Paused.pressed);
+}
+
+test "a control fades as its Appearance and everything above it says, and grows as its scale does" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100 });
+    defer app.destroy();
+    try app.useControlNodes();
+    const holder = try app.world.spawnWith(.{inherited_mod.Appearance{ .modulate = Color.white.withAlpha(0.5) }});
+    const root = try app.world.spawnWith(.{ control.Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, control.CanvasLayer{}, components.Parent.of(holder) });
+    const panel = try app.world.spawnWith(.{
+        control.Control{ .width = .{ .mode = .fixed, .value = 40 }, .height = .{ .mode = .fixed, .value = 40 }, .scale = 2 },
+        components.Parent.of(root),
+        control.PanelContainer{},
+        inherited_mod.Appearance{ .modulate = Color.white.withAlpha(0.5) },
+    });
+    _ = try app.world.spawnWith(.{
+        control.Control{ .width = .{ .mode = .fixed, .value = 10 }, .height = .{ .mode = .fixed, .value = 10 } },
+        components.Parent.of(root),
+        control.PanelContainer{},
+        inherited_mod.Appearance{ .visible = false },
+    });
+    _ = try app.step();
+
+    var id: [48]u8 = undefined;
+    const box = app.ui.boxOf(control.idOf(&id, panel)).?;
+    var found = false;
+    for (app.interface.commands) |command| {
+        if (!std.meta.eql(command.bounding_box, box)) continue;
+        const colour = switch (command.config) {
+            .rectangle => |fill| fill.color,
+            .image => |picture| picture.tint,
+            else => continue,
+        };
+        // A quarter: its own half, and the half of what its tree hangs from.
+        try testing.expect(colour.a <= 0.25 + 1e-4);
+        try testing.expect(!command.transform.isIdentity());
+        found = true;
+    }
+    try testing.expect(found);
+    // The hidden one is not in the tree at all.
+    var rectangles: usize = 0;
+    for (app.interface.commands) |command| {
+        if (command.config == .rectangle or command.config == .image) rectangles += 1;
+    }
+    try testing.expect(rectangles <= 2);
+}
+
 const Nap = struct {
     fn run(_: *App) anyerror!void {
         try testing.io.sleep(.fromMilliseconds(1), .awake);
@@ -6268,7 +6533,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 29), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 31), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);
@@ -6531,7 +6796,7 @@ test "a project file that is wrong stops the start, and says what and where" {
 
 test "the window, the frame and the clock are the game's, then the project's, then the engine's" {
     const said: Project.Settings = .{
-        .application = .{ .name = "Wide" },
+        .application = .{ .name = "Wide", .max_fps = 30 },
         .display = .{ .width = 1600, .height = 900, .vsync = false, .mode = .fullscreen },
         .rendering = .{ .clear_color = .hex(0x102030) },
         .physics_2d = .{ .ticks_per_second = 120 },
@@ -6543,6 +6808,7 @@ test "the window, the frame and the clock are the game's, then the project's, th
     try testing.expectEqual(Fullscreen.borderless, project.fullscreen);
     try testing.expectEqual(Color.hex(0x102030), project.background);
     try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), project.fixed_delta, 1e-6);
+    try testing.expectEqual(@as(?f32, 30), project.max_fps);
 
     // What the game says in code overrules its project, and only that.
     const game: Resolved = .of(.{ .width = 800, .fullscreen = .windowed, .fixed_delta = 0.5 }, &said, said.physics_2d);
@@ -6558,6 +6824,7 @@ test "the window, the frame and the clock are the game's, then the project's, th
     try testing.expect(bare.vsync and bare.resizable and !bare.maximized);
     try testing.expectEqual(Fullscreen.windowed, bare.fullscreen);
     try testing.expectApproxEqAbs(@as(f32, 1.0 / 60.0), bare.fixed_delta, 1e-6);
+    try testing.expect(bare.max_fps == null);
 
     // And a game opened in a project's folder takes them.
     var tmp = testing.tmpDir(.{});

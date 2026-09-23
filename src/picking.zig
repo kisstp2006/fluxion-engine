@@ -151,6 +151,8 @@ fn take(self: *Picking, app: *App, id: physics.ShapeId, point: Vec2) !void {
     if (collider.collision_layer == 0) return;
     const object = Bodies.objectOf(&app.world, shape) orelse return;
     if (!pickable(app, object)) return;
+    // What waits while the game is paused hears nothing of the pointer.
+    if (!app.isProcessing(object)) return;
 
     const drawn = app.world.get(object, Sprite);
     if (drawn) |sprite| {

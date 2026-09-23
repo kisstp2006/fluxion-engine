@@ -18,6 +18,7 @@ const Parent = @import("components.zig").Parent;
 const View = @import("render/view.zig").View;
 const attr = @import("attr.zig");
 const hierarchy = @import("hierarchy.zig");
+const Appearance = @import("inherited.zig").Appearance;
 const theme_file = @import("theme.zig");
 
 /// What a control looks like lives in a `.theme` file rather than in the
@@ -89,6 +90,10 @@ pub const Control = extern struct {
     clip: bool = false,
     mouse_filter: MouseFilter = .pass,
     z_index: i16 = 0,
+    /// How big it and everything in it is drawn, about its middle: one as it
+    /// is laid out. The layout does not change, and neither does the room
+    /// it takes: what a button popping in is drawn with.
+    scale: f32 = 1,
 
     pub const variation_capacity = 31;
     pub const Position = enum(u8) { flow, anchored };
@@ -451,7 +456,9 @@ pub const Nodes = struct {
     pub fn enable(self: *Nodes, app: *App) !void {
         if (self.enabled) return;
         self.enabled = true;
-        try app.addSystem(.ui, "control nodes", draw);
+        // Drawn paused or not: which of them answer the pointer is each
+        // one's `Processing`.
+        try app.addSystemAlways(.ui, "control nodes", draw);
     }
 
     fn draw(app: *App) !void {
@@ -482,7 +489,13 @@ pub const Nodes = struct {
         const control = app.world.get(entity, Control) orelse return;
         // A layer inside another control's tree is drawn with it.
         if (!control.visible or app.world.has(hierarchy.parentOf(&app.world, entity), Control)) return;
-        var declared = self.declaration(context, entity, control.*);
+        // Whatever is above it counts here: the root of a tree may hang from
+        // something that is no control, faded or hidden.
+        const shown = app.resolvedAppearance(entity);
+        if (!shown.visible) return;
+        const own = context.at(entity);
+        var declared = self.declaration(own, entity, control.*);
+        declared.opacity = shown.modulate.a;
         declared.z_index += layer;
         declared.floating = null;
         if (width > 0) declared.width = .fixed(width) else declared.width = .grow;
@@ -504,7 +517,7 @@ pub const Nodes = struct {
             layout.open(declared);
         }
         defer layout.close();
-        try self.content(context, entity);
+        try self.content(own, entity);
         try self.children(context, entity, 0);
     }
 
@@ -524,10 +537,22 @@ pub const Nodes = struct {
         }
     }
 
+    /// A control inside a tree: its own `Appearance` hides and fades it,
+    /// and fluxion-ui takes that on to what is inside it. What it answers is
+    /// its own `Processing`'s, and its children's theirs.
     fn node(self: *Nodes, context: Context, entity: Entity, control: Control, depth: u8) anyerror!void {
-        context.layout.open(self.declaration(context, entity, control));
+        const app = context.app;
+        var opacity: f32 = 1;
+        if (app.world.get(entity, Appearance)) |looks| {
+            if (!looks.visible) return;
+            opacity = looks.modulate.a;
+        }
+        const own = context.at(entity);
+        var declared = self.declaration(own, entity, control);
+        declared.opacity = opacity;
+        context.layout.open(declared);
         defer context.layout.close();
-        try self.content(context, entity);
+        try self.content(own, entity);
         try self.children(context, entity, depth + 1);
     }
 
@@ -542,6 +567,7 @@ pub const Nodes = struct {
             .clip = if (control.clip) .both else .none,
             .z_index = control.z_index,
             .capture = control.mouse_filter == .stop,
+            .scale = if (control.scale != 1) .by(control.scale) else null,
         };
         if (control.position == .anchored) out.floating = .{
             .anchor = .{
@@ -654,12 +680,14 @@ pub const Nodes = struct {
     fn drawTabs(self: *Nodes, context: Context, parent: Entity, children_of: []const Entity, tab_container: *TabContainer, depth: u8) !void {
         const app = context.app;
         const layout = context.layout;
+        // The tabs are the container's to answer; what they show, its own.
+        const own = context.at(parent);
         layout.open(.{ .width = .grow, .height = .fit, .gap = tab_container.separation });
         for (children_of, 0..) |child, index| {
             if (!app.world.has(child, Control)) continue;
             var id: [64]u8 = undefined;
             const name = std.fmt.bufPrint(&id, "tab-{d}-{d}", .{ child.index, child.generation }) catch "tab";
-            const state: State = if (!context.interactive)
+            const state: State = if (!own.interactive)
                 .normal
             else if (layout.isElementPressed(name))
                 .pressed
@@ -680,7 +708,7 @@ pub const Nodes = struct {
             self.applyStyle(app, &tab_decl, style);
             layout.open(tab_decl);
             layout.text(app.nameOf(child) orelse "Tab", .{ .wrap = .none, .font = app.interface.addFont(style.font) catch 0, .font_size = style.font_size, .color = color(style.text_color) });
-            if (context.interactive and layout.justReleased() and index != tab_container.current) {
+            if (own.interactive and layout.justReleased() and index != tab_container.current) {
                 tab_container.current = @intCast(index);
                 try app.signal(parent, TabContainer, .tab_changed).emit(.{ .index = tab_container.current });
             }
@@ -771,6 +799,14 @@ const Context = struct {
     layout: *ui.Ui,
     interactive: bool = false,
     view: ?View = null,
+
+    /// The same, for one entity: which answers the pointer and the keys
+    /// only while it runs. See `App.setPaused`.
+    fn at(self: Context, entity: Entity) Context {
+        var own = self;
+        own.interactive = self.interactive and self.app.isProcessing(entity);
+        return own;
+    }
 };
 
 /// A theme's style with every question answered: what the drawing code

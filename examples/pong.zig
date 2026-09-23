@@ -117,7 +117,7 @@ const Ball = extern struct {
 /// The pause before a serve: the ball's own `fx.Timer`, counted by fixed
 /// steps so the pause is the same length on every machine. Its `timeout`
 /// serves; space cuts it short.
-const serve_wait: fx.Timer = .{ .wait_time = serve_pause, .one_shot = true, .autostart = true, .process_mode = .physics };
+const serve_wait: fx.Timer = .{ .wait_time = serve_pause, .one_shot = true, .autostart = true, .clock = .fixed };
 
 /// The whole of the game's state, on one entity.
 const Score = extern struct {
