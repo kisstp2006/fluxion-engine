@@ -1944,6 +1944,37 @@ pub fn cellAt(self: *App, map: ecs.Entity, point: math.Vec2) ?[2]i32 {
     };
 }
 
+/// The cells of `map` something is painted in: the smallest rectangle that
+/// holds them all, by its first and last cell. Null for a map with nothing
+/// painted. Godot's `get_used_rect`.
+pub fn usedCells(self: *App, map: ecs.Entity) ?CellRect {
+    var out: ?CellRect = null;
+    var it = self.tile_chunks.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (!key.map.eql(map)) continue;
+        // One despawned elsewhere is not the map's any more.
+        const chunk = self.world.getConst(entry.value_ptr.*, tilemap.TileChunk) orelse continue;
+        if (!chunk.map.eql(map) or chunk.x != key.x or chunk.y != key.y) continue;
+        for (chunk.cells, 0..) |cell, at| {
+            if (cell.isEmpty()) continue;
+            const x = key.x * tilemap.chunk_side + @as(i32, @intCast(at % tilemap.chunk_side));
+            const y = key.y * tilemap.chunk_side + @as(i32, @intCast(at / tilemap.chunk_side));
+            if (out) |*held| {
+                held.first = .{ @min(held.first[0], x), @min(held.first[1], y) };
+                held.last = .{ @max(held.last[0], x), @max(held.last[1], y) };
+            } else out = .{ .first = .{ x, y }, .last = .{ x, y } };
+        }
+    }
+    return out;
+}
+
+/// A rectangle of a map's cells, by its first and its last: both are in it.
+pub const CellRect = struct {
+    first: [2]i32,
+    last: [2]i32,
+};
+
 /// What the tile at `x`, `y` of `map` says under its tile set's data layer
 /// called `layer`: nought, or false, where it says nothing, and null where
 /// nothing is painted or the set has no layer of that name. A script has the
@@ -3878,6 +3909,24 @@ test "the tile set says which tiles are solid, and they become one body" {
     _ = try app.setTile(map, 1, 0, .empty);
     try app.bodies.sync(app);
     try testing.expectEqual(@as(usize, 0), app.physics.shapeCount());
+}
+
+test "a map's used cells are the smallest rectangle round what is painted, across chunks" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{} });
+    try testing.expect(app.usedCells(map) == null);
+
+    _ = try app.setTile(map, 3, 2, .at(0, 0, 0));
+    _ = try app.setTile(map, -20, 40, .at(0, 0, 0));
+    const used = app.usedCells(map).?;
+    try testing.expectEqual([2]i32{ -20, 2 }, used.first);
+    try testing.expectEqual([2]i32{ 3, 40 }, used.last);
+
+    // Another map's cells are its own.
+    const other = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{} });
+    _ = try app.setTile(other, 100, 100, .at(0, 0, 0));
+    try testing.expectEqual([2]i32{ 3, 40 }, app.usedCells(map).?.last);
 }
 
 test "a tile's data is asked for by its cell, or by a point of the world over it" {
