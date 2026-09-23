@@ -283,6 +283,9 @@ pub const ActionMap = Input.ActionMap;
 
 /// A component that counts down and says `timeout`. See `timer.zig`.
 pub const Timer = @import("timer.zig").Timer;
+pub const scenes = @import("scenes.zig");
+pub const SceneHandle = scenes.SceneHandle;
+pub const background = @import("background.zig");
 pub const inherited = @import("inherited.zig");
 pub const Processing = inherited.Processing;
 pub const Appearance = inherited.Appearance;
@@ -387,6 +390,9 @@ test {
     _ = @import("picking_test.zig");
     _ = @import("timer.zig");
     _ = @import("inherited.zig");
+    _ = @import("scenes.zig");
+    _ = @import("background.zig");
+    _ = @import("scenes_test.zig");
     _ = @import("script.zig");
     _ = @import("script_test.zig");
     _ = Project;

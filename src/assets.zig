@@ -308,6 +308,19 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
     );
 }
 
+/// A texture read and decoded elsewhere - a scene loading in the background
+/// - made under the file it came from, so what names that file finds it.
+pub fn adoptTexture(self: *Assets, path: []const u8, width: u32, height: u32, rgba: []const u8, options: LoadOptions) !TextureHandle {
+    const source = try self.project.canonical(self.gpa, path);
+    errdefer self.gpa.free(source);
+    self.learnUid(source);
+    return self.addTexture(width, height, rgba, .{
+        .filter = options.filter,
+        .wrap = options.wrap,
+        .label = if (options.label.len == 0) source else options.label,
+    }, source);
+}
+
 /// The texture already read from `path`, if one was: the same file, however
 /// either was spelt - `res://art/a.png`, `art/a.png` from the root, its
 /// absolute path.

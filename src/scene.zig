@@ -7,7 +7,7 @@
 //! try app.registerComponents(.{ Wander, Player });
 //! try app.saveScene("res://levels/meadow.json", .{});
 //! try app.saveScene("res://levels/meadow.scene", .{ .format = .cbor });
-//! const loaded = try app.loadScene("res://levels/meadow.scene", .{});
+//! const loaded = try app.readScene("res://levels/meadow.scene", .{});
 //! ```
 //!
 //! ```json
@@ -105,6 +105,7 @@ const TileChunk = tilemap.TileChunk;
 const TileSetHandle = @import("tileset.zig").TileSetHandle;
 const ThemeHandle = @import("theme.zig").ThemeHandle;
 const AssetKind = @import("asset_kind.zig").AssetKind;
+const SceneHandle = @import("scenes.zig").SceneHandle;
 const Uuid = @import("fluxion_id").Uuid;
 const math = @import("fluxion_math");
 const Color = @import("color.zig").Color;
@@ -116,18 +117,55 @@ pub const SaveOptions = struct {
     format: json.Format = .json,
     /// Spaces per level of JSON. CBOR has no layout.
     indent: u8 = 2,
+    /// Only this entity and what hangs from it, with no parent written for
+    /// it: a branch saved as a scene of its own, which is then a scene to
+    /// make instances of. Null writes the whole world.
+    root: ?Entity = null,
 };
 
 pub const LoadOptions = struct {
     /// Where reading went wrong and why: a line and a column, or a byte of
     /// CBOR, and the path to the value, such as `/entities/3/Sprite/texture`.
     diagnostics: ?*json.Diagnostics = null,
+    /// What the scene's roots - its entities with no parent in it - hang
+    /// from: `.none` for the top of the tree.
+    parent: Entity = .none,
+    /// Read as an instance: its one root is given this UUID, and every other
+    /// entity one made of this and the one the file gives it - the same each
+    /// time for this instance, and others for another. See
+    /// `App.instantiate`. A scene read so has one root, or it is a mistake.
+    instance: ?Uuid = null,
+    /// Every entity made is added to it, the ones inside instances too. On a
+    /// mistake, the ones this read added are despawned again.
+    spawned: ?*std.ArrayList(Entity) = null,
+    /// The scenes being read around this one: a scene that is an instance
+    /// of itself, however deep, is a mistake rather than a loop.
+    within: ?*const Nesting = null,
+};
+
+/// A scene being read, and the one it is read inside.
+pub const Nesting = struct {
+    scene: SceneHandle,
+    outer: ?*const Nesting = null,
+
+    fn holds(self: ?*const Nesting, scene: SceneHandle) bool {
+        var at = self;
+        while (at) |nesting| : (at = nesting.outer) {
+            if (nesting.scene.eql(scene)) return true;
+        }
+        return false;
+    }
 };
 
 /// What a load did.
 pub const Loaded = struct {
-    /// How many entities it spawned.
+    /// How many entities it spawned, the ones inside instances too.
     entities: usize = 0,
+    /// Its entities with no parent in it: what hangs from `LoadOptions.parent`.
+    roots: usize = 0,
+    /// The one of them, when there is one: what an instance is. `.none` for
+    /// a scene of several.
+    root: Entity = .none,
     /// Components the file has that nothing here is registered as: kept
     /// with their entities, saved back as they were, and never run. An
     /// editor without the game's components meets these. See `Unknown`.
@@ -397,13 +435,13 @@ pub fn save(app: *App, io: std.Io, path: []const u8, options: SaveOptions) !void
     if (app.scripts) |scripts| try scripts.ensureUids();
     const file = try app.project.osPath(app.gpa, path);
     defer app.gpa.free(file);
-    return json.save(io, file, Document{ .app = app }, writeOptions(options));
+    return json.save(io, file, Document{ .app = app, .root = options.root }, writeOptions(options));
 }
 
 /// Write `app`'s world into fresh memory. A file with no UUID yet is named
 /// by its path alone: only `save` makes UUIDs for files. The caller frees it.
 pub fn write(app: *App, gpa: Allocator, options: SaveOptions) json.StringifyError![]u8 {
-    return json.stringify(gpa, Document{ .app = app }, writeOptions(options));
+    return json.stringify(gpa, Document{ .app = app, .root = options.root }, writeOptions(options));
 }
 
 /// A scene with nothing in it, into fresh memory: what a new level starts as,
@@ -434,10 +472,11 @@ const Empty = struct {
 /// The world as fluxion-json writes it.
 const Document = struct {
     app: *App,
+    root: ?Entity = null,
 
     pub fn toJson(self: Document, w: *json.Writer) json.Writer.Error!void {
         const gpa = self.app.gpa;
-        var s: Saving = .{ .app = self.app };
+        var s: Saving = .{ .app = self.app, .root = self.root };
         defer s.deinit(gpa);
         try s.placeAll();
 
@@ -450,6 +489,25 @@ const Document = struct {
         try s.writeConnections(w);
         try s.writeFiles(w);
         try w.endObject();
+    }
+};
+
+/// An entity's components as a scene writes them, every field of each, in
+/// compact JSON: what `App.keepInstance` keeps an instance's root as its
+/// scene made it by. Nothing else is given a UUID for it. The caller frees
+/// it.
+pub fn entityTemplate(app: *App, gpa: Allocator, entity: Entity) json.StringifyError![]u8 {
+    return json.stringify(gpa, Template{ .app = app, .entity = entity }, .{ .indent = 0, .non_finite = .literal });
+}
+
+const Template = struct {
+    app: *App,
+    entity: Entity,
+
+    pub fn toJson(self: Template, w: *json.Writer) json.Writer.Error!void {
+        var s: Saving = .{ .app = self.app, .every_field = true };
+        defer s.deinit(self.app.gpa);
+        try s.writeEntity(w, self.entity);
     }
 };
 
@@ -474,6 +532,10 @@ pub const EntityJson = struct {
 const Saving = struct {
     app: *App,
     every_field: bool = false,
+    /// See `SaveOptions.root`.
+    root: ?Entity = null,
+    /// What is written: its parent is named only when it is written too.
+    written: std.AutoHashMapUnmanaged(Entity, void) = .empty,
     /// The entity being written, for a component whose value is kept beside
     /// it: a map's tiles.
     entity: Entity = .none,
@@ -485,6 +547,7 @@ const Saving = struct {
     fn deinit(s: *Saving, gpa: Allocator) void {
         s.order.deinit(gpa);
         s.files.deinit(gpa);
+        s.written.deinit(gpa);
     }
 
     /// Every entity in the world, in the order a parent's children are in -
@@ -500,10 +563,32 @@ const Saving = struct {
                 // A chunk is not a thing in the scene: its map writes its
                 // tiles, and reading them makes the chunks again.
                 if (s.app.world.has(e, TileChunk)) continue;
+                if (s.root) |root| if (!e.eql(root) and !s.app.hangsFrom(e, root)) continue;
                 try s.order.append(gpa, e);
             }
         }
         std.mem.sort(Entity, s.order.items, @as(*const App, s.app), App.siblingBefore);
+        for (s.order.items) |e| try s.written.put(gpa, e, {});
+        // What an instance holds is its scene's: the instance is written, and
+        // its insides are made again from the scene when it is read.
+        var hidden: std.AutoHashMapUnmanaged(Entity, void) = .empty;
+        defer hidden.deinit(gpa);
+        for (s.app.instances.keys(), s.app.instances.values()) |root, held| {
+            if (!s.written.contains(root)) continue;
+            for (held.members) |member| try hidden.put(gpa, member, {});
+        }
+        if (hidden.count() > 0) {
+            var kept: usize = 0;
+            for (s.order.items) |e| {
+                if (hidden.contains(e)) {
+                    _ = s.written.remove(e);
+                    continue;
+                }
+                s.order.items[kept] = e;
+                kept += 1;
+            }
+            s.order.shrinkRetainingCapacity(kept);
+        }
         for (s.order.items) |e| _ = s.app.ensureUuid(e) catch |err| switch (err) {
             error.NoSuchEntity => unreachable,
             error.OutOfMemory => return error.OutOfMemory,
@@ -519,9 +604,11 @@ const Saving = struct {
             try w.field("uuid", @as([]const u8, &text));
         }
         // What it hangs from, by the UUID it was written with: before the
-        // name, which is its own among its parent's children.
+        // name, which is its own among its parent's children. A branch's
+        // root hangs from nothing written.
         const parent = app.parentOf(e);
-        if (!parent.isNone()) if (app.uuidOf(parent)) |uuid| {
+        const named_parent = if (s.root) |root| !e.eql(root) else true;
+        if (!parent.isNone() and named_parent) if (app.uuidOf(parent)) |uuid| {
             const text = uuid.toString();
             try w.field("parent", @as([]const u8, &text));
         };
@@ -534,6 +621,12 @@ const Saving = struct {
             for (groups) |group| try w.writeString(group);
             try w.endArray();
         }
+        // An instance: the scene it is one of, and what differs from it.
+        if (!s.every_field) if (app.instances.getPtr(e)) |instance| {
+            try w.field("instance", app.sceneSource(instance.scene) orelse "");
+            try s.writeOverrides(w, e, instance.template);
+            return w.endObject();
+        };
         for (app.scene_components.entries.items) |entry| {
             const id = entry.findIdIn(&app.world) orelse continue;
             const cell = app.world.cellOf(e, id) orelse continue;
@@ -542,6 +635,78 @@ const Saving = struct {
         }
         try s.writeUnknown(w, e);
         try w.endObject();
+    }
+
+    /// What an instance's root has that its scene did not give it: the
+    /// fields that differ, the components it was given, and in `removed`
+    /// those it lost - `template` being the root as the scene made it.
+    fn writeOverrides(s: *Saving, w: *json.Writer, e: Entity, template: []const u8) json.Writer.Error!void {
+        const app = s.app;
+        var arena_state: std.heap.ArenaAllocator = .init(app.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const was = membersOf(arena, template) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.WriteFailed,
+        };
+
+        var removed: std.ArrayList([]const u8) = .empty;
+        for (app.scene_components.entries.items) |entry| {
+            const before = memberNamed(was, entry.name);
+            const id = entry.findIdIn(&app.world) orelse {
+                if (before != null) try removed.append(arena, entry.name);
+                continue;
+            };
+            const cell = app.world.cellOf(e, id) orelse {
+                if (before != null) try removed.append(arena, entry.name);
+                continue;
+            };
+            const had = before orelse {
+                // Given one its scene does not: written whole.
+                try w.key(entry.name);
+                try entry.write(s, w, cell);
+                continue;
+            };
+            // Every field of it as it is now, beside every field it was
+            // made with: what differs is written.
+            var now_text: std.Io.Writer.Allocating = .init(arena);
+            var now_writer: json.Writer = .init(&now_text.writer, .{ .non_finite = .literal });
+            const every = s.every_field;
+            s.every_field = true;
+            entry.write(s, &now_writer, cell) catch |err| {
+                s.every_field = every;
+                return err;
+            };
+            s.every_field = every;
+            const now = membersOf(arena, now_text.written()) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.WriteFailed,
+            };
+            const then = membersOf(arena, had) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.WriteFailed,
+            };
+            var any = false;
+            for (now) |field| {
+                // A map's tiles are its scene's.
+                if (std.mem.eql(u8, field.name, "cells")) continue;
+                if (memberNamed(then, field.name)) |old| if (std.mem.eql(u8, old, field.value)) continue;
+                if (!any) {
+                    try w.key(entry.name);
+                    try w.beginObject();
+                    any = true;
+                }
+                try w.key(field.name);
+                try writeRaw(app.gpa, w, field.value);
+            }
+            if (any) try w.endObject();
+        }
+        if (removed.items.len > 0) {
+            try w.key("removed");
+            try w.beginArray();
+            for (removed.items) |name| try w.writeString(name);
+            try w.endArray();
+        }
     }
 
     /// The components the entity was read with that nothing here knows, as
@@ -675,6 +840,53 @@ const Saving = struct {
         if (any) try w.endObject();
     }
 };
+
+/// One member of a JSON object, its value as compact JSON.
+const Member = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// The members of the JSON object in `text`, each value written compactly,
+/// so two written by different writers compare as text.
+fn membersOf(arena: Allocator, text: []const u8) ![]Member {
+    var reader: json.Reader = .init(arena, text, .{ .syntax = .json5 });
+    defer reader.deinit();
+    var out: std.ArrayList(Member) = .empty;
+    const opening = (try reader.next()) orelse return error.SyntaxError;
+    if (opening != .object_begin) return error.SyntaxError;
+    while (true) {
+        const token = (try reader.next()) orelse return error.SyntaxError;
+        const name = switch (token) {
+            .key => |held| try arena.dupe(u8, held),
+            .object_end => break,
+            else => return error.SyntaxError,
+        };
+        var value: std.Io.Writer.Allocating = .init(arena);
+        var w: json.Writer = .init(&value.writer, .{ .non_finite = .literal });
+        try copyValue(&reader, &w);
+        try out.append(arena, .{ .name = name, .value = value.written() });
+    }
+    return out.items;
+}
+
+fn memberNamed(members: []const Member, name: []const u8) ?[]const u8 {
+    for (members) |member| {
+        if (std.mem.eql(u8, member.name, name)) return member.value;
+    }
+    return null;
+}
+
+/// JSON already written, written again into `w`.
+fn writeRaw(gpa: Allocator, w: *json.Writer, text: []const u8) json.Writer.Error!void {
+    var reader: json.Reader = .init(gpa, text, .{ .syntax = .json5 });
+    defer reader.deinit();
+    copyValue(&reader, w) catch |err| return switch (err) {
+        error.OutOfMemory, error.WriteFailed, error.TooDeep, error.NonFiniteNumber => |held| held,
+        // Written by this file a moment ago, and it reads.
+        error.SyntaxError => unreachable,
+    };
+}
 
 /// How many bytes a chunk's cells are, and the text they become.
 const chunk_bytes = tilemap.tiles_per_chunk * @sizeOf(tilemap.Cell);
@@ -859,9 +1071,17 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
-    var spawned: std.ArrayList(Entity) = .empty;
-    defer spawned.deinit(gpa);
-    errdefer for (spawned.items) |e| app.world.despawn(e);
+    // Every entity made, the instances' insides too: the caller's list, or
+    // this read's own. On a mistake what this read added goes again.
+    var own: std.ArrayList(Entity) = .empty;
+    defer own.deinit(gpa);
+    const made = options.spawned orelse &own;
+    const first = made.items.len;
+    errdefer for (made.items[first..]) |e| if (app.world.isAlive(e)) app.world.despawn(e);
+
+    // One a place in the file's list: an instance's is its root, once made.
+    var entities: std.ArrayList(Entity) = .empty;
+    defer entities.deinit(gpa);
 
     // What is in the world already keeps its place before the scene's.
     try app.placeTheRest();
@@ -870,16 +1090,21 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     {
         var reader: json.Reader = .init(gpa, bytes, readerOptions(options));
         defer reader.deinit();
-        var l: Loading = .{ .app = app, .reader = &reader, .arena = arena.allocator(), .diagnostics = options.diagnostics };
-        try l.shape(&spawned, &told);
+        var l: Loading = .{ .app = app, .reader = &reader, .arena = arena.allocator(), .diagnostics = options.diagnostics, .parent = options.parent };
+        try l.shape(&entities, made, &told);
+    }
+    if (options.instance != null and told.roots != 1) {
+        return failWhole(options, error.NotOneRoot, "a scene made as an instance has one root, which the rest of it hangs from, and this has {d}", .{told.roots});
     }
 
-    // Each entity the UUID the file gives it - unless an entity already in
-    // the world has that one, when it is given a new one, and the file's
-    // stays the scene's own name for it.
-    var loaded: Loaded = .{ .entities = spawned.items.len };
-    for (spawned.items, told.uuids.items) |e, given| {
-        const uuid = given orelse continue;
+    // Each entity the UUID the file gives it - an instance's made of its
+    // own and the file's - unless an entity already in the world has that
+    // one, when it is given a new one, and the file's stays the scene's own
+    // name for it.
+    var loaded: Loaded = .{ .roots = told.roots };
+    for (entities.items, 0..) |e, place| {
+        if (told.nested.contains(place)) continue;
+        const uuid = uuidAt(options, &told, place) orelse continue;
         if (app.findUuid(uuid) != null) {
             _ = try app.ensureUuid(e);
             loaded.reassigned += 1;
@@ -887,6 +1112,46 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
             error.OutOfMemory => return error.OutOfMemory,
             error.UuidTaken, error.NilUuid, error.NoSuchEntity => unreachable,
         };
+    }
+
+    // Each instance in it made from its own scene, with the UUID the file
+    // gives it: its insides are named after that, so they are found by the
+    // same UUIDs every time the file is read.
+    var it = told.nested.iterator();
+    while (it.next()) |entry| {
+        const place = entry.key_ptr.*;
+        const path = entry.value_ptr.*;
+        const handle = app.loadScene(path) catch |err|
+            return failWhole(options, err, "cannot read the scene \"{s}\" an entity is an instance of: {t}", .{ path, err });
+        if (Nesting.holds(options.within, handle)) {
+            return failWhole(options, error.SceneHoldsItself, "\"{s}\" is an instance of itself, and would never end", .{path});
+        }
+        var uuid = uuidAt(options, &told, place) orelse app.newUuid();
+        if (app.findUuid(uuid) != null) {
+            uuid = app.newUuid();
+            loaded.reassigned += 1;
+        }
+        const nesting: Nesting = .{ .scene = handle, .outer = options.within };
+        const before = made.items.len;
+        // Its mistakes are said as its own file's.
+        var outer_file: [240]u8 = undefined;
+        var outer_len: usize = 0;
+        if (options.diagnostics) |d| {
+            outer_len = @min(d.file().len, outer_file.len);
+            @memcpy(outer_file[0..outer_len], d.file()[0..outer_len]);
+            d.setFile(app.sceneSource(handle) orelse path);
+        }
+        const inner = try read(app, app.scenes.get(handle).?.bytes, .{
+            .diagnostics = options.diagnostics,
+            .instance = uuid,
+            .spawned = made,
+            .within = &nesting,
+        });
+        if (options.diagnostics) |d| d.setFile(outer_file[0..outer_len]);
+        entities.items[place] = inner.root;
+        // What it is as its scene makes it, before this file says what is
+        // particular about this one.
+        try app.keepInstance(inner.root, handle, made.items[before..]);
     }
 
     var chunks: std.ArrayList(PendingChunk) = .empty;
@@ -899,13 +1164,15 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
             .reader = &reader,
             .arena = arena.allocator(),
             .diagnostics = options.diagnostics,
-            .entities = spawned.items,
+            .entities = entities.items,
             .told = &told,
             .chunks = &chunks,
+            .parent = options.parent,
+            .instance = options.instance,
         };
         try l.fill();
         // The list is the order of every parent's children.
-        try app.placeInOrder(spawned.items);
+        try app.placeInOrder(entities.items);
         loaded.moved = l.moved;
         loaded.components_unknown = l.components_unknown;
         loaded.connections_unknown = l.connections_unknown;
@@ -914,16 +1181,31 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
 
     // Last of all: a chunk is an entity, and making one while the values
     // above were being written would have moved the rows they went into.
-    var made: std.ArrayList(Entity) = .empty;
-    defer made.deinit(gpa);
-    errdefer for (made.items) |e| app.world.despawn(e);
     for (chunks.items) |pending| {
         const entity = try app.makeTileChunk(pending.map, pending.x, pending.y);
         try made.append(gpa, entity);
         const chunk = app.world.get(entity, TileChunk).?;
         chunk.cells = pending.cells;
     }
+    if (told.roots == 1) loaded.root = entities.items[told.root_place.?];
+    loaded.entities = made.items.len - first;
     return loaded;
+}
+
+/// The UUID the entity at `place` is given: the file's, or for an instance
+/// the instance's own for its root and one made of it and the file's for
+/// the rest. Null for one the file gives none.
+fn uuidAt(options: LoadOptions, told: *const Told, place: usize) ?Uuid {
+    const instance = options.instance orelse return told.uuids.items[place];
+    if (told.root_place == place) return instance;
+    const given = told.uuids.items[place] orelse return null;
+    return Uuid.fromName(instance, &given.bytes);
+}
+
+/// Say what is wrong with the scene as a whole, rather than at a token.
+fn failWhole(options: LoadOptions, err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
+    if (options.diagnostics) |d| d.setMessage(fmt, args);
+    return err;
 }
 
 /// What a scene says of itself, read without loading it: see `readInfo`.
@@ -934,6 +1216,9 @@ pub const Info = struct {
     format: json.Format,
     /// How many entities it lists.
     entities: usize = 0,
+    /// How many of them name no parent: a scene of one is one an instance
+    /// can be made of.
+    roots: usize = 0,
     /// The files its `assets` table lists, in the file's order: for a scene
     /// `save` wrote, every file of the project's that it names.
     files: []File = &.{},
@@ -1024,8 +1309,8 @@ const Glance = struct {
                     }
                     _ = try g.next();
                     while (try g.peek() != .array_end) {
-                        try g.reader.skipValue();
                         g.said.entities += 1;
+                        if (!try g.parented()) g.said.roots += 1;
                     }
                     _ = try g.next();
                 },
@@ -1043,6 +1328,21 @@ const Glance = struct {
                 },
             }
         }
+    }
+
+    /// Whether the entity next names a parent. The entity is passed over.
+    fn parented(g: *Glance) json.Reader.Error!bool {
+        if (try g.peek() != .object_begin) {
+            try g.reader.skipValue();
+            return false;
+        }
+        _ = try g.next();
+        var found_parent = false;
+        while (try g.key()) |name| {
+            if (std.mem.eql(u8, name, "parent")) found_parent = true;
+            try g.reader.skipValue();
+        }
+        return found_parent;
     }
 
     /// The UUID in what `assets` says of one file, when it says one that
@@ -1094,6 +1394,13 @@ const Glance = struct {
 const Told = struct {
     /// Each entity's UUID in the file, at its place in the list.
     uuids: std.ArrayList(?Uuid) = .empty,
+    /// The places that are instances of another scene, with its path.
+    nested: std.AutoArrayHashMapUnmanaged(usize, []const u8) = .empty,
+    /// Whether the entity at a place names a parent.
+    parented: std.ArrayList(bool) = .empty,
+    /// How many name none, and where the first of them is.
+    roots: usize = 0,
+    root_place: ?usize = null,
     /// Each UUID's place in the list: what a reference inside the scene
     /// finds, whatever UUID the entity was given in the end.
     places: std.AutoHashMapUnmanaged(Uuid, usize) = .empty,
@@ -1131,6 +1438,14 @@ const Loading = struct {
     /// making an entity now would move the rows the values are being
     /// written into.
     chunks: ?*std.ArrayList(PendingChunk) = null,
+    /// What the scene's roots hang from: see `LoadOptions.parent`.
+    parent: Entity = .none,
+    /// The instance being read, when it is one: see `LoadOptions.instance`.
+    instance: ?Uuid = null,
+    /// Whether the entity being read is an instance, whose components are
+    /// its scene's and whose fields here say only what differs: a field
+    /// left out keeps what the scene gave it.
+    overriding: bool = false,
     /// Files found by their UUIDs somewhere other than the scene says.
     moved: usize = 0,
     /// See `Loaded`.
@@ -1142,7 +1457,7 @@ const Loading = struct {
     /// The first pass: an entity for every object in `entities`, with every
     /// registered component it has, each entity's UUID, and the tables of
     /// files.
-    fn shape(l: *Loading, spawned: *std.ArrayList(Entity), told: *Told) anyerror!void {
+    fn shape(l: *Loading, entities: *std.ArrayList(Entity), made: *std.ArrayList(Entity), told: *Told) anyerror!void {
         const app = l.app;
         var versioned = false;
         var listed = false;
@@ -1163,26 +1478,37 @@ const Loading = struct {
                 listed = true;
                 try l.open(.array_begin, "the list of entities");
                 while (try l.reader.peek() != .array_end) {
-                    const mark = l.path.push("entities/{d}", .{spawned.items.len});
+                    const place = entities.items.len;
+                    const mark = l.path.push("entities/{d}", .{place});
                     try l.open(.object_begin, "an entity, which is an object of its components");
                     var ids: [ecs.component.max_components]ComponentId = undefined;
                     var count: usize = 0;
                     var own: ?Uuid = null;
+                    var parented = false;
+                    var instance: ?[]const u8 = null;
                     while (try l.key()) |member| {
                         if (std.mem.eql(u8, member, "uuid")) {
                             const inner = l.path.push("uuid", .{});
                             const uuid = try l.readUuid();
                             if (told.places.contains(uuid)) return l.fail(error.DuplicateUuid, "another entity in this scene has this UUID already", .{});
-                            try told.places.put(l.arena, uuid, spawned.items.len);
+                            try told.places.put(l.arena, uuid, place);
                             own = uuid;
                             l.path.pop(inner);
                             continue;
                         }
+                        if (std.mem.eql(u8, member, "instance")) {
+                            const inner = l.path.push("instance", .{});
+                            const token = try l.next();
+                            instance = switch (token) {
+                                .string => |text| try l.arena.dupe(u8, text),
+                                else => return l.wrong("the scene it is an instance of, which is a path", token),
+                            };
+                            l.path.pop(inner);
+                            continue;
+                        }
                         if (std.mem.eql(u8, member, "parent")) {
-                            if (count == ids.len) return error.TooManyComponents;
-                            ids[count] = try app.world.idOf(components.Parent);
-                            count += 1;
-                        } else if (!std.mem.eql(u8, member, "name") and !std.mem.eql(u8, member, "groups")) {
+                            parented = true;
+                        } else if (!std.mem.eql(u8, member, "name") and !std.mem.eql(u8, member, "groups") and !std.mem.eql(u8, member, "removed")) {
                             if (app.scene_components.find(member)) |entry| {
                                 if (count == ids.len) return error.TooManyComponents;
                                 ids[count] = try entry.idIn(&app.world);
@@ -1191,9 +1517,28 @@ const Loading = struct {
                         }
                         try l.reader.skipValue();
                     }
-                    try spawned.ensureUnusedCapacity(app.gpa, 1);
+                    if (!parented) {
+                        if (told.root_place == null) told.root_place = place;
+                        told.roots += 1;
+                    }
                     try told.uuids.append(l.arena, own);
-                    spawned.appendAssumeCapacity(try app.world.spawnRaw(distinct(ids[0..count])));
+                    try told.parented.append(l.arena, parented);
+                    try entities.ensureUnusedCapacity(app.gpa, 1);
+                    if (instance) |path| {
+                        // Made from its own scene once the list is read.
+                        try told.nested.put(l.arena, place, path);
+                        entities.appendAssumeCapacity(.none);
+                    } else {
+                        if (parented or !l.parent.isNone()) {
+                            if (count == ids.len) return error.TooManyComponents;
+                            ids[count] = try app.world.idOf(components.Parent);
+                            count += 1;
+                        }
+                        try made.ensureUnusedCapacity(app.gpa, 1);
+                        const e = try app.world.spawnRaw(distinct(ids[0..count]));
+                        made.appendAssumeCapacity(e);
+                        entities.appendAssumeCapacity(e);
+                    }
                     l.path.pop(mark);
                 }
                 _ = try l.next();
@@ -1269,13 +1614,29 @@ const Loading = struct {
             for (l.entities, 0..) |e, place| {
                 const entity_mark = l.path.push("entities/{d}", .{place});
                 l.entity = e;
+                l.overriding = l.told.?.nested.contains(place);
+                defer l.overriding = false;
                 // Given once the whole entity is read, when its parent is,
                 // since a name is its own among its parent's children.
                 var given: ?[]const u8 = null;
                 _ = try l.next();
                 while (try l.key()) |member| {
-                    if (std.mem.eql(u8, member, "uuid")) {
+                    if (std.mem.eql(u8, member, "uuid") or std.mem.eql(u8, member, "instance")) {
                         try l.reader.skipValue();
+                        continue;
+                    }
+                    if (std.mem.eql(u8, member, "removed")) {
+                        const mark = l.path.push("removed", .{});
+                        try l.open(.array_begin, "the components its scene gives it that it has not, which is a list of names");
+                        while (true) {
+                            const token = try l.next();
+                            switch (token) {
+                                .array_end => break,
+                                .string => |component| app.removeComponentNamed(e, component) catch {},
+                                else => return l.wrong("the name of a component", token),
+                            }
+                        }
+                        l.path.pop(mark);
                         continue;
                     }
                     if (std.mem.eql(u8, member, "name")) {
@@ -1290,7 +1651,7 @@ const Loading = struct {
                         const mark = l.path.push("parent", .{});
                         var parent: Entity = .none;
                         try readValue(l, Entity, &parent);
-                        app.world.get(e, components.Parent).?.* = .of(parent);
+                        try hang(app, e, parent);
                         l.path.pop(mark);
                         continue;
                     }
@@ -1313,10 +1674,14 @@ const Loading = struct {
                         continue;
                     };
                     const mark = l.path.push("{s}", .{entry.name});
+                    // An instance given a component its scene does not.
+                    if (l.overriding and app.componentOf(e, entry.name) == null) _ = try app.addComponentNamed(e, entry.name);
                     const cell = app.world.cellOf(e, entry.findIdIn(&app.world).?).?;
                     try entry.read(l, cell);
                     l.path.pop(mark);
                 }
+                // A root of the scene hangs from what it was read under.
+                if (!l.told.?.parented.items[place] and !l.parent.isNone()) try hang(app, e, l.parent);
                 // Another of its family with the name already - the same
                 // scene read twice beside itself - gives this one the first
                 // free one after it.
@@ -1430,7 +1795,18 @@ const Loading = struct {
             else => |other| return l.wrong("an entity's UUID", other),
         };
         const uuid = Uuid.parse(text) catch return l.fail(error.WrongType, "an entity is named by its UUID, and \"{s}\" is not one", .{text});
+        return l.entityNamed(uuid);
+    }
+
+    /// The entity a UUID in the file names: one of the scene's own by the
+    /// file's name for it, else one inside an instance the scene holds -
+    /// named, as the file names it, after the instance - else one the world
+    /// had already.
+    fn entityNamed(l: *Loading, uuid: Uuid) ?Entity {
         if (l.told.?.places.get(uuid)) |place| return l.entities[place];
+        if (l.instance) |instance| {
+            if (l.app.findUuid(Uuid.fromName(instance, &uuid.bytes))) |inside| return inside;
+        }
         return l.app.findUuid(uuid);
     }
 
@@ -1589,22 +1965,33 @@ fn distinct(ids: []ComponentId) []const ComponentId {
 }
 
 /// A component, from an object whose missing fields take their defaults.
+/// Give an entity its parent, whether it was made with room for one or not:
+/// an instance's root was made by its own scene, as a root.
+fn hang(app: *App, e: Entity, parent: Entity) !void {
+    if (app.world.get(e, components.Parent)) |held| {
+        held.* = .of(parent);
+    } else try app.world.add(e, components.Parent.of(parent));
+}
+
 fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
     if (@typeInfo(T) != .@"struct") return readValue(l, T, out);
     try l.open(.object_begin, "an object of the component's fields");
     const fields = @typeInfo(T).@"struct".fields;
     var seen: std.StaticBitSet(fields.len) = .initEmpty();
-    if (comptime isBufferedText(T)) {
-        out.bytes = @splat(0);
-        out.len = 0;
-    }
-    if (T == LineEdit) {
-        out.placeholder = @splat(0);
-        out.placeholder_len = 0;
-    }
-    if (T == Control) {
-        out.variation = @splat(0);
-        out.variation_len = 0;
+    // An instance's field left out keeps what its scene gave it.
+    if (!l.overriding) {
+        if (comptime isBufferedText(T)) {
+            out.bytes = @splat(0);
+            out.len = 0;
+        }
+        if (T == LineEdit) {
+            out.placeholder = @splat(0);
+            out.placeholder_len = 0;
+        }
+        if (T == Control) {
+            out.variation = @splat(0);
+            out.variation_len = 0;
+        }
     }
     while (try l.key()) |name| {
         if (comptime isBufferedText(T)) if (std.mem.eql(u8, name, "text")) {
@@ -1642,7 +2029,7 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
         // A field the component no longer has: the scene is older than it.
         if (!matched) try l.reader.skipValue();
     }
-    try defaultTheRest(l, T, out, seen);
+    if (!l.overriding) try defaultTheRest(l, T, out, seen);
 }
 
 fn defaultTheRest(l: *Loading, comptime T: type, out: *T, seen: anytype) anyerror!void {
@@ -1762,8 +2149,7 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
             .null => .none,
             .string => |text| blk: {
                 const uuid = Uuid.parse(text) catch return l.fail(error.WrongType, "an entity is named by its UUID, and \"{s}\" is not one", .{text});
-                if (l.told.?.places.get(uuid)) |place| break :blk l.entities[place];
-                break :blk l.app.findUuid(uuid) orelse
+                break :blk l.entityNamed(uuid) orelse
                     return l.fail(error.NoSuchEntity, "no entity in this scene or in the world has the UUID {s}", .{text});
             },
             else => return l.wrong("an entity's UUID, or null", token),
@@ -2151,7 +2537,7 @@ test "a scene comes back as it went, from JSON and from CBOR" {
         const copy = try headless();
         defer copy.destroy();
         try copy.registerComponents(.{Wander});
-        const loaded = try copy.loadScene(path, .{});
+        const loaded = try copy.readScene(path, .{});
         try testing.expectEqual(@as(usize, 4), loaded.entities);
         try testing.expectEqual(@as(usize, 0), loaded.components_unknown);
 
@@ -2224,7 +2610,7 @@ test "a project's file is written by its res:// path and its UUID, and found by 
 
     const copy = try game.app();
     defer copy.destroy();
-    const loaded = try copy.loadScene("res://levels/meadow.json", .{});
+    const loaded = try copy.readScene("res://levels/meadow.json", .{});
     try testing.expectEqual(@as(usize, 1), loaded.moved);
     const sheet = copy.single(Sprite).?.texture;
     try testing.expectEqualStrings("res://art/people/ada.png", copy.assets.textureSource(sheet).?);

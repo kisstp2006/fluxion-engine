@@ -92,6 +92,21 @@ pub const Application = struct {
     main_scene: []const u8 = "",
     tags: []const []const u8 = &.{},
     max_fps: u16 = 0,
+    autoload: []const []const u8 = &.{},
+    boot_splash: BootSplash = .{},
+
+    /// What the window shows while the game opens. See `App.openProject`.
+    pub const BootSplash = struct {
+        show: bool = false,
+        color: Color = Rendering.default_clear_color,
+        image: []const u8 = "",
+
+        pub const reflect_fields = .{
+            .show = .{attr.Doc{ .text = "Show it while the scenes the game opens with are read." }},
+            .color = .{attr.Doc{ .text = "What the window is filled with." }},
+            .image = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "A picture in the middle of it." } },
+        };
+    };
 
     pub const reflect_fields = .{
         .name = .{ attr.Required{}, attr.Doc{ .text = "What the project is called: the game window's title, and what the project list shows." } },
@@ -100,6 +115,8 @@ pub const Application = struct {
         .main_scene = .{ attr.ProjectFile{ .kind = .scene }, attr.Doc{ .text = "The scene the game opens with, and what Play runs." } },
         .tags = .{attr.Doc{ .text = "Words to find the project by in the project list." }},
         .max_fps = .{ attr.Range{ .min = 0, .max = 1000, .step = 1 }, attr.Advanced{}, attr.Doc{ .text = "The most frames a second the game draws; nought for no limit." } },
+        .autoload = .{attr.Doc{ .text = "Scenes and scripts made before the main scene, each named after its file, and kept when the scene changes." }},
+        .boot_splash = .{attr.Doc{ .text = "What the window shows while the game opens." }},
     };
 };
 

@@ -65,6 +65,8 @@ const AssetKind = @import("asset_kind.zig").AssetKind;
 const theme = @import("theme.zig");
 const tileset = @import("tileset.zig");
 const scene = @import("scene.zig");
+const scenes_mod = @import("scenes.zig");
+const background_mod = @import("background.zig");
 const signals_mod = @import("signals.zig");
 const events_mod = @import("events.zig");
 const script_mod = @import("script.zig");
@@ -152,6 +154,9 @@ pub const Options = struct {
     /// The most frames a second, slept down to. Null is what the project
     /// file's `application.max_fps` says - no limit, with nought or none.
     max_fps: ?f32 = null,
+    /// Open what the project says a game opens with, at `startup`: see
+    /// `openProject`. A game made in code leaves it off and spawns its own.
+    open_project: bool = false,
 
     /// Whether the player may drag the window's edges. `setWindowSize` works
     /// either way.
@@ -398,6 +403,8 @@ tile_sets: tileset.TileSets = .{},
 /// Every `.theme` file read, and the handles a `Control` points at one with.
 /// See `loadTheme`.
 themes: theme.Themes = .{},
+/// Every scene read as a file to make things of: see `loadScene`.
+scenes: scenes_mod.Scenes = .{},
 /// The theme the project file names for every control, and the path it was
 /// read by: see `projectTheme`.
 project_theme: ProjectTheme = .{},
@@ -507,6 +514,17 @@ paused: bool = false,
 /// What each entity inherits - `Processing` and `Appearance` - worked out
 /// as it is asked for. See `inherited.zig`.
 inherited: inherited_mod.Inherited = .{},
+/// Every instance of a scene in the world, by its root: what it is an
+/// instance of, and what it made. See `instantiate`.
+instances: std.AutoArrayHashMapUnmanaged(ecs.Entity, Instance) = .empty,
+/// The scene the game is playing, and its roots: what `changeScene` takes
+/// away. See `openScene`.
+scene_now: scenes_mod.SceneHandle = .none,
+scene_roots: std.ArrayListUnmanaged(ecs.Entity) = .empty,
+/// The scene `changeScene` asked for, opened at the end of the frame.
+scene_next: ?scenes_mod.SceneHandle = null,
+/// Scenes reading in the background: see `loadInBackground`.
+loads: std.ArrayListUnmanaged(*background_mod.SceneLoad) = .empty,
 /// What `newUuid` draws from: seeded by the operating system, or with no
 /// `Io` by a constant, so a test makes the same ones every run.
 uuid_source: std.Random.DefaultCsprng,
@@ -578,6 +596,8 @@ vsync_on: bool = true,
 running: bool = true,
 
 /// From `Options`: whether the close button only sets `close_pressed`.
+/// Whether `startup` opens the project: see `Options.open_project`.
+open_project: bool = false,
 ask_before_closing: bool = false,
 
 /// Set when the window's close button was pressed and `ask_before_closing`
@@ -661,6 +681,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .resized = false,
         .quit_key = options.quit_key,
         .ask_before_closing = options.ask_before_closing,
+        .open_project = options.open_project,
         .fullscreen_key = options.fullscreen_key,
         .debug_key = options.debug_key,
         .vsync_on = options.vsync orelse true,
@@ -926,6 +947,12 @@ pub fn destroy(self: *App) void {
     self.freeGroups();
     self.groups.deinit(gpa);
     self.inherited.deinit(gpa);
+    self.freeInstances();
+    self.instances.deinit(gpa);
+    self.scene_roots.deinit(gpa);
+    for (self.loads.items) |load| self.dropLoad(load);
+    self.loads.deinit(gpa);
+    self.scenes.deinit(gpa);
     self.uuids.deinit(gpa);
     self.by_uuid.deinit(gpa);
     self.sibling_ranks.deinit(gpa);
@@ -1205,6 +1232,7 @@ pub fn run(self: *App) anyerror!void {
 pub fn startup(self: *App) anyerror!void {
     if (self.started) return;
     self.started = true;
+    if (self.open_project) try self.openProject();
     try self.schedule.run(.startup, self);
     try self.enterFirstStates();
 }
@@ -1342,6 +1370,17 @@ pub fn step(self: *App) anyerror!bool {
     // passes, so what they despawn is gone by the draw.
     try self.signals.flushDeferred(self);
 
+    // The scene `changeScene` asked for, before the engine's passes: what
+    // hung from the old one goes with it this frame.
+    if (self.scene_next) |next| {
+        self.scene_next = null;
+        self.openScene(next) catch |err| log.err("the scene {s} did not open: {t}", .{ self.sceneSource(next) orelse "?", err });
+    }
+    // A load with no thread of its own is worked a piece a frame.
+    if (!background_mod.threaded) for (self.loads.items) |load| {
+        _ = load.work();
+    };
+
     // The engine's own passes, after the game's `.late` systems and before
     // drawing: whatever hung from something despawned goes with it, and then
     // the names of everything that died are given back.
@@ -1356,6 +1395,7 @@ pub fn step(self: *App) anyerror!bool {
     self.forgetDeadUuids();
     self.forgetDeadPlaces();
     self.forgetDeadGroupMembers();
+    self.forgetDeadInstances();
     self.unknown_components.forgetDead(self.gpa, &self.world);
     self.signals.forgetDead(&self.world);
     try self.animate();
@@ -2460,7 +2500,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .script => self.scriptSource(handle),
         .tileset => self.tileSetSource(handle),
         .theme => self.themeSource(handle),
-        .scene => unreachable,
+        .scene => self.sceneSource(handle),
     };
 }
 
@@ -2474,7 +2514,7 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .script => self.loadScript(path),
         .tileset => self.loadTileSet(path),
         .theme => self.loadTheme(path),
-        .scene => unreachable,
+        .scene => self.loadScene(path),
     };
 }
 
@@ -2487,7 +2527,7 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .script => self.findScript(path),
         .tileset => self.findTileSet(path),
         .theme => self.findTheme(path),
-        .scene => unreachable,
+        .scene => self.findScene(path),
     };
 }
 
@@ -2829,19 +2869,332 @@ pub fn saveScene(self: *App, path: []const u8, options: scene.SaveOptions) !void
     return scene.save(self, io, path, options);
 }
 
-/// Read a scene into the world, beside whatever is in it already, and say
-/// what came of it. See `scene`.
+/// Read the file at `path` into the world, beside whatever is in it
+/// already, and say what came of it: what an editor opens a scene with. A
+/// game makes things of a scene with `instantiate`, and plays one with
+/// `changeScene`. See `scene`.
 ///
 /// ```zig
 /// var diagnostics: fx.json.Diagnostics = .{};
-/// _ = app.loadScene("levels/meadow.json", .{ .diagnostics = &diagnostics }) catch |err| {
+/// _ = app.readScene("levels/meadow.json", .{ .diagnostics = &diagnostics }) catch |err| {
 ///     std.log.err("{f}", .{diagnostics});
 ///     return err;
 /// };
 /// ```
-pub fn loadScene(self: *App, path: []const u8, options: scene.LoadOptions) !scene.Loaded {
+pub fn readScene(self: *App, path: []const u8, options: scene.LoadOptions) !scene.Loaded {
     const io = self.io orelse return error.NoIo;
     return scene.load(self, io, path, options);
+}
+
+/// Read a scene's file to make things of, or find the one read from there
+/// already. Nothing is made of it yet: see `instantiate` and `changeScene`,
+/// and `scenes`.
+pub fn loadScene(self: *App, path: []const u8) !scenes_mod.SceneHandle {
+    return self.scenes.load(self, path);
+}
+
+/// A scene from memory rather than a file: a test's, or one a game wrote
+/// with `scene.write`. `name` is what it is found and written by.
+pub fn addScene(self: *App, name: []const u8, bytes: []const u8) !scenes_mod.SceneHandle {
+    return self.scenes.add(self.gpa, name, bytes);
+}
+
+/// The scene read from `path` already, if one was, however the path is
+/// spelt: `res://`, from the root, or the system's.
+pub fn findScene(self: *App, path: []const u8) ?scenes_mod.SceneHandle {
+    if (self.scenes.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.scenes.find(named);
+}
+
+/// The path a scene was read from: what an instance is written as.
+pub fn sceneSource(self: *App, handle: scenes_mod.SceneHandle) ?[]const u8 {
+    return self.scenes.sourceOf(handle);
+}
+
+/// Read a scene's file again, for an editor that has just saved it: what is
+/// made of it next is what was saved. What was made of it already stays.
+pub fn reloadScene(self: *App, handle: scenes_mod.SceneHandle) !bool {
+    return self.scenes.reload(self, handle);
+}
+
+pub fn unloadScene(self: *App, handle: scenes_mod.SceneHandle) void {
+    self.scenes.unload(self.gpa, handle);
+}
+
+/// A scene made as a thing in the world: its one root, hanging from
+/// `parent` - `.none` for the top of the tree - with everything else of the
+/// scene under it. What a spawner makes a bat of, or a level a door of.
+///
+/// ```zig
+/// const bat = try app.loadScene("res://enemies/bat.json");
+/// const one = try app.instantiate(bat, cave);
+/// ```
+///
+/// Each instance's entities are given UUIDs of their own, made from the
+/// instance's and the scene's, so two are never confused and a scene that
+/// names one inside an instance finds it again every time it is read. A
+/// scene saved with an instance in it writes the instance - the file it is
+/// of, and what its root has that the file does not give it - so an edit of
+/// the file reaches every instance of it. A scene of more than one root is
+/// `error.NotOneRoot`: save its roots under one first.
+pub fn instantiate(self: *App, scene_handle: scenes_mod.SceneHandle, parent: ecs.Entity) !ecs.Entity {
+    const held = self.scenes.get(scene_handle) orelse return error.NoSuchScene;
+    if (!parent.isNone() and !self.world.isAlive(parent)) return error.NoSuchEntity;
+    var made: std.ArrayList(ecs.Entity) = .empty;
+    defer made.deinit(self.gpa);
+    errdefer for (made.items) |e| if (self.world.isAlive(e)) self.world.despawn(e);
+    const within: scene.Nesting = .{ .scene = scene_handle };
+    const loaded = try scene.read(self, held.bytes, .{
+        .parent = parent,
+        .instance = self.newUuid(),
+        .spawned = &made,
+        .within = &within,
+    });
+    try self.keepInstance(loaded.root, scene_handle, made.items);
+    return loaded.root;
+}
+
+/// One instance of a scene: see `instantiate`.
+pub const Instance = struct {
+    scene: scenes_mod.SceneHandle,
+    /// What it made, its root not among them, the insides of the instances
+    /// in it among them.
+    members: []ecs.Entity,
+    /// Its root as the scene made it, every field of every component, for
+    /// a scene written with the instance in it to write what differs.
+    template: []u8,
+};
+
+/// Remember `root` as an instance of `scene_handle`, which made `made`.
+pub fn keepInstance(self: *App, root: ecs.Entity, scene_handle: scenes_mod.SceneHandle, made: []const ecs.Entity) !void {
+    const gpa = self.gpa;
+    var members: std.ArrayList(ecs.Entity) = .empty;
+    errdefer members.deinit(gpa);
+    try members.ensureTotalCapacity(gpa, made.len);
+    for (made) |e| {
+        if (!e.eql(root)) members.appendAssumeCapacity(e);
+    }
+    const template = try scene.entityTemplate(self, gpa, root);
+    errdefer gpa.free(template);
+    try self.instances.ensureUnusedCapacity(gpa, 1);
+    const owned = try members.toOwnedSlice(gpa);
+    self.instances.putAssumeCapacity(root, .{ .scene = scene_handle, .members = owned, .template = template });
+}
+
+/// What `root` is an instance of, when it is the root of one.
+pub fn instanceOf(self: *const App, root: ecs.Entity) ?*const Instance {
+    return self.instances.getPtr(root);
+}
+
+/// The root of the instance an entity is inside of, if it is inside one -
+/// the outermost, where instances are inside instances. Not for a root
+/// itself unless it is inside another.
+pub fn instanceHolding(self: *const App, entity: ecs.Entity) ?ecs.Entity {
+    var found: ?ecs.Entity = null;
+    for (self.instances.keys(), self.instances.values()) |root, held| {
+        if (!self.world.isAlive(root)) continue;
+        for (held.members) |member| {
+            if (!member.eql(entity)) continue;
+            // The outermost holds the most.
+            if (found) |other| {
+                if (self.instances.getPtr(other).?.members.len >= held.members.len) break;
+            }
+            found = root;
+            break;
+        }
+    }
+    return found;
+}
+
+/// An instance made the scene's own: its insides are written as themselves
+/// from now on, and a change to the scene file reaches it no more.
+pub fn makeLocal(self: *App, root: ecs.Entity) void {
+    const held = self.instances.fetchSwapRemove(root) orelse return;
+    self.gpa.free(held.value.members);
+    self.gpa.free(held.value.template);
+}
+
+fn freeInstances(self: *App) void {
+    for (self.instances.values()) |held| {
+        self.gpa.free(held.members);
+        self.gpa.free(held.template);
+    }
+}
+
+/// Forget the instances whose root has died, at the end of the frame.
+fn forgetDeadInstances(self: *App) void {
+    var at = self.instances.count();
+    while (at > 0) {
+        at -= 1;
+        const root = self.instances.keys()[at];
+        if (self.world.isAlive(root)) continue;
+        const held = self.instances.values()[at];
+        self.gpa.free(held.members);
+        self.gpa.free(held.template);
+        self.instances.swapRemoveAt(at);
+    }
+}
+
+/// Despawn an entity and everything that hangs from it, now rather than at
+/// the end of the frame.
+pub fn despawnTree(self: *App, entity: ecs.Entity) Allocator.Error!void {
+    if (!self.world.isAlive(entity)) return;
+    var doomed: std.ArrayList(ecs.Entity) = .empty;
+    defer doomed.deinit(self.gpa);
+    try doomed.append(self.gpa, entity);
+    var at: usize = 0;
+    while (at < doomed.items.len) : (at += 1) {
+        try doomed.appendSlice(self.gpa, self.children(doomed.items[at]));
+    }
+    for (doomed.items) |e| {
+        if (self.world.isAlive(e)) self.world.despawn(e);
+    }
+}
+
+/// Play another scene from the end of this frame: the one playing goes,
+/// with everything that hangs from it, and this is read in its place.
+/// What does not belong to the scene - an autoload, what the game spawned
+/// at the top of the tree itself - stays. See `openScene`.
+///
+/// ```zig
+/// app.changeScene(try app.loadScene("res://levels/two.json"));
+/// ```
+pub fn changeScene(self: *App, scene_handle: scenes_mod.SceneHandle) void {
+    self.scene_next = scene_handle;
+}
+
+/// `changeScene`, now: before the first frame, or from a tool.
+pub fn openScene(self: *App, scene_handle: scenes_mod.SceneHandle) !void {
+    const held = self.scenes.get(scene_handle) orelse return error.NoSuchScene;
+    // Gone first, so the next is read with its own UUIDs even when it is
+    // the same scene again.
+    for (self.scene_roots.items) |root| try self.despawnTree(root);
+    self.scene_roots.clearRetainingCapacity();
+    self.scene_now = .none;
+    var made: std.ArrayList(ecs.Entity) = .empty;
+    defer made.deinit(self.gpa);
+    _ = try scene.read(self, held.bytes, .{ .spawned = &made });
+    for (made.items) |e| {
+        if (self.parentOf(e).isNone() and !self.world.has(e, tilemap.TileChunk)) try self.scene_roots.append(self.gpa, e);
+    }
+    self.scene_now = scene_handle;
+}
+
+/// The scene the game is playing: what `openScene` or `changeScene` opened
+/// last. `.none` before one has.
+pub fn currentScene(self: *const App) scenes_mod.SceneHandle {
+    return self.scene_now;
+}
+
+/// Open what the project says a game opens with: its boot splash while it
+/// reads, its autoloads - each named after its file and kept when the scene
+/// changes - and then its main scene. What `Options.open_project` does at
+/// `startup`.
+pub fn openProject(self: *App) !void {
+    const settings = self.project.settings orelse return;
+    const application = settings.application;
+    if (application.boot_splash.show) self.showBootSplash(application.boot_splash);
+    try self.openAutoloads();
+    if (application.main_scene.len > 0) try self.openScene(try self.loadScene(application.main_scene));
+}
+
+/// The project's `application.autoload` list, made: each scene or script an
+/// entity named after its file, which a scene change leaves. What
+/// `openProject` does before the main scene, for a tool that opens another.
+pub fn openAutoloads(self: *App) !void {
+    const settings = self.project.settings orelse return;
+    for (settings.application.autoload) |path| {
+        self.autoload(path) catch |err| {
+            log.err("the autoload {s} did not open: {t}", .{ path, err });
+            return err;
+        };
+    }
+}
+
+/// One autoload: a script on an entity of its own, or a scene's instance,
+/// named after its file.
+fn autoload(self: *App, path: []const u8) !void {
+    const name = std.fs.path.stem(path);
+    const made = if (std.ascii.endsWithIgnoreCase(path, ".flux")) blk: {
+        const file = try self.loadScript(path);
+        break :blk try self.world.spawnWith(.{script_mod.Script.of(file)});
+    } else try self.instantiate(try self.loadScene(path), .none);
+    try self.setFreeName(made, name);
+}
+
+/// A frame of the project's boot splash: its colour, and its picture in the
+/// middle of the window. Nothing without a window.
+fn showBootSplash(self: *App, splash: Project.Application.BootSplash) void {
+    if (self.window == null) return;
+    const kept = self.background;
+    defer self.background = kept;
+    self.background = splash.color;
+    var shown: ?ecs.Entity = null;
+    if (splash.image.len > 0) {
+        if (self.assets.loadTexture(splash.image, .{ .filter = .linear })) |picture| {
+            const middle = self.screenToWorld(@as(f32, @floatFromInt(self.width)) / 2, @as(f32, @floatFromInt(self.height)) / 2);
+            shown = self.world.spawnWith(.{ components.Transform2D.at(middle.x, middle.y), components.Sprite.of(picture) }) catch null;
+        } else |err| log.warn("the boot splash's picture {s} did not read: {t}", .{ splash.image, err });
+    }
+    defer if (shown) |e| self.world.despawn(e);
+    self.render() catch |err| log.warn("the boot splash was not drawn: {t}", .{err});
+}
+
+/// Read a scene beside the game: its file, and the pictures it names
+/// decoded, on a thread of its own - on a page, a piece a frame. Ask the
+/// load how far it has got, and take the scene with `takeScene` when it is
+/// done. See `background`.
+pub fn loadInBackground(self: *App, path: []const u8) !*background_mod.SceneLoad {
+    const io = self.io orelse return error.NoIo;
+    // Memory any thread can ask for, since the load's thread does.
+    const gpa = std.heap.smp_allocator;
+    const source = try self.project.canonical(gpa, path);
+    errdefer gpa.free(source);
+    const root = try gpa.dupe(u8, self.project.root);
+    errdefer gpa.free(root);
+    const load = try gpa.create(background_mod.SceneLoad);
+    errdefer gpa.destroy(load);
+    load.* = .{ .gpa = gpa, .io = io, .source = source, .root = root };
+    try self.loads.append(self.gpa, load);
+    if (background_mod.threaded) {
+        load.thread = std.Thread.spawn(.{}, background_mod.SceneLoad.run, .{load}) catch null;
+        // No thread to be had: a piece a frame, as on a page.
+        if (load.thread == null) load.run();
+    }
+    return load;
+}
+
+/// The scene a background load read, once it is done - waited for, if it
+/// is not - with the pictures it decoded made textures. The load is let go
+/// of either way. A scene that did not read is its error.
+pub fn takeScene(self: *App, load: *background_mod.SceneLoad) !scenes_mod.SceneHandle {
+    defer self.dropLoad(load);
+    load.join();
+    while (load.work()) {}
+    if (load.failure) |err| return err;
+    for (load.decoded.items) |picture| {
+        if (self.assets.findTexture(picture.source) != null) continue;
+        _ = self.assets.adoptTexture(picture.source, picture.width, picture.height, picture.pixels, .{}) catch |err|
+            log.warn("the picture {s} did not reach the GPU: {t}", .{ picture.source, err });
+    }
+    if (self.scenes.find(load.source)) |known| {
+        _ = try self.scenes.add(self.gpa, load.source, load.bytes);
+        return known;
+    }
+    return self.scenes.add(self.gpa, load.source, load.bytes);
+}
+
+/// A load let go of, whether it was taken or not.
+fn dropLoad(self: *App, load: *background_mod.SceneLoad) void {
+    for (self.loads.items, 0..) |held, at| {
+        if (held != load) continue;
+        _ = self.loads.swapRemove(at);
+        break;
+    }
+    load.deinit();
+    load.gpa.destroy(load);
 }
 
 /// Write a scene with nothing in it to `path`: a new level, for an editor to
@@ -2891,6 +3244,10 @@ pub fn clearWorld(self: *App) void {
     self.by_uuid.clearRetainingCapacity();
     self.sibling_ranks.clearRetainingCapacity();
     self.unknown_components.clear(self.gpa);
+    self.freeInstances();
+    self.instances.clearRetainingCapacity();
+    self.scene_roots.clearRetainingCapacity();
+    self.scene_now = .none;
     self.signals.clear();
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
@@ -3018,6 +3375,7 @@ pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
     try self.project.moveFile(old, new);
     try self.assets.renamed(old, new);
     try self.tile_sets.renamed(self.gpa, old, new);
+    try self.scenes.renamed(self.gpa, old, new);
     try self.themes.renamed(self.gpa, old, new);
     if (self.scripts) |scripts| try scripts.renamed(old, new);
 }
@@ -3216,7 +3574,7 @@ pub const reflect_methods = .{
     .stateNamed,
     .setStateNamed,
     .saveScene,
-    .loadScene,
+    .readScene,
     .createTimer,
     .randomFloat,
     .randomRange,
@@ -3300,7 +3658,7 @@ fn callValue(receiver: reflect.Value, name: []const u8, args: []const reflect.Va
 
     // Taken whole - error or value - so that an error comes back as one,
     // rather than going into `result` or nowhere.
-    var held: [64]u8 align(16) = undefined;
+    var held: [128]u8 align(16) = undefined;
     if (returns.size > held.len or returns.alignment > 16) return error.Unsupported;
     const returned: reflect.Value = .init(returns, &held);
     try receiver.call(name, args, returned);
@@ -6663,7 +7021,7 @@ test "the engine's calls are made by name, and what they return comes back, erro
     try testing.expectError(error.NameTaken, app.callNamed("setName", &.{ .of(&other), .of(&name) }, null));
     var path: []const u8 = "no/such/scene.json";
     var options: scene.LoadOptions = .{};
-    try testing.expectError(error.FileNotFound, app.callNamed("loadScene", &.{ .of(&path), .of(&options) }, null));
+    try testing.expectError(error.FileNotFound, app.callNamed("readScene", &.{ .of(&path), .of(&options) }, null));
 
     // And a value that comes with the chance of one.
     var copied: []const u8 = "level 3";
@@ -7010,7 +7368,7 @@ test "a file moved takes what was read from it along, and the scene saved next n
     // and the scene saved now names where it is.
     const other = try files.app();
     defer other.destroy();
-    const loaded = try other.loadScene("res://meadow.json", .{});
+    const loaded = try other.readScene("res://meadow.json", .{});
     try testing.expectEqual(@as(usize, 1), loaded.moved);
     try app.saveScene("res://meadow.json", .{});
     var said = (try app.sceneInfo("res://meadow.json", null)).?;
@@ -7065,7 +7423,7 @@ test "a new scene is written empty, never over another, and says what it is with
     defer said.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, scene.version), said.version);
     try testing.expectEqual(@as(usize, 0), said.entities);
-    try testing.expectEqual(@as(usize, 0), (try app.loadScene("res://levels.json", .{})).entities);
+    try testing.expectEqual(@as(usize, 0), (try app.readScene("res://levels.json", .{})).entities);
 
     try files.tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.json", .data = "{ \"hello\": 1 }" });
     try testing.expect(try app.sceneInfo("res://notes.json", null) == null);

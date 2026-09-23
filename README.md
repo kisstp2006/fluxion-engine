@@ -667,7 +667,8 @@ try app.callGroup("enemies", "alert");
   transform above it, a control is laid out in the control above it, and a
   timer or a sound belongs to what it hangs from. **What hangs from something
   goes with it**: despawn the tank and the turret goes at the end of the
-  frame, and the clock on the turret with it.
+  frame, and the clock on the turret with it - or all of it at once, with
+  `app.despawnTree`.
 - **`app.setParent(entity, parent, keep_global)` moves an entity in the
   tree**, `.none` for the roots, last among its new siblings. With
   `keep_global` it stays where it is in the world, its own transform written
@@ -1334,8 +1335,8 @@ game --root ../my-game          # or App.Options.root; the working directory oth
   `art/hero.png` under the project's root, whichever directory the program
   was started in. Any other path is the operating system's, as it always
   was - a system font, where a screenshot goes - and every call that takes a
-  path takes both: `loadTexture`, `loadFont`, `loadScene`, `saveScene`,
-  `saveCapture`.
+  path takes both: `loadTexture`, `loadFont`, `loadScene`, `readScene`,
+  `saveScene`, `saveCapture`.
 - **A file inside the root is kept by its `res://` path however it was
   asked for** - `art/hero.png` from the root, its absolute path, `art\hero.png`
   - so `textureSource` gives the project's name for it, `findTexture` finds
@@ -1531,8 +1532,56 @@ const red = fx.Color.parse("#C8434F").?;         // #RGB, #RGBA, #RRGGBB, #RRGGB
 try app.registerComponents(.{ Wander, Player });                       // the game's own
 try app.saveScene("res://levels/meadow.json", .{});                    // to read, diff and edit
 try app.saveScene("res://levels/meadow.scene", .{ .format = .cbor });  // the same, in fewer bytes
-const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either: it can tell
+const loaded = try app.readScene("res://levels/meadow.scene", .{});    // either: it can tell
+
+const bat = try app.loadScene("res://enemies/bat.json");               // a scene to make things of
+const one = try app.instantiate(bat, cave);                            // its root, under cave
+app.changeScene(try app.loadScene("res://levels/two.json"));          // at the end of the frame
 ```
+
+### Scenes as things a game makes
+
+- **A scene is a file a game holds**: `loadScene` reads it once and gives a
+  `SceneHandle`, which a component can hold like a texture, and
+  `readScene` reads a file straight into the world, beside what is there -
+  what an editor opens one with.
+- **`instantiate(scene, parent)` makes one**: the scene's one root, under
+  `parent`, with the rest of it under the root. Each instance's entities get
+  UUIDs of their own, made from the instance's and the file's - so two are
+  never confused, and something that names an entity inside one finds it
+  again every time the file is read. A scene of more than one root is
+  `error.NotOneRoot`: `saveScene(path, .{ .root = branch })` saves a branch,
+  with nothing it hangs from, as a scene of one. `makeLocal(root)` makes an
+  instance the world's own.
+- **A scene can hold an instance of another.** Its entry is the instance's
+  root: its UUID, its parent, its name and groups, `"instance"` - the file
+  it is of - and what its root has that the file does not give it: a
+  field that differs, a component it was given, and in `"removed"` a
+  component it has not. The rest is made from the file each time it is
+  read, so an edit of the file reaches every instance of it, and a scene
+  saved with an instance in it writes it the same way. A scene that is an
+  instance of itself, however deep, is a mistake rather than a loop.
+
+  ```json
+  { "uuid": "…", "parent": "…", "name": "Big bat", "instance": "res://enemies/bat.json",
+    "Transform2D": { "x": 50.0 }, "Area2D": {}, "removed": ["Sprite"] }
+  ```
+
+- **The scene the game plays** is changed with `changeScene` at the end of
+  the frame - `openScene` now - and `currentScene` says which it is. What
+  it brought goes with everything that hangs from it, and what is not its
+  own stays: an autoload, what the game spawned itself at the top of the
+  tree.
+- **A project opens itself**: `openProject` - or `Options.open_project`, at
+  `startup` - shows its `application.boot_splash`, makes its
+  `application.autoload` list - scenes and scripts, each an entity named
+  after its file that a scene change leaves - and opens its
+  `application.main_scene`.
+- **A scene can be read in the background**: `loadInBackground(path)` reads
+  its file and decodes the pictures it names on a thread of its own - on a
+  page, which has none, a piece a frame - and says how far it has got with
+  `progress()` and `done()`. `takeScene` makes the pictures textures and
+  gives the scene, ready to change to without a pause.
 
 ```json
 {

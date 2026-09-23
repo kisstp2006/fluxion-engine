@@ -745,7 +745,7 @@ pub fn main(init: std.process.Init) !void {
     if (flags.scene) |path| {
         openFont(app);
         var diagnostics: fx.json.Diagnostics = .{};
-        const loaded = app.loadScene(path, .{ .diagnostics = &diagnostics }) catch |err| {
+        const loaded = app.readScene(path, .{ .diagnostics = &diagnostics }) catch |err| {
             try out.print("{f}\n", .{diagnostics});
             try out.flush();
             return err;

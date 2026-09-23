@@ -19,6 +19,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const Assets = @import("assets.zig");
+const scenes = @import("scenes.zig");
 const script = @import("script.zig");
 const theme = @import("theme.zig");
 const tileset = @import("tileset.zig");
@@ -93,16 +94,15 @@ pub const AssetKind = enum {
         return null;
     }
 
-    /// The handle a component holds one by. A scene is not held by a handle
-    /// yet.
+    /// The handle a component holds one by.
     pub fn Handle(comptime self: AssetKind) type {
         return switch (self) {
             .texture => Assets.TextureHandle,
             .font => Assets.FontHandle,
+            .scene => scenes.SceneHandle,
             .script => script.ScriptHandle,
             .tileset => tileset.TileSetHandle,
             .theme => theme.ThemeHandle,
-            .scene => @compileError("a scene is not held by a handle"),
         };
     }
 
@@ -115,7 +115,7 @@ pub const AssetKind = enum {
     }
 
     /// Every kind a component can hold a file of: the ones with a handle.
-    pub const handled = [_]AssetKind{ .texture, .font, .script, .tileset, .theme };
+    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme };
 };
 
 test "a file's kind is its ending's, whatever its case, and a scene's JSON is not said by its name" {

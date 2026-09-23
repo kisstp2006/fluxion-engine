@@ -250,9 +250,17 @@ pub fn osPath(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
         path;
     if (!std.mem.startsWith(u8, project_path, scheme)) return gpa.dupe(u8, path);
 
-    const inside = try tidy(gpa, project_path[scheme.len..]);
+    return underRoot(gpa, self.root, project_path);
+}
+
+/// Where a `res://` path is under `root`: `osPath` with no project, and so
+/// nothing but arithmetic on the two - what a thread of its own can ask. A
+/// path that is not `res://` is itself.
+pub fn underRoot(gpa: Allocator, root: []const u8, path: []const u8) Error![]u8 {
+    if (!std.mem.startsWith(u8, path, scheme)) return gpa.dupe(u8, path);
+    const inside = try tidy(gpa, path[scheme.len..]);
     defer gpa.free(inside);
-    const joined = if (inside.len == 0) try gpa.dupe(u8, self.root) else try std.fs.path.join(gpa, &.{ self.root, inside });
+    const joined = if (inside.len == 0) try gpa.dupe(u8, root) else try std.fs.path.join(gpa, &.{ root, inside });
     if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, joined, '/', std.fs.path.sep);
     return joined;
 }
