@@ -18,10 +18,10 @@
 //! say where it is, once there is one.
 //!
 //! **A project's file can have a UUID**, kept beside it in a `.uid` file -
-//! `art/hero.png.uid`, one line, `uid://...` - as Godot 4 keeps its. A scene
-//! names a file by its UUID as well as by its path, and reading one goes by
-//! the UUID first, so a texture moved or renamed together with its `.uid` file
-//! is found where it went. A `uid://` path is taken wherever a `res://` one is.
+//! `art/hero.png.uid`, one line, `uid://...`. A scene names a file by its
+//! UUID as well as by its path, and reading one goes by the UUID first, so a
+//! texture moved or renamed together with its `.uid` file is found where it
+//! went. A `uid://` path is taken wherever a `res://` one is.
 //!
 //! Where a UUID's file is, is learnt from the `.uid` files read along the way;
 //! one nobody has read yet sends the engine through the whole project once,

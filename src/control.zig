@@ -73,8 +73,8 @@ pub const Control = extern struct {
     /// `.none` takes whatever the control above it uses.
     theme: ThemeHandle = .none,
     /// A name in that theme to be drawn as, over the kind of control this is:
-    /// Godot's type variation. A "Header" built on "Label" is one Label among
-    /// many that is drawn differently.
+    /// a type variation. A "Header" built on "Label" is one Label among many
+    /// that is drawn differently.
     variation: [variation_capacity]u8 = @splat(0),
     variation_len: u8 = 0,
     width: Size = .{},
@@ -192,7 +192,7 @@ pub const PanelContainer = extern struct {
     pub const reflect_name = "PanelContainer";
 };
 
-/// What one control says of its own look, over its theme: Godot's theme
+/// What one control says of its own look, over its theme: its theme
 /// overrides. Each is the control's own only while its switch is on; the
 /// rest stays the theme's. It lies over what every theme says of the normal
 /// look and under what one says of hovering, pressing and the rest, so a

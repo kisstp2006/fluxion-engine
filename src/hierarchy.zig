@@ -2,13 +2,12 @@
 
 //! Where a thing really is, once its parent has had its say.
 //!
-//! A `Transform2D` is local: in its parent's space, as Unity's `Transform`
-//! and Godot's `Node2D` are. Nothing is cached - a parented entity's world
-//! transform is worked out where it is wanted, by walking up to a root - so
-//! there is no second component to move every transform into another
-//! archetype. Each link is interpolated in its own space before composing,
-//! so the children of a body stepped in `.fixed` slide as smoothly as it
-//! does.
+//! A `Transform2D` is local: in its parent's space. Nothing is cached - a
+//! parented entity's world transform is worked out where it is wanted, by
+//! walking up to a root - so there is no second component to move every
+//! transform into another archetype. Each link is interpolated in its own
+//! space before composing, so the children of a body stepped in `.fixed`
+//! slide as smoothly as it does.
 //!
 //! A chain with a dead link cannot be placed: this says null, and `App`
 //! despawns what hung from it at the end of the frame.

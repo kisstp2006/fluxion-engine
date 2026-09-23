@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! Flux scripts on entities, the way Godot puts a script on a node. A
-//! `Script` component names a `.flux` file and a struct in it. The engine
-//! makes the entity an instance of that struct, with the entity in it as
-//! `self.entity`, and calls whichever of these the struct declares:
+//! Flux scripts on entities. A `Script` component names a `.flux` file and a
+//! struct in it. The engine makes the entity an instance of that struct, with
+//! the entity in it as `self.entity`, and calls whichever of these the struct
+//! declares:
 //!
 //! - `ready(self)` before anything else of it;
 //! - `physics(self, dt: float)` every fixed step, before the game's `.fixed`
@@ -80,13 +80,12 @@
 //! false`. Its files are compiled, read again and written in scenes, and
 //! their structs' signals and methods listed and connected to, but no code
 //! of theirs runs - not the top level, a default, `ready` or `update` - so
-//! a script cannot change the scene being edited. Godot's editor runs only
-//! a `tool` script; this one runs none.
+//! a script cannot change the scene being edited.
 //!
 //! **Order.** Scripts are called in the order their instances were made.
 //! `exit` runs at the end of the frame the entity died in, after it is gone,
-//! so `self.entity.alive()` is false there. Godot's `_exit_tree` comes
-//! before. An app closing calls no `exit`: that is the game's quit handling.
+//! so `self.entity.alive()` is false there. An app closing calls no `exit`:
+//! that is the game's quit handling.
 
 const std = @import("std");
 const testing = std.testing;

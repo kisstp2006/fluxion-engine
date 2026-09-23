@@ -221,15 +221,16 @@ pub const Options = struct {
     workers: ?u32 = null,
 
     /// A hundred units to the metre, for a world measured in pixels: what
-    /// the physics' tolerances are scaled by. The engine keeps Godot 3's
+    /// the physics' tolerances are scaled by. The engine keeps its own
     /// rules whatever the rest says: gravity is `physics_2d`'s, two
     /// colliders touch when either one's mask has the other's layer, and a
     /// pair's friction is the smaller and its bounce the sum.
     physics: physics_lib.Settings = .{ .units_per_metre = 100 },
 
     /// How the 2D world moves - gravity, and what a body's damping of minus
-    /// one means - for a game with no project file: Godot 3's numbers. A
-    /// project file's `physics_2d` is taken instead.
+    /// one means - for a game with no project file: the defaults, a gravity
+    /// of 98 where a unit is a pixel. A project file's `physics_2d` is
+    /// taken instead.
     physics_2d: Project.Physics2D = .{},
 };
 
@@ -399,16 +400,13 @@ areas: Areas = .{},
 /// What the pointer is over, and what it did there. See `picking.zig`.
 picking: Picking = .{},
 
-/// Whether the pointer picks what it is over at all: Godot's
-/// `physics/common/enable_object_picking`. An editor turns it off while it
-/// edits a scene rather than plays it.
+/// Whether the pointer picks what it is over at all. An editor turns it off
+/// while it edits a scene rather than plays it.
 physics_object_picking: bool = true,
 /// Whether what is picked comes in the order it is drawn, the topmost
-/// first. Godot works the other way by default, and its order is the
-/// broadphase's.
+/// first. Off, the order is the broadphase's.
 physics_object_picking_sort: bool = true,
-/// Whether only the first of several under the pointer hears the event,
-/// as Godot 4.3 can.
+/// Whether only the first of several under the pointer hears the event.
 physics_object_picking_first_only: bool = false,
 
 /// Where the game's files are - `res://` - and the UUIDs of the ones that
@@ -582,7 +580,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .world = .init(gpa),
         .commands = .init(gpa, &self.world),
         .jobs = undefined,
-        .physics = .init(gpa, godotRules(options.physics)),
+        .physics = .init(gpa, withEngineRules(options.physics)),
         .physics_2d = options.physics_2d,
         .bodies = .{},
         .tile_sets = .{},
@@ -1237,8 +1235,8 @@ pub fn step(self: *App) anyerror!bool {
     }
     try self.schedule.run(.update, self);
     try self.schedule.run(.late, self);
-    // Deferred signal calls, Godot's idle time: after `.late`, before the
-    // engine's own passes, so what they despawn is gone by the draw.
+    // Deferred signal calls: after `.late`, before the engine's own
+    // passes, so what they despawn is gone by the draw.
     try self.signals.flushDeferred(self);
 
     // The engine's own passes, after the game's `.late` systems and before
@@ -1456,16 +1454,16 @@ fn despawnOrphans(self: *App) !void {
 }
 
 // -------------------------------------------------------------------------
-// Where things are: Godot 3's Node2D, through the parent chain
+// Where things are, through the parent chain
 // -------------------------------------------------------------------------
 
 /// Resolving against no snapshots is resolving where things are, not where
 /// they are drawn.
 const still: hierarchy.Snapshots = .empty;
 
-/// Where an entity really is, with every parent above it applied: Godot's
-/// `global_transform`. Null when it has no transform, or when something it
-/// hangs from was despawned this frame. The result has no parent, so writing
+/// Where an entity really is, with every parent above it applied. Null
+/// when it has no transform, or when something it hangs from was despawned
+/// this frame. The result has no parent, so writing
 /// it over the entity's own transform lets go while keeping it in place.
 ///
 /// Where it is, not where it is drawn: an entity that `interpolate`s is drawn
@@ -1491,9 +1489,9 @@ pub const PlaceError = error{
 };
 
 /// Put an entity where `placed` says in the world, and keep its parent: its
-/// own transform becomes the one that, under its parents, lands there.
-/// Godot's `global_transform =`. Its parent, its inherit switches and its
-/// `interpolate` stay its own; `placed`'s are not read.
+/// own transform becomes the one that, under its parents, lands there. Its
+/// parent, its inherit switches and its `interpolate` stay its own;
+/// `placed`'s are not read.
 pub fn setWorldTransform(self: *App, entity: ecs.Entity, placed: components.Transform2D) PlaceError!void {
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     const above = try self.parentPlace(own.*);
@@ -1524,7 +1522,7 @@ fn placeOf(self: *App, entity: ecs.Entity) PlaceError!components.Transform2D {
     return self.worldTransform(entity) orelse error.Unplaced;
 }
 
-/// Where an entity is in the world: Godot's `global_position`.
+/// Where an entity is in the world.
 pub fn globalPosition(self: *App, entity: ecs.Entity) ?math.Vec2 {
     const placed = self.worldTransform(entity) orelse return null;
     return .init(placed.x, placed.y);
@@ -1537,8 +1535,7 @@ pub fn setGlobalPosition(self: *App, entity: ecs.Entity, position: math.Vec2) Pl
     try self.setWorldTransform(entity, placed);
 }
 
-/// Which way an entity faces in the world, in radians: Godot's
-/// `global_rotation`.
+/// Which way an entity faces in the world, in radians.
 pub fn globalRotation(self: *App, entity: ecs.Entity) ?f32 {
     const placed = self.worldTransform(entity) orelse return null;
     return placed.rotation;
@@ -1550,7 +1547,7 @@ pub fn setGlobalRotation(self: *App, entity: ecs.Entity, radians: f32) PlaceErro
     try self.setWorldTransform(entity, placed);
 }
 
-/// How big an entity is in the world: Godot's `global_scale`.
+/// How big an entity is in the world.
 pub fn globalScale(self: *App, entity: ecs.Entity) ?math.Vec2 {
     const placed = self.worldTransform(entity) orelse return null;
     return .init(placed.scale_x, placed.scale_y);
@@ -1564,44 +1561,43 @@ pub fn setGlobalScale(self: *App, entity: ecs.Entity, scale: math.Vec2) PlaceErr
 }
 
 /// Move an entity by `offset` in the world, whatever its parents have done
-/// to its axes: Godot's `global_translate`.
+/// to its axes.
 pub fn globalTranslate(self: *App, entity: ecs.Entity, offset: math.Vec2) PlaceError!void {
     const placed = try self.placeOf(entity);
     try self.setGlobalPosition(entity, .init(placed.x + offset.x, placed.y + offset.y));
 }
 
-/// A point in the world, in an entity's own space: Godot's `to_local`.
+/// A point in the world, in an entity's own space.
 pub fn toLocal(self: *App, entity: ecs.Entity, global_point: math.Vec2) ?math.Vec2 {
     const placed = self.worldTransform(entity) orelse return null;
     const local = placed.unapply(global_point.x, global_point.y);
     return .init(local.x, local.y);
 }
 
-/// A point in an entity's own space, in the world: Godot's `to_global`.
+/// A point in an entity's own space, in the world.
 pub fn toGlobal(self: *App, entity: ecs.Entity, local_point: math.Vec2) ?math.Vec2 {
     const placed = self.worldTransform(entity) orelse return null;
     const global = placed.apply(local_point.x, local_point.y);
     return .init(global.x, global.y);
 }
 
-/// How far an entity would turn to face a point with its `+x`, in radians:
-/// Godot's `get_angle_to`, measured in its own space and scale.
+/// How far an entity would turn to face a point with its `+x`, in radians,
+/// measured in its own space and scale.
 pub fn getAngleTo(self: *App, entity: ecs.Entity, point: math.Vec2) ?f32 {
     const local = self.toLocal(entity, point) orelse return null;
     const own = self.world.get(entity, components.Transform2D).?;
     return std.math.atan2(local.y * own.scale_y, local.x * own.scale_x);
 }
 
-/// Turn an entity so that its `+x` faces a point in the world: Godot's
-/// `look_at`.
+/// Turn an entity so that its `+x` faces a point in the world.
 pub fn lookAt(self: *App, entity: ecs.Entity, point: math.Vec2) PlaceError!void {
     const angle = self.getAngleTo(entity, point) orelse return if (self.world.has(entity, components.Transform2D)) error.Unplaced else error.NoTransform;
     self.world.get(entity, components.Transform2D).?.rotation += angle;
 }
 
-/// Where an entity is in the space of `ancestor`, something it hangs from:
-/// Godot's `get_relative_transform_to_parent`. Nothing moved for the entity
-/// itself, and null for an entity `ancestor` is not above.
+/// Where an entity is in the space of `ancestor`, something it hangs from.
+/// Nothing moved for the entity itself, and null for an entity `ancestor`
+/// is not above.
 pub fn getRelativeTransformToParent(self: *App, entity: ecs.Entity, ancestor: ecs.Entity) ?components.Transform2D {
     var chain: [components.Transform2D.max_depth]components.Transform2D = undefined;
     var depth: usize = 0;
@@ -1622,15 +1618,14 @@ pub fn getRelativeTransformToParent(self: *App, entity: ecs.Entity, ancestor: ec
     return placed;
 }
 
-/// Move an entity along its own `+x`, in its parent's space: Godot's
-/// `move_local_x`. By `delta` units, or with `scaled` by `delta` of its own
-/// scaled lengths.
+/// Move an entity along its own `+x`, in its parent's space. By `delta`
+/// units, or with `scaled` by `delta` of its own scaled lengths.
 pub fn moveLocalX(self: *App, entity: ecs.Entity, delta: f32, scaled: bool) PlaceError!void {
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     moveAlong(own, .init(@cos(own.rotation) * own.scale_x, @sin(own.rotation) * own.scale_x), delta, scaled);
 }
 
-/// The same along its own `+y`: Godot's `move_local_y`.
+/// The same along its own `+y`.
 pub fn moveLocalY(self: *App, entity: ecs.Entity, delta: f32, scaled: bool) PlaceError!void {
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     moveAlong(own, .init(-@sin(own.rotation) * own.scale_y, @cos(own.rotation) * own.scale_y), delta, scaled);
@@ -1642,13 +1637,13 @@ fn moveAlong(own: *components.Transform2D, axis: math.Vec2, delta: f32, scaled: 
     own.y += along.y * delta;
 }
 
-/// Turn an entity by `radians` more: Godot's `rotate`.
+/// Turn an entity by `radians` more.
 pub fn rotate(self: *App, entity: ecs.Entity, radians: f32) PlaceError!void {
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     own.rotation += radians;
 }
 
-/// Multiply an entity's scale by `ratio`: Godot's `apply_scale`.
+/// Multiply an entity's scale by `ratio`.
 pub fn applyScale(self: *App, entity: ecs.Entity, ratio: math.Vec2) PlaceError!void {
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     own.scale_x *= ratio.x;
@@ -1656,8 +1651,7 @@ pub fn applyScale(self: *App, entity: ecs.Entity, ratio: math.Vec2) PlaceError!v
 }
 
 /// A timer that runs once, `seconds` from now, on an entity of its own that
-/// goes after its `timeout`: Godot's `SceneTree.create_timer`, to connect
-/// to and forget.
+/// goes after its `timeout`: one to connect to and forget.
 ///
 /// ```zig
 /// const fuse = try app.createTimer(1.5);
@@ -1715,8 +1709,8 @@ pub const NameError = error{
 /// }
 /// ```
 ///
-/// The name is the entity's own, as a Unity GameObject's is, not a
-/// component: naming does not move the entity to another archetype. One
+/// The name is the entity's own, not a component: naming does not move the
+/// entity to another archetype. One
 /// living entity to a name - another is `error.NameTaken` - because `find`
 /// hands back one. A despawned entity's name is free at once, and calling
 /// this again renames. The text is copied. `ecs.save` does not write names.
@@ -2011,7 +2005,7 @@ pub fn cellAt(self: *App, map: ecs.Entity, point: math.Vec2) ?[2]i32 {
 
 /// The cells of `map` something is painted in: the smallest rectangle that
 /// holds them all, by its first and last cell. Null for a map with nothing
-/// painted. Godot's `get_used_rect`.
+/// painted.
 pub fn usedCells(self: *App, map: ecs.Entity) ?CellRect {
     var out: ?CellRect = null;
     var it = self.tile_chunks.iterator();
@@ -2154,8 +2148,8 @@ pub fn themeSource(self: *App, handle: theme.ThemeHandle) ?[]const u8 {
 }
 
 /// A parent's children in their order, as many as `found` holds, the first
-/// ones kept when there are more; `.none` for the roots. Godot's
-/// `get_children`. One walk over the world each time.
+/// ones kept when there are more; `.none` for the roots. One walk over the
+/// world each time.
 pub fn childrenOf(self: *App, parent: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
     if (found.len == 0) return found;
     var count: usize = 0;
@@ -2179,8 +2173,8 @@ pub fn childrenOf(self: *App, parent: ecs.Entity, found: []ecs.Entity) []ecs.Ent
     return found[0..count];
 }
 
-/// Where an entity is among its parent's children, from nought: Godot's
-/// `get_index`. Null for one that is not alive.
+/// Where an entity is among its parent's children, from nought. Null for
+/// one that is not alive.
 pub fn siblingIndex(self: *App, entity: ecs.Entity) ?u32 {
     if (!self.world.isAlive(entity)) return null;
     const parent = self.parentOf(entity);
@@ -2196,8 +2190,7 @@ pub fn siblingIndex(self: *App, entity: ecs.Entity) ?u32 {
 }
 
 /// Put an entity at `index` among its parent's children, the ones from
-/// there on moving along one: Godot's `move_child`. An index past the end
-/// is the end. Kept beside the world, and written into a scene as the order
+/// there on moving along one. An index past the end is the end. Kept beside the world, and written into a scene as the order
 /// its list is in, so it comes back as it was.
 pub fn setSiblingIndex(self: *App, entity: ecs.Entity, index: u32) (error{NoSuchEntity} || Allocator.Error)!void {
     if (!self.world.isAlive(entity)) return error.NoSuchEntity;
@@ -2758,13 +2751,13 @@ fn callValue(receiver: reflect.Value, name: []const u8, args: []const reflect.Va
 // Signals and events
 // -------------------------------------------------------------------------
 //
-// Godot's signals, on components, and the typed events the engine's own
-// are made from. See `signals.zig` and `events.zig`.
+// Signals, on components, and the typed events the engine's own are made
+// from. See `signals.zig` and `events.zig`.
 
 pub const Signal = signals_mod.Signal;
 
-/// The signal `name` that `C` declares, of `entity`: Godot's
-/// `entity.name`, checked as it is compiled.
+/// The signal `name` that `C` declares, of `entity`, checked as it is
+/// compiled.
 ///
 /// ```zig
 /// try app.signal(player, Health, .hit).connect(.method(hud, "_on_player_hit"), .{});
@@ -2832,7 +2825,6 @@ pub fn emitNamed(self: *App, entity: ecs.Entity, name: []const u8, values: []con
 }
 
 /// Whether one of `entity`'s components declares a signal by that name.
-/// Godot's `has_signal`.
 pub fn hasSignal(self: *App, entity: ecs.Entity, name: []const u8) bool {
     _ = self.signalNamed(entity, name) catch |err| return err == error.AmbiguousSignal;
     return true;
@@ -2840,7 +2832,7 @@ pub fn hasSignal(self: *App, entity: ecs.Entity, name: []const u8) bool {
 
 /// Every signal `entity` has, component by component in the order they
 /// were registered - its script's where `Script` is - as many as `found`
-/// holds. Godot's `get_signal_list`.
+/// holds.
 pub fn signalsOf(self: *App, entity: ecs.Entity, found: []signals_mod.Info) []signals_mod.Info {
     var count: usize = 0;
     var held: [64]ComponentValue = undefined;
@@ -2895,16 +2887,14 @@ pub fn disconnectNamed(self: *App, source: ecs.Entity, name: []const u8, callabl
 
 /// Every connection of `source`'s signals, known or not, in the order they
 /// were made: the order they are heard in, and the order a scene keeps and
-/// reads back. A disconnect and a connect again puts one last, as Godot's
-/// Edit Connection does. Godot's `get_signal_connection_list`, over all.
+/// reads back. A disconnect and a connect again puts one last.
 pub fn connectionsFrom(self: *App, source: ecs.Entity, found: []signals_mod.Connection) []signals_mod.Connection {
     const listed = self.signals.connectionsFrom(source, found);
     for (listed) |*c| c.signal = self.signalWritten(c.*);
     return listed;
 }
 
-/// Every connection to a method of `receiver`. Godot's
-/// `get_incoming_connections`.
+/// Every connection to a method of `receiver`.
 pub fn connectionsTo(self: *App, receiver: ecs.Entity, found: []signals_mod.Connection) []signals_mod.Connection {
     const listed = self.signals.connectionsTo(receiver, found);
     for (listed) |*c| c.signal = self.signalWritten(c.*);
@@ -2918,7 +2908,7 @@ pub fn connectionCount(self: *const App, source: ecs.Entity) usize {
     return list.items.len;
 }
 
-/// Whether `entity`'s emits do nothing. Godot's `set_block_signals`.
+/// Whether `entity`'s emits do nothing.
 pub fn setBlockSignals(self: *App, entity: ecs.Entity, on: bool) Allocator.Error!void {
     if (on) try self.signals.blocked.put(self.gpa, entity, {}) else _ = self.signals.blocked.remove(entity);
 }
@@ -2929,8 +2919,8 @@ pub fn isBlockingSignals(self: *const App, entity: ecs.Entity) bool {
 
 /// Let a signal's connection call `f` by `name`, when no component of the
 /// target has a method by it: `fn (app: *App, self: fx.Entity, ...) !void`,
-/// `self` the entity connected to - Godot's implicit one - and after it what
-/// the connection hands on. The values are converted to the parameters as
+/// `self` the entity connected to, and after it what the connection hands
+/// on. The values are converted to the parameters as
 /// it is called, and a call with the wrong number is that call's error.
 ///
 /// ```zig
@@ -3365,9 +3355,10 @@ pub fn contactsBegun(self: *const App) []const Bodies.Contact {
     return self.bodies.began(self.input.clock == .fixed);
 }
 
-/// The physics' settings as the engine keeps them: Godot 3's rules for
-/// which layers touch and how two surfaces mix, whatever a game passed.
-fn godotRules(settings: physics_lib.Settings) physics_lib.Settings {
+/// The physics' settings as the engine keeps them, whatever a game passed:
+/// two colliders touch when either one's mask has the other's layer, a
+/// pair's friction is the smaller of the two, and its bounce the two added.
+fn withEngineRules(settings: physics_lib.Settings) physics_lib.Settings {
     var kept = settings;
     kept.filter_rule = .either;
     kept.friction_mix = .minimum;
@@ -3375,63 +3366,59 @@ fn godotRules(settings: physics_lib.Settings) physics_lib.Settings {
     return kept;
 }
 
-/// Keep two bodies from touching whatever their layers say: Godot's
-/// `add_collision_exception_with`. Each is a `RigidBody2D` or a collider
-/// that is a static body of its own. Counted, so two calls take two
+/// Keep two bodies from touching whatever their layers say. Each is a
+/// `RigidBody2D` or a collider that is a static body of its own. Counted, so two calls take two
 /// removals, and gone with either entity.
 pub fn addCollisionExceptionWith(self: *App, a: ecs.Entity, b: ecs.Entity) Bodies.ExceptionError!void {
     return self.bodies.addException(self, a, b);
 }
 
-/// Take one `addCollisionExceptionWith` back: Godot's
-/// `remove_collision_exception_with`.
+/// Take one `addCollisionExceptionWith` back.
 pub fn removeCollisionExceptionWith(self: *App, a: ecs.Entity, b: ecs.Entity) void {
     self.bodies.removeException(self, a, b);
 }
 
-/// The bodies `body` is kept from touching, as many as `found` holds:
-/// Godot's `get_collision_exceptions`.
+/// The bodies `body` is kept from touching, as many as `found` holds.
 pub fn collisionExceptionsOf(self: *App, body: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
     return self.bodies.exceptionsOf(body, found);
 }
 
-/// Whose collision object a collider is a shape of: Godot's
-/// `CollisionObject2D` of a shape, and what an area's signals name. The
-/// collider's own entity when that has an `Area2D` or a `RigidBody2D`, else
-/// the nearest one above it that has, else its own entity, which is its own
-/// static body. Null for an entity that is neither.
+/// Whose collision object a collider is a shape of: the body or area that
+/// owns it, and what an area's signals name. The collider's own entity when
+/// that has an `Area2D` or a `RigidBody2D`, else the nearest one above it
+/// that has, else its own entity, which is its own static body. Null for an
+/// entity that is neither.
 pub fn collisionObjectOf(self: *App, collider: ecs.Entity) ?ecs.Entity {
     return Bodies.objectOf(&self.world, collider);
 }
 
-/// The bodies inside `area` now, as many as `found` holds: Godot's
-/// `get_overlapping_bodies`. Empty, with a word in the log, for an area that
-/// is not monitoring.
+/// The bodies inside `area` now, as many as `found` holds. Empty, with a
+/// word in the log, for an area that is not monitoring.
 pub fn overlappingBodies(self: *App, area: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
     return self.areas.overlapping(self, area, false, found);
 }
 
-/// The other areas inside `area` now: Godot's `get_overlapping_areas`.
+/// The other areas inside `area` now, as many as `found` holds.
 pub fn overlappingAreas(self: *App, area: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
     return self.areas.overlapping(self, area, true, found);
 }
 
-/// Whether anything at all is inside `area`: Godot's `has_overlapping_bodies`.
+/// Whether any body at all is inside `area`.
 pub fn hasOverlappingBodies(self: *App, area: ecs.Entity) bool {
     return self.areas.any(self, area, false);
 }
 
-/// Whether another area is inside it: Godot's `has_overlapping_areas`.
+/// Whether another area is inside it.
 pub fn hasOverlappingAreas(self: *App, area: ecs.Entity) bool {
     return self.areas.any(self, area, true);
 }
 
-/// Whether that body is inside it: Godot's `overlaps_body`.
+/// Whether that body is inside it.
 pub fn overlapsBody(self: *App, area: ecs.Entity, body: ecs.Entity) bool {
     return self.areas.overlaps(self, area, body);
 }
 
-/// Whether that area is inside it: Godot's `overlaps_area`.
+/// Whether that area is inside it.
 pub fn overlapsArea(self: *App, area: ecs.Entity, other: ecs.Entity) bool {
     return self.areas.overlaps(self, area, other);
 }
@@ -3551,8 +3538,7 @@ pub fn setCursorShape(self: *App, shape: CursorShape) Window.Error!void {
 }
 
 /// A picture of the game's own for the pointer, with the point in it that
-/// does the pointing; null puts the shape back. Godot's
-/// `Input.set_custom_mouse_cursor`. Nothing without a window.
+/// does the pointing; null puts the shape back. Nothing without a window.
 ///
 /// ```zig
 /// const sword = app.assets.get(cursor_texture).?;
@@ -3607,9 +3593,8 @@ pub fn safeArea(self: *const App) platform.Insets {
     return .{};
 }
 
-/// Put the pointer there, in framebuffer pixels: Godot's `warp_mouse`. The
-/// system takes a moment to say it moved, so `input.pointer` is set here as
-/// well. Nothing without a window, save moving what a test reads.
+/// Put the pointer there, in framebuffer pixels. The system takes a moment
+/// to say it moved, so `input.pointer` is set here as well. Nothing without a window, save moving what a test reads.
 pub fn warpPointer(self: *App, x: f32, y: f32) void {
     if (self.window) |*window| {
         window.setCursorPos(x, y) catch |err| {
@@ -3621,9 +3606,8 @@ pub fn warpPointer(self: *App, x: f32, y: f32) void {
     self.input.pointer.y = y;
 }
 
-/// Where the pointer is in an entity's own space: Godot's
-/// `get_local_mouse_position`. Null for an entity that is not there, or
-/// whose chain of parents is broken.
+/// Where the pointer is in an entity's own space. Null for an entity that
+/// is not there, or whose chain of parents is broken.
 ///
 /// ```zig
 /// const at = app.pointerIn(dial) orelse return;
@@ -3634,8 +3618,7 @@ pub fn pointerIn(self: *App, entity: ecs.Entity) ?math.Vec2 {
 }
 
 /// A pointer event as an entity sees it: the same event, with its place in
-/// that entity's own space rather than the window's. Godot's
-/// `make_input_local`.
+/// that entity's own space rather than the window's.
 pub fn localEvent(self: *App, entity: ecs.Entity, event: pointer.InputEvent) pointer.InputEvent {
     const at = self.screenToWorld(event.position().x, event.position().y);
     const local = self.toLocal(entity, at) orelse return event;

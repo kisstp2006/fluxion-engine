@@ -33,8 +33,7 @@ const Signals = @import("signals.zig").Signals;
 const States = @import("states.zig");
 
 /// What a system is: a function that gets the whole application. Declaring
-/// queries in the signature, as Bevy does, waits for a scheduler that could
-/// use them.
+/// queries in the signature waits for a scheduler that could use them.
 pub const System = *const fn (app: *App) anyerror!void;
 
 /// Which part of the frame a system runs in. See the table above.

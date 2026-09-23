@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! How a game's interface looks, as a file says it: Godot's Theme resource.
+//! How a game's interface looks, as a file says it: a `Theme`.
 //!
 //! ```json
 //! {
@@ -429,8 +429,8 @@ pub const Themes = struct {
     /// theme's word on `state` itself, in the same order. So a state a theme
     /// does not speak of looks as the normal one does, a button whose
     /// background is its own is still lit where a theme says how it lights,
-    /// and a variation's hover is its base type's until it says its own - as
-    /// Godot looks a style up by its state's name.
+    /// and a variation's hover is its base type's until it says its own: a
+    /// style is looked up by its state's name.
     pub fn styleWith(self: *Themes, handle: ThemeHandle, under: ThemeHandle, part: Part, state: State, variation: []const u8, own: Style) Style {
         var project: [most_links]ThemeHandle = undefined;
         var near: [most_links]ThemeHandle = undefined;
@@ -923,7 +923,7 @@ test "a base theme is under the theme that names it" {
     try testing.expectEqual(@as(f32, 9), style.corners.?.top_left);
 }
 
-test "a state a variation does not speak of is its base type's, as Godot looks a style up" {
+test "a state a variation does not speak of is its base type's, looked up by the state's name" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const handle = try app.themes.add(app, "states.theme",

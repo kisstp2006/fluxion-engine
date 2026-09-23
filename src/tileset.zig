@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! The tiles a `TileMap` is painted with, as a file describes them: Godot's
-//! TileSet resource.
+//! The tiles a `TileMap` is painted with, as a file describes them: a
+//! `TileSet`.
 //!
 //! ```json
 //! {
@@ -28,7 +28,7 @@
 //!
 //! A data layer is a value every tile of the set may carry under one name -
 //! how much a tile hurts, whether it is water - which a game asks for with
-//! `App.tileData`, as Godot's custom data layers are asked for.
+//! `App.tileData`.
 //!
 //! Kept beside the world, as scripts are, and pointed at by a handle: a
 //! component holds no memory. A file that does not read still gets a handle,
@@ -135,8 +135,7 @@ pub const Value = union(DataKind) {
     }
 };
 
-/// A value every tile of a set may carry under one name: Godot's custom data
-/// layer.
+/// A value every tile of a set may carry under one name.
 pub const DataLayer = struct {
     name_bytes: [name_capacity]u8 = @splat(0),
     name_len: u8 = 0,
@@ -166,8 +165,7 @@ pub const Tile = struct {
     points: [max_points]math.Vec2 = @splat(.zero),
     point_count: u8 = 0,
     /// How often a random brush picks this tile against the others it may
-    /// pick: Godot's probability. One is as often as a tile that says
-    /// nothing; nought is never.
+    /// pick. One is as often as a tile that says nothing; nought is never.
     probability: f32 = 1,
     /// What the tile says under each of the set's data layers, by the
     /// layer's place. Nought, or false, is saying nothing.

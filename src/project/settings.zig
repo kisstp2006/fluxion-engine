@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! `project.fluxion`: how a project is called, opened, drawn and moved, at
-//! the root of its folder, as Godot keeps its `project.godot`.
+//! the root of its folder.
 //!
 //! ```json
 //! {
@@ -84,8 +84,7 @@ pub const Renderer = enum {
     }
 };
 
-/// What the project is and what it opens: Godot's `application/config` and
-/// `application/run`.
+/// What the project is and what it opens.
 pub const Application = struct {
     name: []const u8 = "",
     description: []const u8 = "",
@@ -102,8 +101,8 @@ pub const Application = struct {
     };
 };
 
-/// The game's window: Godot's `display/window`. A game's own `App.Options`
-/// say otherwise when they say anything.
+/// The game's window. A game's own `App.Options` say otherwise when they
+/// say anything.
 pub const Display = struct {
     width: u32 = 1280,
     height: u32 = 720,
@@ -129,7 +128,7 @@ pub const Display = struct {
     };
 };
 
-/// How the project is drawn: Godot's `rendering`.
+/// How the project is drawn.
 pub const Rendering = struct {
     renderer: Renderer = .compatibility,
     clear_color: Color = default_clear_color,
@@ -142,9 +141,9 @@ pub const Rendering = struct {
     };
 };
 
-/// How a 2D world moves when nothing else says so: Godot 3's `physics/2d`
-/// settings and their names, and `physics/common`'s ticks. A game with no
-/// project file takes `App.Options.physics_2d`.
+/// How a 2D world moves when nothing else says so, and how many fixed steps
+/// it takes a second. A game with no project file takes
+/// `App.Options.physics_2d`.
 pub const Physics2D = struct {
     default_gravity: f32 = 98,
     default_gravity_vector: math.Vec2 = .init(0, 1),
@@ -154,7 +153,7 @@ pub const Physics2D = struct {
 
     pub const reflect_attributes = .{attr.Label{ .text = "Physics 2D" }};
     pub const reflect_fields = .{
-        .default_gravity = .{ attr.Range{ .min = 0, .max = 10000 }, attr.Unit{ .text = "px/s²" }, attr.Doc{ .text = "How hard everything falls. 98 is Godot 3's, where a unit is a pixel; a world of a hundred units to the metre that wants Earth's says 981." } },
+        .default_gravity = .{ attr.Range{ .min = 0, .max = 10000 }, attr.Unit{ .text = "px/s²" }, attr.Doc{ .text = "How hard everything falls: 98 when a unit is a pixel; a world of a hundred units to the metre that wants Earth's says 981." } },
         .default_gravity_vector = .{attr.Doc{ .text = "Which way things fall: down the screen." }},
         .default_linear_damp = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How much of its speed a body loses a second, when its own linear damp is minus one." } },
         .default_angular_damp = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How much of its spin a body loses a second, when its own angular damp is minus one." } },
@@ -167,7 +166,7 @@ pub const Physics2D = struct {
     }
 };
 
-/// What the project calls its layers: Godot's `layer_names`.
+/// What the project calls its layers.
 pub const LayerNames = struct {
     /// The 2D physics layers, first to last, `""` for one with no name - at
     /// most 32: what an editor shows beside a layer's toggle.
@@ -191,8 +190,7 @@ pub const LayerNames = struct {
     }
 };
 
-/// How the project's interface looks when nothing nearer says: Godot's
-/// `gui/theme`.
+/// How the project's interface looks when nothing nearer says.
 pub const Gui = struct {
     theme: []const u8 = "",
 
@@ -417,7 +415,7 @@ test "what a project file leaves out takes its default, and a key it does not kn
     try testing.expectEqualStrings("", settings.application.icon);
     try testing.expectEqual(Renderer.compatibility, settings.rendering.renderer);
     try testing.expectEqual(@as(usize, 0), settings.application.tags.len);
-    // Godot 3's physics, which a new Godot project has.
+    // The default physics, which a new project has.
     try testing.expectEqual(@as(f32, 98), settings.physics_2d.default_gravity);
     try testing.expectEqual(@as(f32, 1), settings.physics_2d.default_gravity_vector.y);
     try testing.expectEqual(@as(u16, 60), settings.physics_2d.ticks_per_second);

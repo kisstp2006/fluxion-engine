@@ -250,7 +250,7 @@ pub fn main(init: std.process.Init) !void {
         .quit_key = .escape,
         .fullscreen_key = .f11,
         // A hundred pixels to the metre, falling as things do on Earth: the
-        // project default is Godot 3's gentler 98.
+        // project default is a gentler 98.
         .physics_2d = .{ .default_gravity = 981 },
     })) catch |err| switch (err) {
         error.NoDisplay => {

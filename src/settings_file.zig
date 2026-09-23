@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! A file of settings in sections - `project.fluxion`, and an editor's own -
-//! read and written from the struct that describes it, the way Godot keeps
-//! `project.godot` and its editor settings:
+//! read and written from the struct that describes it:
 //!
 //! ```zig
 //! const Settings = struct {
@@ -23,7 +22,7 @@
 //!
 //! **A file says only what differs.** A setting left at its default is not
 //! written, and a section all of whose settings are is not either, so a file
-//! is a short list of what was changed - as Godot's is - and a default
+//! is a short list of what was changed, and a default
 //! changed in a later build reaches every project that did not say otherwise.
 //!
 //! **What this build does not know is kept.** A key of the file that names

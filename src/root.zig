@@ -22,7 +22,7 @@
 //! }
 //! ```
 //!
-//! A scene is a world and a node is an entity: Godot's shape, with
+//! A scene is a world and a node is an entity, with
 //! [Fluxion ECS](https://github.com/kisstp2006/fluxion-ecs) in the middle.
 //! Three layers - 3D, 2D, interface - are drawn back to front into one
 //! target; the 2D layer and the interface are written, the 3D one is not. This
@@ -52,18 +52,17 @@ pub const DebugViews = @import("debug_views.zig");
 /// `app.setState`, `app.addSystemIn`, `app.onEnter`.
 pub const States = @import("states.zig");
 
-/// Godot's signals, on components: `pub const signals` on one, and
-/// `app.signal`, `connect`, `emit`. The table is `app.signals`.
+/// Signals, on components: `pub const signals` on one, and `app.signal`,
+/// `connect`, `emit`. The table is `app.signals`.
 pub const signals = @import("signals.zig");
 
-/// A signal of one entity: Godot 4's `Signal`. See `App.signal`.
+/// A signal of one entity. See `App.signal`.
 pub const Signal = signals.Signal;
 
-/// What a signal calls: a method by name, or a Zig function. Godot's
-/// `Callable`.
+/// What a signal calls: a method by name, or a Zig function.
 pub const Callable = signals.Callable;
 
-/// Godot's `ConnectFlags`.
+/// How a connection is heard and kept: deferred, persist, one shot.
 pub const ConnectFlags = signals.Flags;
 
 /// How a connection is made: flags, unbinds, binds.
@@ -91,8 +90,8 @@ pub const Events = events.Events;
 /// A place in the events of one type, reading each once.
 pub const EventReader = events.Reader;
 
-/// Flux scripts on entities, the way Godot puts a script on a node:
-/// `app.useScripts`, `app.loadScript`, and a `Script` on the entity.
+/// Flux scripts on entities: `app.useScripts`, `app.loadScript`, and a
+/// `Script` on the entity.
 pub const script = @import("script.zig");
 
 /// A script on an entity: a `.flux` file, and which struct in it.
@@ -179,11 +178,11 @@ pub const RigidBody2D = components.RigidBody2D;
 pub const Collider2D = components.Collider2D;
 
 /// A place that tells what is in it and pushes nothing: a trigger, a
-/// pickup, a hurtbox. Godot's Area2D.
+/// pickup, a hurtbox.
 pub const Area2D = components.Area2D;
 
-/// A grid of tiles from a `TileSet`: Godot's TileMap. Its cells live in
-/// `TileChunk`s the map owns; `App.setTile` paints one.
+/// A grid of tiles from a `TileSet`. Its cells live in `TileChunk`s the
+/// map owns; `App.setTile` paints one.
 pub const TileMap = @import("tilemap.zig").TileMap;
 pub const TileChunk = @import("tilemap.zig").TileChunk;
 /// One tile of a map: which tile of which source, and how it is turned.
@@ -225,7 +224,7 @@ pub const pointer = @import("pointer.zig");
 /// One thing the pointer did: `fx.pointer.InputEvent`.
 pub const InputEvent = pointer.InputEvent;
 
-/// A button of the pointer, the wheel among them. Godot's `MouseButton`.
+/// A button of the pointer, the wheel among them.
 pub const PointerButton = pointer.PointerButton;
 
 /// Which pointer buttons are held: `app.input.buttonMask()`.
@@ -281,8 +280,7 @@ pub const AxisBinding = Input.AxisBinding;
 pub const ButtonBinding = Input.ButtonBinding;
 pub const ActionMap = Input.ActionMap;
 
-/// Godot's Timer: a component that counts down and says `timeout`. See
-/// `timer.zig`.
+/// A component that counts down and says `timeout`. See `timer.zig`.
 pub const Timer = @import("timer.zig").Timer;
 
 /// A point or a direction in the plane.

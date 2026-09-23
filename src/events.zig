@@ -20,7 +20,7 @@
 //!
 //! **A reader is a place in the stream**, not a queue of its own: two
 //! readers see the same events, and each sees each event once. One that
-//! does not read for two frames misses what went by, as Bevy's does.
+//! does not read for two frames misses what went by.
 
 const std = @import("std");
 const testing = std.testing;

@@ -79,13 +79,11 @@ pub const ProjectFile = struct {
 /// A setting that has to say something: a project's name.
 pub const Required = struct {};
 
-/// A setting shown only with the advanced settings on: Godot's settings
-/// that are not basic.
+/// A setting shown only with the advanced settings on.
 pub const Advanced = struct {};
 
 /// A setting that takes effect when the program starts again - the game's,
-/// for a project's; the editor's, for an editor's: Godot's
-/// `restart_if_changed`.
+/// for a project's; the editor's, for an editor's.
 pub const Restart = struct {};
 
 /// On a component: whether a click in an editor's scene picks an entity
@@ -112,7 +110,7 @@ pub const Pickable = struct { by_default: bool = true };
 pub const Radius = struct {};
 
 /// Half a width and a height, drawn as a box around the middle with handles
-/// on its sides and corners: Godot's `extents`.
+/// on its sides and corners: the `extents` of a box.
 pub const Extents = struct {};
 
 /// On a component whose geometry sits away from its entity's origin: the

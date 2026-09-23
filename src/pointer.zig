@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! What the pointer did, as one event: Godot's `InputEventMouseButton` and
+//! What the pointer did, as one event: an `InputEventMouseButton` or an
 //! `InputEventMouseMotion`. This frame's are `app.input.pointerEvents()`, in
 //! the order they happened, and picking hands each one to whatever is under
 //! it as `input_event`.
@@ -13,9 +13,9 @@ const platform = @import("fluxion_platform");
 
 const Vec2 = math.Vec2;
 
-/// A button of the pointer, the wheel's four directions among them, as
-/// Godot's `MouseButton` has them. The mouse's own buttons keep the numbers
-/// `fx.MouseButton` gives them; the wheel's come after.
+/// A button of the pointer, the wheel's four directions among them. The
+/// mouse's own buttons keep the numbers `fx.MouseButton` gives them; the
+/// wheel's come after.
 pub const PointerButton = enum(u8) {
     left = 0,
     right = 1,
@@ -56,8 +56,8 @@ pub const PointerButton = enum(u8) {
     }
 };
 
-/// Which buttons are held: Godot's `get_mouse_button_mask`. A wheel's bit is
-/// set only in the press that turns it.
+/// Which buttons are held, one bit each. A wheel's bit is set only in the
+/// press that turns it.
 pub const ButtonMask = packed struct(u16) {
     left: bool = false,
     right: bool = false,
@@ -92,7 +92,7 @@ pub const ButtonMask = packed struct(u16) {
     }
 };
 
-/// A button pressed or let go, or a wheel notch, which Godot reports as a
+/// A button pressed or let go, or a wheel notch, which is reported as a
 /// press and a release of a wheel button.
 pub const InputEventMouseButton = struct {
     button: PointerButton,
@@ -111,8 +111,8 @@ pub const InputEventMouseButton = struct {
     pub const reflect_name = "InputEventMouseButton";
 };
 
-/// The pointer moved. One event a frame, the frame's motion added up, as
-/// Godot's accumulated input gives.
+/// The pointer moved. One event a frame, with all of the frame's motion
+/// added up.
 pub const InputEventMouseMotion = struct {
     /// In the window's pixels.
     position: Vec2,

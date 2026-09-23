@@ -164,7 +164,7 @@ pub const Happening = enum { suspended, resumed, low_memory };
 pub const typed_capacity = 32;
 
 /// The least time the pointer's velocity is worked out over, so a frame
-/// with no motion in it does not read as a stop. Godot's tracker.
+/// with no motion in it does not read as a stop.
 const velocity_window = 0.1;
 /// How long the pointer stands still before its velocity is nought.
 const velocity_forgets = 3.0;
@@ -539,9 +539,8 @@ pub const Pointer = struct {
     dx: f32 = 0,
     dy: f32 = 0,
     /// How fast it is moving, in pixels a second, worked out over at
-    /// least the last tenth of a second: Godot's
-    /// `get_last_mouse_velocity`. Nought once it has been still for
-    /// three seconds. Set by `Input.trackPointer`.
+    /// least the last tenth of a second. Nought once it has been still
+    /// for three seconds. Set by `Input.trackPointer`.
     velocity: math.Vec2 = .zero,
     /// Whether the pointer is over the window at all.
     inside: bool = true,
@@ -701,8 +700,8 @@ pub fn pointerEvents(self: *const Input) []const pointer_mod.InputEvent {
     return self.pointer_events[0..self.pointer_events_len];
 }
 
-/// Which buttons are held now: Godot's `get_mouse_button_mask`. The
-/// wheel is in an event's own mask, never here.
+/// Which buttons are held now, as a mask. The wheel is in an event's own
+/// mask, never here.
 pub fn buttonMask(self: *const Input) pointer_mod.ButtonMask {
     var mask: pointer_mod.ButtonMask = .none;
     for (0..button_span) |i| {
@@ -713,8 +712,7 @@ pub fn buttonMask(self: *const Input) pointer_mod.ButtonMask {
 }
 
 /// Take this frame's pointer: picking stops there, and a system that
-/// asks `isHandled` leaves it alone. Godot's
-/// `Viewport.set_input_as_handled`, and what an `.input` system calls to
+/// asks `isHandled` leaves it alone. What an `.input` system calls to
 /// keep a click from the world behind it.
 pub fn setAsHandled(self: *Input) void {
     self.handled = true;
@@ -1004,8 +1002,8 @@ pub fn apply(self: *Input, ev: platform.Event) void {
         .scroll => |w| {
             self.wheel.x += @floatCast(w.x);
             self.wheel.y += @floatCast(w.y);
-            // A notch is a press and a release of a wheel button, as
-            // Godot reports one.
+            // A notch is reported as a press and a release of a wheel
+            // button.
             if (w.y != 0) self.pushWheel(if (w.y > 0) .wheel_up else .wheel_down, @floatCast(@abs(w.y)), w.mods);
             if (w.x != 0) self.pushWheel(if (w.x > 0) .wheel_right else .wheel_left, @floatCast(@abs(w.x)), w.mods);
         },
@@ -1064,7 +1062,7 @@ fn pushPointer(self: *Input, event: pointer_mod.InputEvent) void {
 }
 
 /// Motion, added to the last event when that is motion too: a frame's
-/// moving is one event, as Godot's accumulated input gives.
+/// moving is one event.
 fn pushMotion(self: *Input, by: math.Vec2) void {
     const at: math.Vec2 = .init(self.pointer.x, self.pointer.y);
     if (self.pointer_events_len != 0) {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! Signals, as Godot 4 has them: a component says something happened, and
-//! whoever is connected to it hears.
+//! Signals: a component says something happened, and whoever is connected
+//! to it hears.
 //!
 //! ```zig
 //! pub const Health = struct {
@@ -9,8 +9,8 @@
 //!     pub const signals = .{ .died = struct {}, .hit = struct { damage: f32, by: fx.Entity } };
 //! };
 //!
-//! const hit = app.signal(player, Health, .hit);          // Godot: player.hit
-//! try hit.connect(.method(hud, "_on_player_hit"), .{});  // Godot: Callable(hud, "_on_player_hit")
+//! const hit = app.signal(player, Health, .hit);
+//! try hit.connect(.method(hud, "_on_player_hit"), .{});
 //! try hit.connectFn(onHit, .{ .flags = .{ .one_shot = true } });
 //! try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });
 //! ```
@@ -31,15 +31,13 @@
 //! **An emit is heard when the emitting system returns** - with the calls
 //! and their arguments fixed as it emitted - at the sync point where
 //! `app.commands` is done too, and never under the emitting system's query.
-//! That is the one thing Godot does otherwise: its emit calls at once. A
-//! `.deferred` connection is heard at the end of the frame instead, after
-//! `.late`, as Godot's is at idle time.
+//! A `.deferred` connection is heard at the end of the frame instead, after
+//! `.late`.
 //!
 //! **A named connection is looked up when it is called**: a method one of the
 //! target's components lists in its `reflect_methods`, one its script
-//! declares, or one the game gave `App.addMethod`. Connecting never asks, as
-//! Godot's never does - a tool connects to the game's methods, which it
-//! cannot see.
+//! declares, or one the game gave `App.addMethod`. Connecting never asks - a
+//! tool connects to the game's methods, which it cannot see.
 //!
 //! **A script's signals are its entity's**, under `Script`: a `signal died`
 //! in the struct is `Script.died` in the table, listed, connected and saved
@@ -68,7 +66,7 @@ pub const Error = error{
     /// That callable is connected to that signal already. See
     /// `Flags.reference_counted`.
     AlreadyConnected,
-    /// A Zig function cannot be saved with a scene, as Godot's lambdas cannot.
+    /// A Zig function cannot be saved with a scene.
     NotPersistable,
     /// One drain made `Signals.max_calls` calls: a handler that emits what
     /// it hears, round and round.
@@ -112,7 +110,7 @@ pub fn declsOf(comptime T: type) []const Decl {
 }
 
 /// A signal an entity has: which of its components declares it, and what
-/// it says. Godot's `get_signal_list` entry.
+/// it says. What `App.signalsOf` lists.
 pub const Info = struct {
     /// What a scene calls the component: `Script` for a signal the
     /// entity's script declares.
@@ -129,13 +127,13 @@ pub const Info = struct {
     arity: ?u8 = null,
 };
 
-/// Godot's `ConnectFlags`.
+/// How a connection is heard and kept, one switch each.
 pub const Flags = packed struct(u8) {
     /// Heard at the end of the frame, after `.late`, rather than as the
-    /// emitting system returns. Godot's `CONNECT_DEFERRED`.
+    /// emitting system returns.
     deferred: bool = false,
     /// Saved with the scene. What an editor's connections are, and what
-    /// every connection a scene made is. Godot's `CONNECT_PERSIST`.
+    /// every connection a scene made is.
     persist: bool = false,
     /// Taken away as it is emitted, before it is heard. With
     /// `reference_counted`, each emit takes one count.
@@ -144,13 +142,13 @@ pub const Flags = packed struct(u8) {
     /// counts down.
     reference_counted: bool = false,
     /// The entity that emitted, after the emitted arguments and before the
-    /// binds. Godot 4.5's `CONNECT_APPEND_SOURCE_OBJECT`.
+    /// binds.
     append_source: bool = false,
     _: u3 = 0,
 };
 
 /// A value a connection hands its method after the signal's own: what a
-/// scene can write, as Godot's binds are Variants.
+/// scene can write.
 pub const Bind = union(enum) {
     bool: bool,
     int: i64,
@@ -187,22 +185,22 @@ pub const Bind = union(enum) {
     }
 };
 
-/// How a connection is made. Godot's flags, and the arguments it drops and
+/// How a connection is made: its flags, and the arguments it drops and
 /// adds.
 pub const Options = struct {
     flags: Flags = .{},
     /// How many of the emitted arguments, from the last, the method is not
-    /// handed. Godot's `Callable.unbind`.
+    /// handed.
     unbinds: u8 = 0,
-    /// Handed to the method after the rest. Godot's `Callable.bind`.
+    /// Handed to the method after the rest.
     binds: []const Bind = &.{},
 };
 
-/// What a signal calls. Godot's `Callable`.
+/// What a signal calls: a method by name, or a Zig function.
 pub const Callable = union(enum) {
     /// A method, looked up by name on `target` when it is called.
     named: Named,
-    /// A Zig function: Godot's lambda. Never saved with a scene.
+    /// A Zig function. Never saved with a scene.
     zig: ZigFn,
 
     pub const Named = struct {
@@ -218,8 +216,7 @@ pub const Callable = union(enum) {
         id: usize,
     };
 
-    /// The method called `name` on `target`: Godot's
-    /// `Callable(target, "name")`.
+    /// The method called `name` on `target`.
     pub fn method(target: Entity, name: []const u8) Callable {
         return .{ .named = .{ .target = target, .name = name } };
     }
@@ -251,8 +248,8 @@ pub const Callable = union(enum) {
     }
 };
 
-/// A connection as it is kept. Godot's `get_signal_connection_list` entry,
-/// with the flags and the binds besides.
+/// A connection as it is kept: whose signal it is, what it calls, and its
+/// flags and binds.
 pub const Connection = struct {
     /// The entity whose signal it is.
     source: Entity,
@@ -268,8 +265,7 @@ pub const Connection = struct {
     count: u32,
     /// Whether one of the entity's components declared the signal when it
     /// was connected. One that did not is kept, listed and saved as it was
-    /// written, and never heard - as Godot keeps what a scene says of a
-    /// script it has not got.
+    /// written, and never heard.
     known: bool,
 };
 
@@ -287,8 +283,7 @@ pub const Key = struct {
     }
 };
 
-/// A signal of one entity: Godot 4's `Signal`, what `connect` and `emit` are
-/// asked of. A value, as cheap to make again as to keep. See `App.signal`
+/// A signal of one entity: what `connect` and `emit` are asked of. A value, as cheap to make again as to keep. See `App.signal`
 /// and `App.signalNamed`.
 pub const Signal = struct {
     app: *App,
@@ -301,14 +296,14 @@ pub const Signal = struct {
         return .{ .component = self.component, .name = self.name };
     }
 
-    /// Godot's `connect`: `callable` hears every emit from now on, until it
-    /// is disconnected or either entity dies. A second connect of the same
+    /// `callable` hears every emit from now on, until it is disconnected
+    /// or either entity dies. A second connect of the same
     /// callable is `error.AlreadyConnected`, unless `reference_counted`.
     pub fn connect(self: Signal, callable: Callable, options: Options) Error!void {
         return self.app.signals.connect(self.source, self.key(), callable, options);
     }
 
-    /// A Zig function, Godot's lambda: `fn (app: *App, args: Health.Hit) !void`.
+    /// A Zig function: `fn (app: *App, args: Health.Hit) !void`.
     /// Never saved with a scene.
     pub fn connectFn(self: Signal, comptime f: anytype, options: Options) Error!void {
         return self.connect(.function(f), options);
@@ -336,9 +331,9 @@ pub const Signal = struct {
         return listed;
     }
 
-    /// Godot's `emit`: every connection hears it when the emitting system
-    /// returns - a deferred one at the end of the frame - with these
-    /// arguments, in the declared order. Each is converted to what the
+    /// Every connection hears it when the emitting system returns - a
+    /// deferred one at the end of the frame - with these arguments, in the
+    /// declared order. Each is converted to what the
     /// method takes as it is called, so `.{ .damage = 5 }` does for an
     /// `f32`; `App.emit` checks them as it is compiled instead.
     pub fn emit(self: Signal, args: anytype) Error!void {
@@ -382,8 +377,8 @@ pub const Registered = struct {
     params: []const reflect.Param,
 };
 
-/// A method a connection to an entity can name: Godot's `get_method_list`
-/// entry, what an editor's method picker lists.
+/// A method a connection to an entity can name: what an editor's method
+/// picker lists.
 pub const MethodInfo = struct {
     /// What a scene calls the component whose method it is - `Script` for
     /// one the entity's script declares - and empty for one given to
@@ -464,14 +459,14 @@ pub const Signals = struct {
 
     /// Whether an emit calls anything. Off in an editor, which edits a scene
     /// rather than plays it: the connections are kept, saved and listed, and
-    /// nothing hears them. Godot's editor runs no scripts but tool ones.
+    /// nothing hears them.
     dispatch: bool = true,
 
     /// Every connection, by the entity whose signal it is, each list in the
     /// order its connections were made: the order they are heard in.
     from: std.AutoArrayHashMapUnmanaged(Entity, std.ArrayList(Connection)) = .empty,
 
-    /// Entities whose emits do nothing. Godot's `set_block_signals`.
+    /// Entities whose emits do nothing.
     blocked: std.AutoHashMapUnmanaged(Entity, void) = .empty,
 
     /// What `App.addMethod` was given.
@@ -638,8 +633,7 @@ pub const Signals = struct {
         return found[0..count];
     }
 
-    /// Every connection to `target`'s methods, from anything. Godot's
-    /// `get_incoming_connections`.
+    /// Every connection to `target`'s methods, from anything.
     pub fn connectionsTo(self: *const Signals, target: Entity, found: []Connection) []Connection {
         var count: usize = 0;
         for (self.from.values()) |list| {

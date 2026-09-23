@@ -86,9 +86,9 @@ fn move(app: *fx.App) !void {
 }
 ```
 
-**A scene is a world, and a node is an entity.** The shape is Godot's - open a
-window, put things in a scene, give them behaviour, draw - and the thing in
-the middle is an ECS rather than a tree of objects with virtual methods on
+**A scene is a world, and a node is an entity.** A game goes: open a window,
+put things in a scene, give them behaviour, draw - and the thing in the
+middle is an ECS rather than a tree of objects with virtual methods on
 them. Everything of one shape lives in one table, so a system is a loop over
 plain slices with no branch in it asking what this one is. That is
 [Fluxion ECS](https://github.com/kisstp2006/fluxion-ecs)' doing, not this
@@ -243,7 +243,7 @@ fn hurt(app: *fx.App) !void {
 ```
 
 - **An event is a value of any type**, and whoever reads that type hears it:
-  the sender names no receiver and the reader no sender. Bevy's events.
+  the sender names no receiver and the reader no sender.
 - **Sending only appends**, so a system can send from inside its own query's
   loop. Only from its own thread, though: a parallel `Query.each` worker
   cannot send.
@@ -266,8 +266,8 @@ try app.addMethod("_on_player_hit", onPlayerHit);
 fn onPlayerHit(app: *fx.App, self: fx.Entity, damage: f32, by: fx.Entity) !void { ... }
 fn shake(app: *fx.App, args: struct { damage: f32, by: fx.Entity }) !void { ... }
 
-const hit = app.signal(player, Health, .hit);                        // Godot: player.hit
-try hit.connect(.method(hud, "_on_player_hit"), .{});                // Callable(hud, "_on_player_hit")
+const hit = app.signal(player, Health, .hit);                        // the player's hit
+try hit.connect(.method(hud, "_on_player_hit"), .{});                // a method of hud's, by name
 try hit.connectFn(shake, .{ .flags = .{ .one_shot = true } });       // a lambda
 try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked as it is compiled
 ```
@@ -287,30 +287,31 @@ try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked 
   `signal.connections` list them, and `app.connectionCount` counts them.
 - **An emit is heard when the emitting system returns.** The calls run at the
   same sync point as `app.commands`, in the order the connections were
-  made, and never under the emitting system's query. **This is where it
-  differs from Godot**, whose emit calls at once.
+  made, and never under the emitting system's query. **No handler runs at
+  the emit itself.**
   - The arguments are copied as the emit happens, text included, so a
     handler reads what was said.
   - What a handler emits is heard in the same round.
   - Ten thousand calls in one round is taken as a loop: it is stopped and
     returns `error.TooManyCalls`.
 - **A `.deferred` connection is heard at the end of the frame**, after
-  `.late`, which is Godot's idle time.
-- **The rest of the flags are Godot's too**:
+  `.late`.
+- **The rest of the flags**:
   - `.persist`: saved with the scene;
   - `.one_shot`: gone as it is emitted;
   - `.reference_counted`: a second connect counts up, and each disconnect
     counts down;
-  - `.append_source`, from 4.5.
+  - `.append_source`: the emitting entity is handed after the emitted
+    arguments and before the binds.
 
-  `unbinds` and `binds` are `Callable.unbind` and `Callable.bind`, and an
-  `fx.Bind` is a bool, an integer, a float, text, a `Vec2`, a colour or an
-  entity.
+  `unbinds` is how many of the emitted arguments, from the last, the method
+  is not handed, and `binds` are handed to it after the rest. An `fx.Bind`
+  is a bool, an integer, a float, text, a `Vec2`, a colour or an entity.
 - **A method is found by name when it is called, not when it is connected.**
   The engine looks first among the methods the target's components list in
-  `reflect_methods`, then among those the game gave `app.addMethod`. Godot's
-  connect does not check either, and that is what lets a tool connect to
-  methods it cannot see.
+  `reflect_methods`, then among those the game gave `app.addMethod`. A
+  connect checks neither, and that is what lets a tool connect to methods it
+  cannot see.
   - A failed call is logged, counted in `app.signals.failures`, and the other
     connections are still heard. A call fails when the method is missing,
     the arguments are wrong, or the method returns an error.
@@ -320,8 +321,8 @@ try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked 
 - **Death undoes connections.** A call to an entity that has died since the
   emit is not made. The connections from and to the dead go at the end of
   the frame.
-- **A Zig function is never saved**, as Godot's lambdas are not.
-  `connectFn` with `.persist` returns `error.NotPersistable`.
+- **A Zig function is never saved**: `connectFn` with `.persist` returns
+  `error.NotPersistable`.
 - **By name, for code that was not compiled against the game** - an editor, a
   console, a scene:
   - `app.signalNamed(entity, "hit")`, `app.emitNamed`, `app.hasSignal`;
@@ -332,8 +333,7 @@ try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked 
   - `app.hasMethod` and `app.callMethodOn`.
 - **An editor turns them off.** With `app.signals.dispatch = false`, every
   connection is kept, saved and listed, and none is called.
-  `app.setBlockSignals(entity, true)` silences one entity, as Godot's
-  `set_block_signals` does.
+  `app.setBlockSignals(entity, true)` silences one entity.
 
 A scene keeps the connections made with `.persist`, by UUID, in a list of
 their own:
@@ -392,7 +392,7 @@ const turn = app.input.pointer.dx;
   allows. While locked, `input.pointer` holds still where it was and only
   `dx` and `dy` move; `.confined_hidden` keeps saying where it is.
 - **The pointer's shape is the system's**, `app.setCursorShape(.pointing_hand)`
-  and the rest of Godot's seventeen, or a picture of the game's own with
+  or any other of the seventeen, or a picture of the game's own with
   `app.setCursorImage(.{ .pixels = rgba, .width = 32, .height = 32, .hot_x = 4, .hot_y = 2 })`.
   A browser quietly keeps its arrow past 128 by 128, so a cursor a page
   will see should be small.
@@ -566,7 +566,7 @@ const fuse = try app.createTimer(1.5);         // one to connect to and forget
 try app.signal(fuse, fx.Timer, .timeout).connectFn(explode, .{});
 ```
 
-- **Godot 3's Timer, as a component.**
+- **A timer is a component.**
   - `wait_time`, `one_shot`, `autostart`, `paused` and `time_left`.
   - `start`, `stop` and `isStopped`.
   - The `timeout` signal, and it is saved with a scene.
@@ -578,8 +578,8 @@ try app.signal(fuse, fx.Timer, .timeout).connectFn(explode, .{});
 - **No time, no count.** A paused game's timers wait, and an editor, which
   gives its world no time, starts none in the scene it edits. A timer read
   back from a scene saved while it ran goes on from where it was.
-- **`app.createTimer(seconds)`** is Godot's `create_timer`: a one-shot timer
-  on an entity of its own, which goes once it has said `timeout`.
+- **`app.createTimer(seconds)`** makes a one-shot timer on an entity of its
+  own, which goes once it has said `timeout`.
 
 ## 📱 In the background
 
@@ -655,13 +655,12 @@ _ = try world.spawnWith(.{
 - **A transform's `parent` attaches one entity to another**, so a turret rides
   on a tank and a health bar rides over an enemy. The numbers in a transform
   are *local* - in the parent's space, and in the world's only when there is
-  no parent - which is Unity's `Transform` and Godot's `Node2D`.
-  `app.worldTransform(entity)` is the other one, and it costs a walk up the
-  chain rather than a field read. `inherit_rotation = false` is the shadow
-  that does not tip over. **What hangs from something goes with it**: despawn
-  the tank and the turret goes at the end of the frame, and the barrel on the
-  turret with it - Unity's rule and Godot's.
-- **Godot's Node2D calls work through the chain**, on the app:
+  no parent. `app.worldTransform(entity)` is the other one, and it costs a
+  walk up the chain rather than a field read. `inherit_rotation = false` is
+  the shadow that does not tip over. **What hangs from something goes with
+  it**: despawn the tank and the turret goes at the end of the frame, and the
+  barrel on the turret with it.
+- **Calls on the app work through the chain**:
   - `globalPosition`, `globalRotation`, `globalScale` and `worldTransform` read where an entity is in the world, and their `set` twins put it there under the parents it keeps.
   - `globalTranslate` moves it by an amount in the world, and `toLocal`/`toGlobal` take a point in and out of its space.
   - `lookAt` turns its `+x` to a point, and `getAngleTo` says how far that is.
@@ -671,11 +670,10 @@ _ = try world.spawnWith(.{
 - **A parent's children keep an order**: `app.childrenOf(parent, &buf)` in
   it - `.none` for the roots - `app.siblingIndex(entity)` for one's place, and
   `app.setSiblingIndex(entity, i)` to move one, the ones from there on moving
-  along: Godot's `get_children`, `get_index` and `move_child`. A child never
-  placed comes after the ones that were, in the order it was made. A scene
-  writes its list in this order and a read keeps it, so the tree comes back as
-  it was, after whatever was in the world already. `app.siblingBefore` sorts
-  siblings a caller has grouped itself.
+  along. A child never placed comes after the ones that were, in the order it
+  was made. A scene writes its list in this order and a read keeps it, so the
+  tree comes back as it was, after whatever was in the world already.
+  `app.siblingBefore` sorts siblings a caller has grouped itself.
 - **An `Animation` is a sheet and a rate**, and the engine writes the cell it
   lands on into `Sprite.region` once a frame. One sheet holds a walk, an idle
   and an attack; swapping between them is writing two numbers.
@@ -738,7 +736,7 @@ const hurts = app.tileDataAt(map, app.pointerInWorld(), "damage");     // what t
 
 - **A `TileMap` is a grid of cells over a tile set**, drawn with the sprites
   of its `layer` and sorted by its `order`, tinted, and stopping what its
-  `collision_layer` and `collision_mask` say. Godot's TileMap node.
+  `collision_layer` and `collision_mask` say.
 - **A cell is four bytes**: which source of the set, the column and row of
   the tile in it, and whether it is flipped across, flipped over or turned -
   `Cell.flip_h`, `flip_v` and `transpose`, three of which make every quarter
@@ -781,15 +779,15 @@ const hurts = app.tileDataAt(map, app.pointerInWorld(), "damage");     // what t
   say is its default, and is not written back.
 - **Data layers are values a tile carries under a name** - how much it
   hurts, whether it is water - whole numbers, numbers or truths, eight at
-  most: Godot's custom data layers. `app.tileData(map, x, y, "damage")` asks
-  a cell, `app.tileDataAt(map, point, "damage")` the cell under a point of
-  the world, and a Flux script gets the number or the truth itself:
+  most. `app.tileData(map, x, y, "damage")` asks a cell,
+  `app.tileDataAt(map, point, "damage")` the cell under a point of the world,
+  and a Flux script gets the number or the truth itself:
   `app.tileDataAt(ground, vec2(x, y + 20.0), "water") == true`.
 - **`probability`** is how often a random brush picks the tile against the
   others it picks among: an editor's, since a game places its own tiles.
 - **Where a map is**: `app.cellAt(map, point)` is the cell a point of the
   world is in, and `app.usedCells(map)` the smallest rectangle holding every
-  painted cell - Godot's `get_used_rect`.
+  painted cell.
 - **A tile set's file can be written back**: `app.tile_sets.textOf` and
   `save` are what an editor keeps undo steps with and saves, and
   `reloadTileSet` reads one again - everything built from it, a map's body
@@ -879,7 +877,7 @@ const play = try app.world.spawnWith(.{ fx.Control{ .parent = root }, fx.Button.
 try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{});   // menu: an entity whose script has start()
 ```
 
-- **Godot's Control nodes, as components.** A `Control` is the box - its
+- **Controls are components.** A `Control` is the box - its
   parent, its size as fit, fixed, grow, a share or a ratio, and in the flow
   of its parent or anchored to one of nine places in it. What it is comes
   beside it: `Label`, `Button`, `CheckBox`, `LineEdit`, `Slider`,
@@ -888,13 +886,13 @@ try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{}); 
   `CenterContainer` and `ScrollContainer`. A root is a `Control` with a
   `CanvasLayer` over the screen, or a `Viewport` placed in the world.
   `app.useControlNodes()` lays them out into the interface every frame.
-- **They say what happened as signals**, Godot's names: `pressed` and
+- **They say what happened as signals**: `pressed` and
   `toggled` on a button, `toggled` on a check box, `changed` and `submitted`
   on a line edit, `changed` on a slider, `tab_changed` on tabs - connected in
   code or kept in a scene.
 - **A button is one thing**: its words, its icon, whether it stays down,
   and whether it is down - not a button with a label inside it.
-- **How they look is a file**, `.theme`, Godot's Theme resource:
+- **How they look is a file**, `.theme`:
 
   ```json
   {
@@ -932,7 +930,7 @@ try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{}); 
   is built on; then what the control says of itself; then every theme's word
   on the state it is in. So a state a theme does not mention looks as
   `normal` does, and a `Danger` button's hover is its `Button`'s until it
-  says one of its own, as Godot finds a style by its state's name.
+  says one of its own: a style is found by its state's name.
 - **A control's theme is the nearest one named up its tree**, and under
   all of them is the project's: `"gui": { "theme": "res://ui/game.theme" }`
   in `project.fluxion`, which `app.projectTheme()` reads the first time it is
@@ -1050,21 +1048,20 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   a compound shape is a body and a few children.
 - **A collider with no size is its sprite's**, pivot and all, and the
   transform's scale scales it. `.rectangle(half_width, half_height)` says
-  otherwise, in half sizes as Godot's `extents`, and so does `.circle(r)`.
-- **Godot 3's names and rules.**
+  otherwise, in half sizes, and so does `.circle(r)`.
+- **Names and rules.**
   - Two colliders touch when either one's `collision_mask` has the other's `collision_layer`: 32 bits, one for each layer. The project file names them.
   - A pair's `friction` is the smaller of the two, and its `bounce` the two added, no more than one.
   - A body's `linear_damp` and `angular_damp` of minus one take the project's.
   - `continuous_cd` sweeps a fast body against other moving bodies too; the level stops one either way.
 - **A platform to jump up through** is a collider with `one_way_collision`.
   - What comes onto it from its entity's `-y`, up the screen, stands on it; what comes from below or the side goes through.
-  - It is decided when the two first touch and kept while they touch, as Godot 3.6 decides it.
+  - It is decided when the two first touch and kept while they touch.
   - Turn the entity, or the collider's `rotation`, and the side turns with it.
 - **`disabled` takes a collider out** until it is turned back on: nothing
   touches it, and what stood on it falls.
 - **Two bodies can be kept apart by name**:
-  `app.addCollisionExceptionWith(a, b)`, Godot's collision exception, whatever
-  their layers say.
+  `app.addCollisionExceptionWith(a, b)`, whatever their layers say.
   - Counted: `removeCollisionExceptionWith` takes one back.
   - `collisionExceptionsOf(body, &buffer)` lists them.
   - It lasts through a body made anew and goes with either entity.
@@ -1087,7 +1084,7 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
 - **How the world moves is the project's**: `physics_2d` in `project.fluxion`
   - and its layers' names, `layer_names.physics_2d` - or `Options.physics_2d`
   for a game with none.
-  - Godot 3's numbers by default: gravity 98 down the screen, damping 0.1 and 1.
+  - By default, gravity is 98 down the screen, and damping 0.1 and 1.
   - A game of a hundred pixels to the metre that wants Earth's gravity says `.default_gravity = 981`.
 - **Everything else is `app.physics`**: settings, and joints between the
   handles `app.bodyIdOf` gives. `Options.physics` starts at a hundred units a
@@ -1119,12 +1116,12 @@ if (app.hasOverlappingBodies(door)) open(app, door);
 ```
 
 - **An `Area2D` is a place that tells what is in it and pushes nothing**:
-  Godot's Area2D. A trigger, a pickup, a hurtbox, a door's threshold. Its
-  shapes are its own `Collider2D` and the ones hanging from it, every one of
-  them a sensor whatever its collider says, and in the physics it is a
-  kinematic body that goes where its transform goes.
-- **It says eight things**, Godot's, with shape indices replaced by the
-  colliders' entities: `body_entered` and `body_exited`,
+  a trigger, a pickup, a hurtbox, a door's threshold. Its shapes are its own
+  `Collider2D` and the ones hanging from it, every one of them a sensor
+  whatever its collider says, and in the physics it is a kinematic body that
+  goes where its transform goes.
+- **It says eight things**, naming each collider by its entity:
+  `body_entered` and `body_exited`,
   `area_entered` and `area_exited`, and a `*_shape_entered` and
   `*_shape_exited` for each, which name the two colliders as well.
   `body_entered` comes once for a body however many of its shapes are in
@@ -1134,8 +1131,8 @@ if (app.hasOverlappingBodies(door)) open(app, door);
   when that has an `Area2D` or a `RigidBody2D`, else the nearest one above
   it that has, else itself, being its own static body.
 - **Who is told is the asking side's business.** An area reports what its
-  own shape's `mask` takes, whatever the other side's mask says, so Godot's
-  hitbox and hurtbox work: a hitbox is on the hitboxes layer and asks for
+  own shape's `mask` takes, whatever the other side's mask says, so a
+  hitbox and a hurtbox work: a hitbox is on the hitboxes layer and asks for
   nothing, a hurtbox asks for hitboxes and is on no layer, and only the
   hurtbox is told. An area is reported to another area only while its
   `monitorable` is true.
@@ -1143,7 +1140,7 @@ if (app.hasOverlappingBodies(door)) open(app, door);
   `app.overlappingAreas(area, &buf)`, `app.hasOverlappingBodies(area)`,
   `app.hasOverlappingAreas(area)`, `app.overlapsBody(area, body)` and
   `app.overlapsArea(area, other)`. With `monitoring` off they are empty and
-  say so in the log once, where Godot errors every time.
+  say so in the log once.
 - **`monitoring` turned off leaves what was in it with an exit**, and turning
   it on again finds what is in it and says so. So do a mask changed, an area
   that becomes monitorable, and a component taken away: what an area says is
@@ -1152,11 +1149,11 @@ if (app.hasOverlappingBodies(door)) open(app, door);
   that has died, as an ended contact does.
 - **The signals are emitted after the step and heard before the systems of
   the next one**, so a `.fixed` system that moves a player sees the doors it
-  opened on its next turn. Godot flushes them at the start of the next tick.
+  opened on its next turn.
 - **An entity is an area or a body, not both.** One with an `Area2D` and a
   `RigidBody2D` is a body, its area does nothing, and the log says so once.
-- **Godot's `priority`, its gravity and damping overrides and its audio bus
-  are not here**: this is what overlaps, not a place that changes physics.
+- **An area has no `priority`, no gravity or damping overrides and no audio
+  bus**: this is what overlaps, not a place that changes physics.
   `input_pickable` is here and does nothing yet; picking comes next.
 
 ### 🖱️ Picking: what the pointer is on
@@ -1165,7 +1162,7 @@ if (app.hasOverlappingBodies(door)) open(app, door);
 const lamp = try app.world.spawnWith(.{
     fx.Transform2D.at(200, 120),
     fx.Sprite.of(bulb),
-    fx.Area2D{},            // input_pickable is true, as Godot's is
+    fx.Area2D{},            // input_pickable is true on an area
     fx.Collider2D{},        // the sprite's size
 });
 try app.addMethod("_on_input_event", onLampInput);
@@ -1181,10 +1178,10 @@ fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.En
 
 - **Once a frame, after the `.input` stage and before the first fixed step.**
   A game's own `.input` system sees the pointer first and can keep it with
-  `app.input.setAsHandled()`; picking then does nothing at all. Godot picks
-  at the next physics tick, so ours has no lag.
+  `app.input.setAsHandled()`; picking then does nothing at all. It does not
+  wait for a physics tick, so it has no lag.
 - **What can be picked** is an `Area2D` or a `RigidBody2D` with
-  `input_pickable` - true on an area and false on a body, as in Godot -
+  `input_pickable` - true on an area and false on a body -
   through a collider that holds the point, is on a layer (a `collision_layer`
   of nought is never picked, and there is no picking mask), and whose object,
   if it is drawn at all, is visible. A lone `Collider2D`, which is its own
@@ -1196,29 +1193,27 @@ fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.En
   is the same list, for a game that would rather read it itself, and
   `app.input.buttonMask()` says what is held.
 - **What is on top hears first**: higher `Sprite.layer`, then higher
-  `Sprite.order`, then the later entity. Godot leaves the order to its
-  broadphase unless asked; ours sorts unless
+  `Sprite.order`, then the later entity. It sorts unless
   `app.physics_object_picking_sort` is false.
-- **Each shape under the point hears**, as Godot does, so an object with two
+- **Each shape under the point hears**, so an object with two
   colliders under the pointer hears twice, with `shape` saying which. With
   `app.physics_object_picking_first_only` only the first hears.
-- **A handler stops the rest** by calling `app.input.setAsHandled()`, which
-  is Godot 4.2's behaviour: the objects under it hear nothing of that event.
+- **A handler stops the rest** by calling `app.input.setAsHandled()`: the
+  objects under it hear nothing of that event.
   The handlers run as each object is told, so the next one sees it.
 - **`mouse_entered` and `mouse_exited`** come with the pointer, and
   `mouse_shape_entered` and `mouse_shape_exited` for each collider. Hover is
   worked out on every frame, event or no event, so a thing that moves under
   a still pointer is entered; a thing that dies under it drops out
-  silently, as Godot's freed object does; and one that stops being pickable
-  is left at the next pass.
+  silently; and one that stops being pickable is left at the next pass.
 - **Nothing is picked** while picking is off, while the cursor is `.locked`,
   while the pointer is outside the window, or while the interface wants it -
-  `app.ui.wantsPointer()`, which is Godot's STOP control. In each case what
-  was hovered is left with its exits.
+  `app.ui.wantsPointer()`. In each case what was hovered is left with its
+  exits.
 - **An editor turns it off** with `app.physics_object_picking = false`,
   beside `app.signals.dispatch = false`.
-- **`event.position` is in the window's pixels**, as Godot's viewport
-  coordinates are. `app.screenToWorld(x, y)` takes it into the world.
+- **`event.position` is in the window's pixels**. `app.screenToWorld(x, y)`
+  takes it into the world.
 
 Not here yet: polygons, joints as components, and a view of the colliders in
 `debug`.
@@ -1235,7 +1230,7 @@ const font = try app.assets.loadFont("C:/Windows/Fonts/segoeui.ttf", .{}); // th
 game --root ../my-game          # or App.Options.root; the working directory otherwise
 ```
 
-- **A `res://` path is the project's**, as in Godot: `res://art/hero.png` is
+- **A `res://` path is the project's**: `res://art/hero.png` is
   `art/hero.png` under the project's root, whichever directory the program
   was started in. Any other path is the operating system's, as it always
   was - a system font, where a screenshot goes - and every call that takes a
@@ -1247,7 +1242,7 @@ game --root ../my-game          # or App.Options.root; the working directory oth
   it by any spelling, and a scene never holds one machine's directories. A
   `res://` path that climbs out with `..` is `error.OutsideProject`.
 - **A file can have a UUID**, kept beside it in a `.uid` file -
-  `art/hero.png.uid`, one line, `uid://...` - as Godot 4 keeps its.
+  `art/hero.png.uid`, one line, `uid://...`.
   Saving a scene gives one to every loaded file of the project's that has
   none, and a scene names each file by its UUID as well as its path; reading
   goes by the UUID first, so a texture moved or renamed together with its
@@ -1311,7 +1306,7 @@ try fx.Project.writeSettings(gpa, io, "games/pasture", renamed);                
 const mine = try settings.section(MyGame, "my_game", arena);                          // a game's own section
 ```
 
-- **`project.fluxion` is a project's folder**, as `project.godot` is Godot's.
+- **`project.fluxion` marks a project's folder.**
   A game and an editor read the same file: `App.create` reads the one at the
   root - `app.project.settings` - before anything opens, and a project
   manager lists projects with `Project.readSettings`. A root without one
@@ -1323,7 +1318,7 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   `attr.Advanced` and `attr.Restart` for what a setting is besides its value.
   `fx.settings_file` reads and writes any such struct, and an editor draws
   its Project Settings from the same fields: a new setting is a new field.
-- **A file says only what differs**, as Godot's does: a setting at its
+- **A file says only what differs**: a setting at its
   default is not written, nor a section all of whose settings are. A key
   naming no section of this build - a newer one's, or a game's own - is kept
   and written back; the game reads its own with `settings.section`. A key
@@ -1588,9 +1583,9 @@ as data, and the engine hands its components and its calls out through it.
 
 ## ✍️ Scripts
 
-Flux scripts on entities, the way Godot puts a script on a node. A `Script`
-component names a `.flux` file and a struct in it, and the entity gets an
-instance of that struct with itself in it as `self.entity`.
+Flux scripts go on entities. A `Script` component names a `.flux` file and a
+struct in it, and the entity gets an instance of that struct with itself in
+it as `self.entity`.
 
 ```zig
 try app.useScripts(.{});
@@ -1658,7 +1653,7 @@ struct Door {
   diagnostics, and it needs no `useScripts`.
 - **An editor has the scripts and runs none of them**, with
   `useScripts(.{ .run = false })`.
-  - Each file is compiled and never run: not its top level, a default, `ready` or `update`. So a script cannot change the scene being edited, as Godot's editor runs only `tool` scripts.
+  - Each file is compiled and never run: not its top level, a default, `ready` or `update`. So a script cannot change the scene being edited.
   - Its structs' signals and methods are still listed and connected to, and the scene still writes the script.
 
 ## 🧪 It runs with no window and no GPU
@@ -1819,10 +1814,10 @@ Here, and checked by the tests:
   clock moved on by one step.
 - Events of any type, sent from inside a query and read once by each
   reader over the two frames they live.
-- Signals on components, as Godot 4 has them:
+- Signals on components:
   - connections to methods by name or to Zig functions, heard when the
     emitting system returns or, deferred, at the end of the frame;
-  - Godot's flags, unbinds and binds;
+  - flags, unbinds and binds;
   - loops stopped, failures counted, and the dead let go;
   - everything by name for an editor;
   - connections kept in scenes, including ones this build does not know.
@@ -1830,7 +1825,7 @@ Here, and checked by the tests:
   edges that a fixed step hears exactly once.
 - Controls as data: an `AxisBinding` holds two keys, a second two, a stick
   and a d-pad, lives in a component and saves with the world.
-- Godot's Timer as a component, with `timeout` and `app.createTimer`;
+- A timer as a component, with `timeout` and `app.createTimer`;
   `app.single` for the component there is
   one of, and engine shortcuts for quitting and fullscreen, off unless asked
   for.
@@ -1887,8 +1882,8 @@ Here, and checked by the tests:
   index, written compactly in scenes; `.tileset` files with sheets, shapes
   the physics stops at, probabilities and data layers asked for from Zig and
   from Flux.
-- Controls as components, laid out into the interface with Godot's
-  containers and signals, and drawn from `.theme` files: types, variations,
+- Controls as components, laid out into the interface with containers and
+  signals, and drawn from `.theme` files: types, variations,
   states, base themes, a project theme under all and a control's own
   overrides over them.
 - The interface: fluxion-ui laid out by `.ui` systems into one root, drawn
@@ -1903,10 +1898,10 @@ Here, and checked by the tests:
   with them; boxes and circles sized by their sprites; compound bodies from
   children; places and speeds written back after each step; contacts once per
   frame or per step; rays, points and boxes asked in entities.
-- Areas: what is in a place, as Godot has it - the eight overlap signals,
+- Areas: what is in a place - the eight overlap signals,
   the shapes forced to sensors, the asking side's mask deciding who is
   told, monitoring turned off and on again, and the six questions.
-- Picking: what the pointer is on and what it did there, as Godot has it -
+- Picking: what the pointer is on and what it did there -
   `input_event`, `mouse_entered` and their shape pairs, the topmost first,
   a handler that stops the rest, hover worked out every frame, and the
   pointer's own events with the wheel as buttons.
@@ -1996,7 +1991,7 @@ before this package existed - the seam was cut for it deliberately.
 ## 🧩 What counts as a component
 
 In 2D: `Transform2D`, `Sprite`, `Text2D`, `Animation`, `Camera2D`,
-`RigidBody2D`, `Collider2D`, `Area2D` and `TileMap`; Godot's `Timer`; and the
+`RigidBody2D`, `Collider2D`, `Area2D` and `TileMap`; `Timer`; and the
 interface's `Control` with what goes beside it - see
 [Controls and themes](#-controls-and-themes). Each one is something a
 person making a game would name, which is the test. A map's chunks are
@@ -2004,21 +1999,19 @@ entities of the engine's own, which a scene never writes.
 
 Two things that used to be on that list are not any more, and the reason is
 the same for both. `Parent` was a component holding a link and an offset; it
-is a field of `Transform2D` now, because parenting is what a transform *does* -
-Unity puts it on `Transform`, Godot puts it in the tree - and nobody building
-a scene thinks "I will add a Parent to this". `Previous2D` held where
-something was a step ago; that is the engine's own bookkeeping and a game
-should never have to declare it, so it is a flag on the transform and a table
-beside the world.
+is a field of `Transform2D` now, because parenting is what a transform *does*,
+and nobody building a scene thinks "I will add a Parent to this".
+`Previous2D` held where something was a step ago; that is the engine's own
+bookkeeping and a game should never have to declare it, so it is a flag on
+the transform and a table beside the world.
 
 The rule that falls out: **a component is a thing, not a mechanism.** If it
 exists so that the engine can do its job rather than so that the game can say
 what something is, it belongs inside another component or beside the world.
 
-**A name is not a component either**, although Bevy makes it one. It is what
-an entity is called rather than something it has - Unity's `GameObject.name` -
-so the engine keeps it beside the world, the way it keeps where things were a
-step ago:
+**A name is not a component either.** It is what an entity is called rather
+than something it has, so the engine keeps it beside the world, the way it
+keeps where things were a step ago:
 
 ```zig
 fn spawn(app: *fx.App) !void {

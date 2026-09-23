@@ -56,10 +56,10 @@
 //!
 //! **The camera and the player are found by name.** `app.setName(camera,
 //! "camera")` once, when it is spawned, and `app.find("camera")` in every
-//! system that wants it. The name belongs to the entity, as a Unity
-//! GameObject's does, and is not a component - so naming the camera does not
-//! move it to another table, and `find` hands back the one thing called that
-//! rather than the first thing a query happened to reach.
+//! system that wants it. The name belongs to the entity, and is not a
+//! component - so naming the camera does not move it to another table, and
+//! `find` hands back the one thing called that rather than the first thing a
+//! query happened to reach.
 //!
 //! **The world can be written down.** `--save-scene` writes everything in it
 //! when the run ends - every entity, its name, and its components, the
@@ -560,8 +560,8 @@ fn followPlayer(app: *App) !void {
     const half_view_y = height / (2 * zoom);
 
     // Where it wants to be: over the player, pushed by however far the view
-    // has been dragged, and held inside the field - which is Godot's camera
-    // limits and the difference between a game and a demonstration. Without
+    // has been dragged, and held inside the field - the camera's limits, and
+    // the difference between a game and a demonstration. Without
     // it, a player walking into a corner is looking at half a screen of
     // nothing.
     const want_x = insideField(looking_at.x + follow.peek_x, half_view_x, field_width);

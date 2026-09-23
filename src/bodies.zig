@@ -82,8 +82,8 @@ mark: u32 = 0,
 /// Entities told already that they cannot be a body and an area at once.
 refused: std.AutoHashMapUnmanaged(Entity, void) = .empty,
 /// Pairs of bodies kept from touching, with how many times each was asked:
-/// Godot's collision exceptions, by entity, so they outlast a body made
-/// anew. The physics is told of each pair once, while both bodies are there.
+/// the collision exceptions, by entity, so they outlast a body made anew.
+/// The physics is told of each pair once, while both bodies are there.
 exceptions: std.AutoArrayHashMapUnmanaged(EntityPair, u32) = .empty,
 tile_bodies: std.AutoHashMapUnmanaged(Entity, TileBody) = .empty,
 
@@ -469,7 +469,7 @@ pub const ExceptionError = error{
     SameBody,
 } || Allocator.Error;
 
-/// Keep two bodies from touching: Godot's `add_collision_exception_with`.
+/// Keep two bodies from touching, whatever their layers and masks say.
 /// Counted, so two calls take two removals. It lasts until then or until
 /// either entity is gone, a body made anew included.
 pub fn addException(self: *Bodies, app: *App, a: Entity, b: Entity) ExceptionError!void {
@@ -618,8 +618,8 @@ fn owns(world: *ecs.World, e: Entity) bool {
     return world.has(e, RigidBody2D) or world.has(e, Area2D);
 }
 
-/// Which collision object a collider belongs to: Godot's `CollisionObject2D`
-/// of a shape. Its own entity when that is a body or an area, else the
+/// Which collision object a collider belongs to: the body or area that owns
+/// a shape. Its own entity when that is a body or an area, else the
 /// nearest one above it that is, else its own entity, which is its own
 /// static body. Null when it is neither a collider nor an object itself, or
 /// when the chain above it is broken.
@@ -1001,8 +1001,8 @@ pub fn overlapBox(self: *const Bodies, app: *App, min: Vec2, max: Vec2, found: [
 const scene = @import("scene.zig");
 
 /// Earth's pull at a hundred units to the metre, with nothing slowing a
-/// body down: what these tests' numbers were worked out for. The defaults,
-/// Godot 3's, have tests of their own.
+/// body down: what these tests' numbers were worked out for. The defaults
+/// have tests of their own.
 pub const earth: @import("Project.zig").Physics2D = .{ .default_gravity = 981, .default_linear_damp = 0, .default_angular_damp = 0 };
 
 fn headless(frame_time: f32) !*App {
@@ -1259,7 +1259,7 @@ test "a body's damping of minus one is the project's, and its own is its own" {
     const drifting = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.circle(4) });
     const braked = try app.world.spawnWith(.{ Transform2D.at(50, 0), RigidBody2D{ .linear_damp = 3, .angular_damp = 0 }, Collider2D.circle(4) });
     try app.syncBodies();
-    // Godot 3's, with no project file to say otherwise.
+    // The defaults, with no project file to say otherwise.
     try testing.expectEqual(@as(f32, 0.1), app.bodyOf(drifting).?.linear_damping);
     try testing.expectEqual(@as(f32, 1), app.bodyOf(drifting).?.angular_damping);
     try testing.expectEqual(@as(f32, 3), app.bodyOf(braked).?.linear_damping);
@@ -1270,7 +1270,7 @@ test "a body's damping of minus one is the project's, and its own is its own" {
     try testing.expectEqual(@as(f32, 0.1), app.bodyOf(braked).?.linear_damping);
 }
 
-test "gravity is the project's, and the rules for touching are Godot 3's whatever a game passes" {
+test "gravity is the project's, and the rules for touching are the engine's whatever a game passes" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     try testing.expectEqual(@as(f32, 98), app.physics.gravity.y);

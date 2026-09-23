@@ -117,7 +117,7 @@ test "an emit is heard when the emitting system returns, with its arguments" {
     _ = try app.step();
     try testing.expect(!Emitter.inside_query);
     try testing.expectEqual(@as(usize, 2), Heard.len);
-    // In the order they were connected, Godot 4's.
+    // In the order they were connected.
     try testing.expectEqual(@as(u8, 1), Heard.calls[0].who);
     try testing.expectEqual(@as(u8, 2), Heard.calls[1].who);
     try testing.expectEqual(@as(f32, 5), Heard.calls[0].damage);

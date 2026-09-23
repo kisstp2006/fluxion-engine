@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! A grid of tiles from a tile set: Godot's TileMap.
+//! A grid of tiles from a tile set: the `TileMap` component.
 //!
 //! ```zig
 //! const terrain = try app.loadTileSet("res://art/terrain.tileset");
@@ -44,7 +44,7 @@ pub const TileMap = extern struct {
     order: f32 = 0,
     visible: bool = true,
     /// The layers its solid tiles are on, and those they stop. A map's own,
-    /// as Godot 3 keeps them on the TileMap rather than on each tile.
+    /// kept on the TileMap rather than on each tile.
     collision_layer: u32 = 1,
     collision_mask: u32 = 1,
     friction: f32 = 0.5,
@@ -77,7 +77,7 @@ pub const Cell = extern struct {
     pub const flip_h: u8 = 1 << 1;
     pub const flip_v: u8 = 1 << 2;
     /// Mirrored along its top-left to bottom-right diagonal, which with the
-    /// flips is every quarter turn. Tiled calls this the diagonal flip.
+    /// flips is every quarter turn: the diagonal flip.
     pub const transpose: u8 = 1 << 3;
 
     pub const reflect_name = "Cell";
@@ -172,10 +172,10 @@ pub const TileChunk = extern struct {
 /// both in fractions from the top left.
 ///
 /// **The transpose comes first, and the flips after it**, in the cell's own
-/// frame - Tiled's rule, and the one that makes "turn it a quarter" the same
-/// three flags wherever the tile came from. Everything that has to agree on
-/// which way round a cell is goes through here: the renderer places its
-/// corners this way, and the physics places the corners of a tile's shape.
+/// frame - the rule that makes "turn it a quarter" the same three flags
+/// wherever the tile came from. Everything that has to agree on which way
+/// round a cell is goes through here: the renderer places its corners this
+/// way, and the physics places the corners of a tile's shape.
 pub fn place(cell: Cell, u: f32, v: f32) [2]f32 {
     var x = u;
     var y = v;

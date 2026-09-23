@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! Godot 3's Timer: a component that counts down, and says `timeout` when it
-//! runs out.
+//! A `Timer`: a component that counts down, and says `timeout` when it runs
+//! out.
 //!
 //! ```zig
 //! const door = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Timer{ .wait_time = 2, .one_shot = true, .autostart = true } });
@@ -77,7 +77,6 @@ pub const Timer = extern struct {
 
     /// Start counting from the top: from `seconds`, which becomes
     /// `wait_time`, or with nought or less from `wait_time` as it is.
-    /// Godot's `start(time_sec = -1)`.
     pub fn start(self: *Timer, seconds: f32) void {
         if (seconds > 0) self.wait_time = seconds;
         self.time_left = @max(self.wait_time, 0);

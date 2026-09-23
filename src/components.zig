@@ -48,10 +48,9 @@ pub const Color = @import("color.zig").Color;
 /// });
 /// ```
 ///
-/// The numbers are local - in the parent's space, as with Unity's
-/// `Transform` and Godot's `Node2D` - and `App.worldTransform` gives the
-/// world's. The parent is a field rather than a component, so gaining one
-/// does not move the entity to another archetype.
+/// The numbers are local - in the parent's space - and `App.worldTransform`
+/// gives the world's. The parent is a field rather than a component, so
+/// gaining one does not move the entity to another archetype.
 pub const Transform2D = extern struct {
     x: f32 = 0,
     y: f32 = 0,
@@ -539,8 +538,7 @@ pub const RigidBody2D = extern struct {
     linear_velocity: math.Vec2 = .zero,
     /// Radians a second, clockwise on screen.
     angular_velocity: f32 = 0,
-    /// How much of its speed it loses a second, as Godot's: 0.1 slows it by
-    /// a tenth. Minus one takes the project's `default_linear_damp`.
+    /// How much of its speed it loses a second: 0.1 slows it by a tenth. Minus one takes the project's `default_linear_damp`.
     linear_damp: f32 = -1,
     /// The same for its spin; minus one is `default_angular_damp`.
     angular_damp: f32 = -1,
@@ -548,11 +546,11 @@ pub const RigidBody2D = extern struct {
     gravity_scale: f32 = 1,
     fixed_rotation: bool = false,
     can_sleep: bool = true,
-    /// Godot's continuous collision detection. Off, a fast body is still
+    /// Continuous collision detection. Off, a fast body is still
     /// stopped by the level; on, by the other moving bodies too.
     continuous_cd: ContinuousCd = .disabled,
 
-    /// Whether the pointer can pick it. Godot keeps it false on a body and
+    /// Whether the pointer can pick it: false on a body by default, and
     /// true on an `Area2D`; picking asks it of whichever object a collider
     /// belongs to.
     input_pickable: bool = false,
@@ -561,12 +559,12 @@ pub const RigidBody2D = extern struct {
     /// pushes it; dynamic is pushed by everything.
     pub const Type = physics.BodyType;
 
-    /// Godot's names: a ray and a shape cast are both one sweep here.
+    /// A ray and a shape cast are both one sweep here.
     pub const ContinuousCd = enum(u8) { disabled, cast_ray, cast_shape };
 
     /// What the pointer did over it, and which of its colliders it was
-    /// over: Godot's CollisionObject2D signals. A body is picked only with
-    /// `input_pickable`; see `App.physics_object_picking`.
+    /// over. A body is picked only with `input_pickable`; see
+    /// `App.physics_object_picking`.
     pub const signals = .{
         .input_event = struct { event: pointer.InputEvent, shape: Entity },
         .mouse_entered = struct {},
@@ -587,19 +585,18 @@ pub const RigidBody2D = extern struct {
     };
 };
 
-/// The shape a body collides with: Godot's CollisionShape2D. On an entity
-/// with a `RigidBody2D` it is that body's, and on one hanging from such an
-/// entity it is part of that body, where the entity is. Anywhere else it is
-/// a static body of its own: a wall, a floor tile.
+/// The shape a body collides with. On an entity with a `RigidBody2D` it is
+/// that body's, and on one hanging from such an entity it is part of that
+/// body, where the entity is. Anywhere else it is a static body of its own:
+/// a wall, a floor tile.
 ///
 /// Two colliders touch when either one's `collision_mask` has the other's
-/// `collision_layer`, as in Godot 3. A pair's friction is the smaller of
-/// the two, and its bounce the two added, no more than one.
+/// `collision_layer`. A pair's friction is the smaller of the two, and its
+/// bounce the two added, no more than one.
 pub const Collider2D = extern struct {
     shape: Shape = .rectangle,
-    /// Half a rectangle's width and height, before the transform's scale:
-    /// Godot's `extents`. Zero takes the sprite's size, and centres the
-    /// shape on the sprite.
+    /// Half a rectangle's width and height, before the transform's scale.
+    /// Zero takes the sprite's size, and centres the shape on the sprite.
     extents: math.Vec2 = .zero,
     /// A circle's. Zero is half the sprite's width, centred on the sprite.
     radius: f32 = 0,
@@ -643,7 +640,7 @@ pub const Collider2D = extern struct {
         .collision_mask = .{ attr.Layers{ .names = .physics_2d }, attr.Doc{ .text = "The layers it looks for" } },
     };
 
-    /// A rectangle of these half sizes: Godot's `extents`.
+    /// A rectangle of these half sizes, its `extents`.
     pub fn rectangle(half_width: f32, half_height: f32) Collider2D {
         return .{ .extents = .init(half_width, half_height) };
     }
@@ -653,8 +650,8 @@ pub const Collider2D = extern struct {
     }
 };
 
-/// Godot's Area2D: a place that tells what is in it, and pushes nothing. A
-/// trigger, a pickup, a hurtbox, a door's threshold.
+/// A place that tells what is in it, and pushes nothing. A trigger, a
+/// pickup, a hurtbox, a door's threshold.
 ///
 /// ```zig
 /// const trap = try world.spawnWith(.{ Transform2D.at(100, 0), Area2D{}, Collider2D.box(32, 32) });
@@ -667,16 +664,15 @@ pub const Collider2D = extern struct {
 /// carries its shapes. An entity may have an `Area2D` or a `RigidBody2D`,
 /// not both.
 ///
-/// Godot's `priority`, its gravity and damping overrides and its audio bus
-/// are not here: this is what overlaps, not a place that changes physics.
+/// It has no priority, no gravity or damping overrides and no audio bus:
+/// this is what overlaps, not a place that changes physics.
 pub const Area2D = extern struct {
     /// Whether it says what is in it. Off, it hears nothing and its
     /// questions are empty, and what was in it is left with an exit.
     monitoring: bool = true,
     /// Whether other areas see it. It is still seen by a body's contacts.
     monitorable: bool = true,
-    /// Whether the pointer can pick it. Godot's
-    /// `CollisionObject2D.input_pickable`, true for an area as there.
+    /// Whether the pointer can pick it; true for an area by default.
     input_pickable: bool = true,
 
     /// What it says. `body` is the entity of what came in - the collider's

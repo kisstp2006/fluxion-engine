@@ -545,8 +545,7 @@ const Saving = struct {
 
     /// `connections`: every one made with `persist` from an entity written,
     /// to one written, in the order each entity's are heard - known to this
-    /// build or not - and nothing at all when there are none. Godot's
-    /// `[connection]` lines.
+    /// build or not - and nothing at all when there are none.
     fn writeConnections(s: *Saving, w: *json.Writer) json.Writer.Error!void {
         var any = false;
         for (s.order.items) |source| {
@@ -664,7 +663,6 @@ const chunk_text_len = std.base64.standard.Encoder.calcSize(chunk_bytes);
 
 /// A map's tiles: one line of text a chunk, under the chunk's place.
 ///
-/// Godot 3 writes a TileMap's cells as one flat list for the same reasons.
 /// A chunk at a time rather than one long line so that a change to a corner
 /// of a level is a change to one line of the file, and base64 rather than
 /// numbers because a chunk is a kilobyte of them and nobody reads a

@@ -10,8 +10,8 @@
     // one of them reaches the engine when its pin moves:
     //   zig fetch --save=fluxion_rhi git+https://github.com/kisstp2006/fluxion-rhi#<commit>
     .dependencies = .{
-        // The world, and everything in it. An entity is what a Godot node
-        // would be, minus the inheritance and the virtual call.
+        // The world, and everything in it. An entity is a thing in the scene,
+        // with no inheritance and no virtual call.
         .fluxion_ecs = .{
             .url = "git+https://github.com/kisstp2006/fluxion-ecs#2c15c6462892ed7797c931d3f68f0fc747eefd04",
             .hash = "fluxion_ecs-0.1.0-YgvFeCwAAgAVlX7zVleHEfI60BNwdhGLyvBtRDqiy5Q4",
