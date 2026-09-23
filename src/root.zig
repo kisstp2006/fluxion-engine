@@ -207,6 +207,7 @@ pub const PanelContainer = control.PanelContainer;
 pub const Label = control.Label;
 pub const Button = control.Button;
 pub const CheckBox = control.CheckBox;
+pub const ThemeOverride = control.ThemeOverride;
 pub const LineEdit = control.LineEdit;
 pub const Slider = control.Slider;
 pub const ProgressBar = control.ProgressBar;

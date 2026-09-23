@@ -18,7 +18,8 @@
 //!     "default_linear_damp": 0.1,
 //!     "default_angular_damp": 1,
 //!     "layer_names": ["world", "player"]
-//!   }
+//!   },
+//!   "gui": { "theme": "res://ui/game.theme" }
 //! }
 //! ```
 //!
@@ -109,6 +110,14 @@ pub const Physics2D = struct {
     }
 };
 
+/// How the project's interface looks when nothing nearer says: Godot's
+/// `gui/theme` settings.
+pub const Gui = struct {
+    /// The `.theme` every control is drawn with under the one it names
+    /// itself - `res://` or `uid://`, or empty for the engine's own look.
+    theme: []const u8 = "",
+};
+
 /// What a project file says.
 pub const Settings = struct {
     name: []const u8,
@@ -121,6 +130,7 @@ pub const Settings = struct {
     main_scene: []const u8 = "",
     tags: []const []const u8 = &.{},
     physics_2d: Physics2D = .{},
+    gui: Gui = .{},
     /// What the text above is kept in, for settings read from a file; null
     /// for ones written in code, whose text is the caller's.
     arena: ?*std.heap.ArenaAllocator = null,
@@ -150,8 +160,8 @@ pub const ReadError = error{
 } || json.Reader.Error || std.Io.Dir.ReadFileAllocError;
 
 pub const WriteError = error{
-    /// An `icon` or a `main_scene` that is not the project's path, which
-    /// the file could not be read back with.
+    /// An `icon`, a `main_scene` or a `gui.theme` that is not the project's
+    /// path, which the file could not be read back with.
     WrongType,
 } || Allocator.Error || json.SaveError;
 
@@ -245,6 +255,8 @@ const Reading = struct {
                 out.tags = try r.tags();
             } else if (std.mem.eql(u8, name, "physics_2d")) {
                 out.physics_2d = try r.physics2d();
+            } else if (std.mem.eql(u8, name, "gui")) {
+                out.gui = try r.gui();
             } else {
                 log.warn("{s}: \"{s}\" is no project setting this engine knows, and is passed over", .{ r.file, name });
                 try r.reader.skipValue();
@@ -315,6 +327,20 @@ const Reading = struct {
         return out;
     }
 
+    fn gui(r: *Reading) ReadError!Gui {
+        var out: Gui = .{};
+        try r.open(.object_begin, "the interface's settings, which are an object");
+        while (try r.key()) |name| {
+            if (std.mem.eql(u8, name, "theme")) {
+                out.theme = try r.path("gui.theme");
+            } else {
+                log.warn("{s}: \"gui.{s}\" is no interface setting this engine knows, and is passed over", .{ r.file, name });
+                try r.reader.skipValue();
+            }
+        }
+        return out;
+    }
+
     fn decimal(r: *Reading, comptime what: []const u8) ReadError!f32 {
         const token = try r.next();
         return switch (token) {
@@ -367,7 +393,7 @@ const Reading = struct {
 /// one there: written beside it and then moved over it, so a crash halfway
 /// leaves the old file whole. Folders on the way are made.
 pub fn write(gpa: Allocator, io: std.Io, dir: []const u8, settings: Settings) WriteError!void {
-    for ([_][]const u8{ settings.icon, settings.main_scene }) |given| {
+    for ([_][]const u8{ settings.icon, settings.main_scene, settings.gui.theme }) |given| {
         if (given.len > 0 and !Project.isValidProjectPath(given)) return error.WrongType;
     }
     const path = try std.fs.path.join(gpa, &.{ dir, file_name });
@@ -428,6 +454,10 @@ const File = struct {
         for (p.layer_names[0..named]) |layer| try w.writeString(layer);
         try w.endArray();
         try w.endObject();
+        try w.key("gui");
+        try w.beginObject();
+        try w.field("theme", s.gui.theme);
+        try w.endObject();
         try w.endObject();
     }
 };
@@ -474,6 +504,7 @@ test "a project file is written and read back as it was" {
             .default_angular_damp = 0.5,
             .layer_names = layers,
         },
+        .gui = .{ .theme = "res://ui/game.theme" },
     });
 
     var settings = try read(testing.allocator, testing.io, try folder.at(""), null);
@@ -494,6 +525,9 @@ test "a project file is written and read back as it was" {
     try testing.expectEqualStrings("", physics.layer_names[2]);
     try testing.expectEqualStrings("", physics.layer_names[31]);
     try testing.expectApproxEqAbs(@as(f32, 784.8), physics.gravity().y, 0.01);
+    try testing.expectEqualStrings("res://ui/game.theme", settings.gui.theme);
+    // A theme that is not the project's is not written.
+    try testing.expectError(error.WrongType, write(testing.allocator, testing.io, try folder.at(""), .{ .name = "Out", .gui = .{ .theme = "C:/elsewhere.theme" } }));
 
     var kept: [1024]u8 = undefined;
     const text = try folder.tmp.dir.readFile(testing.io, file_name, &kept);

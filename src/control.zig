@@ -188,6 +188,51 @@ pub const PanelContainer = extern struct {
     pub const reflect_name = "PanelContainer";
 };
 
+/// What one control says of its own look, over its theme: Godot's theme
+/// overrides. Each is the control's own only while its switch is on; the
+/// rest stays the theme's. It lies over what every theme says of the normal
+/// look and under what one says of hovering, pressing and the rest, so a
+/// button of its own colour still answers the pointer where its theme says
+/// how. It is the control's own part it changes - a slider's track, not its
+/// fill - and not its children's.
+pub const ThemeOverride = extern struct {
+    override_font_color: bool = false,
+    font_color: Color = .white,
+    override_font_size: bool = false,
+    font_size: u16 = 16,
+    override_background: bool = false,
+    background: Color = .black,
+    override_border: bool = false,
+    border_color: Color = .white,
+    border_width: u16 = 1,
+    override_corners: bool = false,
+    corner_radius: f32 = 4,
+    override_padding: bool = false,
+    padding: Insets = .{},
+
+    pub const reflect_name = "ThemeOverride";
+    pub const reflect_fields = .{
+        .font_size = .{attr.Range{ .min = 1, .max = 256 }},
+        .border_width = .{ attr.Range{ .min = 0, .max = 64 }, attr.Unit{ .text = "px" } },
+        .corner_radius = .{ attr.Range{ .min = 0, .max = 128 }, attr.Unit{ .text = "px" } },
+    };
+
+    /// What it says, as a theme says it: only what is switched on.
+    pub fn style(self: ThemeOverride) theme_file.Style {
+        var out: theme_file.Style = .{};
+        if (self.override_font_color) out.font_color = self.font_color;
+        if (self.override_font_size) out.font_size = self.font_size;
+        if (self.override_background) out.background = self.background;
+        if (self.override_border) {
+            out.border_color = self.border_color;
+            out.border_width = self.border_width;
+        }
+        if (self.override_corners) out.corners = .all(self.corner_radius);
+        if (self.override_padding) out.padding = self.padding;
+        return out;
+    }
+};
+
 pub const Label = extern struct {
     bytes: [capacity]u8 = @splat(0),
     len: u8 = 0,
@@ -647,11 +692,17 @@ pub const Nodes = struct {
     /// What a piece of a control looks like: what the theme it is under says,
     /// over the look this engine is born with. There is always one, so a
     /// scene with no theme at all still draws.
+    /// The control's theme over the project's, with its own overrides where
+    /// `part` is the one the control is - not a slider's fill or a focus ring.
     fn resolvedStyle(self: *Nodes, context: Context, entity: Entity, part: Part, state: State) ResolvedStyle {
         _ = self;
         const app = context.app;
         const found = themeOf(app, entity);
-        return .from(app.themes.styleOf(found.handle, part, state, found.variation));
+        const own: theme_file.Style = if (app.world.get(entity, ThemeOverride)) |override|
+            (if (part == roleOf(app, entity) orelse .panel) override.style() else .{})
+        else
+            .{};
+        return .from(app.themes.styleWith(found.handle, app.projectTheme(), part, state, found.variation, own));
     }
 
     fn applyStyle(self: *Nodes, app: *App, out: *ui.Declaration, style: ResolvedStyle) void {
@@ -1170,6 +1221,69 @@ test "a check box that is ticked draws a tick, made once, and one that is not dr
     const bend = (@as(usize, @intFromFloat(0.76 * check_side)) * check_side + @as(usize, @intFromFloat(0.40 * check_side))) * 4;
     try testing.expectEqual(@as(u8, 255), pixels[bend + 3]);
     try testing.expectEqual(@as(u8, 0), pixels[3]);
+}
+
+test "a control that names no theme is drawn with the project's, which the project file can change" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "game.theme", .data = "{ \"fluxion_theme\": 1, \"types\": { \"Panel\": { \"styles\": { \"normal\": { \"background\": \"#123456\" } } } } }" });
+    try @import("Project.zig").create(testing.allocator, testing.io, root, .{ .name = "Themed", .gui = .{ .theme = "res://game.theme" } });
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root, .width = 200, .height = 100, .frames = 1 });
+    defer app.destroy();
+    try app.useControlNodes();
+    const panel = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{}, PanelContainer{} });
+    try app.run();
+
+    const context: Context = .{ .app = app, .layout = &app.ui };
+    try testing.expectEqual(Color.hex(0x123456), app.control_nodes.resolvedStyle(context, panel, .panel, .normal).background_color);
+    // The same theme is not read again a frame.
+    const first = app.projectTheme();
+    try testing.expect(first.eql(app.projectTheme()));
+
+    // Named no more, the engine's own look is back.
+    app.project.settings.?.gui.theme = "";
+    try testing.expect(app.projectTheme().isNone());
+    try testing.expect(!std.meta.eql(Color.hex(0x123456), app.control_nodes.resolvedStyle(context, panel, .panel, .normal).background_color));
+}
+
+test "a control's own overrides change its own part and not its children's, and a scene keeps them" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100, .frames = 1 });
+    defer app.destroy();
+    try app.useControlNodes();
+    const root = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{}, PanelContainer{} });
+    const slider = try app.world.spawnWith(.{ Control{ .parent = root }, Slider{ .value = 50 }, ThemeOverride{
+        .override_background = true,
+        .background = .hex(0xFF0000),
+        .override_font_size = true,
+        .font_size = 30,
+    } });
+    try app.run();
+
+    const context: Context = .{ .app = app, .layout = &app.ui };
+    const track = app.control_nodes.resolvedStyle(context, slider, .slider_track, .normal);
+    try testing.expectEqual(Color.hex(0xFF0000), track.background_color);
+    try testing.expectEqual(@as(u16, 30), track.font_size);
+    // Its fill, and the panel it sits in, are the theme's.
+    const fill = app.control_nodes.resolvedStyle(context, slider, .slider_fill, .normal);
+    try testing.expect(!std.meta.eql(Color.hex(0xFF0000), fill.background_color));
+    const panel = app.control_nodes.resolvedStyle(context, root, .panel, .normal);
+    try testing.expect(!std.meta.eql(Color.hex(0xFF0000), panel.background_color));
+
+    // Written and read back: the switches and the values both.
+    const text = try @import("scene.zig").write(app, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    app.clearWorld();
+    _ = try @import("scene.zig").read(app, text, .{});
+    var found = false;
+    for (app.world.archetypeSlice()) |*archetype| for (archetype.entities.items) |entity| {
+        const held = app.world.get(entity, ThemeOverride) orelse continue;
+        try testing.expect(held.override_background and held.override_font_size and !held.override_border);
+        try testing.expectEqual(@as(u16, 30), held.font_size);
+        found = true;
+    };
+    try testing.expect(found);
 }
 
 test "a scene keeps the theme a control names, what it is drawn as, and a button's words" {

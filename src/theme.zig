@@ -416,59 +416,96 @@ pub const Themes = struct {
     /// what it does not say its `base_type` does. Nothing found anywhere
     /// leaves the built-in look, so a scene with no theme still draws.
     pub fn styleOf(self: *Themes, handle: ThemeHandle, part: Part, state: State, variation: []const u8) Style {
+        return self.styleWith(handle, .none, part, state, variation, .{});
+    }
+
+    /// The same, with the project's theme - `under` - beneath `handle`, and
+    /// what one control says of itself - `own`, its `ThemeOverride` - above
+    /// both.
+    ///
+    /// Every theme's word on the normal look comes first, the project's and
+    /// each base theme's under the nearer ones; then `own`; then every
+    /// theme's word on `state` itself, in the same order. So a state a theme
+    /// does not speak of looks as the normal one does, a button whose
+    /// background is its own is still lit where a theme says how it lights,
+    /// and a variation's hover is its base type's until it says its own - as
+    /// Godot looks a style up by its state's name.
+    pub fn styleWith(self: *Themes, handle: ThemeHandle, under: ThemeHandle, part: Part, state: State, variation: []const u8, own: Style) Style {
+        var project: [most_links]ThemeHandle = undefined;
+        var near: [most_links]ThemeHandle = undefined;
+        const layers = [_][]const ThemeHandle{ self.baseFirst(under, &project), self.baseFirst(handle, &near) };
+
         var out: Style = builtIn(part, state);
-        // The oldest base theme first, so that a nearer one lies over it.
-        var chain: [most_links]ThemeHandle = undefined;
-        var count: usize = 0;
-        var at = handle;
-        while (count < most_links) : (count += 1) {
-            const held = self.table.get(at.toId()) orelse break;
-            chain[count] = at;
-            if (held.base.isNone() or held.base.eql(at)) {
-                count += 1;
-                break;
-            }
-            at = held.base;
-        }
-        while (count > 0) {
-            count -= 1;
-            const held = self.table.get(chain[count].toId()) orelse continue;
-            out = self.fromTheme(held, part.typeName(), state).over(out);
-            if (variation.len > 0) out = self.fromTheme(held, variation, state).over(out);
-        }
+        for (layers) |themes| for (themes) |at| {
+            const held = self.table.get(at.toId()) orelse continue;
+            out = normalOf(held, part.typeName()).over(out);
+            if (variation.len > 0) out = normalOf(held, variation).over(out);
+        };
+        out = own.over(out);
+        if (state == .normal) return out;
+        for (layers) |themes| for (themes) |at| {
+            const held = self.table.get(at.toId()) orelse continue;
+            out = stateOf(held, part.typeName(), state).over(out);
+            if (variation.len > 0) out = stateOf(held, variation, state).over(out);
+        };
         return out;
     }
 
-    /// What one theme says about a type, with what it is built on under it.
-    fn fromTheme(self: *Themes, theme: *const Theme, name: []const u8, state: State) Style {
-        _ = self;
-        var out: Style = .{};
-        // The type it is built on first, so that the type itself wins.
-        var chain: [most_links][]const u8 = undefined;
+    /// `handle` and the themes it is built on, the oldest base first, so that
+    /// a nearer one lies over it.
+    fn baseFirst(self: *Themes, handle: ThemeHandle, into: *[most_links]ThemeHandle) []const ThemeHandle {
+        var count: usize = 0;
+        var at = handle;
+        while (count < most_links) {
+            const held = self.table.get(at.toId()) orelse break;
+            into[count] = at;
+            count += 1;
+            if (held.base.isNone() or held.base.eql(at)) break;
+            at = held.base;
+        }
+        std.mem.reverse(ThemeHandle, into[0..count]);
+        return into[0..count];
+    }
+
+    /// A type's name and the names it is built on, the one built on first,
+    /// so that the type itself wins.
+    fn typesFirst(theme: *const Theme, name: []const u8, into: *[most_links][]const u8) []const []const u8 {
         var count: usize = 0;
         var at = name;
-        while (count < most_links) : (count += 1) {
-            chain[count] = at;
-            const held = theme.typeNamed(at) orelse {
-                count += 1;
-                break;
-            };
-            if (held.base_type.len == 0 or std.mem.eql(u8, held.base_type, at)) {
-                count += 1;
-                break;
-            }
+        while (count < most_links) {
+            into[count] = at;
+            count += 1;
+            const held = theme.typeNamed(at) orelse break;
+            if (held.base_type.len == 0 or std.mem.eql(u8, held.base_type, at)) break;
             at = held.base_type;
         }
-        while (count > 0) {
-            count -= 1;
-            const held = theme.typeNamed(chain[count]) orelse continue;
+        std.mem.reverse([]const u8, into[0..count]);
+        return into[0..count];
+    }
+
+    /// What one theme says of a type's normal look - and of every state -
+    /// with what it is built on under it, and the theme's own font under all.
+    fn normalOf(theme: *const Theme, name: []const u8) Style {
+        var out: Style = .{};
+        var names: [most_links][]const u8 = undefined;
+        for (typesFirst(theme, name, &names)) |at| {
+            const held = theme.typeNamed(at) orelse continue;
             out = held.shared.over(out);
-            // A state says only what it changes; the rest is `normal`.
             out = held.state(.normal).over(out);
-            if (state != .normal) out = held.state(state).over(out);
         }
         if (out.font == null and !theme.font.isNone()) out.font = theme.font;
         if (out.font_size == null and theme.font_size > 0) out.font_size = theme.font_size;
+        return out;
+    }
+
+    /// What one theme says of a type in `state` alone: only what it changes.
+    fn stateOf(theme: *const Theme, name: []const u8, state: State) Style {
+        var out: Style = .{};
+        var names: [most_links][]const u8 = undefined;
+        for (typesFirst(theme, name, &names)) |at| {
+            const held = theme.typeNamed(at) orelse continue;
+            out = held.state(state).over(out);
+        }
         return out;
     }
 
@@ -883,6 +920,49 @@ test "a base theme is under the theme that names it" {
     const style = app.themes.styleOf(handle, .button, .normal, "");
     try testing.expectEqualDeep(parseHex("#222222").?, style.background.?);
     try testing.expectEqual(@as(f32, 9), style.corners.?.top_left);
+}
+
+test "a state a variation does not speak of is its base type's, as Godot looks a style up" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const handle = try app.themes.add(app, "states.theme",
+        \\{ "fluxion_theme": 1, "types": {
+        \\  "Button": { "styles": { "normal": { "background": "#111111" }, "hover": { "background": "#222222" } } },
+        \\  "Danger": { "base_type": "Button", "styles": { "normal": { "background": "#AA0000" } } } } }
+    );
+    try testing.expectEqualDeep(parseHex("#AA0000").?, app.themes.styleOf(handle, .button, .normal, "Danger").background.?);
+    try testing.expectEqualDeep(parseHex("#222222").?, app.themes.styleOf(handle, .button, .hover, "Danger").background.?);
+}
+
+test "a control's own look lies over every theme's normal one and under what they say of a state" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const project = try app.themes.add(app, "project.theme",
+        \\{ "fluxion_theme": 1, "font_size": 21, "types": { "Button": { "styles": { "normal": { "corners": 7 }, "pressed": { "background": "#333333" } } } } }
+    );
+    const near = try app.themes.add(app, "near.theme",
+        \\{ "fluxion_theme": 1, "types": { "Button": { "styles": { "normal": { "background": "#111111" }, "hover": { "background": "#222222" } } } } }
+    );
+    const own: Style = .{ .background = parseHex("#FF0000").?, .border_width = 3 };
+
+    // The project's theme is under the control's, and the engine's under both.
+    const plain = app.themes.styleWith(near, project, .button, .normal, "", .{});
+    try testing.expectEqualDeep(parseHex("#111111").?, plain.background.?);
+    try testing.expectEqual(@as(f32, 7), plain.corners.?.top_left);
+    try testing.expectEqual(@as(u16, 21), plain.font_size.?);
+
+    const normal = app.themes.styleWith(near, project, .button, .normal, "", own);
+    try testing.expectEqualDeep(parseHex("#FF0000").?, normal.background.?);
+    try testing.expectEqual(@as(u16, 3), normal.border_width.?);
+    // A state the themes speak of is theirs; the rest of the control's own
+    // holds in it.
+    const hover = app.themes.styleWith(near, project, .button, .hover, "", own);
+    try testing.expectEqualDeep(parseHex("#222222").?, hover.background.?);
+    try testing.expectEqual(@as(u16, 3), hover.border_width.?);
+    const pressed = app.themes.styleWith(near, project, .button, .pressed, "", own);
+    try testing.expectEqualDeep(parseHex("#333333").?, pressed.background.?);
+    const focus = app.themes.styleWith(near, project, .button, .focus, "", own);
+    try testing.expectEqualDeep(parseHex("#FF0000").?, focus.background.?);
 }
 
 test "a theme written back reads as the theme it was" {

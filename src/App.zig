@@ -372,6 +372,9 @@ tile_sets: tileset.TileSets = .{},
 /// Every `.theme` file read, and the handles a `Control` points at one with.
 /// See `loadTheme`.
 themes: theme.Themes = .{},
+/// The theme the project file names for every control, and the path it was
+/// read by: see `projectTheme`.
+project_theme: ProjectTheme = .{},
 /// Which entity holds each chunk of each map, so painting a tile finds its
 /// chunk without walking every chunk in the world. Kept beside the world,
 /// as the names are: a chunk holds no handle of its own.
@@ -675,6 +678,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         control.CenterContainer,
         control.ScrollContainer,
         control.PanelContainer,
+        control.ThemeOverride,
         control.Label,
         control.Button,
         control.CheckBox,
@@ -2022,6 +2026,41 @@ pub fn tileSetOf(self: *App, handle: tileset.TileSetHandle) ?*const tileset.Tile
 pub fn tileSetSource(self: *App, handle: tileset.TileSetHandle) ?[]const u8 {
     return self.tile_sets.sourceOf(handle);
 }
+
+/// The theme the project file names for its whole interface - `gui.theme` -
+/// which every control is drawn with under the one it names itself; `.none`
+/// for the engine's own look. Read the first time it is asked for, and again
+/// when the project file names another.
+pub fn projectTheme(self: *App) theme.ThemeHandle {
+    const named = if (self.project.settings) |settings| settings.gui.theme else "";
+    const held = &self.project_theme;
+    if (std.mem.eql(u8, held.path(), named)) return held.handle;
+    held.remember(named);
+    held.handle = .none;
+    if (named.len == 0) return .none;
+    // Kept even when it does not read, so that it is said once and not a
+    // frame.
+    held.handle = self.loadTheme(named) catch |err| blk: {
+        log.warn("the project's theme {s} did not read: {t}", .{ named, err });
+        break :blk .none;
+    };
+    return held.handle;
+}
+
+pub const ProjectTheme = struct {
+    handle: theme.ThemeHandle = .none,
+    bytes: [512]u8 = undefined,
+    len: usize = 0,
+
+    fn path(self: *const ProjectTheme) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    fn remember(self: *ProjectTheme, named: []const u8) void {
+        self.len = @min(named.len, self.bytes.len);
+        @memcpy(self.bytes[0..self.len], named[0..self.len]);
+    }
+};
 
 /// Read a `.theme` file, or find the one read from there already. See
 /// `theme.Themes`.
@@ -5509,7 +5548,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 28), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 29), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);
