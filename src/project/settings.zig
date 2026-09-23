@@ -152,6 +152,7 @@ pub const Physics2D = struct {
     default_angular_damp: f32 = 1,
     ticks_per_second: u16 = 60,
 
+    pub const reflect_attributes = .{attr.Label{ .text = "Physics 2D" }};
     pub const reflect_fields = .{
         .default_gravity = .{ attr.Range{ .min = 0, .max = 10000 }, attr.Unit{ .text = "px/s²" }, attr.Doc{ .text = "How hard everything falls. 98 is Godot 3's, where a unit is a pixel; a world of a hundred units to the metre that wants Earth's says 981." } },
         .default_gravity_vector = .{attr.Doc{ .text = "Which way things fall: down the screen." }},
@@ -174,8 +175,14 @@ pub const LayerNames = struct {
 
     pub const max = 32;
 
+    pub const reflect_attributes = .{attr.Label{ .text = "Layer Names" }};
     pub const reflect_fields = .{
-        .physics_2d = .{ attr.Label{ .text = "2D Physics" }, attr.Doc{ .text = "A name for each 2D physics layer, shown beside its toggle." } },
+        .physics_2d = .{
+            attr.Label{ .text = "2D Physics" },
+            attr.Layers{ .names = .physics_2d },
+            attr.Range{ .min = 0, .max = max },
+            attr.Doc{ .text = "A name for each 2D physics layer, shown beside its toggle." },
+        },
     };
 
     /// The name of the 2D physics layer numbered from 0, or `""`.
@@ -189,6 +196,7 @@ pub const LayerNames = struct {
 pub const Gui = struct {
     theme: []const u8 = "",
 
+    pub const reflect_attributes = .{attr.Label{ .text = "GUI" }};
     pub const reflect_fields = .{
         .theme = .{ attr.ProjectFile{ .kind = .theme }, attr.Doc{ .text = "The .theme every control is drawn with, under the one it names itself." } },
     };

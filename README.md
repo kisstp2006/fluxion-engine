@@ -1084,8 +1084,9 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   may name a despawned entity - often that is why it ended.
 - **The three questions, answered in entities**: `app.castRay(from, to, .{})`,
   `app.overlapPoint(point)` and `app.overlapBox(min, max, &buffer)`.
-- **How the world moves is the project's**: `physics_2d` in `project.fluxion`,
-  or `Options.physics_2d` for a game with none.
+- **How the world moves is the project's**: `physics_2d` in `project.fluxion`
+  - and its layers' names, `layer_names.physics_2d` - or `Options.physics_2d`
+  for a game with none.
   - Godot 3's numbers by default: gravity 98 down the screen, damping 0.1 and 1.
   - A game of a hundred pixels to the metre that wants Earth's gravity says `.default_gravity = 981`.
 - **Everything else is `app.physics`**: settings, and joints between the
@@ -1292,22 +1293,22 @@ _ = try app.assets.reloadFile("res://art/hero.png");                 // changed 
 
 ```json
 {
-  "fluxion_project": 1,
-  "name": "Meadow",
-  "description": "",
-  "icon": "res://icon.png",
-  "renderer": "compatibility",
-  "main_scene": "",
-  "tags": ["2d"],
-  "gui": { "theme": "res://ui/game.theme" }
+  "fluxion_project": 2,
+  "application": { "name": "Meadow", "icon": "res://icon.png", "main_scene": "res://levels/meadow.json", "tags": ["2d"] },
+  "display": { "width": 1600, "height": 900, "mode": "maximized" },
+  "physics_2d": { "default_gravity": 420 },
+  "layer_names": { "physics_2d": ["world", "player"] },
+  "gui": { "theme": "res://ui/game.theme" },
+  "my_game": { "lives": 3 }
 }
 ```
 
 ```zig
 var settings = try fx.Project.readSettings(gpa, io, "games/meadow", &diagnostics);  // no App, no GPU
 defer settings.deinit();
-try fx.Project.create(gpa, io, "games/pasture", .{ .name = "Pasture" });           // error.ProjectExists over one
+try fx.Project.create(gpa, io, "games/pasture", .{ .application = .{ .name = "Pasture" } });  // error.ProjectExists over one
 try fx.Project.writeSettings(gpa, io, "games/pasture", renamed);                    // written beside, then moved over
+const mine = try settings.section(MyGame, "my_game", arena);                          // a game's own section
 ```
 
 - **`project.fluxion` is a project's folder**, as `project.godot` is Godot's.
@@ -1315,17 +1316,33 @@ try fx.Project.writeSettings(gpa, io, "games/pasture", renamed);                
   root - `app.project.settings` - before anything opens, and a project
   manager lists projects with `Project.readSettings`. A root without one
   starts as it always did, with `settings` null.
-- **`name` is all it must have.** The rest are optional: `description`,
-  `icon` and `main_scene` (a `res://` or `uid://` path, or empty), `tags`,
-  the renderer, the 2D physics' defaults, and `gui.theme`, the theme every
-  control is drawn with under its own. The name is the window's title when
-  the game gives none.
-- **What is wrong is said, with its line and column**, and stops the start
-  rather than being guessed round: another version, a renderer with no name
-  here, a path that is not the project's, no name. `Options.project_diagnostics`
-  is where it is said; without one it is said in the log. A key the engine
-  does not know is passed over with a warning, so a hand's addition does not
-  stop a game.
+- **Settings are data.** A section is a plain struct - `Application`,
+  `Display`, `Rendering`, `Physics2D`, `LayerNames`, `Gui` - and a setting
+  a field of it, with its default and its description in `reflect_fields`:
+  `attr.Doc`, `attr.Range`, and `attr.ProjectFile`, `attr.Required`,
+  `attr.Advanced` and `attr.Restart` for what a setting is besides its value.
+  `fx.settings_file` reads and writes any such struct, and an editor draws
+  its Project Settings from the same fields: a new setting is a new field.
+- **A file says only what differs**, as Godot's does: a setting at its
+  default is not written, nor a section all of whose settings are. A key
+  naming no section of this build - a newer one's, or a game's own - is kept
+  and written back; the game reads its own with `settings.section`. A key
+  inside a section that no setting reads is passed over with a warning.
+- **The project says how the game opens**: the window's `width`, `height`,
+  `resizable`, `mode` (`windowed`, `maximized`, `fullscreen`) and `vsync`,
+  the `clear_color`, the `ticks_per_second` of the fixed step, and the
+  `icon` on the window. What the game's own `App.Options` say overrules it,
+  field by field; what neither says is the sections' defaults, so a folder
+  with no project file opens as it always did.
+- **`application.name` is all it must have.** The name is the window's
+  title when the game gives none.
+- **What is wrong is said, with where it is**, and stops the start rather
+  than being guessed round: another version - version 1, the flat file
+  before sections, is refused, and says it was written for an older
+  Fluxion - a value of the wrong kind, with its line, a path that is not the
+  project's, and no name, each by its key: `application.icon`.
+  `Options.project_diagnostics` is where it is said; without one it is said
+  in the log.
 
 ### The renderer chooses the backend
 
@@ -1905,10 +1922,12 @@ Here, and checked by the tests:
   along and copies given their own, what was loaded following its file, the
   system's trash, and textures and fonts read again in place when their
   files change.
-- `project.fluxion`: read with no App for a project manager, made and
-  rewritten in place, read by every game as it starts, and its renderer
-  choosing the backend - Direct3D 11 first on Windows - with `--backend`
-  still over it.
+- `project.fluxion`: sections of settings as plain structs, read and
+  written by one generic reader that writes only what differs and keeps what
+  it does not know; read with no App for a project manager, read by every
+  game as it starts - its window, clear colour, fixed step and icon - and its
+  renderer choosing the backend - Direct3D 11 first on Windows - with
+  `--backend` still over it.
 - Reflection: every component described - fields, defaults, ranges, units -
   and found on an entity by its scene name, read and written in place, added
   and taken off; the engine's calls and a game's states made by name, errors
