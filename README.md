@@ -439,6 +439,11 @@ if (app.resized) layOutAgain(app.width, app.height);
   straight RGBA rows in as many sizes as a game has, and the system takes
   the one it wants. An empty list puts the system's own back. Wayland has
   none - a window's picture comes from its desktop file there.
+- **The close button can ask rather than close.** With
+  `Options.ask_before_closing`, pressing it - or Alt+F4 - only sets
+  `app.close_pressed`, and the run goes on until the program calls `quit`:
+  an editor asks about work not saved first. A game leaves it off and closes
+  at once.
 - **`Options.resizable` and `Options.maximized`** say what can only be said
   when the window is made. Without a window - headless - all of this is
   nothing, and says so without failing.
@@ -721,6 +726,75 @@ _ = try world.spawnWith(.{
   and comes out as GLSL and as HLSL. Two hand-written copies would drift, and
   the drift shows up as one backend drawing correctly and the other not.
 
+## 🧱 Tile maps
+
+```zig
+const set = try app.loadTileSet("res://tiles/terrain.tileset");
+const map = try app.world.spawnWith(.{ fx.Transform2D{}, fx.TileMap{ .tile_set = set } });
+_ = try app.setTile(map, 3, 2, .at(0, 1, 0));                          // source 0, column 1, row 0
+_ = try app.setTile(map, 4, 2, fx.Cell.at(0, 1, 0).with(fx.Cell.flip_h, true));
+const hurts = app.tileDataAt(map, app.pointerInWorld(), "damage");     // what the tile set says of it
+```
+
+- **A `TileMap` is a grid of cells over a tile set**, drawn with the sprites
+  of its `layer` and sorted by its `order`, tinted, and stopping what its
+  `collision_layer` and `collision_mask` say. Godot's TileMap node.
+- **A cell is four bytes**: which source of the set, the column and row of
+  the tile in it, and whether it is flipped across, flipped over or turned -
+  `Cell.flip_h`, `flip_v` and `transpose`, three of which make every quarter
+  turn. A tile added to the sheet later leaves every painted cell where it
+  was, since a cell names its tile by place and not by number.
+- **Cells live in chunks of sixteen by sixteen**, entities of their own that
+  a map owns: a level larger than the screen is a handful of instanced draws,
+  and the camera drops the chunks it cannot see. `app.setTile` and
+  `app.tileAt` go through an index, not a walk of the world. The chunks are
+  the engine's - a scene writes the map's cells under the map itself,
+  `"cells": { "0,0": "<base64>" }`, and builds the chunks again when it reads
+  them.
+- **What stops at a tile is the tile set's word**: the whole tile - whole
+  tiles side by side are merged into as few boxes as cover them - or a shape
+  of up to eight corners, turned and flipped the way its cell is. A map's
+  solid tiles are one static body per chunk.
+- **A tile set is a file**, `.tileset`, read once however many maps name
+  it, and kept by a handle as a texture is. A source is a sheet cut into a
+  grid past its margin and between its gaps; a source with no texture is one
+  tile of the white texel, which a map's tint colours - a level blocked out
+  before its art exists.
+
+  ```json
+  {
+    "fluxion_tileset": 1,
+    "tile_size": [16, 16],
+    "data_layers": [{ "name": "damage", "type": "int" }, { "name": "water", "type": "bool" }],
+    "sources": [{
+      "id": 0, "texture": "res://art/terrain.png", "margin": [0, 0], "separation": [0, 0],
+      "tiles": [
+        { "at": [0, 0], "collision": "full" },
+        { "at": [2, 0], "collision": "polygon", "polygon": [[0, 16], [16, 0], [16, 16]] },
+        { "at": [1, 0], "probability": 0.5, "data": { "damage": 2 } }
+      ]
+    }]
+  }
+  ```
+
+  `tiles` lists only the tiles with something to say. What a tile does not
+  say is its default, and is not written back.
+- **Data layers are values a tile carries under a name** - how much it
+  hurts, whether it is water - whole numbers, numbers or truths, eight at
+  most: Godot's custom data layers. `app.tileData(map, x, y, "damage")` asks
+  a cell, `app.tileDataAt(map, point, "damage")` the cell under a point of
+  the world, and a Flux script gets the number or the truth itself:
+  `app.tileDataAt(ground, vec2(x, y + 20.0), "water") == true`.
+- **`probability`** is how often a random brush picks the tile against the
+  others it picks among: an editor's, since a game places its own tiles.
+- **Where a map is**: `app.cellAt(map, point)` is the cell a point of the
+  world is in, and `app.usedCells(map)` the smallest rectangle holding every
+  painted cell - Godot's `get_used_rect`.
+- **A tile set's file can be written back**: `app.tile_sets.textOf` and
+  `save` are what an editor keeps undo steps with and saves, and
+  `reloadTileSet` reads one again - everything built from it, a map's body
+  included, is built again.
+
 ## 🔘 The interface
 
 ```zig
@@ -794,6 +868,84 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   zoom wants.
 - **Without a `.ui` system none of this happens.** Nothing is fed, laid out or
   drawn, and a game that never asks for an interface runs as it did.
+
+## 🔲 Controls and themes
+
+```zig
+try app.useControlNodes();
+const ui_theme = try app.loadTheme("res://ui/game.theme");
+const root = try app.world.spawnWith(.{ fx.Control{ .theme = ui_theme, .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, fx.CanvasLayer{} });
+const play = try app.world.spawnWith(.{ fx.Control{ .parent = root }, fx.Button.of("Play") });
+try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{});   // menu: an entity whose script has start()
+```
+
+- **Godot's Control nodes, as components.** A `Control` is the box - its
+  parent, its size as fit, fixed, grow, a share or a ratio, and in the flow
+  of its parent or anchored to one of nine places in it. What it is comes
+  beside it: `Label`, `Button`, `CheckBox`, `LineEdit`, `Slider`,
+  `ProgressBar`, `TabContainer`, `TextureRect`, `NinePatchRect`, and the
+  containers `PanelContainer`, `BoxContainer`, `MarginContainer`,
+  `CenterContainer` and `ScrollContainer`. A root is a `Control` with a
+  `CanvasLayer` over the screen, or a `Viewport` placed in the world.
+  `app.useControlNodes()` lays them out into the interface every frame.
+- **They say what happened as signals**, Godot's names: `pressed` and
+  `toggled` on a button, `toggled` on a check box, `changed` and `submitted`
+  on a line edit, `changed` on a slider, `tab_changed` on tabs - connected in
+  code or kept in a scene.
+- **A button is one thing**: its words, its icon, whether it stays down,
+  and whether it is down - not a button with a label inside it.
+- **How they look is a file**, `.theme`, Godot's Theme resource:
+
+  ```json
+  {
+    "fluxion_theme": 1,
+    "base": "res://ui/base.theme",
+    "font": "res://fonts/ui.ttf",
+    "font_size": 16,
+    "types": {
+      "Button": {
+        "font_color": "#F2EEF8",
+        "styles": {
+          "normal":  { "background": "#6B4FC8", "corners": 6, "padding": [10, 5] },
+          "hover":   { "background": "#8F72E8" },
+          "pressed": { "background": "#4E3899" },
+          "focus":   { "border": 2, "border_color": "#F5B942" }
+        }
+      },
+      "Danger": { "base_type": "Button", "styles": { "normal": { "background": "#C8434F" } } },
+      "Header": { "base_type": "Label", "font_size": 20, "font_color": "#F5B942" }
+    }
+  }
+  ```
+
+  A type is a kind of control - `Panel`, `Button`, `CheckBox`, `LineEdit`,
+  `Slider` and `SliderFill`, `ProgressBar` and `ProgressBarFill`, `Tab` and
+  `TabActive`, `Focus`, `Label` - or a name of the game's own built on one,
+  which a control asks for with `type_variation`: one `Danger` button among
+  many. A style says a background, a border, corners, padding, a texture cut
+  in nine with its tint, and the text's colour, font and size; the states
+  are `normal`, `hover`, `pressed`, `disabled` and `focus`.
+- **A theme says only what it changes.** What a control is drawn with is
+  looked up in layers: the engine's own look; every theme's word on the
+  normal look - the project's, its base themes, the control's own theme and
+  its base themes, the nearer over the further, a variation over the type it
+  is built on; then what the control says of itself; then every theme's word
+  on the state it is in. So a state a theme does not mention looks as
+  `normal` does, and a `Danger` button's hover is its `Button`'s until it
+  says one of its own, as Godot finds a style by its state's name.
+- **A control's theme is the nearest one named up its tree**, and under
+  all of them is the project's: `"gui": { "theme": "res://ui/game.theme" }`
+  in `project.fluxion`, which `app.projectTheme()` reads the first time it is
+  asked and again when the file names another.
+- **One control's own look is a `ThemeOverride`**: its text's colour and
+  size, its background, border, corners and padding, each with a switch
+  beside it - what is switched off stays the theme's. It lies over every
+  theme's normal look and under what they say of hovering and pressing, so a
+  button of its own colour still answers the pointer. It changes the part
+  the control is - a slider's track, not its fill - and none of its children.
+- **A theme's file can be written back** - `app.themes.textOf` and `save`,
+  as a tile set's - and `app.themes.styleOf` is the lookup the game draws
+  with, for an editor's preview to draw with too.
 
 ## 🐞 Debug drawing
 
@@ -1146,7 +1298,8 @@ _ = try app.assets.reloadFile("res://art/hero.png");                 // changed 
   "icon": "res://icon.png",
   "renderer": "compatibility",
   "main_scene": "",
-  "tags": ["2d"]
+  "tags": ["2d"],
+  "gui": { "theme": "res://ui/game.theme" }
 }
 ```
 
@@ -1164,7 +1317,9 @@ try fx.Project.writeSettings(gpa, io, "games/pasture", renamed);                
   starts as it always did, with `settings` null.
 - **`name` is all it must have.** The rest are optional: `description`,
   `icon` and `main_scene` (a `res://` or `uid://` path, or empty), `tags`,
-  and the renderer. The name is the window's title when the game gives none.
+  the renderer, the 2D physics' defaults, and `gui.theme`, the theme every
+  control is drawn with under its own. The name is the window's title when
+  the game gives none.
 - **What is wrong is said, with its line and column**, and stops the start
   rather than being guessed round: another version, a renderer with no name
   here, a path that is not the project's, no name. `Options.project_diagnostics`
@@ -1705,6 +1860,14 @@ Here, and checked by the tests:
   the system's own interface font and its monospaced one, as the system
   names them.
 - Culling against the camera, sprites and labels alike.
+- Tile maps: four-byte cells turned and flipped, in chunks found through an
+  index, written compactly in scenes; `.tileset` files with sheets, shapes
+  the physics stops at, probabilities and data layers asked for from Zig and
+  from Flux.
+- Controls as components, laid out into the interface with Godot's
+  containers and signals, and drawn from `.theme` files: types, variations,
+  states, base themes, a project theme under all and a control's own
+  overrides over them.
 - The interface: fluxion-ui laid out by `.ui` systems into one root, drawn
   over the 2D layer, fed from the keyboard, the mouse and the pads before the
   game's systems, keeping the wheel it used, and setting the pointer's shape;
@@ -1774,23 +1937,14 @@ already, and an `AxisBinding` takes a stick and a d-pad beside its keys; what
 is missing is the name between a control and what it does, and a way for the
 player to change it.
 
-### 2. Tilemaps
-
-A `Tilemap` component holding a grid of indices into one sheet, drawn in
-chunks so a level larger than the screen is a handful of instanced draws
-rather than one per tile - and its solid tiles one static body of many
-shapes, which the physics compares as one entity rather than thousands. It
-wants nothing that is not already here, and it is what makes the difference
-between demonstrations and levels.
-
-### 3. Interface anchored to the world
+### 2. Interface anchored to the world
 
 The layer is here. What a game's interface still wants from fluxion-ui is
 interface floating over a point in the world - health bars, name plates -
 which needs an id scope so forty of them can share one declaration, state per
 element so a menu can animate, and nine-slice pictures.
 
-### 4. The 3D pass
+### 3. The 3D pass
 
 Meshes, a depth attachment, a `Camera3D`, and the pass drawn before the 2D one
 into the same target. The place it goes is marked in `App.drawLayers`, and
@@ -1816,9 +1970,12 @@ before this package existed - the seam was cut for it deliberately.
 
 ## 🧩 What counts as a component
 
-Eight: `Transform2D`, `Sprite`, `Text2D`, `Animation`, `Camera2D`,
-`RigidBody2D`, `Collider2D` and `Area2D`. Each one is something a person
-making a game would name, which is the test.
+In 2D: `Transform2D`, `Sprite`, `Text2D`, `Animation`, `Camera2D`,
+`RigidBody2D`, `Collider2D`, `Area2D` and `TileMap`; Godot's `Timer`; and the
+interface's `Control` with what goes beside it - see
+[Controls and themes](#-controls-and-themes). Each one is something a
+person making a game would name, which is the test. A map's chunks are
+entities of the engine's own, which a scene never writes.
 
 Two things that used to be on that list are not any more, and the reason is
 the same for both. `Parent` was a component holding a link and an offset; it

@@ -27,9 +27,10 @@
 //! `Control` asks for by its `type_variation`, which says what it is built on
 //! with `base_type`. Nothing has to be said twice: a field a state leaves out
 //! comes from `normal`, a field the type leaves out comes from its
-//! `base_type`, then from the `base` theme, and at the end from the look this
-//! engine is born with. So a theme file holds what a game changed, and
-//! nothing else.
+//! `base_type`, then from the `base` theme, then from the project's theme,
+//! and at the end from the look this engine is born with. So a theme file
+//! holds what a game changed, and nothing else. See `Themes.styleWith` for
+//! the order in full, a control's own `ThemeOverride` included.
 //!
 //! Kept beside the world and pointed at by a handle, as tile sets are: see
 //! `tileset.zig`, whose shape this follows.
