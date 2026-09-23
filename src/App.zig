@@ -3200,32 +3200,31 @@ pub fn keyAxis(self: *const App, negative: []const u8, positive: []const u8) f32
     return value;
 }
 
+/// Whether an entity stands on a floor: something facing up under the bottom
+/// of its collider, no further below it than `distance`. A floor under the
+/// middle of the bottom, or under either end of it, counts, so a body half
+/// over an edge still stands; the bottom is the collider's as the physics
+/// holds it, so a turned body stands on whatever corner is lowest.
+///
+/// The rays start a little inside the body: one resting on a floor has sunk
+/// the physics' slop into it, and a ray that starts inside the floor finds
+/// nothing of it.
 pub fn isOnFloor(self: *App, entity: ecs.Entity, distance: f32) bool {
-    const placed = self.worldTransform(entity) orelse return false;
     const collider = self.world.get(entity, components.Collider2D) orelse return false;
-    const drawn_sprite = self.world.get(entity, components.Sprite);
-    const half_height = switch (collider.shape) {
-        .rectangle => if (collider.extents.y > 0)
-            collider.extents.y
-        else if (drawn_sprite) |drawn|
-            drawn.height / 2
-        else
-            0,
-        .circle => if (collider.radius > 0)
-            collider.radius
-        else if (drawn_sprite) |drawn|
-            drawn.width / 2
-        else
-            0,
-    };
-    if (half_height <= 0) return false;
-    const bottom = placed.y + (collider.offset.y + half_height) * @abs(placed.scale_y) + 0.05;
-    const hit = self.castRay(
-        .init(placed.x, bottom),
-        .init(placed.x, bottom + @max(distance, 0)),
-        .{ .category = collider.collision_layer, .mask = collider.collision_mask },
-    ) orelse return false;
-    return !hit.entity.eql(entity) and hit.normal.y < -0.5;
+    const box = self.bodies.boundsOf(self, entity) orelse return false;
+    const settings = self.physics.settings;
+    const sunk = 4 * settings.linear_slop * settings.units_per_metre;
+    const inside = @min(sunk, (box.max.y - box.min.y) / 2);
+    const own = self.bodies.idOf(entity);
+    const filter: physics_lib.Filter = .{ .category = collider.collision_layer, .mask = collider.collision_mask };
+    for ([_]f32{ 0.5, 0.1, 0.9 }) |along| {
+        const x = box.min.x + (box.max.x - box.min.x) * along;
+        const hit = self.castRay(.init(x, box.max.y - inside), .init(x, box.max.y + @max(distance, 0)), filter) orelse continue;
+        // Another collider of the same body is not a floor.
+        if (hit.entity.eql(entity) or std.meta.eql(self.bodies.idOf(hit.entity), own)) continue;
+        if (hit.normal.y < -0.5) return true;
+    }
+    return false;
 }
 
 /// Where an entity's sprite is drawn, as its four corners in the world, round
@@ -4123,6 +4122,56 @@ test "a rigid body detects a tile floor below its collider" {
     app.world.get(player, components.Transform2D).?.y = -20;
     try app.syncBodies();
     try testing.expect(!app.isOnFloor(player, 5));
+}
+
+/// What pushes a crate along in a fixed step, as a game's script does: its
+/// speed set, whatever it was.
+const Pusher = struct {
+    var crate: ecs.Entity = .none;
+    var speed: f32 = 0;
+
+    fn push(app: *App) !void {
+        const body = app.world.get(crate, components.RigidBody2D) orelse return;
+        body.linear_velocity.x = speed;
+    }
+};
+
+test "a crate stands on a tile floor at rest and pushed along it, as far as over its edge" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 1.0 / 60.0 };
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    for (0..10) |x| _ = try app.setTile(map, @intCast(x), 0, .at(0, 0, 0));
+    // Sized from its sprite, as a crate put in a scene is.
+    const crate = try app.world.spawnWith(.{
+        components.Transform2D.at(40, -30),
+        components.Sprite{ .width = 28, .height = 28 },
+        components.RigidBody2D{},
+        components.Collider2D{},
+    });
+    Pusher.crate = crate;
+    Pusher.speed = 0;
+    try app.addSystem(.fixed, "push", Pusher.push);
+    try app.startup();
+
+    // At rest it has sunk into the floor by the physics' slop - which a ray
+    // from its bottom would start inside of - and stands.
+    for (0..60) |_| _ = try app.step();
+    try testing.expect(app.world.get(crate, components.Transform2D).?.y + 14 > 0);
+    try testing.expect(app.isOnFloor(crate, 6));
+
+    // Pushed along, it stands every step, and still with its middle past the
+    // end of the floor.
+    Pusher.speed = 120;
+    while (app.world.get(crate, components.Transform2D).?.x < 165) {
+        _ = try app.step();
+        try testing.expect(app.isOnFloor(crate, 6));
+    }
+
+    // Off the end, it falls, and stands on nothing.
+    for (0..30) |_| _ = try app.step();
+    try testing.expect(!app.isOnFloor(crate, 6));
 }
 
 test "the world is drawn into a texture through a view of its own" {

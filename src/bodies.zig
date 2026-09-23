@@ -925,6 +925,17 @@ pub fn idOf(self: *const Bodies, e: Entity) ?BodyId {
     return null;
 }
 
+/// The box round an entity's collider in the world, as the physics holds
+/// it: turned, scaled, and sized from a sprite as the shape was made. Null
+/// for an entity with no shape.
+pub fn boundsOf(self: *const Bodies, app: *App, e: Entity) ?physics.Aabb {
+    if (e.index >= self.shapes.items.len) return null;
+    const link = self.shapes.items[e.index];
+    if (!link.entity.eql(e)) return null;
+    const entry = app.physics.shape(link.shape) orelse return null;
+    return entry.def.geometry.aabb(app.physics.shapeTransform(entry));
+}
+
 /// The collider a shape is, or null for one the engine did not make.
 pub fn entityOf(self: *const Bodies, app: *App, shape: ShapeId) ?Entity {
     if (app.physics.shape(shape)) |entry| {
