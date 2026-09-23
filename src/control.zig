@@ -579,9 +579,7 @@ pub const Nodes = struct {
         const style = self.resolvedStyle(context, entity, roleOf(app, entity) orelse .panel, stateOf(context, entity));
         if (app.world.get(entity, Label)) |label| drawLabel(context, label, style);
         if (app.world.get(entity, Button)) |button| {
-            // Its own face, unless the entity carries a Label that has
-            // already drawn one: that is how scenes said it before.
-            if (!app.world.has(entity, Label)) buttonFace(self, context, button, style);
+            buttonFace(self, context, button, style);
             const control = app.world.get(entity, Control).?;
             if (control.mouse_filter == .ignore) {
                 button.hovered = false;
@@ -1148,10 +1146,10 @@ test "a control is drawn from the theme the control above it names" {
         Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow }, .theme = handle },
         CanvasLayer{},
     });
-    const button = try app.world.spawnWith(.{ Control{ .parent = root }, Button{}, Label.of("Styled") });
+    const button = try app.world.spawnWith(.{ Control{ .parent = root }, Button.of("Styled") });
     var loud: Control = .{ .parent = root };
     loud.setVariation("Loud");
-    const shouty = try app.world.spawnWith(.{ loud, Button{}, Label.of("Loud") });
+    const shouty = try app.world.spawnWith(.{ loud, Button.of("Loud") });
     try app.run();
 
     const context: Context = .{ .app = app, .layout = &app.ui };
