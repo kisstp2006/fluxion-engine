@@ -3807,11 +3807,12 @@ pub fn controlPreviewBox(self: *App, entity: ecs.Entity) ?ui_lib.BoundingBox {
 
 /// Whether a texture `drawWorld` drew into comes out upside down when drawn
 /// as a picture: true on OpenGL, whose framebuffers count rows from the
-/// bottom.
+/// bottom. Direct3D and Vulkan count them from the top; of a backend the
+/// caller supplied nothing is known, and it is taken to as well.
 pub fn drawnUpsideDown(self: *const App) bool {
     return switch (self.device.backendTag()) {
         .gl, .webgl => true,
-        .d3d11, .none => false,
+        .d3d11, .d3d12, .vulkan, .none, .other => false,
     };
 }
 
