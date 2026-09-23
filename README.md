@@ -1557,6 +1557,12 @@ as data, and the engine hands its components and its calls out through it.
   is checked when the component is registered: a getter or a setter it
   names that `reflect_methods` does not list, or a getter that does not
   return what the setter takes, stops the build.
+- **A component says how an editor's scene treats what has it.**
+  `fx.attr.Pickable{ .by_default = false }` in its `reflect_attributes` has
+  a click in the scene pass over an entity that has it, until the editor
+  is told otherwise for that entity. `Control`'s says so, so that a UI over
+  the whole screen does not take every click meant for the world; an editor
+  reads it with `app.componentsOf` and `Type.attribute`.
 - **`App` is described by its calls, not its insides.** `App.reflect_methods`
   lists the ones that take and give plain values - names, the window, the
   clipboard, scenes, components and states by name - and `app.callNamed`

@@ -88,6 +88,18 @@ pub const Advanced = struct {};
 /// `restart_if_changed`.
 pub const Restart = struct {};
 
+/// On a component: whether a click in an editor's scene picks an entity
+/// that has it, until the entity is told otherwise there. A `Control`'s is
+/// false - a UI over the whole screen would take every click - and a game's
+/// own component may say the same. An entity is passed over when any of its
+/// components says false; the list of everything under the pointer still
+/// offers it, and the tree picks it as ever.
+///
+/// ```zig
+/// pub const reflect_attributes = .{fx.attr.Pickable{ .by_default = false }};
+/// ```
+pub const Pickable = struct { by_default: bool = true };
+
 // -------------------------------------------------------------------------
 // Geometry an editor can draw and drag
 // -------------------------------------------------------------------------

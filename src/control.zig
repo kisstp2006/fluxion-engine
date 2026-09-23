@@ -96,7 +96,11 @@ pub const Control = extern struct {
     pub const MouseFilter = enum(u8) { stop, pass, ignore };
 
     pub const reflect_name = "Control";
-    pub const reflect_attributes = .{attr.Property{ .name = "type_variation", .get = "variationSlice", .set = "setVariation" }};
+    pub const reflect_attributes = .{
+        attr.Property{ .name = "type_variation", .get = "variationSlice", .set = "setVariation" },
+        // A UI over the whole screen would take every click in the scene.
+        attr.Pickable{ .by_default = false },
+    };
     pub const reflect_fields = .{
         .parent = .{attr.Doc{ .text = "The UI entity whose box contains this one" }},
         .variation = .{attr.Hidden{}},
@@ -1118,6 +1122,18 @@ fn ratio(app: *App, handle: Assets.TextureHandle) ?f32 {
 }
 
 const testing = std.testing;
+
+test "an editor reads from a control's type that a click in its scene passes over it" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240, .io = testing.io });
+    defer app.destroy();
+    const panel = try app.world.spawnWith(.{ Control{}, PanelContainer{} });
+    var found: [16]App.ComponentValue = undefined;
+    var said: ?bool = null;
+    for (app.componentsOf(panel, &found)) |component| {
+        if (component.value.type.attribute(attr.Pickable)) |pickable| said = pickable.by_default;
+    }
+    try testing.expectEqual(@as(?bool, false), said);
+}
 
 test "control components build one screen-space Fluxion UI tree" {
     const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240, .frames = 2, .io = testing.io });
