@@ -55,10 +55,38 @@ pub const Layers = struct {
     pub const Names = enum {
         /// None: the layers are their numbers.
         none,
-        /// `physics_2d.layer_names` in `project.fluxion`.
+        /// `layer_names.physics_2d` in `project.fluxion`.
         physics_2d,
     };
 };
+
+// -------------------------------------------------------------------------
+// Settings
+// -------------------------------------------------------------------------
+//
+// What a setting of a settings file is, besides its value: see
+// `settings_file.zig`. An editor draws its settings windows by them.
+
+/// Text that names a file of the project's - `res://` or `uid://`, or empty -
+/// of this kind: checked when the file is read and written, and shown as a
+/// field that takes a file of the kind.
+pub const ProjectFile = struct {
+    kind: Kind = .any,
+
+    pub const Kind = enum { any, scene, texture, font, theme, tileset, script };
+};
+
+/// A setting that has to say something: a project's name.
+pub const Required = struct {};
+
+/// A setting shown only with the advanced settings on: Godot's settings
+/// that are not basic.
+pub const Advanced = struct {};
+
+/// A setting that takes effect when the program starts again - the game's,
+/// for a project's; the editor's, for an editor's: Godot's
+/// `restart_if_changed`.
+pub const Restart = struct {};
 
 // -------------------------------------------------------------------------
 // Geometry an editor can draw and drag

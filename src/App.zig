@@ -139,21 +139,28 @@ pub const Options = struct {
     /// What the title bar says. Null is the project's name, from its project
     /// file, or "fluxion" with none.
     title: ?[]const u8 = null,
-    width: u32 = 1280,
-    height: u32 = 720,
+    /// The window's size. Null is what the project file's `display` says -
+    /// 1280 by 720 with none. So are the four below: a game says them in code
+    /// only to overrule its project.
+    width: ?u32 = null,
+    height: ?u32 = null,
     backend: Backend = .auto,
-    vsync: bool = true,
+    vsync: ?bool = null,
 
     /// Whether the player may drag the window's edges. `setWindowSize` works
     /// either way.
-    resizable: bool = true,
+    resizable: ?bool = null,
 
     /// Open maximised. Only a resizable window can be.
-    maximized: bool = false,
+    maximized: ?bool = null,
 
     /// Open filling the screen. `width` and `height` are still the size of
     /// the window it goes back to.
-    fullscreen: Fullscreen = .windowed,
+    fullscreen: ?Fullscreen = null,
+
+    /// Put the project file's `application.icon` on the window. An editor,
+    /// whose window is its own and not the game's, leaves it off.
+    project_icon: bool = true,
 
     /// What files are read with and the clock is read from. Null means no
     /// files and a fixed step, as in a test.
@@ -169,8 +176,13 @@ pub const Options = struct {
     project_diagnostics: ?*json.Diagnostics = null,
 
     /// Every frame counts as exactly this many seconds, whatever the clock
-    /// says, so every run is the same. `Flags.apply` sets it for `--capture`.
+    /// says, so every run is the same.
     frame_time: ?f32 = null,
+
+    /// Every frame counts as exactly one fixed step, whatever the clock says
+    /// and however long the project makes the step. `Flags.apply` sets it for
+    /// `--capture`.
+    fixed_frame_time: bool = false,
 
     /// A key that ends the game, handled after the `.input` stage. Null leaves
     /// every key to the game.
@@ -193,11 +205,13 @@ pub const Options = struct {
     /// program with unsaved work to ask about; a game closes at once.
     ask_before_closing: bool = false,
 
-    /// What the frame is cleared to.
-    background: Color = .hex(0x0E1013),
+    /// What the frame is cleared to. Null is the project file's
+    /// `rendering.clear_color`.
+    background: ?Color = null,
 
-    /// One fixed step, in seconds.
-    fixed_delta: f32 = 1.0 / 60.0,
+    /// One fixed step, in seconds. Null is a step of the project file's
+    /// `physics_2d.ticks_per_second` - sixty a second, with none.
+    fixed_delta: ?f32 = null,
 
     /// Stop after this many frames. A headless app has no window to close, so
     /// it needs this or a system that calls `quit`.
@@ -257,7 +271,7 @@ pub const Flags = struct {
         if (self.root) |root| out.root = root;
         if (self.capture != null) {
             out.frames = out.frames orelse capture_frames;
-            out.frame_time = out.fixed_delta;
+            out.fixed_frame_time = true;
         }
         return out;
     }
@@ -593,12 +607,14 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .next_dialog = 1,
         .trash = null,
         // A fixed frame time wins over the clock, and the clock over nothing.
+        // The fixed step is known once the project file is read; the source
+        // is set again then.
         .time = .init(if (options.frame_time) |seconds|
             .{ .fixed = seconds }
         else if (options.io) |io|
             .{ .clock = io }
         else
-            .{ .fixed = options.fixed_delta }),
+            .{ .fixed = options.fixed_delta orelse Resolved.default_fixed_delta }),
         .snapshots = .empty,
         .orphans = .empty,
         .names = .empty,
@@ -614,16 +630,16 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .schedule = .{ .io = options.io, .commands = &self.commands, .signals = &self.signals },
         .states = .{},
         .gate = null,
-        .background = options.background,
+        .background = options.background orelse Project.Rendering.default_clear_color,
         .world_on_screen = true,
-        .width = options.width,
-        .height = options.height,
+        .width = options.width orelse 0,
+        .height = options.height orelse 0,
         .resized = false,
         .quit_key = options.quit_key,
         .ask_before_closing = options.ask_before_closing,
         .fullscreen_key = options.fullscreen_key,
         .debug_key = options.debug_key,
-        .vsync_on = options.vsync,
+        .vsync_on = options.vsync orelse true,
         .running = true,
         .close_pressed = false,
         .frames_left = options.frames,
@@ -633,7 +649,6 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     errdefer self.commands.deinit();
     errdefer self.ui.deinit();
     errdefer self.physics.deinit();
-    self.time.fixed_delta = options.fixed_delta;
 
     var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = @splat(0x5E);
     if (options.io) |io| io.random(&seed);
@@ -655,6 +670,18 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     // The project's physics, or the game's with no project file.
     if (self.project.settings) |held| self.physics_2d = held.physics_2d;
     self.physics.gravity = self.physics_2d.gravity();
+
+    // The window, the frame and the clock: what the game says, over what
+    // the project says, over the engine's own.
+    const resolved: Resolved = .of(options, if (self.project.settings) |*held| held else null, self.physics_2d);
+    self.background = resolved.background;
+    self.width = resolved.width;
+    self.height = resolved.height;
+    self.vsync_on = resolved.vsync;
+    self.time.fixed_delta = resolved.fixed_delta;
+    if (options.frame_time == null and (options.fixed_frame_time or options.io == null)) {
+        self.time.source = .{ .fixed = resolved.fixed_delta };
+    }
 
     errdefer self.scene_components.deinit(gpa);
     errdefer self.types.deinit();
@@ -698,7 +725,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     };
 
     // Headless opens no renderer, so the project's is not asked about.
-    const renderer: Project.Renderer = if (self.project.settings) |held| held.renderer else .compatibility;
+    const renderer: Project.Renderer = if (self.project.settings) |held| held.rendering.renderer else .compatibility;
     const backend: Backend = if (options.headless) .none else chooseBackend(options.backend, renderer, builtin.os.tag) catch |err| {
         log.err("the {t} renderer ({s}) is not built yet: set \"renderer\" to \"compatibility\" in {s}, or give --backend", .{ renderer, renderer.apis(), Project.file_name });
         return err;
@@ -714,12 +741,12 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         self.window = @as(Window, undefined);
         self.window.?.open(gpa, .{
             .title = titleOf(options, self.project.settings),
-            .width = options.width,
-            .height = options.height,
-            .resizable = options.resizable,
-            .maximized = options.maximized,
+            .width = resolved.width,
+            .height = resolved.height,
+            .resizable = resolved.resizable,
+            .maximized = resolved.maximized,
             .gl = backend == .gl,
-            .vsync = options.vsync,
+            .vsync = resolved.vsync,
         }) catch |err| {
             self.window = null;
             if (Window.isAbsent(err)) return Error.NoDisplay;
@@ -733,15 +760,15 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     // its final size. Not fatal: a game that cannot fill the screen still
     // runs in a window.
     if (self.window) |*w| {
-        if (options.fullscreen != .windowed) {
-            w.setFullscreen(options.fullscreen) catch |err| {
+        if (resolved.fullscreen != .windowed) {
+            w.setFullscreen(resolved.fullscreen) catch |err| {
                 log.warn("could not open fullscreen: {t}", .{err});
             };
         }
     }
 
-    const width = if (self.window) |*w| w.width else options.width;
-    const height = if (self.window) |*w| w.height else options.height;
+    const width = if (self.window) |*w| w.width else resolved.width;
+    const height = if (self.window) |*w| w.height else resolved.height;
     self.width = width;
     self.height = height;
     // The surface is about to be made at this size, so the first frame has
@@ -774,7 +801,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             .height = height,
             // Told to the swapchain as well as the window: Direct3D keeps it
             // on the swapchain, OpenGL on the context.
-            .vsync = options.vsync,
+            .vsync = resolved.vsync,
         });
     } else {
         // No window, so the frame goes into a texture, through every draw
@@ -796,6 +823,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 
     self.assets = try .init(gpa, &self.device, options.io, &self.project);
     errdefer self.assets.deinit();
+    if (options.project_icon) self.useProjectIcon();
 
     self.sprites = try .init(gpa, &self.device);
     errdefer self.sprites.deinit(gpa);
@@ -813,10 +841,43 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 fn titleOf(options: Options, settings: ?Project.Settings) []const u8 {
     if (options.title) |title| return title;
     if (settings) |held| {
-        if (held.name.len > 0) return held.name;
+        if (held.application.name.len > 0) return held.application.name;
     }
     return "fluxion";
 }
+
+/// What the window, the frame and the clock are made with: the game's
+/// `Options` where they say, the project file's `display`, `rendering` and
+/// `physics_2d` where they do not, and the engine's own under both - which
+/// are the sections' defaults, so a project that says nothing and a folder
+/// with no project file open the same.
+const Resolved = struct {
+    width: u32,
+    height: u32,
+    vsync: bool,
+    resizable: bool,
+    maximized: bool,
+    fullscreen: Fullscreen,
+    background: Color,
+    fixed_delta: f32,
+
+    const default_fixed_delta: f32 = 1.0 / @as(f32, @floatFromInt((Project.Physics2D{}).ticks_per_second));
+
+    fn of(options: Options, settings: ?*const Project.Settings, physics_2d: Project.Physics2D) Resolved {
+        const display: Project.Display = if (settings) |held| held.display else .{};
+        const rendering: Project.Rendering = if (settings) |held| held.rendering else .{};
+        return .{
+            .width = options.width orelse display.width,
+            .height = options.height orelse display.height,
+            .vsync = options.vsync orelse display.vsync,
+            .resizable = options.resizable orelse display.resizable,
+            .maximized = options.maximized orelse (display.mode == .maximized),
+            .fullscreen = options.fullscreen orelse if (display.mode == .fullscreen) .borderless else .windowed,
+            .background = options.background orelse rendering.clear_color,
+            .fixed_delta = options.fixed_delta orelse 1.0 / @as(f32, @floatFromInt(@max(physics_2d.ticks_per_second, 1))),
+        };
+    }
+};
 
 pub fn destroy(self: *App) void {
     const gpa = self.gpa;
@@ -3514,6 +3575,27 @@ pub fn setWindowIcon(self: *App, images: []const platform.IconImage) Window.Erro
     if (self.window) |*window| try window.setIcon(images);
 }
 
+/// The project file's `application.icon` on the window, when it names one:
+/// what the game shows in the taskbar. A picture that does not read is
+/// said, and the window keeps the system's.
+fn useProjectIcon(self: *App) void {
+    const settings = self.project.settings orelse return;
+    const path = settings.application.icon;
+    if (path.len == 0 or self.window == null) return;
+    const io = self.io orelse return;
+    const source = self.project.canonical(self.gpa, path) catch return;
+    defer self.gpa.free(source);
+    const file = self.project.osPath(self.gpa, source) catch return;
+    defer self.gpa.free(file);
+    var decoded = image.png.readFile(self.gpa, io, file, .{}) catch |err| {
+        return log.warn("the project's icon {s} did not read: {t}", .{ path, err });
+    };
+    defer decoded.deinit(self.gpa);
+    self.setWindowIcon(&.{.{ .pixels = decoded.pixels, .width = decoded.width, .height = decoded.height }}) catch |err| {
+        log.warn("the project's icon {s} was not put on the window: {t}", .{ path, err });
+    };
+}
+
 /// How far in from each edge of the framebuffer the part of the window that
 /// nothing covers starts: a phone's notch and its gesture bar, a page's
 /// safe area. Nought on every desktop, and without a window.
@@ -4831,7 +4913,7 @@ test "flags override what they say and leave the rest, and a capture is reproduc
     // machine's.
     const captured = (Flags{ .capture = "shot.png" }).apply(base);
     try testing.expectEqual(@as(u32, Flags.capture_frames), captured.frames.?);
-    try testing.expectEqual(captured.fixed_delta, captured.frame_time.?);
+    try testing.expect(captured.fixed_frame_time);
 
     // With a count of its own, that count.
     const counted = (Flags{ .capture = "shot.png", .frames = 7 }).apply(base);
@@ -5761,8 +5843,7 @@ test "a project's file is read as it starts, and a root with none starts as befo
     bare.destroy();
 
     try Project.writeSettings(testing.allocator, testing.io, root, .{
-        .name = "Meadow",
-        .tags = &.{"2d"},
+        .application = .{ .name = "Meadow", .tags = &.{"2d"} },
         .physics_2d = .{ .default_gravity = 981, .default_linear_damp = 0.25 },
     });
     // By the folder, or by the file itself, as a file association gives it.
@@ -5771,8 +5852,8 @@ test "a project's file is read as it starts, and a root with none starts as befo
         const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = given });
         defer app.destroy();
         const settings = app.project.settings.?;
-        try testing.expectEqualStrings("Meadow", settings.name);
-        try testing.expectEqualStrings("2d", settings.tags[0]);
+        try testing.expectEqualStrings("Meadow", settings.application.name);
+        try testing.expectEqualStrings("2d", settings.application.tags[0]);
         try testing.expect(std.mem.endsWith(u8, app.project.root, &tmp.sub_path));
         try testing.expectEqualStrings("Meadow", titleOf(.{}, settings));
         try testing.expectEqualStrings("Pong", titleOf(.{ .title = "Pong" }, settings));
@@ -5787,7 +5868,7 @@ test "a project file that is wrong stops the start, and says what and where" {
     defer tmp.cleanup();
     var buffer: [160]u8 = undefined;
     const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data = "{ \"fluxion_project\": 9, \"name\": \"Later\" }" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data = "{ \"fluxion_project\": 9, \"application\": { \"name\": \"Later\" } }" });
 
     var diagnostics: json.Diagnostics = .{};
     try testing.expectError(error.UnsupportedVersion, App.create(testing.allocator, .{
@@ -5796,8 +5877,61 @@ test "a project file that is wrong stops the start, and says what and where" {
         .root = root,
         .project_diagnostics = &diagnostics,
     }));
-    try testing.expectEqualStrings("this project file is version 9; this engine reads version 1", diagnostics.message());
-    try testing.expectEqual(@as(u32, 1), diagnostics.line);
+    try testing.expectEqualStrings("this project file is version 9, written for a newer Fluxion; this one reads version 2", diagnostics.message());
+    try testing.expect(std.mem.endsWith(u8, diagnostics.file(), Project.file_name));
+
+    // A value of the wrong kind, at its line.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data = "{ \"fluxion_project\": 2,\n  \"application\": { \"name\": \"Wide\" },\n  \"display\": { \"width\": \"wide\" } }" });
+    try testing.expectError(error.WrongType, App.create(testing.allocator, .{
+        .headless = true,
+        .io = testing.io,
+        .root = root,
+        .project_diagnostics = &diagnostics,
+    }));
+    try testing.expectEqual(@as(u32, 3), diagnostics.line);
+}
+
+test "the window, the frame and the clock are the game's, then the project's, then the engine's" {
+    const said: Project.Settings = .{
+        .application = .{ .name = "Wide" },
+        .display = .{ .width = 1600, .height = 900, .vsync = false, .mode = .fullscreen },
+        .rendering = .{ .clear_color = .hex(0x102030) },
+        .physics_2d = .{ .ticks_per_second = 120 },
+    };
+    const project: Resolved = .of(.{}, &said, said.physics_2d);
+    try testing.expectEqual(@as(u32, 1600), project.width);
+    try testing.expectEqual(@as(u32, 900), project.height);
+    try testing.expect(!project.vsync);
+    try testing.expectEqual(Fullscreen.borderless, project.fullscreen);
+    try testing.expectEqual(Color.hex(0x102030), project.background);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), project.fixed_delta, 1e-6);
+
+    // What the game says in code overrules its project, and only that.
+    const game: Resolved = .of(.{ .width = 800, .fullscreen = .windowed, .fixed_delta = 0.5 }, &said, said.physics_2d);
+    try testing.expectEqual(@as(u32, 800), game.width);
+    try testing.expectEqual(@as(u32, 900), game.height);
+    try testing.expectEqual(Fullscreen.windowed, game.fullscreen);
+    try testing.expectEqual(@as(f32, 0.5), game.fixed_delta);
+
+    // With no project file, the sections' own defaults.
+    const bare: Resolved = .of(.{}, null, .{});
+    try testing.expectEqual(@as(u32, 1280), bare.width);
+    try testing.expectEqual(@as(u32, 720), bare.height);
+    try testing.expect(bare.vsync and bare.resizable and !bare.maximized);
+    try testing.expectEqual(Fullscreen.windowed, bare.fullscreen);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 60.0), bare.fixed_delta, 1e-6);
+
+    // And a game opened in a project's folder takes them.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [160]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try Project.writeSettings(testing.allocator, testing.io, root, said);
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+    defer app.destroy();
+    try testing.expectEqual(@as(u32, 1600), app.width);
+    try testing.expectEqual(Color.hex(0x102030), app.background);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), app.time.fixed_delta, 1e-6);
 }
 
 test "auto opens the best of the project's renderer, and a backend asked for wins" {

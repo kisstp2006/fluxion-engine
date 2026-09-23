@@ -1229,7 +1229,7 @@ test "a control that names no theme is drawn with the project's, which the proje
     var root_buffer: [128]u8 = undefined;
     const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "game.theme", .data = "{ \"fluxion_theme\": 1, \"types\": { \"Panel\": { \"styles\": { \"normal\": { \"background\": \"#123456\" } } } } }" });
-    try @import("Project.zig").create(testing.allocator, testing.io, root, .{ .name = "Themed", .gui = .{ .theme = "res://game.theme" } });
+    try @import("Project.zig").create(testing.allocator, testing.io, root, .{ .application = .{ .name = "Themed" }, .gui = .{ .theme = "res://game.theme" } });
     const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root, .width = 200, .height = 100, .frames = 1 });
     defer app.destroy();
     try app.useControlNodes();

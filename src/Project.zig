@@ -41,37 +41,50 @@ const Allocator = std.mem.Allocator;
 const json = @import("fluxion_json");
 const Uuid = @import("fluxion_id").Uuid;
 
-const settings_file = @import("project/settings.zig");
+const project_file = @import("project/settings.zig");
 
 const Project = @This();
 const log = std.log.scoped(.fluxion_engine);
 
 /// What a project's file is called, at its root: `project.fluxion`.
-pub const file_name = settings_file.file_name;
+pub const file_name = project_file.file_name;
 
-/// What a project file says: its name, its renderer, its icon and the rest.
-/// See `project/settings.zig`.
-pub const Settings = settings_file.Settings;
+/// What a project file says, a section a field: `application`, `display`,
+/// `rendering`, `physics_2d`, `layer_names`, `gui`. See `project/settings.zig`.
+pub const Settings = project_file.Settings;
+
+/// The project file's sections.
+pub const Application = project_file.Application;
+pub const Display = project_file.Display;
+pub const Rendering = project_file.Rendering;
+/// How a 2D world moves: `physics_2d` in the project file.
+pub const Physics2D = project_file.Physics2D;
+pub const LayerNames = project_file.LayerNames;
+pub const Gui = project_file.Gui;
 
 /// Which family of graphics APIs a project is drawn with, and its backends
 /// on each system.
-pub const Renderer = settings_file.Renderer;
-/// How a 2D world moves: `physics_2d` in the project file.
-pub const Physics2D = settings_file.Physics2D;
+pub const Renderer = project_file.Renderer;
 
-pub const ReadError = settings_file.ReadError;
-pub const WriteError = settings_file.WriteError;
-pub const CreateError = settings_file.CreateError;
+/// The top of a project file: `"fluxion_project": 2`.
+pub const settings_header = project_file.header;
+
+pub const ReadError = project_file.ReadError;
+pub const WriteError = project_file.WriteError;
+pub const CreateError = project_file.CreateError;
 
 /// The project file in a folder, read with no `App` and no GPU: what a
 /// project manager lists projects by.
-pub const readSettings = settings_file.read;
+pub const readSettings = project_file.read;
 
 /// Write a folder's project file in place of the one there.
-pub const writeSettings = settings_file.write;
+pub const writeSettings = project_file.write;
+
+/// The project file's text, as `writeSettings` writes it.
+pub const settingsText = project_file.text;
 
 /// Make a new project: its folder and its project file.
-pub const create = settings_file.create;
+pub const create = project_file.create;
 
 /// What a project path starts with.
 pub const scheme = "res://";

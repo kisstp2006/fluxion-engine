@@ -87,8 +87,8 @@
         // What a scene is written in: JSON to read and diff, or CBOR, the
         // same values in fewer bytes.
         .fluxion_json = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-json#1d8cb5bb6184636dc3dd0b07a5b4fbe3af41a8b4",
-            .hash = "fluxion_json-0.1.0-sFlLPe9uBQDchSsbl8_C6tWxkEDIgARGF-SziCP3_P_h",
+            .url = "git+https://github.com/kisstp2006/fluxion-json#5b156eea39ad6f1ad1642c971008a0bbbbd21c0f",
+            .hash = "fluxion_json-0.1.0-sFlLPa1yBQCYVZD-64nMnRtnhjH6P3xbnq1ftDyIs1DB",
         },
 
         // Rigid bodies, stepped in `.fixed` on the same scheduler as the

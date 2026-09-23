@@ -109,6 +109,10 @@ pub const flux = script.flux;
 /// Where a game's files are: `res://` paths from the project's root, and
 /// files known by the UUID in the `.uid` file beside them: `app.project`.
 pub const Project = @import("Project.zig");
+/// A file of settings in sections, read and written from the struct that
+/// describes it: what `project.fluxion` is, and what an editor keeps its own
+/// settings with.
+pub const settings_file = @import("settings_file.zig");
 
 /// File and folder dialogs, the system's own: `app.openFileDialog`,
 /// `app.openFolderDialog`, and the answer in `app.input.dialogAnswer`.
@@ -372,6 +376,7 @@ test {
     _ = @import("script.zig");
     _ = @import("script_test.zig");
     _ = Project;
+    _ = settings_file;
     _ = dialog;
     _ = attr;
     _ = assets;

@@ -1,39 +1,36 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! `project.fluxion`: what a project is called and how it is drawn, at the
-//! root of its folder, as Godot keeps its `project.godot`.
+//! `project.fluxion`: how a project is called, opened, drawn and moved, at
+//! the root of its folder, as Godot keeps its `project.godot`.
 //!
 //! ```json
 //! {
-//!   "fluxion_project": 1,
-//!   "name": "Meadow",
-//!   "description": "",
-//!   "icon": "res://icon.png",
-//!   "renderer": "compatibility",
-//!   "main_scene": "",
-//!   "tags": ["2d"],
-//!   "physics_2d": {
-//!     "default_gravity": 98,
-//!     "default_gravity_vector": [0, 1],
-//!     "default_linear_damp": 0.1,
-//!     "default_angular_damp": 1,
-//!     "layer_names": ["world", "player"]
-//!   },
+//!   "fluxion_project": 2,
+//!   "application": { "name": "Meadow", "icon": "res://icon.png", "main_scene": "res://levels/meadow.json", "tags": ["2d"] },
+//!   "display": { "width": 1600, "height": 900, "mode": "maximized" },
+//!   "physics_2d": { "default_gravity": 420 },
+//!   "layer_names": { "physics_2d": ["world", "player"] },
 //!   "gui": { "theme": "res://ui/game.theme" }
 //! }
 //! ```
 //!
+//! **Settings are data.** Each section is a struct below, each setting a
+//! field of it with its default and its description; `settings_file.zig`
+//! reads and writes any such struct, and an editor draws its Project
+//! Settings from the same fields. A file says only what differs from the
+//! defaults, and keeps the keys this build has no section for.
+//!
 //! **A game and an editor read the same file.** A project manager lists its
 //! projects by reading theirs, with no `App` and no GPU - `Project.readSettings`
 //! - and a game finds its own as it starts: `App.create` reads the one at its
-//! root, and the renderer it names chooses what `Backend.auto` opens. A folder
-//! with no project file is still somewhere to read files from, and is drawn
-//! with the compatibility renderer.
+//! root, and what it says of the window, the clear colour and the fixed step
+//! is what the game opens with, unless the game's own `App.Options` say
+//! otherwise. A folder with no project file is still somewhere to read files
+//! from.
 //!
 //! **What is wrong is said, not guessed round.** A version other than this
-//! one, a renderer with no name here, a path that is not the project's, is an
-//! error with its line and column. A key this engine does not know is passed
-//! over with a warning, so a file a hand or a newer build added to still opens.
+//! one, a renderer with no name here, a path that is not the project's, a
+//! project with no name: each is an error with where it is.
 
 const std = @import("std");
 const testing = std.testing;
@@ -41,19 +38,20 @@ const Allocator = std.mem.Allocator;
 
 const json = @import("fluxion_json");
 const math = @import("fluxion_math");
-const Uuid = @import("fluxion_id").Uuid;
 
 const App = @import("../App.zig");
-const Project = @import("../Project.zig");
-const scene = @import("../scene.zig");
-
-const log = std.log.scoped(.fluxion_engine);
+const attr = @import("../attr.zig");
+const Color = @import("../color.zig").Color;
+const settings_file = @import("../settings_file.zig");
 
 /// What the file is called, at the root of a project's folder.
 pub const file_name = "project.fluxion";
 
 /// The version this writes, and the only one it reads.
-pub const version = 1;
+pub const version = 2;
+
+/// The top of the file: `"fluxion_project": 2`.
+pub const header: settings_file.Header = .{ .header = "fluxion_project", .version = version, .what = "project file" };
 
 /// Which family of graphics APIs a project is drawn with.
 pub const Renderer = enum {
@@ -86,23 +84,81 @@ pub const Renderer = enum {
     }
 };
 
+/// What the project is and what it opens: Godot's `application/config` and
+/// `application/run`.
+pub const Application = struct {
+    name: []const u8 = "",
+    description: []const u8 = "",
+    icon: []const u8 = "",
+    main_scene: []const u8 = "",
+    tags: []const []const u8 = &.{},
+
+    pub const reflect_fields = .{
+        .name = .{ attr.Required{}, attr.Doc{ .text = "What the project is called: the game window's title, and what the project list shows." } },
+        .description = .{ attr.Multiline{}, attr.Doc{ .text = "A line or two about the project, for the project list." } },
+        .icon = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "The project's picture: the game window's icon, and the project list's." } },
+        .main_scene = .{ attr.ProjectFile{ .kind = .scene }, attr.Doc{ .text = "The scene the game opens with, and what Play runs." } },
+        .tags = .{attr.Doc{ .text = "Words to find the project by in the project list." }},
+    };
+};
+
+/// The game's window: Godot's `display/window`. A game's own `App.Options`
+/// say otherwise when they say anything.
+pub const Display = struct {
+    width: u32 = 1280,
+    height: u32 = 720,
+    resizable: bool = true,
+    mode: Mode = .windowed,
+    vsync: bool = true,
+
+    pub const Mode = enum {
+        /// A window of `width` by `height`.
+        windowed,
+        /// The window, as large as the screen lets it be.
+        maximized,
+        /// The whole monitor, at the resolution it already has.
+        fullscreen,
+    };
+
+    pub const reflect_fields = .{
+        .width = .{ attr.Range{ .min = 1, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "How wide the game's window opens." } },
+        .height = .{ attr.Range{ .min = 1, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "How tall the game's window opens." } },
+        .resizable = .{ attr.Restart{}, attr.Doc{ .text = "Whether the player may drag the window's edges." } },
+        .mode = .{ attr.Restart{}, attr.Doc{ .text = "Whether the game opens in a window, maximised, or filling the screen." } },
+        .vsync = .{ attr.Restart{}, attr.Doc{ .text = "Wait for the screen between frames, so a frame is never shown half drawn." } },
+    };
+};
+
+/// How the project is drawn: Godot's `rendering`.
+pub const Rendering = struct {
+    renderer: Renderer = .compatibility,
+    clear_color: Color = default_clear_color,
+
+    pub const default_clear_color: Color = .hex(0x0E1013);
+
+    pub const reflect_fields = .{
+        .renderer = .{ attr.Restart{}, attr.Doc{ .text = "The family of graphics APIs the game is drawn with." } },
+        .clear_color = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "What every frame is cleared to, under the world." } },
+    };
+};
+
 /// How a 2D world moves when nothing else says so: Godot 3's `physics/2d`
-/// settings, and its names. A game with no project file takes
-/// `App.Options.physics_2d`.
+/// settings and their names, and `physics/common`'s ticks. A game with no
+/// project file takes `App.Options.physics_2d`.
 pub const Physics2D = struct {
-    /// How hard everything falls, in units a second squared: Godot 3's
-    /// 98, where a unit is a pixel. A world of a hundred units to the metre
-    /// that wants Earth's says 981.
     default_gravity: f32 = 98,
-    /// Which way: down the screen.
     default_gravity_vector: math.Vec2 = .init(0, 1),
-    /// How much of its speed and its spin a body loses a second, when its
-    /// own `linear_damp` or `angular_damp` is minus one: Godot 3's.
     default_linear_damp: f32 = 0.1,
     default_angular_damp: f32 = 1,
-    /// A name for each of the 32 collision layers, `""` for one with none:
-    /// what an editor shows beside a layer's toggle.
-    layer_names: [32][]const u8 = @splat(""),
+    ticks_per_second: u16 = 60,
+
+    pub const reflect_fields = .{
+        .default_gravity = .{ attr.Range{ .min = 0, .max = 10000 }, attr.Unit{ .text = "px/s²" }, attr.Doc{ .text = "How hard everything falls. 98 is Godot 3's, where a unit is a pixel; a world of a hundred units to the metre that wants Earth's says 981." } },
+        .default_gravity_vector = .{attr.Doc{ .text = "Which way things fall: down the screen." }},
+        .default_linear_damp = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How much of its speed a body loses a second, when its own linear damp is minus one." } },
+        .default_angular_damp = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How much of its spin a body loses a second, when its own angular damp is minus one." } },
+        .ticks_per_second = .{ attr.Range{ .min = 1, .max = 1000, .step = 1 }, attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "How many fixed steps a second the physics and the fixed systems take." } },
+    };
 
     /// The gravity as the physics takes it: the vector, scaled.
     pub fn gravity(self: Physics2D) math.Vec2 {
@@ -110,60 +166,65 @@ pub const Physics2D = struct {
     }
 };
 
-/// How the project's interface looks when nothing nearer says: Godot's
-/// `gui/theme` settings.
-pub const Gui = struct {
-    /// The `.theme` every control is drawn with under the one it names
-    /// itself - `res://` or `uid://`, or empty for the engine's own look.
-    theme: []const u8 = "",
+/// What the project calls its layers: Godot's `layer_names`.
+pub const LayerNames = struct {
+    /// The 2D physics layers, first to last, `""` for one with no name - at
+    /// most 32: what an editor shows beside a layer's toggle.
+    physics_2d: []const []const u8 = &.{},
+
+    pub const max = 32;
+
+    pub const reflect_fields = .{
+        .physics_2d = .{ attr.Label{ .text = "2D Physics" }, attr.Doc{ .text = "A name for each 2D physics layer, shown beside its toggle." } },
+    };
+
+    /// The name of the 2D physics layer numbered from 0, or `""`.
+    pub fn physics2d(self: LayerNames, layer: usize) []const u8 {
+        return if (layer < self.physics_2d.len) self.physics_2d[layer] else "";
+    }
 };
 
-/// What a project file says.
+/// How the project's interface looks when nothing nearer says: Godot's
+/// `gui/theme`.
+pub const Gui = struct {
+    theme: []const u8 = "",
+
+    pub const reflect_fields = .{
+        .theme = .{ attr.ProjectFile{ .kind = .theme }, attr.Doc{ .text = "The .theme every control is drawn with, under the one it names itself." } },
+    };
+};
+
+/// What a project file says: a section a field.
 pub const Settings = struct {
-    name: []const u8,
-    description: []const u8 = "",
-    /// `res://` or `uid://`, or empty.
-    icon: []const u8 = "",
-    renderer: Renderer = .compatibility,
-    /// What a game opens first: `res://` or `uid://`, or empty. Kept for a
-    /// project manager to show; nothing opens it by itself yet.
-    main_scene: []const u8 = "",
-    tags: []const []const u8 = &.{},
+    application: Application = .{},
+    display: Display = .{},
+    rendering: Rendering = .{},
     physics_2d: Physics2D = .{},
+    layer_names: LayerNames = .{},
     gui: Gui = .{},
-    /// What the text above is kept in, for settings read from a file; null
-    /// for ones written in code, whose text is the caller's.
-    arena: ?*std.heap.ArenaAllocator = null,
+    /// The memory the text above is kept in, and the file's keys this build
+    /// has no section for.
+    kept: settings_file.Kept = .{},
+
+    pub const json_ignore = .{.kept};
 
     /// Give back what reading them took. Nothing, for settings written in
     /// code.
     pub fn deinit(self: *Settings) void {
-        if (self.arena) |arena| {
-            const gpa = arena.child_allocator;
-            arena.deinit();
-            gpa.destroy(arena);
-        }
+        self.kept.deinit();
         self.* = undefined;
+    }
+
+    /// A section the game keeps in the project file itself, read into `S`:
+    /// `"my_game": { ... }` beside the engine's. Null when there is none.
+    pub fn section(self: *const Settings, comptime S: type, name: []const u8, into: Allocator) json.Error!?S {
+        return settings_file.readSection(S, &self.kept, name, into);
     }
 };
 
-pub const ReadError = error{
-    /// Not a project file: not an object, or no `fluxion_project` version.
-    NotAProject,
-    /// A version other than the one this engine reads.
-    UnsupportedVersion,
-    /// A value of the wrong kind: a renderer with no name here, a path that
-    /// is not the project's, a number where text goes.
-    WrongType,
-    /// No `name`, which every project has.
-    MissingField,
-} || json.Reader.Error || std.Io.Dir.ReadFileAllocError;
+pub const ReadError = settings_file.ReadError || std.Io.Dir.ReadFileAllocError;
 
-pub const WriteError = error{
-    /// An `icon`, a `main_scene` or a `gui.theme` that is not the project's
-    /// path, which the file could not be read back with.
-    WrongType,
-} || Allocator.Error || json.SaveError;
+pub const WriteError = settings_file.WriteError || Allocator.Error;
 
 pub const CreateError = error{
     /// The folder has a project file already.
@@ -194,196 +255,26 @@ pub fn read(gpa: Allocator, io: std.Io, dir: []const u8, diagnostics: ?*json.Dia
 
 /// Settings from a project file's text; `name` is what a warning calls the
 /// file. JSON5, so a file edited by hand may say why in a comment.
-pub fn parse(gpa: Allocator, bytes: []const u8, name: []const u8, diagnostics: ?*json.Diagnostics) ReadError!Settings {
-    const arena = try gpa.create(std.heap.ArenaAllocator);
-    arena.* = .init(gpa);
-    errdefer {
-        arena.deinit();
-        gpa.destroy(arena);
+pub fn parse(gpa: Allocator, bytes: []const u8, name: []const u8, diagnostics: ?*json.Diagnostics) settings_file.ReadError!Settings {
+    // Reading starts the diagnostics afresh; which file it is, is said again.
+    var file_buffer: [240]u8 = undefined;
+    const file: []const u8 = if (diagnostics) |d| blk: {
+        const len = @min(d.file().len, file_buffer.len);
+        @memcpy(file_buffer[0..len], d.file()[0..len]);
+        break :blk file_buffer[0..len];
+    } else "";
+    var settings = settings_file.parse(Settings, header, gpa, bytes, name, diagnostics) catch |err| {
+        if (diagnostics) |d| d.setFile(file);
+        return err;
+    };
+    errdefer settings.deinit();
+    if (diagnostics) |d| d.setFile(file);
+    if (settings.layer_names.physics_2d.len > LayerNames.max) {
+        if (diagnostics) |d| d.setMessage("there are 32 physics layers, and \"layer_names.physics_2d\" names more", .{});
+        return error.WrongType;
     }
-    var reader: json.Reader = .init(gpa, bytes, .{ .syntax = .json5, .diagnostics = diagnostics });
-    defer reader.deinit();
-    var reading: Reading = .{ .reader = &reader, .arena = arena.allocator(), .file = name };
-    var settings = try reading.settings();
-    settings.arena = arena;
     return settings;
 }
-
-/// The names of the renderers, for a message: `compatibility and modern`.
-const renderer_names = blk: {
-    const names = std.meta.fieldNames(Renderer);
-    var text: []const u8 = "";
-    for (names, 0..) |each, i| {
-        text = text ++ (if (i == 0) "" else if (i + 1 == names.len) " and " else ", ") ++ each;
-    }
-    break :blk text;
-};
-
-const Token = json.Reader.Token;
-
-const Reading = struct {
-    reader: *json.Reader,
-    arena: Allocator,
-    file: []const u8,
-
-    fn settings(r: *Reading) ReadError!Settings {
-        var out: Settings = .{ .name = "" };
-        var versioned = false;
-        var named = false;
-        try r.open(.object_begin, "a project, which is an object");
-        while (try r.key()) |name| {
-            if (std.mem.eql(u8, name, "fluxion_project")) {
-                const token = try r.next();
-                const number = switch (token) {
-                    .number => |n| n.asInt(u32),
-                    else => null,
-                } orelse return r.fail(error.NotAProject, "\"fluxion_project\" is the version of the project file, and this is {f}", .{scene.found(token)});
-                if (number != version) return r.fail(error.UnsupportedVersion, "this project file is version {d}; this engine reads version {d}", .{ number, version });
-                versioned = true;
-            } else if (std.mem.eql(u8, name, "name")) {
-                out.name = try r.text("the project's name");
-                named = true;
-            } else if (std.mem.eql(u8, name, "description")) {
-                out.description = try r.text("a description");
-            } else if (std.mem.eql(u8, name, "icon")) {
-                out.icon = try r.path("icon");
-            } else if (std.mem.eql(u8, name, "main_scene")) {
-                out.main_scene = try r.path("main_scene");
-            } else if (std.mem.eql(u8, name, "renderer")) {
-                out.renderer = try r.renderer();
-            } else if (std.mem.eql(u8, name, "tags")) {
-                out.tags = try r.tags();
-            } else if (std.mem.eql(u8, name, "physics_2d")) {
-                out.physics_2d = try r.physics2d();
-            } else if (std.mem.eql(u8, name, "gui")) {
-                out.gui = try r.gui();
-            } else {
-                log.warn("{s}: \"{s}\" is no project setting this engine knows, and is passed over", .{ r.file, name });
-                try r.reader.skipValue();
-            }
-        }
-        if (!versioned) return r.fail(error.NotAProject, "this is not a project file: it has no \"fluxion_project\" version", .{});
-        if (!named) return r.fail(error.MissingField, "a project has a \"name\", and this one has none", .{});
-        return out;
-    }
-
-    fn text(r: *Reading, comptime what: []const u8) ReadError![]const u8 {
-        const token = try r.next();
-        return switch (token) {
-            .string => |words| try r.arena.dupe(u8, words),
-            else => r.wrong(what ++ ", which is text", token),
-        };
-    }
-
-    fn path(r: *Reading, comptime field: []const u8) ReadError![]const u8 {
-        const given = try r.text("\"" ++ field ++ "\", a path");
-        if (given.len == 0 or Project.isValidProjectPath(given)) return given;
-        return r.fail(error.WrongType, "\"" ++ field ++ "\" is a res:// or uid:// path, or empty, and this is \"{s}\"", .{given});
-    }
-
-    fn renderer(r: *Reading) ReadError!Renderer {
-        const token = try r.next();
-        const word = switch (token) {
-            .string => |word| word,
-            else => return r.wrong("a renderer, which is text", token),
-        };
-        return std.meta.stringToEnum(Renderer, word) orelse
-            r.fail(error.WrongType, "\"{s}\" is not a renderer: the renderers are " ++ renderer_names, .{word});
-    }
-
-    fn tags(r: *Reading) ReadError![]const []const u8 {
-        try r.open(.array_begin, "the tags, which are a list");
-        var list: std.ArrayList([]const u8) = .empty;
-        while (try r.reader.peek() != .array_end) try list.append(r.arena, try r.text("a tag"));
-        _ = try r.next();
-        return list.items;
-    }
-
-    fn physics2d(r: *Reading) ReadError!Physics2D {
-        var out: Physics2D = .{};
-        try r.open(.object_begin, "the 2D physics settings, which are an object");
-        while (try r.key()) |name| {
-            if (std.mem.eql(u8, name, "default_gravity")) {
-                out.default_gravity = try r.decimal("the default gravity");
-            } else if (std.mem.eql(u8, name, "default_gravity_vector")) {
-                out.default_gravity_vector = try r.vector("the way gravity pulls");
-            } else if (std.mem.eql(u8, name, "default_linear_damp")) {
-                out.default_linear_damp = try r.decimal("the default linear damp");
-            } else if (std.mem.eql(u8, name, "default_angular_damp")) {
-                out.default_angular_damp = try r.decimal("the default angular damp");
-            } else if (std.mem.eql(u8, name, "layer_names")) {
-                try r.open(.array_begin, "the layer names, which are a list");
-                var at: usize = 0;
-                while (try r.reader.peek() != .array_end) : (at += 1) {
-                    if (at == out.layer_names.len) return r.fail(error.WrongType, "there are 32 physics layers, and this names more", .{});
-                    out.layer_names[at] = try r.text("a layer's name");
-                }
-                _ = try r.next();
-            } else {
-                log.warn("{s}: \"physics_2d.{s}\" is no 2D physics setting this engine knows, and is passed over", .{ r.file, name });
-                try r.reader.skipValue();
-            }
-        }
-        return out;
-    }
-
-    fn gui(r: *Reading) ReadError!Gui {
-        var out: Gui = .{};
-        try r.open(.object_begin, "the interface's settings, which are an object");
-        while (try r.key()) |name| {
-            if (std.mem.eql(u8, name, "theme")) {
-                out.theme = try r.path("gui.theme");
-            } else {
-                log.warn("{s}: \"gui.{s}\" is no interface setting this engine knows, and is passed over", .{ r.file, name });
-                try r.reader.skipValue();
-            }
-        }
-        return out;
-    }
-
-    fn decimal(r: *Reading, comptime what: []const u8) ReadError!f32 {
-        const token = try r.next();
-        return switch (token) {
-            .number => |n| n.asFloat(f32),
-            else => r.wrong(what ++ ", which is a number", token),
-        };
-    }
-
-    fn vector(r: *Reading, comptime what: []const u8) ReadError!math.Vec2 {
-        try r.open(.array_begin, what ++ ", which is two numbers");
-        const x = try r.decimal(what);
-        const y = try r.decimal(what);
-        try r.open(.array_end, what ++ ", which is two numbers and no more");
-        return .init(x, y);
-    }
-
-    fn next(r: *Reading) ReadError!Token {
-        return (try r.reader.next()) orelse r.fail(error.SyntaxError, "the project file ends too soon", .{});
-    }
-
-    /// The next member's name, or null at the end of the object.
-    fn key(r: *Reading) ReadError!?[]const u8 {
-        return switch (try r.next()) {
-            .key => |name| name,
-            else => null,
-        };
-    }
-
-    fn open(r: *Reading, comptime kind: std.meta.Tag(Token), comptime what: []const u8) ReadError!void {
-        const token = try r.next();
-        if (token != kind) return r.wrong(what, token);
-    }
-
-    fn wrong(r: *Reading, comptime expected: []const u8, token: Token) ReadError {
-        return r.fail(error.WrongType, "expected " ++ expected ++ ", found {f}", .{scene.found(token)});
-    }
-
-    /// Say what is wrong with the last token, and where it is.
-    fn fail(r: *Reading, err: ReadError, comptime fmt: []const u8, args: anytype) ReadError {
-        r.reader.report(fmt, args);
-        return err;
-    }
-};
 
 // -------------------------------------------------------------------------
 // Writing
@@ -391,14 +282,17 @@ const Reading = struct {
 
 /// Write `settings` as the project file in the folder `dir`, in place of the
 /// one there: written beside it and then moved over it, so a crash halfway
-/// leaves the old file whole. Folders on the way are made.
+/// leaves the old file whole. Folders on the way are made. Only what differs
+/// from the defaults is written.
 pub fn write(gpa: Allocator, io: std.Io, dir: []const u8, settings: Settings) WriteError!void {
-    for ([_][]const u8{ settings.icon, settings.main_scene, settings.gui.theme }) |given| {
-        if (given.len > 0 and !Project.isValidProjectPath(given)) return error.WrongType;
-    }
     const path = try std.fs.path.join(gpa, &.{ dir, file_name });
     defer gpa.free(path);
-    try json.save(io, path, File{ .settings = settings }, .{ .indent = 2 });
+    try settings_file.save(Settings, header, io, path, &settings);
+}
+
+/// The project file's text, as `write` writes it.
+pub fn text(gpa: Allocator, settings: *const Settings) WriteError![]u8 {
+    return settings_file.stringify(Settings, header, gpa, settings);
 }
 
 /// Make a new project: its folder, with every folder above it that is
@@ -417,51 +311,6 @@ pub fn create(gpa: Allocator, io: std.Io, dir: []const u8, settings: Settings) C
     try write(gpa, io, dir, settings);
 }
 
-/// The file as fluxion-json writes it: every key, in the order a person
-/// would read them.
-const File = struct {
-    settings: Settings,
-
-    pub fn toJson(self: File, w: *json.Writer) json.Writer.Error!void {
-        const s = self.settings;
-        try w.beginObject();
-        try w.field("fluxion_project", @as(u32, version));
-        try w.field("name", s.name);
-        try w.field("description", s.description);
-        try w.field("icon", s.icon);
-        try w.field("renderer", @as([]const u8, @tagName(s.renderer)));
-        try w.field("main_scene", s.main_scene);
-        try w.key("tags");
-        try w.beginArray();
-        for (s.tags) |tag| try w.writeString(tag);
-        try w.endArray();
-        const p = s.physics_2d;
-        try w.key("physics_2d");
-        try w.beginObject();
-        try w.field("default_gravity", p.default_gravity);
-        try w.key("default_gravity_vector");
-        try w.beginArray();
-        try w.write(p.default_gravity_vector.x);
-        try w.write(p.default_gravity_vector.y);
-        try w.endArray();
-        try w.field("default_linear_damp", p.default_linear_damp);
-        try w.field("default_angular_damp", p.default_angular_damp);
-        // Up to the last layer with a name: most projects name a few.
-        var named: usize = p.layer_names.len;
-        while (named > 0 and p.layer_names[named - 1].len == 0) named -= 1;
-        try w.key("layer_names");
-        try w.beginArray();
-        for (p.layer_names[0..named]) |layer| try w.writeString(layer);
-        try w.endArray();
-        try w.endObject();
-        try w.key("gui");
-        try w.beginObject();
-        try w.field("theme", s.gui.theme);
-        try w.endObject();
-        try w.endObject();
-    }
-};
-
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
@@ -479,71 +328,76 @@ const Folder = struct {
         return std.fmt.bufPrint(&self.buffer, ".zig-cache/tmp/{s}{s}", .{ self.tmp.sub_path, inside });
     }
 
-    fn put(self: *Folder, text: []const u8) !void {
-        try self.tmp.dir.writeFile(testing.io, .{ .sub_path = file_name, .data = text });
+    fn put(self: *Folder, content: []const u8) !void {
+        try self.tmp.dir.writeFile(testing.io, .{ .sub_path = file_name, .data = content });
     }
 };
 
-test "a project file is written and read back as it was" {
+test "a project file is written and read back as it was, saying only what differs" {
     var folder: Folder = .init();
     defer folder.tmp.cleanup();
     const tags = [_][]const u8{ "2d", "jam" };
-    var layers: [32][]const u8 = @splat("");
-    layers[0] = "world";
-    layers[3] = "wolves";
+    const layers = [_][]const u8{ "world", "", "", "wolves" };
     try write(testing.allocator, testing.io, try folder.at(""), .{
-        .name = "Meadow",
-        .description = "Sheep, and a wolf",
-        .icon = "res://icon.png",
-        .main_scene = "res://levels/meadow.json",
-        .tags = &tags,
+        .application = .{
+            .name = "Meadow",
+            .description = "Sheep, and a wolf",
+            .icon = "res://icon.png",
+            .main_scene = "res://levels/meadow.json",
+            .tags = &tags,
+        },
+        .display = .{ .width = 1600, .mode = .maximized },
         .physics_2d = .{
             .default_gravity = 981,
             .default_gravity_vector = .init(0.6, 0.8),
             .default_linear_damp = 0,
             .default_angular_damp = 0.5,
-            .layer_names = layers,
         },
+        .layer_names = .{ .physics_2d = &layers },
         .gui = .{ .theme = "res://ui/game.theme" },
     });
 
     var settings = try read(testing.allocator, testing.io, try folder.at(""), null);
     defer settings.deinit();
-    try testing.expectEqualStrings("Meadow", settings.name);
-    try testing.expectEqualStrings("Sheep, and a wolf", settings.description);
-    try testing.expectEqualStrings("res://icon.png", settings.icon);
-    try testing.expectEqual(Renderer.compatibility, settings.renderer);
-    try testing.expectEqualStrings("res://levels/meadow.json", settings.main_scene);
-    try testing.expectEqual(@as(usize, 2), settings.tags.len);
-    try testing.expectEqualStrings("jam", settings.tags[1]);
+    const application = settings.application;
+    try testing.expectEqualStrings("Meadow", application.name);
+    try testing.expectEqualStrings("Sheep, and a wolf", application.description);
+    try testing.expectEqualStrings("res://icon.png", application.icon);
+    try testing.expectEqualStrings("res://levels/meadow.json", application.main_scene);
+    try testing.expectEqual(@as(usize, 2), application.tags.len);
+    try testing.expectEqualStrings("jam", application.tags[1]);
+    try testing.expectEqual(@as(u32, 1600), settings.display.width);
+    try testing.expectEqual(@as(u32, 720), settings.display.height);
+    try testing.expectEqual(Display.Mode.maximized, settings.display.mode);
+    try testing.expectEqual(Renderer.compatibility, settings.rendering.renderer);
     const physics = settings.physics_2d;
     try testing.expectEqual(@as(f32, 981), physics.default_gravity);
     try testing.expectEqual(@as(f32, 0.8), physics.default_gravity_vector.y);
     try testing.expectEqual(@as(f32, 0), physics.default_linear_damp);
     try testing.expectEqual(@as(f32, 0.5), physics.default_angular_damp);
-    try testing.expectEqualStrings("wolves", physics.layer_names[3]);
-    try testing.expectEqualStrings("", physics.layer_names[2]);
-    try testing.expectEqualStrings("", physics.layer_names[31]);
     try testing.expectApproxEqAbs(@as(f32, 784.8), physics.gravity().y, 0.01);
+    try testing.expectEqualStrings("wolves", settings.layer_names.physics2d(3));
+    try testing.expectEqualStrings("", settings.layer_names.physics2d(2));
+    try testing.expectEqualStrings("", settings.layer_names.physics2d(31));
     try testing.expectEqualStrings("res://ui/game.theme", settings.gui.theme);
-    // A theme that is not the project's is not written.
-    try testing.expectError(error.WrongType, write(testing.allocator, testing.io, try folder.at(""), .{ .name = "Out", .gui = .{ .theme = "C:/elsewhere.theme" } }));
 
-    var kept: [1024]u8 = undefined;
-    const text = try folder.tmp.dir.readFile(testing.io, file_name, &kept);
-    try testing.expect(std.mem.startsWith(u8, text, "{\n  \"fluxion_project\": 1,\n  \"name\": \"Meadow\","));
-    // The layers up to the last one named, and no further.
-    const wolves = std.mem.indexOf(u8, text, "\"wolves\"").?;
-    const after = std.mem.trimStart(u8, text[wolves + "\"wolves\"".len ..], " \r\n");
-    try testing.expect(std.mem.startsWith(u8, after, "]"));
+    // What was left at its default is not written: no height, no renderer.
+    var kept: [2048]u8 = undefined;
+    const written = try folder.tmp.dir.readFile(testing.io, file_name, &kept);
+    try testing.expect(std.mem.startsWith(u8, written, "{\n  \"fluxion_project\": 2,\n  \"application\": {"));
+    try testing.expect(std.mem.indexOf(u8, written, "\"height\"") == null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"rendering\"") == null);
+
+    // A theme that is not the project's is not written.
+    try testing.expectError(error.WrongType, write(testing.allocator, testing.io, try folder.at(""), .{ .application = .{ .name = "Out" }, .gui = .{ .theme = "C:/elsewhere.theme" } }));
 }
 
-test "what a project file leaves out takes its default, and a key it does not know is passed over" {
+test "what a project file leaves out takes its default, and a key it does not know is kept" {
     var folder: Folder = .init();
     defer folder.tmp.cleanup();
     try folder.put(
         \\// Written by hand.
-        \\{ "fluxion_project": 1, "window": { "vsync": false, "size": [640, 360] }, "name": "Bare" }
+        \\{ "fluxion_project": 2, "application": { "name": "Bare", "colour": "green" }, "my_game": { "lives": 3 } }
     );
     const level = testing.log_level;
     testing.log_level = .err;
@@ -551,15 +405,25 @@ test "what a project file leaves out takes its default, and a key it does not kn
 
     var settings = try read(testing.allocator, testing.io, try folder.at(""), null);
     defer settings.deinit();
-    try testing.expectEqualStrings("Bare", settings.name);
-    try testing.expectEqualStrings("", settings.icon);
-    try testing.expectEqual(Renderer.compatibility, settings.renderer);
-    try testing.expectEqual(@as(usize, 0), settings.tags.len);
+    try testing.expectEqualStrings("Bare", settings.application.name);
+    try testing.expectEqualStrings("", settings.application.icon);
+    try testing.expectEqual(Renderer.compatibility, settings.rendering.renderer);
+    try testing.expectEqual(@as(usize, 0), settings.application.tags.len);
     // Godot 3's physics, which a new Godot project has.
     try testing.expectEqual(@as(f32, 98), settings.physics_2d.default_gravity);
     try testing.expectEqual(@as(f32, 1), settings.physics_2d.default_gravity_vector.y);
-    try testing.expectEqual(@as(f32, 0.1), settings.physics_2d.default_linear_damp);
-    try testing.expectEqual(@as(f32, 1), settings.physics_2d.default_angular_damp);
+    try testing.expectEqual(@as(u16, 60), settings.physics_2d.ticks_per_second);
+
+    // The game's own section, read by the game; and written back.
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const Game = struct { lives: u8 = 1 };
+    try testing.expectEqual(@as(u8, 3), (try settings.section(Game, "my_game", arena.allocator())).?.lives);
+    try write(testing.allocator, testing.io, try folder.at(""), settings);
+    var kept: [1024]u8 = undefined;
+    const written = try folder.tmp.dir.readFile(testing.io, file_name, &kept);
+    try testing.expect(std.mem.indexOf(u8, written, "\"my_game\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"colour\"") == null);
 }
 
 test "a project file that is wrong says what and where, and one that is not there says so" {
@@ -571,50 +435,30 @@ test "a project file that is wrong says what and where, and one that is not ther
 
     const cases = [_]struct { text: []const u8, err: ReadError, message: []const u8 }{
         .{
-            .text = "{ \"fluxion_project\": 2, \"name\": \"Later\" }",
+            .text = "{ \"fluxion_project\": 1, \"name\": \"Old\" }",
             .err = error.UnsupportedVersion,
-            .message = "this project file is version 2; this engine reads version 1",
+            .message = "this project file is version 1, written for an older Fluxion; this one reads version 2",
         },
         .{
-            .text = "{ \"fluxion_project\": 1, \"name\": \"Shiny\", \"renderer\": \"raytraced\" }",
+            .text = "{ \"fluxion_project\": 2, \"application\": { \"name\": \"Lost\", \"icon\": \"C:/art/icon.png\" } }",
             .err = error.WrongType,
-            .message = "\"raytraced\" is not a renderer: the renderers are compatibility and modern",
+            .message = "\"application.icon\" is a res:// or uid:// path, or empty, and this is \"C:/art/icon.png\"",
         },
         .{
-            .text = "{ \"fluxion_project\": 1, \"name\": \"Lost\", \"icon\": \"C:/art/icon.png\" }",
-            .err = error.WrongType,
-            .message = "\"icon\" is a res:// or uid:// path, or empty, and this is \"C:/art/icon.png\"",
-        },
-        .{
-            .text = "{ \"fluxion_project\": 1, \"renderer\": \"modern\" }",
+            .text = "{ \"fluxion_project\": 2, \"rendering\": { \"renderer\": \"modern\" } }",
             .err = error.MissingField,
-            .message = "a project has a \"name\", and this one has none",
+            .message = "\"application.name\" has to say something, and says nothing",
         },
         .{
-            .text = "{ \"name\": \"Meadow\" }",
-            .err = error.NotAProject,
+            .text = "{ \"application\": { \"name\": \"Meadow\" } }",
+            .err = error.NotSettings,
             .message = "this is not a project file: it has no \"fluxion_project\" version",
         },
         .{
-            .text = "{ \"fluxion_project\": 1, \"name\": 7 }",
-            .err = error.WrongType,
-            .message = "expected the project's name, which is text, found the number 7",
-        },
-        .{
-            .text = "{ \"fluxion_project\": 1, \"name\": \"Down\", \"physics_2d\": { \"default_gravity\": \"down\" } }",
-            .err = error.WrongType,
-            .message = "expected the default gravity, which is a number, found the string \"down\"",
-        },
-        .{
-            .text = "{ \"fluxion_project\": 1, \"name\": \"Deep\", \"physics_2d\": { \"default_gravity_vector\": [0, 1, 0] } }",
-            .err = error.WrongType,
-            .message = "expected the way gravity pulls, which is two numbers and no more, found the number 0",
-        },
-        .{
-            .text = "{ \"fluxion_project\": 1, \"name\": \"Many\", \"physics_2d\": { \"layer_names\": [" ++
+            .text = "{ \"fluxion_project\": 2, \"application\": { \"name\": \"Many\" }, \"layer_names\": { \"physics_2d\": [" ++
                 ("\"\", " ** 32) ++ "\"thirty-third\"] } }",
             .err = error.WrongType,
-            .message = "there are 32 physics layers, and this names more",
+            .message = "there are 32 physics layers, and \"layer_names.physics_2d\" names more",
         },
     };
     for (cases) |case| {
@@ -624,29 +468,28 @@ test "a project file that is wrong says what and where, and one that is not ther
         try testing.expect(std.mem.endsWith(u8, diagnostics.file(), file_name));
     }
 
-    // The line and column of what is wrong.
-    try folder.put("{\n  \"fluxion_project\": 1,\n  \"name\": \"Shiny\",\n  \"renderer\": \"raytraced\"\n}");
-    try testing.expectError(error.WrongType, read(testing.allocator, testing.io, try folder.at(""), &diagnostics));
+    // The line of what is wrong.
+    try folder.put("{\n  \"fluxion_project\": 2,\n  \"application\": { \"name\": \"Shiny\" },\n  \"rendering\": { \"renderer\": \"raytraced\" }\n}");
+    try testing.expectError(error.UnknownTag, read(testing.allocator, testing.io, try folder.at(""), &diagnostics));
     try testing.expectEqual(@as(u32, 4), diagnostics.line);
-    try testing.expectEqual(@as(u32, 15), diagnostics.column);
 }
 
 test "a project is made in a folder that was not there, and not over one that is" {
     var folder: Folder = .init();
     defer folder.tmp.cleanup();
     const dir = try folder.at("/games/meadow");
-    try create(testing.allocator, testing.io, dir, .{ .name = "Meadow", .renderer = .modern });
+    try create(testing.allocator, testing.io, dir, .{ .application = .{ .name = "Meadow" }, .rendering = .{ .renderer = .modern } });
 
     var settings = try read(testing.allocator, testing.io, dir, null);
     defer settings.deinit();
-    try testing.expectEqual(Renderer.modern, settings.renderer);
+    try testing.expectEqual(Renderer.modern, settings.rendering.renderer);
 
-    try testing.expectError(error.ProjectExists, create(testing.allocator, testing.io, dir, .{ .name = "Other" }));
+    try testing.expectError(error.ProjectExists, create(testing.allocator, testing.io, dir, .{ .application = .{ .name = "Other" } }));
     var again = try read(testing.allocator, testing.io, dir, null);
     defer again.deinit();
-    try testing.expectEqualStrings("Meadow", again.name);
+    try testing.expectEqualStrings("Meadow", again.application.name);
 
-    try testing.expectError(error.WrongType, write(testing.allocator, testing.io, dir, .{ .name = "Lost", .icon = "icon.png" }));
+    try testing.expectError(error.WrongType, write(testing.allocator, testing.io, dir, .{ .application = .{ .name = "Lost", .icon = "icon.png" } }));
 }
 
 test "a renderer's backends, best first, on each system" {
