@@ -12,7 +12,7 @@
 //!
 //! ```json
 //! {
-//!   "fluxion_scene": 2,
+//!   "fluxion_scene": 3,
 //!   "entities": [
 //!     {
 //!       "uuid": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c",
@@ -22,7 +22,10 @@
 //!     },
 //!     {
 //!       "uuid": "5c2d7e9f-0a1b-4c3d-8e5f-6a7b8c9d0e1f",
-//!       "Transform2D": { "y": -6.0, "parent": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c" },
+//!       "parent": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c",
+//!       "name": "turret",
+//!       "groups": ["guns"],
+//!       "Transform2D": { "y": -6.0 },
 //!       "Sprite": { "texture": "res://art/turret.png" }
 //!     }
 //!   ],
@@ -107,7 +110,7 @@ const math = @import("fluxion_math");
 const Color = @import("color.zig").Color;
 
 /// The version this writes, and the only one it reads.
-pub const version = 2;
+pub const version = 3;
 
 pub const SaveOptions = struct {
     format: json.Format = .json,
@@ -515,7 +518,22 @@ const Saving = struct {
             const text = uuid.toString();
             try w.field("uuid", @as([]const u8, &text));
         }
+        // What it hangs from, by the UUID it was written with: before the
+        // name, which is its own among its parent's children.
+        const parent = app.parentOf(e);
+        if (!parent.isNone()) if (app.uuidOf(parent)) |uuid| {
+            const text = uuid.toString();
+            try w.field("parent", @as([]const u8, &text));
+        };
         if (app.nameOf(e)) |name| try w.field("name", name);
+        var held: [32][]const u8 = undefined;
+        const groups = app.groupsOf(e, &held);
+        if (groups.len > 0) {
+            try w.key("groups");
+            try w.beginArray();
+            for (groups) |group| try w.writeString(group);
+            try w.endArray();
+        }
         for (app.scene_components.entries.items) |entry| {
             const id = entry.findIdIn(&app.world) orelse continue;
             const cell = app.world.cellOf(e, id) orelse continue;
@@ -1160,7 +1178,11 @@ const Loading = struct {
                             l.path.pop(inner);
                             continue;
                         }
-                        if (!std.mem.eql(u8, member, "name")) {
+                        if (std.mem.eql(u8, member, "parent")) {
+                            if (count == ids.len) return error.TooManyComponents;
+                            ids[count] = try app.world.idOf(components.Parent);
+                            count += 1;
+                        } else if (!std.mem.eql(u8, member, "name") and !std.mem.eql(u8, member, "groups")) {
                             if (app.scene_components.find(member)) |entry| {
                                 if (count == ids.len) return error.TooManyComponents;
                                 ids[count] = try entry.idIn(&app.world);
@@ -1247,6 +1269,9 @@ const Loading = struct {
             for (l.entities, 0..) |e, place| {
                 const entity_mark = l.path.push("entities/{d}", .{place});
                 l.entity = e;
+                // Given once the whole entity is read, when its parent is,
+                // since a name is its own among its parent's children.
+                var given: ?[]const u8 = null;
                 _ = try l.next();
                 while (try l.key()) |member| {
                     if (std.mem.eql(u8, member, "uuid")) {
@@ -1255,14 +1280,32 @@ const Loading = struct {
                     }
                     if (std.mem.eql(u8, member, "name")) {
                         const token = try l.next();
-                        const text = switch (token) {
-                            .string => |text| text,
+                        given = switch (token) {
+                            .string => |text| try l.arena.dupe(u8, text),
                             else => return l.wrong("an entity's name", token),
                         };
-                        app.setName(e, text) catch |err| return switch (err) {
-                            error.NameTaken => l.fail(err, "\"{s}\" is the name of an entity already in the world", .{text}),
-                            else => err,
-                        };
+                        continue;
+                    }
+                    if (std.mem.eql(u8, member, "parent")) {
+                        const mark = l.path.push("parent", .{});
+                        var parent: Entity = .none;
+                        try readValue(l, Entity, &parent);
+                        app.world.get(e, components.Parent).?.* = .of(parent);
+                        l.path.pop(mark);
+                        continue;
+                    }
+                    if (std.mem.eql(u8, member, "groups")) {
+                        const mark = l.path.push("groups", .{});
+                        try l.open(.array_begin, "the groups an entity is in, which is a list of names");
+                        while (true) {
+                            const token = try l.next();
+                            switch (token) {
+                                .array_end => break,
+                                .string => |group| try app.addToGroup(e, group),
+                                else => return l.wrong("the name of a group", token),
+                            }
+                        }
+                        l.path.pop(mark);
                         continue;
                     }
                     const entry = app.scene_components.find(member) orelse {
@@ -1274,6 +1317,10 @@ const Loading = struct {
                     try entry.read(l, cell);
                     l.path.pop(mark);
                 }
+                // Another of its family with the name already - the same
+                // scene read twice beside itself - gives this one the first
+                // free one after it.
+                if (given) |text| try app.setFreeName(e, text);
                 l.path.pop(entity_mark);
             }
             // Past the list's end, for what comes after it: the connections.
@@ -1904,7 +1951,7 @@ test "a scene reads as what it holds, and leaves out what is the default" {
     try app.setName(camera, "camera");
     var label: Text2D = .of("Hi");
     label.size = 13;
-    const words = try app.world.spawnWith(.{ Transform2D.childOf(camera, 0, -6), label });
+    const words = try app.world.spawnWith(.{ Transform2D.at(0, -6), components.Parent.of(camera), label });
     const wanderer = try app.world.spawnWith(.{Wander{ .dx = 1, .mood = .cross, .leader = camera }});
     for ([_]Entity{ camera, words, wanderer }, fixed_uuids) |e, uuid| try app.setUuid(e, uuid);
 
@@ -1912,7 +1959,7 @@ test "a scene reads as what it holds, and leaves out what is the default" {
     defer testing.allocator.free(text);
     try testing.expectEqualStrings(
         \\{
-        \\  "fluxion_scene": 2,
+        \\  "fluxion_scene": 3,
         \\  "entities": [
         \\    {
         \\      "uuid": "00000000-0000-4000-8000-000000000001",
@@ -1922,10 +1969,8 @@ test "a scene reads as what it holds, and leaves out what is the default" {
         \\    },
         \\    {
         \\      "uuid": "00000000-0000-4000-8000-000000000002",
-        \\      "Transform2D": {
-        \\        "y": -6.0,
-        \\        "parent": "00000000-0000-4000-8000-000000000001"
-        \\      },
+        \\      "parent": "00000000-0000-4000-8000-000000000001",
+        \\      "Transform2D": { "y": -6.0 },
         \\      "Text2D": { "text": "Hi", "size": 13.0 }
         \\    },
         \\    {
@@ -2031,14 +2076,14 @@ test "one entity is written as a scene writes it, or with every field for an ins
     defer app.destroy();
     const camera = try app.world.spawnWith(.{ Transform2D.at(4, 8), Camera2D{} });
     try app.setName(camera, "camera");
-    const child = try app.world.spawnWith(.{Transform2D.childOf(camera, 0, 2)});
+    const child = try app.world.spawnWith(.{ Transform2D.at(0, 2), components.Parent.of(camera) });
     try app.setUuid(camera, fixed_uuids[0]);
     try app.setUuid(child, fixed_uuids[1]);
 
     const brief = try json.stringify(testing.allocator, EntityJson{ .app = app, .entity = child }, .{});
     defer testing.allocator.free(brief);
     try testing.expectEqualStrings(
-        "{\"uuid\":\"00000000-0000-4000-8000-000000000002\",\"Transform2D\":{\"y\":2.0,\"parent\":\"00000000-0000-4000-8000-000000000001\"}}",
+        "{\"uuid\":\"00000000-0000-4000-8000-000000000002\",\"parent\":\"00000000-0000-4000-8000-000000000001\",\"Transform2D\":{\"y\":2.0}}",
         brief,
     );
 
@@ -2076,10 +2121,10 @@ test "a scene comes back as it went, from JSON and from CBOR" {
         Animation.strip(4, 8),
     });
     try source.setName(body, "hero");
-    _ = try source.world.spawnWith(.{ Transform2D.childOf(body, -7, -4), Sprite.solid(.white, 9, 9) });
+    _ = try source.world.spawnWith(.{ Transform2D.at(-7, -4), components.Parent.of(body), Sprite.solid(.white, 9, 9) });
     var label: Text2D = .of("Zoë ✓");
     label.font = typeface;
-    _ = try source.world.spawnWith(.{ Transform2D{ .parent = body, .inherit_rotation = false }, label });
+    _ = try source.world.spawnWith(.{ Transform2D{ .inherit_rotation = false }, components.Parent.of(body), label });
     _ = try source.world.spawnWith(.{Wander{
         .dx = 0.1,
         .dy = std.math.inf(f32),
@@ -2192,15 +2237,15 @@ test "a version 1 scene is refused, and says so, rather than read another way" {
     try testing.expectError(error.UnsupportedVersion, read(app,
         \\{ "fluxion_scene": 1, "entities": [
         \\  { "name": "tank" },
-        \\  { "Transform2D": { "parent": 0 } }
+        \\  { "parent": 0, "Transform2D": {} }
         \\] }
     , .{ .diagnostics = &diagnostics }));
-    try testing.expectEqualStrings("this scene is version 1, an older one this engine no longer reads: it reads version 2", diagnostics.message());
+    try testing.expectEqualStrings("this scene is version 1, an older one this engine no longer reads: it reads version 3", diagnostics.message());
     try testing.expectEqual(@as(usize, 0), app.world.count());
 
     // Nor is an entity named by its place in the list any more.
     try testing.expectError(error.WrongType, read(app,
-        \\{ "fluxion_scene": 2, "entities": [{ "name": "tank" }, { "Transform2D": { "parent": 0 } }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "name": "tank" }, { "parent": 0, "Transform2D": {} }] }
     , .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("expected an entity's UUID, or null, found the number 0", diagnostics.message());
     try testing.expectEqual(@as(usize, 0), app.world.count());
@@ -2210,9 +2255,9 @@ test "a scene loaded twice gives the second copy UUIDs of its own, and its refer
     const app = try headless();
     defer app.destroy();
     const text =
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "uuid": "11111111-1111-4111-8111-111111111111", "name": "tank", "Transform2D": { "x": 1 } },
-        \\  { "uuid": "22222222-2222-4222-8222-222222222222", "Transform2D": { "parent": "11111111-1111-4111-8111-111111111111" } }
+        \\  { "uuid": "22222222-2222-4222-8222-222222222222", "parent": "11111111-1111-4111-8111-111111111111", "Transform2D": {} }
         \\] }
     ;
     const tank_uuid: Uuid = .parseComptime("11111111-1111-4111-8111-111111111111");
@@ -2225,21 +2270,20 @@ test "a scene loaded twice gives the second copy UUIDs of its own, and its refer
     try testing.expectEqual(@as(usize, 0), (try read(app, text, .{})).reassigned);
     const again = app.findUuid(tank_uuid).?;
 
-    // The same scene beside it: new UUIDs, and a child of its own tank.
-    var copy = text.*;
-    std.mem.replaceScalar(u8, &copy, 'k', 'q');
-    try testing.expectEqual(@as(usize, 2), (try read(app, &copy, .{})).reassigned);
+    // The same scene beside it: new UUIDs, a child of its own tank, and the
+    // next free name among the roots.
+    try testing.expectEqual(@as(usize, 2), (try read(app, text, .{})).reassigned);
     try testing.expect(app.findUuid(tank_uuid).?.eql(again));
-    const second_tank = app.find("tanq").?;
+    try testing.expect(app.find("tank").?.eql(again));
+    const second_tank = app.find("tank 2").?;
     try testing.expect(!app.uuidOf(second_tank).?.eql(tank_uuid));
 
     var parents: [2]Entity = undefined;
     var count: usize = 0;
-    var it = try ecs.Query(.{Transform2D}).over(&app.world);
+    var it = try ecs.Query(.{components.Parent}).over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(Transform2D)) |place| {
-            if (place.parent.isNone()) continue;
-            parents[count] = place.parent;
+        for (chunk.slice(components.Parent)) |held| {
+            parents[count] = held.entity;
             count += 1;
         }
     }
@@ -2254,11 +2298,40 @@ test "an entity another scene brought is found by its UUID" {
     const door = try app.world.spawnWith(.{Transform2D.at(3, 4)});
     try app.setUuid(door, fixed_uuids[2]);
     _ = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [
-        \\  { "name": "handle", "Transform2D": { "parent": "00000000-0000-4000-8000-000000000003" } }
+        \\{ "fluxion_scene": 3, "entities": [
+        \\  { "name": "handle", "parent": "00000000-0000-4000-8000-000000000003", "Transform2D": {} }
         \\] }
     , .{});
-    try testing.expect(app.world.get(app.find("handle").?, Transform2D).?.parent.eql(door));
+    try testing.expect(app.parentOf(app.find("handle").?).eql(door));
+}
+
+test "parents, names and groups go through a scene and back" {
+    const app = try headless();
+    defer app.destroy();
+    const tank = try app.world.spawnWith(.{Transform2D.at(1, 2)});
+    try app.setName(tank, "tank");
+    try app.addToGroup(tank, "vehicles");
+    const turret = try app.world.spawnWith(.{ Transform2D.at(0, -6), components.Parent.of(tank) });
+    try app.setName(turret, "turret");
+    try app.addToGroup(turret, "guns");
+    try app.addToGroup(turret, "vehicles");
+    // A timer hangs in the tree with no transform of its own.
+    const reload = try app.world.spawnWith(.{ @import("timer.zig").Timer{}, components.Parent.of(turret) });
+    try app.setName(reload, "reload");
+
+    const saved = try write(app, testing.allocator, .{});
+    defer testing.allocator.free(saved);
+    app.clearWorld();
+    _ = try read(app, saved, .{});
+
+    const back = app.find("tank").?;
+    try testing.expect(app.findPath(back, "turret/reload") != null);
+    const gun = app.findPath(back, "turret").?;
+    try testing.expect(app.parentOf(gun).eql(back));
+    try testing.expect(app.isInGroup(gun, "guns"));
+    try testing.expect(app.isInGroup(gun, "vehicles"));
+    try testing.expect(app.isInGroup(back, "vehicles"));
+    try testing.expect(!app.isInGroup(back, "guns"));
 }
 
 test "a UUID given twice, or naming nothing, is a mistake that says where it is" {
@@ -2267,7 +2340,7 @@ test "a UUID given twice, or naming nothing, is a mistake that says where it is"
     var diagnostics: json.Diagnostics = .{};
 
     try testing.expectError(error.DuplicateUuid, read(app,
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "uuid": "11111111-1111-4111-8111-111111111111" },
         \\  { "uuid": "11111111-1111-4111-8111-111111111111" }
         \\] }
@@ -2276,15 +2349,15 @@ test "a UUID given twice, or naming nothing, is a mistake that says where it is"
     try testing.expectEqualStrings("/entities/1/uuid", diagnostics.path());
 
     try testing.expectError(error.NoSuchEntity, read(app,
-        \\{ "fluxion_scene": 2, "entities": [
-        \\  { "Transform2D": { "parent": "44444444-4444-4444-8444-444444444444" } }
+        \\{ "fluxion_scene": 3, "entities": [
+        \\  { "parent": "44444444-4444-4444-8444-444444444444", "Transform2D": {} }
         \\] }
     , .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("no entity in this scene or in the world has the UUID 44444444-4444-4444-8444-444444444444", diagnostics.message());
-    try testing.expectEqualStrings("/entities/0/Transform2D/parent", diagnostics.path());
+    try testing.expectEqualStrings("/entities/0/parent", diagnostics.path());
 
     try testing.expectError(error.WrongType, read(app,
-        \\{ "fluxion_scene": 2, "entities": [{ "uuid": "tank" }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "uuid": "tank" }] }
     , .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("\"tank\" is not a UUID", diagnostics.message());
     try testing.expectEqual(@as(usize, 0), app.world.count());
@@ -2294,7 +2367,7 @@ test "a component nothing here knows is kept, a field or a member nothing knows 
     const app = try headless();
     defer app.destroy();
     const loaded = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "name": "odd", "Transform2D": { "x": 5, "wobble": 3 }, "Mystery": { "a": [1, 2] } },
         \\  { "name": "empty" }
         \\], "future": true }
@@ -2310,7 +2383,7 @@ test "a component nothing here knows is kept, a field or a member nothing knows 
     const place = app.single(Transform2D).?;
     try testing.expectEqual(@as(f32, 5), place.x);
     try testing.expectEqual(@as(f32, 1), place.scale_x);
-    try testing.expect(place.parent.isNone());
+    try testing.expect(app.parentOf(app.find("odd").?).isNone());
     try testing.expect(app.find("empty") != null);
 }
 
@@ -2325,7 +2398,7 @@ test "a component nothing here knows is written back as it was read, from JSON a
     const app = try headless();
     defer app.destroy();
     const loaded = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "name": "odd", "Mystery": { "big": 18446744073709551615, "half": -0.5, "odd": NaN,
         \\      "text": "a \"quoted\"\nline ✓", "list": [true, false, null, { "deep": [[]] }] },
         \\    "Transform2D": { "x": 5 }, "Later": 7 },
@@ -2396,17 +2469,17 @@ test "a mistake in a scene says where it is, and leaves the world as it was" {
     _ = try app.world.spawnWith(.{Transform2D.at(1, 1)});
 
     const text =
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "name": "first", "Transform2D": { "x": 5 } },
-        \\  { "Transform2D": { "parent": "77777777-7777-4777-8777-777777777777" } }
+        \\  { "parent": "77777777-7777-4777-8777-777777777777", "Transform2D": {} }
         \\] }
     ;
     var diagnostics: json.Diagnostics = .{};
     try testing.expectError(error.NoSuchEntity, read(app, text, .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("no entity in this scene or in the world has the UUID 77777777-7777-4777-8777-777777777777", diagnostics.message());
-    try testing.expectEqualStrings("/entities/1/Transform2D/parent", diagnostics.path());
+    try testing.expectEqualStrings("/entities/1/parent", diagnostics.path());
     try testing.expectEqual(@as(u32, 3), diagnostics.line);
-    try testing.expectEqual(@as(u32, 32), diagnostics.column);
+    try testing.expectEqual(@as(u32, 15), diagnostics.column);
     try testing.expectEqual(@as(usize, 1), app.world.count());
     try testing.expect(app.find("first") == null);
 
@@ -2415,10 +2488,10 @@ test "a mistake in a scene says where it is, and leaves the world as it was" {
     defer testing.allocator.free(binary);
     try testing.expectError(error.NoSuchEntity, read(app, binary, .{ .diagnostics = &diagnostics }));
     try testing.expect(diagnostics.binary);
-    try testing.expectEqualStrings("/entities/1/Transform2D/parent", diagnostics.path());
+    try testing.expectEqualStrings("/entities/1/parent", diagnostics.path());
 
     try testing.expectError(error.WrongType, read(app,
-        \\{ "fluxion_scene": 2, "entities": [{ "Sprite": { "width": "wide" } }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "Sprite": { "width": "wide" } }] }
     , .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("expected a number, found the string \"wide\"", diagnostics.message());
     try testing.expectEqualStrings("/entities/0/Sprite/width", diagnostics.path());
@@ -2436,7 +2509,7 @@ test "numbers no hand would give load, and the frames after them do not crash" {
     defer app.destroy();
     _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 }) catch {};
     const loaded = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "Transform2D": { "x": NaN, "y": Infinity, "scale_x": 0 }, "Sprite": { "width": NaN },
         \\    "Animation": { "columns": 0, "rows": 0, "length": 4, "fps": 1e39, "time": NaN } },
         \\  { "Transform2D": {}, "Sprite": {}, "Animation": { "columns": 0, "rows": 0, "length": 0, "fps": 1e39 } },
@@ -2460,10 +2533,10 @@ test "numbers no hand would give load, and the frames after them do not crash" {
     // Words that are not UTF-8 never reach a label: a lone surrogate written
     // as an escape is read as U+FFFD, and a byte no UTF-8 has is a mistake.
     _ = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [{ "name": "surrogate", "Transform2D": {}, "Text2D": { "text": "a\uD800b" } }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "name": "surrogate", "Transform2D": {}, "Text2D": { "text": "a\uD800b" } }] }
     , .{});
     try testing.expectEqualStrings("a\u{FFFD}b", app.world.get(app.find("surrogate").?, Text2D).?.slice());
-    try testing.expectError(error.SyntaxError, read(app, "{ \"fluxion_scene\": 2, \"entities\": [{ \"Text2D\": { \"text\": \"a\xffb\" } }] }", .{}));
+    try testing.expectError(error.SyntaxError, read(app, "{ \"fluxion_scene\": 3, \"entities\": [{ \"Text2D\": { \"text\": \"a\xffb\" } }] }", .{}));
 
     // And a label's bytes written by hand, past UTF-8 and past its buffer,
     // are neither drawn nor saved as they are.
@@ -2492,8 +2565,11 @@ test "a file that is not a scene, or a newer one, is refused" {
     try testing.expectError(error.NotAScene, read(app, "{ \"entities\": [] }", .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("this is not a scene: it has no \"fluxion_scene\" version", diagnostics.message());
 
-    try testing.expectError(error.UnsupportedVersion, read(app, "{ \"fluxion_scene\": 3, \"entities\": [] }", .{ .diagnostics = &diagnostics }));
-    try testing.expectEqualStrings("this scene is version 3, newer than this engine, which reads version 2", diagnostics.message());
+    try testing.expectError(error.UnsupportedVersion, read(app, "{ \"fluxion_scene\": 4, \"entities\": [] }", .{ .diagnostics = &diagnostics }));
+    try testing.expectEqualStrings("this scene is version 4, newer than this engine, which reads version 3", diagnostics.message());
+
+    try testing.expectError(error.UnsupportedVersion, read(app, "{ \"fluxion_scene\": 2, \"entities\": [] }", .{ .diagnostics = &diagnostics }));
+    try testing.expectEqualStrings("this scene is version 2, an older one this engine no longer reads: it reads version 3", diagnostics.message());
 
     try testing.expectError(error.WrongType, read(app, "[1, 2]", .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("expected a scene, which is an object, found a list", diagnostics.message());
@@ -2503,7 +2579,7 @@ test "a scene says what it is and which files it names, without being loaded" {
     const text =
         \\{
         \\  // By hand, with what nothing here knows beside what it does.
-        \\  "fluxion_scene": 2,
+        \\  "fluxion_scene": 3,
         \\  "made_by": { "tool": "an editor", "entities": [1, 2, 3] },
         \\  "entities": [
         \\    { "uuid": "00000000-0000-4000-8000-000000000001", "Sprite": { "texture": "res://art/hero.png" } },
@@ -2519,7 +2595,7 @@ test "a scene says what it is and which files it names, without being loaded" {
     var said = (try readInfo(testing.allocator, text, null)).?;
     defer said.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(u32, 2), said.version);
+    try testing.expectEqual(@as(u32, 3), said.version);
     try testing.expectEqual(json.Format.json, said.format);
     try testing.expectEqual(@as(usize, 2), said.entities);
     try testing.expectEqual(@as(usize, 3), said.files.len);
@@ -2685,6 +2761,6 @@ test "a font of a collection is written as its file and member, and read back as
 
     // An object with no file is a mistake that says so, not a crash.
     try testing.expectError(error.WrongType, read(copy,
-        \\{ "fluxion_scene": 2, "entities": [{ "Transform2D": {}, "Text2D": { "font": { "member": 1 } } }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "Transform2D": {}, "Text2D": { "font": { "member": 1 } } }] }
     , .{}));
 }

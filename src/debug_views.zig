@@ -119,12 +119,13 @@ fn drawBodies(app: *App) void {
 fn drawTransforms(app: *App) !void {
     var it = try ecs.Query(.{Transform2D}).over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.entities, chunk.slice(Transform2D)) |e, local| {
+        for (chunk.entities) |e| {
             const placed = app.drawnTransform(e) orelse continue;
             const at: Vec2 = .init(placed.x, placed.y);
             app.debug.axes2d(at, placed.rotation, reach);
-            if (local.parent.isNone()) continue;
-            const parent = app.drawnTransform(local.parent) orelse continue;
+            const above = app.parentOf(e);
+            if (above.isNone()) continue;
+            const parent = app.drawnTransform(above) orelse continue;
             app.debug.line2d(at, .init(parent.x, parent.y), .gray);
         }
     }
@@ -298,7 +299,7 @@ test "the transform view draws each entity's axes and a line to its parent" {
     defer app.destroy();
     app.debug_views.transforms = true;
     const tank = try app.world.spawnWith(.{Transform2D.at(10, 10)});
-    _ = try app.world.spawnWith(.{Transform2D.childOf(tank, 20, 0)});
+    _ = try app.world.spawnWith(.{ Transform2D.at(20, 0), components.Parent.of(tank) });
 
     _ = try app.step();
     try testing.expectEqual(@as(u32, 2 + 2 + 1), linesDrawn(app));

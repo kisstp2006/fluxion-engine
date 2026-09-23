@@ -14,8 +14,10 @@ const Color = @import("color.zig").Color;
 const Interface = @import("interface.zig");
 const Region = @import("components.zig").Region;
 const Transform2D = @import("components.zig").Transform2D;
+const Parent = @import("components.zig").Parent;
 const View = @import("render/view.zig").View;
 const attr = @import("attr.zig");
+const hierarchy = @import("hierarchy.zig");
 const theme_file = @import("theme.zig");
 
 /// What a control looks like lives in a `.theme` file rather than in the
@@ -68,7 +70,6 @@ fn radius(self: Corners) ui.CornerRadius {
 
 /// The rectangular base of every UI entity.
 pub const Control = extern struct {
-    parent: Entity = .none,
     /// The `.theme` file this control and everything under it is drawn from.
     /// `.none` takes whatever the control above it uses.
     theme: ThemeHandle = .none,
@@ -102,7 +103,6 @@ pub const Control = extern struct {
         attr.Pickable{ .by_default = false },
     };
     pub const reflect_fields = .{
-        .parent = .{attr.Doc{ .text = "The UI entity whose box contains this one" }},
         .variation = .{attr.Hidden{}},
         .variation_len = .{attr.Hidden{}},
         .offset_x = .{attr.Unit{ .text = "px" }},
@@ -480,7 +480,8 @@ pub const Nodes = struct {
         const app = context.app;
         const layout = context.layout;
         const control = app.world.get(entity, Control) orelse return;
-        if (!control.visible or !control.parent.isNone()) return;
+        // A layer inside another control's tree is drawn with it.
+        if (!control.visible or app.world.has(hierarchy.parentOf(&app.world, entity), Control)) return;
         var declared = self.declaration(context, entity, control.*);
         declared.z_index += layer;
         declared.floating = null;
@@ -865,8 +866,9 @@ fn themeOf(app: *App, entity: Entity) struct { handle: ThemeHandle, variation: [
             found = control.theme;
             break;
         }
-        if (control.parent.isNone() or !app.world.isAlive(control.parent)) break;
-        at = control.parent;
+        const above = hierarchy.parentOf(&app.world, at);
+        if (above.isNone() or !app.world.isAlive(above)) break;
+        at = above;
     }
     return .{ .handle = found, .variation = variation };
 }
@@ -1148,7 +1150,7 @@ test "control components build one screen-space Fluxion UI tree" {
         MarginContainer{ .margin = .all(10) },
     });
     const panel = try app.world.spawnWith(.{
-        Control{ .parent = root, .width = .{ .mode = .fixed, .value = 100 }, .height = .{ .mode = .fixed, .value = 40 } },
+        Control{ .width = .{ .mode = .fixed, .value = 100 }, .height = .{ .mode = .fixed, .value = 40 } }, Parent.of(root),
         PanelContainer{},
         ScrollContainer{},
         Label.of("Outlined"),
@@ -1201,10 +1203,10 @@ test "form controls share the retained Control tree" {
     _ = app.assets.loadSystemFont(.{ .atlas = 128 }) catch return error.SkipZigTest;
     try app.useControlNodes();
     const root = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{}, BoxContainer{ .direction = .vertical } });
-    const check = try app.world.spawnWith(.{ Control{ .parent = root, .width = .{ .mode = .fixed, .value = 140 }, .height = .{ .mode = .fixed, .value = 30 } }, CheckBox{ .checked = true }, Label.of("Enabled") });
-    const field = try app.world.spawnWith(.{ Control{ .parent = root, .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 32 } }, LineEdit.of("Player") });
-    const slider = try app.world.spawnWith(.{ Control{ .parent = root, .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 20 } }, Slider{ .value = 50 } });
-    const progress = try app.world.spawnWith(.{ Control{ .parent = root, .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 20 } }, ProgressBar{ .value = 75 } });
+    const check = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 140 }, .height = .{ .mode = .fixed, .value = 30 } }, Parent.of(root), CheckBox{ .checked = true }, Label.of("Enabled") });
+    const field = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 32 } }, Parent.of(root), LineEdit.of("Player") });
+    const slider = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 20 } }, Parent.of(root), Slider{ .value = 50 } });
+    const progress = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 20 } }, Parent.of(root), ProgressBar{ .value = 75 } });
     try app.run();
 
     for ([_]Entity{ check, field, slider, progress }) |entity| {
@@ -1219,7 +1221,7 @@ test "a check box that is ticked draws a tick, made once, and one that is not dr
     defer app.destroy();
     try app.useControlNodes();
     const root = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{} });
-    const box = try app.world.spawnWith(.{ Control{ .parent = root, .width = .{ .mode = .fixed, .value = 40 }, .height = .{ .mode = .fixed, .value = 20 } }, CheckBox{} });
+    const box = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 40 }, .height = .{ .mode = .fixed, .value = 20 } }, Parent.of(root), CheckBox{} });
     try app.run();
     try testing.expect(app.control_nodes.check_mark.isNone());
 
@@ -1269,7 +1271,7 @@ test "a control's own overrides change its own part and not its children's, and 
     defer app.destroy();
     try app.useControlNodes();
     const root = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{}, PanelContainer{} });
-    const slider = try app.world.spawnWith(.{ Control{ .parent = root }, Slider{ .value = 50 }, ThemeOverride{
+    const slider = try app.world.spawnWith(.{ Control{}, Parent.of(root), Slider{ .value = 50 }, ThemeOverride{
         .override_background = true,
         .background = .hex(0xFF0000),
         .override_font_size = true,
@@ -1309,7 +1311,7 @@ test "a scene keeps the theme a control names, what it is drawn as, and a button
         \\{ "fluxion_theme": 1, "types": { "Danger": { "base_type": "Button", "styles": { "normal": { "background": "#C8434F" } } } } }
     );
     const loaded = try @import("scene.zig").read(app,
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "uuid": "40000000-0000-4000-8000-000000000001", "name": "Delete",
         \\    "Control": { "theme": "ui.theme", "type_variation": "Danger" },
         \\    "Button": { "text": "Delete" } }
@@ -1349,10 +1351,10 @@ test "a control is drawn from the theme the control above it names" {
         Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow }, .theme = handle },
         CanvasLayer{},
     });
-    const button = try app.world.spawnWith(.{ Control{ .parent = root }, Button.of("Styled") });
-    var loud: Control = .{ .parent = root };
+    const button = try app.world.spawnWith(.{ Control{}, Parent.of(root), Button.of("Styled") });
+    var loud: Control = .{};
     loud.setVariation("Loud");
-    const shouty = try app.world.spawnWith(.{ loud, Button.of("Loud") });
+    const shouty = try app.world.spawnWith(.{ loud, Parent.of(root), Button.of("Loud") });
     try app.run();
 
     const context: Context = .{ .app = app, .layout = &app.ui };

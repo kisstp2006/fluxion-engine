@@ -108,6 +108,8 @@ const BodyLink = struct {
     rigid: ?RigidBody2D = null,
     /// As last synced either way.
     transform: Transform2D = .{},
+    /// What it hung from when it was last synced.
+    parent: Entity = .none,
     /// Where the body was last put, in the world.
     placed: Pose = .{},
 };
@@ -385,12 +387,14 @@ fn syncRigid(self: *Bodies, app: *App) !void {
 fn update(app: *App, link: *BodyLink, place: Transform2D, rigid: RigidBody2D) void {
     const body = app.physics.body(link.body) orelse return;
     const was = link.rigid.?;
-    if (moved(link.transform, place) or (rigid.type == .static and !place.parent.isNone())) {
+    const parent = hierarchy.parentOf(&app.world, link.entity);
+    if (moved(link.transform, place) or !link.parent.eql(parent) or (rigid.type == .static and !parent.isNone())) {
         if (placed(app, link.entity, place)) |at| {
             if (!std.meta.eql(at, link.placed)) body.setTransform(.init(at.x, at.y), at.rotation);
             link.placed = at;
         }
         link.transform = place;
+        link.parent = parent;
     }
     if (!std.meta.eql(rigid.linear_velocity, was.linear_velocity) or rigid.angular_velocity != was.angular_velocity) {
         body.linear_velocity = rigid.linear_velocity;
@@ -441,7 +445,7 @@ fn make(self: *Bodies, app: *App, link: *BodyLink, e: Entity, place: Transform2D
         .bullet = r.continuous_cd != .disabled,
         .user_data = e.toInt(),
     });
-    link.* = .{ .entity = e, .body = body, .rigid = rigid, .transform = place, .placed = at };
+    link.* = .{ .entity = e, .body = body, .rigid = rigid, .transform = place, .parent = hierarchy.parentOf(&app.world, e), .placed = at };
     // A body made anew has lost its exceptions with the old one.
     for (self.exceptions.keys()) |pair| {
         if (!pair.has(e)) continue;
@@ -520,9 +524,9 @@ pub fn exceptionsOf(self: *const Bodies, e: Entity, found: []Entity) []Entity {
 fn isBody(world: *ecs.World, e: Entity) bool {
     if (world.has(e, RigidBody2D)) return true;
     if (world.has(e, Area2D)) return false;
-    const place = world.get(e, Transform2D) orelse return false;
+    if (!world.has(e, Transform2D)) return false;
     if (!world.has(e, Collider2D)) return false;
-    const owner = ownerOf(world, e, place.*) orelse return false;
+    const owner = ownerOf(world, e) orelse return false;
     return owner.eql(e);
 }
 
@@ -569,7 +573,7 @@ fn syncColliders(self: *Bodies, app: *App) !void {
         // One archetype: every row has a body of its own, or none does.
         const own_body = owns(&app.world, chunk.entities[0]);
         for (chunk.entities, chunk.slice(Transform2D), chunk.slice(Collider2D)) |e, place, collider| {
-            const owner = if (own_body or place.parent.isNone()) e else ownerOf(&app.world, e, place) orelse continue;
+            const owner = if (own_body or hierarchy.parentOf(&app.world, e).isNone()) e else ownerOf(&app.world, e) orelse continue;
             if (!own_body and owner.eql(e)) try self.syncStatic(app, e, place);
             // Not there while disabled: its shape goes with the sweep.
             if (collider.disabled) continue;
@@ -592,13 +596,15 @@ fn syncColliders(self: *Bodies, app: *App) !void {
 fn syncStatic(self: *Bodies, app: *App, e: Entity, place: Transform2D) !void {
     const link = &self.bodies.items[e.index];
     if (link.entity.eql(e) and link.rigid == null) {
-        if (moved(link.transform, place) or !place.parent.isNone()) {
+        const parent = hierarchy.parentOf(&app.world, e);
+        if (moved(link.transform, place) or !parent.isNone() or !link.parent.eql(parent)) {
             const at = placed(app, e, place) orelse return;
             if (!std.meta.eql(at, link.placed)) {
                 if (app.physics.body(link.body)) |body| body.setTransform(.init(at.x, at.y), at.rotation);
                 link.placed = at;
             }
             link.transform = place;
+            link.parent = parent;
         }
     } else {
         const at = placed(app, e, place) orelse return;
@@ -624,29 +630,29 @@ fn owns(world: *ecs.World, e: Entity) bool {
 /// static body. Null when it is neither a collider nor an object itself, or
 /// when the chain above it is broken.
 pub fn objectOf(world: *ecs.World, e: Entity) ?Entity {
-    const place = world.get(e, Transform2D) orelse return null;
+    if (!world.has(e, Transform2D)) return null;
     if (!world.has(e, Collider2D)) return if (owns(world, e)) e else null;
-    return ownerOf(world, e, place.*);
+    return ownerOf(world, e);
 }
 
 /// Whose body a collider is part of: its own entity when that is a body or
 /// an area, else the nearest one above it that is, else its own. Null when
 /// the chain above it is broken.
-fn ownerOf(world: *ecs.World, e: Entity, place: Transform2D) ?Entity {
+fn ownerOf(world: *ecs.World, e: Entity) ?Entity {
     if (owns(world, e)) return e;
-    var above = place.parent;
+    var above = hierarchy.parentOf(world, e);
     var depth: usize = 0;
     while (!above.isNone()) : (depth += 1) {
         if (depth == Transform2D.max_depth) return null;
-        const up = world.get(above, Transform2D) orelse return if (world.isAlive(above)) e else null;
+        if (!world.has(above, Transform2D)) return if (world.isAlive(above)) e else null;
         if (owns(world, above)) return above;
-        above = up.parent;
+        above = hierarchy.parentOf(world, above);
     }
     return e;
 }
 
 fn inputsOf(app: *App, e: Entity, place: Transform2D, collider: Collider2D, owner: Entity) ?Inputs {
-    const scale = if (owner.eql(e) and place.parent.isNone())
+    const scale = if (owner.eql(e) and hierarchy.parentOf(&app.world, e).isNone())
         .{ place.scale_x, place.scale_y }
     else
         worldScale(app, owner) orelse return null;
@@ -657,13 +663,16 @@ fn inputsOf(app: *App, e: Entity, place: Transform2D, collider: Collider2D, owne
         // a moving body does not make its shapes again.
         var chain: [Transform2D.max_depth]Transform2D = undefined;
         var depth: usize = 0;
+        var at = e;
         var link = place;
         while (true) {
             if (depth == chain.len) return null;
             chain[depth] = link;
             depth += 1;
-            if (link.parent.eql(owner)) break;
-            link = (app.world.get(link.parent, Transform2D) orelse return null).*;
+            const above = hierarchy.parentOf(&app.world, at);
+            if (above.eql(owner)) break;
+            link = (app.world.get(above, Transform2D) orelse return null).*;
+            at = above;
         }
         while (depth > 0) {
             depth -= 1;
@@ -678,7 +687,7 @@ fn inputsOf(app: *App, e: Entity, place: Transform2D, collider: Collider2D, owne
 
 fn worldScale(app: *App, e: Entity) ?[2]f32 {
     const place = app.world.get(e, Transform2D) orelse return null;
-    if (place.parent.isNone()) return .{ place.scale_x, place.scale_y };
+    if (hierarchy.parentOf(&app.world, e).isNone()) return .{ place.scale_x, place.scale_y };
     const world = hierarchy.resolve(&app.world, &still, e, place.*, 1) orelse return null;
     return .{ world.scale_x, world.scale_y };
 }
@@ -810,7 +819,7 @@ fn sweep(self: *Bodies, app: *App) !void {
 
 fn moved(was: Transform2D, now: Transform2D) bool {
     return was.x != now.x or was.y != now.y or was.rotation != now.rotation or
-        was.scale_x != now.scale_x or was.scale_y != now.scale_y or !was.parent.eql(now.parent) or
+        was.scale_x != now.scale_x or was.scale_y != now.scale_y or
         was.inherit_rotation != now.inherit_rotation or was.inherit_scale != now.inherit_scale;
 }
 
@@ -829,7 +838,7 @@ pub fn afterStep(self: *Bodies, app: *App) !void {
         const link = &self.bodies.items[index];
         const body = app.physics.bodyConst(link.body) orelse continue;
         const place = app.world.get(link.entity, Transform2D) orelse continue;
-        const local = localPose(app, place.*, body) orelse continue;
+        const local = localPose(app, link.entity, place.*, body) orelse continue;
         place.x = local.x;
         place.y = local.y;
         place.rotation = local.rotation;
@@ -847,13 +856,14 @@ pub fn afterStep(self: *Bodies, app: *App) !void {
 }
 
 /// A body's place in its entity's parent's space.
-fn localPose(app: *App, place: Transform2D, body: *const physics.Body) ?Pose {
+fn localPose(app: *App, e: Entity, place: Transform2D, body: *const physics.Body) ?Pose {
     const at = body.position();
-    const parent_local = app.world.get(place.parent, Transform2D) orelse {
-        if (!place.parent.isNone() and !app.world.isAlive(place.parent)) return null;
+    const above = hierarchy.parentOf(&app.world, e);
+    const parent_local = app.world.get(above, Transform2D) orelse {
+        if (!above.isNone() and !app.world.isAlive(above)) return null;
         return .{ .x = at.x, .y = at.y, .rotation = body.angle };
     };
-    const parent = hierarchy.resolve(&app.world, &still, place.parent, parent_local.*, 1) orelse return null;
+    const parent = hierarchy.resolve(&app.world, &still, above, parent_local.*, 1) orelse return null;
     const local = parent.unapply(at.x, at.y);
     return .{
         .x = local.x,
@@ -1141,7 +1151,7 @@ test "a collider hanging from a body is part of that body" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
     const hull = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .gravity_scale = 0 }, Collider2D.rectangle(5, 5) });
-    const arm = try app.world.spawnWith(.{ Transform2D.childOf(hull, 20, 0), Collider2D.rectangle(5, 5) });
+    const arm = try app.world.spawnWith(.{ Transform2D.at(20, 0), components.Parent.of(hull), Collider2D.rectangle(5, 5) });
     try app.syncBodies();
 
     try testing.expectEqual(@as(usize, 1), app.physics.bodyCount());
@@ -1203,7 +1213,7 @@ test "a moving parent does not carry a body, whose place is written in the paren
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
     const cart = try app.world.spawnWith(.{Transform2D.at(100, 0)});
-    const rider = try app.world.spawnWith(.{ Transform2D.childOf(cart, 10, 0), RigidBody2D{ .gravity_scale = 0 }, Collider2D.circle(2) });
+    const rider = try app.world.spawnWith(.{ Transform2D.at(10, 0), components.Parent.of(cart), RigidBody2D{ .gravity_scale = 0 }, Collider2D.circle(2) });
     try frames(app, 1);
     try testing.expectApproxEqAbs(@as(f32, 110), app.bodyOf(rider).?.position().x, 0.001);
 

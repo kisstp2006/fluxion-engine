@@ -444,7 +444,7 @@ test "a bare name two components declare is kept as written, and never heard" {
     defer app.destroy();
     const text =
         \\{
-        \\  "fluxion_scene": 2,
+        \\  "fluxion_scene": 3,
         \\  "entities": [
         \\    { "uuid": "00000000-0000-4000-8000-000000000001", "Health": {}, "Armour": {} },
         \\    { "uuid": "00000000-0000-4000-8000-000000000002" }
@@ -656,7 +656,7 @@ test "a connection this build knows nothing of is kept through a load and a save
     defer app.destroy();
     const text =
         \\{
-        \\  "fluxion_scene": 2,
+        \\  "fluxion_scene": 3,
         \\  "entities": [
         \\    { "uuid": "00000000-0000-4000-8000-000000000001", "name": "chest" },
         \\    { "uuid": "00000000-0000-4000-8000-000000000002", "name": "hud" }

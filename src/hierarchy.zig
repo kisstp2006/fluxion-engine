@@ -2,7 +2,7 @@
 
 //! Where a thing really is, once its parent has had its say.
 //!
-//! A `Transform2D` is local: in its parent's space. Nothing is cached - a
+//! A `Transform2D` is local: in its `Parent`'s space. Nothing is cached - a
 //! parented entity's world transform is worked out where it is wanted, by
 //! walking up to a root - so there is no second component to move every
 //! transform into another archetype. Each link is interpolated in its own
@@ -19,7 +19,14 @@ const ecs = @import("fluxion_ecs");
 const components = @import("components.zig");
 
 const Transform2D = components.Transform2D;
+const Parent = components.Parent;
 const Entity = ecs.Entity;
+
+/// What an entity hangs from, `.none` for a root.
+pub fn parentOf(world: *const ecs.World, entity: Entity) Entity {
+    const held = world.getConst(entity, Parent) orelse return .none;
+    return held.entity;
+}
 
 /// Where a transform was before the last fixed step. Kept by `App` beside the
 /// world; see `Transform2D.interpolate`.
@@ -65,9 +72,10 @@ pub fn stepped(snapshots: *const Snapshots, entity: Entity, local: Transform2D, 
 }
 
 /// Where an entity's transform ends up once every parent above it has been
-/// applied. The result has no parent: it is in world space.
+/// applied: in world space. `local` is the entity's own transform, which the
+/// caller may hold a copy of.
 ///
-/// The chain ends at `.none`, or at a living parent with no `Transform2D`.
+/// The chain ends at a root, or at a living parent with no `Transform2D`.
 /// Null when a link has died, or when the chain is deeper than
 /// `Transform2D.max_depth` - in practice, a cycle.
 pub fn resolve(
@@ -77,17 +85,15 @@ pub fn resolve(
     local: Transform2D,
     alpha: f32,
 ) ?Transform2D {
-    if (local.parent.isNone()) return stepped(snapshots, entity, local, alpha);
+    var above = parentOf(world, entity);
+    if (above.isNone()) return stepped(snapshots, entity, local, alpha);
 
     // Nearest first. A fixed array, so nothing allocates inside a frame.
     var chain: [Transform2D.max_depth]Transform2D = undefined;
     chain[0] = stepped(snapshots, entity, local, alpha);
     var depth: usize = 1;
 
-    while (true) {
-        const above = chain[depth - 1].parent;
-        if (above.isNone()) break;
-
+    while (!above.isNone()) {
         const parent_local = world.get(above, Transform2D) orelse {
             // Dead: the chain is broken. See `App.despawnOrphans`.
             if (!world.isAlive(above)) return null;
@@ -98,11 +104,11 @@ pub fn resolve(
         if (depth == chain.len) return null;
         chain[depth] = stepped(snapshots, above, parent_local.*, alpha);
         depth += 1;
+        above = parentOf(world, above);
     }
 
     // Composed back down from the root, whose numbers are already the world's.
     var placed = chain[depth - 1];
-    placed.parent = .none;
     var at = depth - 1;
     while (at > 0) {
         at -= 1;
@@ -146,7 +152,7 @@ test "a child is composed through its parent" {
         .y = 100,
         .rotation = std.math.pi / 2.0,
     }});
-    const held = try world.spawnWith(.{Transform2D.childOf(body, 10, 0)});
+    const held = try world.spawnWith(.{ Transform2D.at(10, 0), Parent.of(body) });
 
     // A quarter turn takes the offset from +x to +y.
     const placed = resolveEntity(&world, &snapshots, held, 1).?;
@@ -161,8 +167,8 @@ test "a chain of three composes in one pass" {
     defer snapshots.deinit(testing.allocator);
 
     const root = try world.spawnWith(.{Transform2D.at(10, 0)});
-    const middle = try world.spawnWith(.{Transform2D.childOf(root, 5, 0)});
-    const leaf = try world.spawnWith(.{Transform2D.childOf(middle, 2, 0)});
+    const middle = try world.spawnWith(.{ Transform2D.at(5, 0), Parent.of(root) });
+    const leaf = try world.spawnWith(.{ Transform2D.at(2, 0), Parent.of(middle) });
 
     try testing.expectApproxEqAbs(
         @as(f32, 17),
@@ -178,7 +184,7 @@ test "a parent that died leaves the chain unresolvable" {
     defer snapshots.deinit(testing.allocator);
 
     const carrier = try world.spawnWith(.{Transform2D.at(60, 60)});
-    const held = try world.spawnWith(.{Transform2D.childOf(carrier, 4, 0)});
+    const held = try world.spawnWith(.{ Transform2D.at(4, 0), Parent.of(carrier) });
 
     world.despawn(carrier);
     try testing.expect(resolveEntity(&world, &snapshots, held, 1) == null);
@@ -191,12 +197,11 @@ test "a parent with no transform is the end of the chain, not a break in it" {
     defer snapshots.deinit(testing.allocator);
 
     const owner = try world.spawn();
-    const arm = try world.spawnWith(.{Transform2D.childOf(owner, 100, 0)});
-    const hand = try world.spawnWith(.{Transform2D.childOf(arm, 5, 0)});
+    const arm = try world.spawnWith(.{ Transform2D.at(100, 0), Parent.of(owner) });
+    const hand = try world.spawnWith(.{ Transform2D.at(5, 0), Parent.of(arm) });
 
     const placed = resolveEntity(&world, &snapshots, hand, 1).?;
     try testing.expectApproxEqAbs(@as(f32, 105), placed.x, 0.0001);
-    try testing.expect(placed.parent.isNone());
 }
 
 test "a chain that loops back on itself cannot be placed" {
@@ -206,8 +211,8 @@ test "a chain that loops back on itself cannot be placed" {
     defer snapshots.deinit(testing.allocator);
 
     const a = try world.spawnWith(.{Transform2D.at(1, 0)});
-    const b = try world.spawnWith(.{Transform2D.childOf(a, 1, 0)});
-    world.get(a, Transform2D).?.parent = b;
+    const b = try world.spawnWith(.{ Transform2D.at(1, 0), Parent.of(a) });
+    try world.add(a, Parent.of(b));
 
     try testing.expect(resolveEntity(&world, &snapshots, a, 1) == null);
 }

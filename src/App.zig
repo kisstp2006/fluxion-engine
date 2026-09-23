@@ -474,11 +474,13 @@ snapshots: hierarchy.Snapshots = .empty,
 /// What `despawnOrphans` found. Kept for its capacity.
 orphans: std.ArrayList(ecs.Entity) = .empty,
 
-/// Every named entity's name, and every name's entity. Each name is one
-/// allocation, shared by the two maps and freed once. An array map, so that
+/// Every named entity's name, and every name's entities, in the order they
+/// were given it: `find`'s answer is the first living one. Each name's text
+/// is one allocation, the key in `by_name`, which `names` points into and
+/// which is freed when nothing has the name any more. An array map, so that
 /// `forgetDeadNames` can walk it by index while removing from it.
 names: std.AutoArrayHashMapUnmanaged(ecs.Entity, []const u8) = .empty,
-by_name: std.StringHashMapUnmanaged(ecs.Entity) = .empty,
+by_name: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(ecs.Entity)) = .empty,
 
 /// Every entity given a UUID, and every UUID's entity: kept beside the world
 /// as names are, and written into a scene with it. An array map, for the same
@@ -491,6 +493,11 @@ by_uuid: std.AutoHashMapUnmanaged(Uuid, ecs.Entity) = .empty,
 sibling_ranks: std.AutoArrayHashMapUnmanaged(ecs.Entity, u64) = .empty,
 /// The next place given out.
 next_rank: u64 = 0,
+/// Each parent's children in their order, and the roots: see `childrenOf`.
+tree: Tree = .{},
+/// The groups entities are in, by name, each with its members in the order
+/// they joined. See `addToGroup`.
+groups: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(ecs.Entity)) = .empty,
 /// What `newUuid` draws from: seeded by the operating system, or with no
 /// `Io` by a constant, so a test makes the same ones every run.
 uuid_source: std.Random.DefaultCsprng,
@@ -897,9 +904,12 @@ pub fn destroy(self: *App) void {
     self.states.deinit(gpa);
     self.snapshots.deinit(gpa);
     self.orphans.deinit(gpa);
-    for (self.names.values()) |name| gpa.free(name);
     self.names.deinit(gpa);
+    self.freeNames();
     self.by_name.deinit(gpa);
+    self.tree.deinit(gpa);
+    self.freeGroups();
+    self.groups.deinit(gpa);
     self.uuids.deinit(gpa);
     self.by_uuid.deinit(gpa);
     self.sibling_ranks.deinit(gpa);
@@ -1263,6 +1273,7 @@ pub fn step(self: *App) anyerror!bool {
     self.forgetDeadNames();
     self.forgetDeadUuids();
     self.forgetDeadPlaces();
+    self.forgetDeadGroupMembers();
     self.unknown_components.forgetDead(self.gpa, &self.world);
     self.signals.forgetDead(&self.world);
     try self.animate();
@@ -1431,17 +1442,17 @@ fn animate(self: *App) !void {
 }
 
 /// Despawn everything whose parent has died, and what hangs from that in
-/// turn; see `Transform2D.parent`. Once a frame, because a game despawns
-/// through `world.despawn` and nothing here sees it. It goes round until a
-/// pass finds nothing, so a turret's barrel goes one pass after the turret.
+/// turn; see `Parent`. Once a frame, because a game despawns through
+/// `world.despawn` and nothing here sees it. It goes round until a pass
+/// finds nothing, so a turret's barrel goes one pass after the turret.
 fn despawnOrphans(self: *App) !void {
     while (true) {
         self.orphans.clearRetainingCapacity();
 
-        var it = try ecs.Query(.{components.Transform2D}).over(&self.world);
+        var it = try ecs.Query(.{components.Parent}).over(&self.world);
         while (it.next()) |chunk| {
-            for (chunk.slice(components.Transform2D), chunk.entities) |place, entity| {
-                if (place.parent.isNone() or self.world.isAlive(place.parent)) continue;
+            for (chunk.slice(components.Parent), chunk.entities) |held, entity| {
+                if (held.entity.isNone() or self.world.isAlive(held.entity)) continue;
                 try self.orphans.append(self.gpa, entity);
             }
         }
@@ -1504,8 +1515,8 @@ pub const PlaceError = error{
 /// parent, its inherit switches and its `interpolate` stay its own;
 /// `placed`'s are not read.
 pub fn setWorldTransform(self: *App, entity: ecs.Entity, placed: components.Transform2D) PlaceError!void {
+    const above = try self.parentPlace(entity);
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
-    const above = try self.parentPlace(own.*);
     const at = above.unapply(placed.x, placed.y);
     own.x = at.x;
     own.y = at.y;
@@ -1514,12 +1525,13 @@ pub fn setWorldTransform(self: *App, entity: ecs.Entity, placed: components.Tran
     own.scale_y = if (own.inherit_scale) placed.scale_y / nonZero(above.scale_y) else placed.scale_y;
 }
 
-/// Where a transform's parent is in the world: nothing at all for none, or
+/// Where an entity's parent is in the world: nothing at all for none, or
 /// for a living parent with no transform of its own, which places nothing.
-fn parentPlace(self: *App, own: components.Transform2D) PlaceError!components.Transform2D {
-    if (own.parent.isNone()) return .{};
-    if (self.world.get(own.parent, components.Transform2D) == null and self.world.isAlive(own.parent)) return .{};
-    return self.worldTransform(own.parent) orelse error.Unplaced;
+fn parentPlace(self: *App, entity: ecs.Entity) PlaceError!components.Transform2D {
+    const above = self.parentOf(entity);
+    if (above.isNone()) return .{};
+    if (self.world.get(above, components.Transform2D) == null and self.world.isAlive(above)) return .{};
+    return self.worldTransform(above) orelse error.Unplaced;
 }
 
 /// A scale of zero is left out rather than divided by, as `unapply` does.
@@ -1616,10 +1628,11 @@ pub fn getRelativeTransformToParent(self: *App, entity: ecs.Entity, ancestor: ec
     while (!at.eql(ancestor)) {
         if (depth == chain.len) return null;
         const own = self.world.get(at, components.Transform2D) orelse return null;
-        if (own.parent.isNone()) return null;
+        const above = self.parentOf(at);
+        if (above.isNone()) return null;
         chain[depth] = own.*;
         depth += 1;
-        at = own.parent;
+        at = above;
     }
     var placed: components.Transform2D = .{};
     while (depth > 0) {
@@ -1700,13 +1713,15 @@ pub fn single(self: *App, comptime T: type) ?*T {
 
 /// What `setName` can refuse.
 pub const NameError = error{
-    /// Another living entity is called that. A name picks out one thing.
+    /// A sibling is called that: another living entity with the same
+    /// parent, or another root. A path of names picks out one thing.
     NameTaken,
     /// The entity has been despawned, or never was.
     NoSuchEntity,
 } || Allocator.Error;
 
-/// Call an entity something, so that `find` can come back to it.
+/// Call an entity something, so that `find` and a path of names can come
+/// back to it.
 ///
 /// ```zig
 /// fn spawn(app: *App) !void {
@@ -1721,37 +1736,72 @@ pub const NameError = error{
 /// ```
 ///
 /// The name is the entity's own, not a component: naming does not move the
-/// entity to another archetype. One
-/// living entity to a name - another is `error.NameTaken` - because `find`
-/// hands back one. A despawned entity's name is free at once, and calling
-/// this again renames. The text is copied. `ecs.save` does not write names.
+/// entity to another archetype. Siblings - the children of one parent, or
+/// the roots - have names of their own, another's is `error.NameTaken`, so a
+/// path of names leads to one thing; two entities in different places may
+/// share one, as two copies of a scene do. A despawned entity's name is free
+/// at once, and calling this again renames. The text is copied.
 pub fn setName(self: *App, entity: ecs.Entity, name: []const u8) NameError!void {
     if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    if (self.nameOf(entity)) |own| if (std.mem.eql(u8, own, name)) return;
+    if (self.siblingNamed(self.parentOf(entity), name, entity) != null) return error.NameTaken;
+    try self.giveName(entity, name);
+}
 
-    var stale: ?ecs.Entity = null;
-    if (self.by_name.get(name)) |holder| {
-        if (holder.eql(entity)) return;
-        if (self.world.isAlive(holder)) return error.NameTaken;
-        // Despawned and not yet forgotten: the name is free.
-        stale = holder;
+/// `setName`, where a sibling that has the name already gives this one the
+/// first free one after it - "Rock 2" - rather than refusing: what a scene
+/// read into a family does, and `setParent`.
+pub fn setFreeName(self: *App, entity: ecs.Entity, wanted: []const u8) NameError!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    var buffer: [256]u8 = undefined;
+    const name = self.freeName(self.parentOf(entity), wanted, entity, &buffer);
+    if (self.nameOf(entity)) |own| if (std.mem.eql(u8, own, name)) return;
+    try self.giveName(entity, name);
+}
+
+/// `wanted`, or it with the first number after it that no child of
+/// `parent` but `except` is called: "Sprite", "Sprite 2", "Sprite 3". Written
+/// into `buffer` when a number is added; a name too long for it is cut.
+pub fn freeName(self: *const App, parent: ecs.Entity, wanted: []const u8, except: ecs.Entity, buffer: []u8) []const u8 {
+    if (self.siblingNamed(parent, wanted, except) == null) return wanted;
+    const base = wanted[0..@min(wanted.len, buffer.len -| 8)];
+    var number: usize = 2;
+    while (number < 100_000) : (number += 1) {
+        const tried = std.fmt.bufPrint(buffer, "{s} {d}", .{ base, number }) catch break;
+        if (self.siblingNamed(parent, tried, except) == null) return tried;
     }
+    return wanted;
+}
 
+/// A living child of `parent` but `except` called `name`, if there is one.
+fn siblingNamed(self: *const App, parent: ecs.Entity, name: []const u8, except: ecs.Entity) ?ecs.Entity {
+    const holders = self.by_name.getPtr(name) orelse return null;
+    for (holders.items) |holder| {
+        if (holder.eql(except) or !self.world.isAlive(holder)) continue;
+        if (self.parentOf(holder).eql(parent)) return holder;
+    }
+    return null;
+}
+
+/// Give an entity a name, whoever else has it: the checks are the caller's.
+fn giveName(self: *App, entity: ecs.Entity, name: []const u8) Allocator.Error!void {
     // Everything that can fail comes before anything changes, so a failed
-    // rename keeps the old name. The copy comes first of all, because `name`
-    // may point into a name that is about to be freed.
-    const copy = try self.gpa.dupe(u8, name);
-    errdefer self.gpa.free(copy);
+    // rename keeps the old name.
     try self.names.ensureUnusedCapacity(self.gpa, 1);
     try self.by_name.ensureUnusedCapacity(self.gpa, 1);
+    const known = self.by_name.getPtr(name);
+    const copy = if (known == null) try self.gpa.dupe(u8, name) else null;
+    errdefer if (copy) |text| self.gpa.free(text);
+    var fresh: std.ArrayListUnmanaged(ecs.Entity) = .empty;
+    errdefer fresh.deinit(self.gpa);
+    if (known) |holders| try holders.ensureUnusedCapacity(self.gpa, 1) else try fresh.ensureTotalCapacity(self.gpa, 1);
 
-    if (stale) |holder| self.forgetName(holder);
-    const slot = self.names.getOrPutAssumeCapacity(entity);
-    if (slot.found_existing) {
-        _ = self.by_name.remove(slot.value_ptr.*);
-        self.gpa.free(slot.value_ptr.*);
-    }
-    slot.value_ptr.* = copy;
-    self.by_name.putAssumeCapacityNoClobber(copy, entity);
+    // Nothing below here can fail.
+    self.forgetName(entity);
+    const slot = self.by_name.getOrPutAssumeCapacity(copy orelse name);
+    if (!slot.found_existing) slot.value_ptr.* = fresh;
+    slot.value_ptr.appendAssumeCapacity(entity);
+    self.names.putAssumeCapacity(entity, slot.key_ptr.*);
 }
 
 /// What an entity is called, or null when it has no name or is not alive.
@@ -1761,22 +1811,47 @@ pub fn nameOf(self: *const App, entity: ecs.Entity) ?[]const u8 {
     return self.names.get(entity);
 }
 
-/// The living entity called `name`, or null. Cheap enough to ask every
-/// frame. See `setName`.
+/// A living entity called `name` - the first given it of those that are -
+/// or null. Cheap enough to ask every frame. Where two in different places
+/// share a name, `findPath` and `findIn` say which. See `setName`.
 ///
 /// ```zig
 /// const player = app.find("player") orelse return;
 /// ```
 pub fn find(self: *const App, name: []const u8) ?ecs.Entity {
-    const entity = self.by_name.get(name) orelse return null;
-    return if (self.world.isAlive(entity)) entity else null;
+    const holders = self.by_name.getPtr(name) orelse return null;
+    for (holders.items) |holder| {
+        if (self.world.isAlive(holder)) return holder;
+    }
+    return null;
 }
 
-/// Take one entity's name off it, if it has one, and free the text.
+/// Take one entity's name off it, if it has one, and free the text once
+/// nothing has it.
 fn forgetName(self: *App, entity: ecs.Entity) void {
     const named = self.names.fetchSwapRemove(entity) orelse return;
-    _ = self.by_name.remove(named.value);
-    self.gpa.free(named.value);
+    const slot = self.by_name.getEntry(named.value) orelse return;
+    const holders = slot.value_ptr;
+    for (holders.items, 0..) |holder, at| {
+        if (!holder.eql(entity)) continue;
+        _ = holders.orderedRemove(at);
+        break;
+    }
+    if (holders.items.len > 0) return;
+    const key = slot.key_ptr.*;
+    holders.deinit(self.gpa);
+    self.by_name.removeByPtr(slot.key_ptr);
+    self.gpa.free(key);
+}
+
+/// Give back every name's text and list, and empty `by_name`.
+fn freeNames(self: *App) void {
+    var it = self.by_name.iterator();
+    while (it.next()) |entry| {
+        self.gpa.free(entry.key_ptr.*);
+        entry.value_ptr.deinit(self.gpa);
+    }
+    self.by_name.clearRetainingCapacity();
 }
 
 // -------------------------------------------------------------------------
@@ -1944,10 +2019,10 @@ fn siblingRank(self: *const App, entity: ecs.Entity) u64 {
 }
 
 /// Whether `a` comes before `b` among their parent's children: what to sort
-/// siblings by. Siblings are the entities with the same `Transform2D.parent`,
-/// and the roots - no parent, or no transform - are one family of their
-/// own. An editor that groups the world by parent itself sorts each group
-/// with this, rather than asking `childrenOf` of every entity.
+/// siblings by. Siblings are the entities with the same `Parent`, and the
+/// roots - no parent - are one family of their own. An editor that groups
+/// the world by parent itself sorts each group with this, rather than asking
+/// `childrenOf` of every entity.
 ///
 /// ```zig
 /// std.mem.sort(fx.Entity, group, @as(*const fx.App, app), fx.App.siblingBefore);
@@ -1956,12 +2031,184 @@ pub fn siblingBefore(self: *const App, a: ecs.Entity, b: ecs.Entity) bool {
     return self.siblingRank(a) < self.siblingRank(b);
 }
 
-/// The parent an entity hangs from, `.none` for a root: the family its
-/// place is kept in.
-fn parentOf(self: *const App, entity: ecs.Entity) ecs.Entity {
-    if (self.world.getConst(entity, components.Transform2D)) |place| return place.parent;
-    if (self.world.getConst(entity, control.Control)) |box| return box.parent;
-    return .none;
+/// The parent an entity hangs from, `.none` for a root: see `Parent`.
+pub fn parentOf(self: *const App, entity: ecs.Entity) ecs.Entity {
+    return hierarchy.parentOf(&self.world, entity);
+}
+
+/// What `setParent` can refuse.
+pub const ParentError = error{
+    /// The entity has been despawned, or never was - or the parent has.
+    NoSuchEntity,
+    /// The parent is the entity itself, or something that hangs from it: a
+    /// loop, which nothing could be placed by.
+    Loop,
+} || PlaceError || NameError || ecs.World.Error;
+
+/// Hang `entity` from `parent`, or from nothing for a root, last among its
+/// new siblings. With `keep_global` it stays where it is in the world, its
+/// own transform written to land there under the new parent; without, its
+/// numbers stay as they are and it moves with the new parent's space. A
+/// sibling with its name already gives it the first free one after it.
+pub fn setParent(self: *App, entity: ecs.Entity, parent: ecs.Entity, keep_global: bool) ParentError!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    if (!parent.isNone()) {
+        if (!self.world.isAlive(parent)) return error.NoSuchEntity;
+        if (parent.eql(entity) or self.hangsFrom(parent, entity)) return error.Loop;
+    }
+    if (self.parentOf(entity).eql(parent)) return;
+    const was = if (keep_global and self.world.has(entity, components.Transform2D))
+        self.worldTransform(entity) orelse return error.Unplaced
+    else
+        null;
+    if (parent.isNone()) {
+        try self.world.remove(entity, components.Parent);
+    } else {
+        self.world.add(entity, components.Parent.of(parent)) catch |err| return switch (err) {
+            error.NoSuchEntity => error.NoSuchEntity,
+            else => |other| other,
+        };
+    }
+    try self.setSiblingIndex(entity, std.math.maxInt(u32));
+    if (self.nameOf(entity)) |name| {
+        var copy: [256]u8 = undefined;
+        const held = copy[0..@min(name.len, copy.len)];
+        @memcpy(held, name[0..held.len]);
+        try self.setFreeName(entity, held);
+    }
+    if (was) |placed| try self.setWorldTransform(entity, placed);
+}
+
+/// Whether `entity` hangs from `ancestor`, however far down.
+pub fn hangsFrom(self: *const App, entity: ecs.Entity, ancestor: ecs.Entity) bool {
+    var at = self.parentOf(entity);
+    var depth: usize = 0;
+    while (!at.isNone() and depth < 256) : (depth += 1) {
+        if (at.eql(ancestor)) return true;
+        at = self.parentOf(at);
+    }
+    return false;
+}
+
+/// Each parent's children in their order, and the roots, as one list of
+/// families: built from the `Parent` components when the world has changed
+/// shape since, or a place or a parent was given.
+pub const Tree = struct {
+    families: std.AutoHashMapUnmanaged(ecs.Entity, Family) = .empty,
+    order: std.ArrayListUnmanaged(ecs.Entity) = .empty,
+    /// The world's `structure` when it was built; null when something has
+    /// changed that the world does not count.
+    built: ?u64 = null,
+
+    pub const Family = struct { start: u32, count: u32 };
+
+    fn deinit(self: *Tree, gpa: Allocator) void {
+        self.families.deinit(gpa);
+        self.order.deinit(gpa);
+    }
+
+    /// Build it again when next asked.
+    pub fn forget(self: *Tree) void {
+        self.built = null;
+    }
+};
+
+/// A parent's children in their order, `.none` for the roots: a slice of
+/// the tree, good until the world next changes shape.
+pub fn children(self: *App, parent: ecs.Entity) []const ecs.Entity {
+    self.buildTree() catch return &.{};
+    const family = self.tree.families.get(parent) orelse return &.{};
+    return self.tree.order.items[family.start..][0..family.count];
+}
+
+fn buildTree(self: *App) Allocator.Error!void {
+    if (self.tree.built == self.world.structure) return;
+    const gpa = self.gpa;
+    const Member = struct { parent: ecs.Entity, rank: u64, entity: ecs.Entity };
+    var members: std.ArrayListUnmanaged(Member) = .empty;
+    defer members.deinit(gpa);
+    try members.ensureTotalCapacity(gpa, self.world.count());
+    for (self.world.archetypeSlice()) |*archetype| {
+        for (archetype.entities.items) |entity| {
+            members.appendAssumeCapacity(.{ .parent = self.parentOf(entity), .rank = self.siblingRank(entity), .entity = entity });
+        }
+    }
+    std.mem.sort(Member, members.items, {}, struct {
+        fn before(_: void, a: Member, b: Member) bool {
+            const pa = a.parent.toInt();
+            const pb = b.parent.toInt();
+            if (pa != pb) return pa < pb;
+            return a.rank < b.rank;
+        }
+    }.before);
+    self.tree.families.clearRetainingCapacity();
+    self.tree.order.clearRetainingCapacity();
+    try self.tree.order.ensureTotalCapacity(gpa, members.items.len);
+    for (members.items, 0..) |member, at| {
+        self.tree.order.appendAssumeCapacity(member.entity);
+        const family = try self.tree.families.getOrPut(gpa, member.parent);
+        if (!family.found_existing) family.value_ptr.* = .{ .start = @intCast(at), .count = 0 };
+        family.value_ptr.count += 1;
+    }
+    self.tree.built = self.world.structure;
+}
+
+/// How many children a parent has; the roots for `.none`.
+pub fn childCount(self: *App, parent: ecs.Entity) i64 {
+    return @intCast(self.children(parent).len);
+}
+
+/// A parent's child at `index` in their order, or null past the end.
+pub fn childAt(self: *App, parent: ecs.Entity, index: i64) ?ecs.Entity {
+    const family = self.children(parent);
+    if (index < 0 or index >= family.len) return null;
+    return family[@intCast(index)];
+}
+
+/// The child of `parent` called `name`, the roots for `.none`.
+pub fn childNamed(self: *App, parent: ecs.Entity, name: []const u8) ?ecs.Entity {
+    for (self.children(parent)) |child| {
+        const own = self.names.get(child) orelse continue;
+        if (std.mem.eql(u8, own, name)) return child;
+    }
+    return null;
+}
+
+/// Where a path of names leads from `from`: "Arm/Hand" is `from`'s child
+/// called Arm and that one's child called Hand. `..` is a step up to the
+/// parent, `.` stays, and a path that starts with `/` starts from the roots
+/// rather than from `from`. Null where a step finds nothing.
+///
+/// ```zig
+/// const hand = app.findPath(player, "Arm/Hand") orelse return;
+/// const door = app.findPath(button, "../../Door") orelse return;
+/// ```
+pub fn findPath(self: *App, from: ecs.Entity, path: []const u8) ?ecs.Entity {
+    var at = if (path.len > 0 and path[0] == '/') ecs.Entity.none else from;
+    var parts = std.mem.tokenizeScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, ".")) continue;
+        if (std.mem.eql(u8, part, "..")) {
+            if (at.isNone()) return null;
+            at = self.parentOf(at);
+            continue;
+        }
+        at = self.childNamed(at, part) orelse return null;
+    }
+    return if (at.isNone()) null else at;
+}
+
+/// The first entity called `name` that hangs from `root`, however far down,
+/// in the tree's order; the whole world for `.none`. What a scene's own
+/// "unique" names are found by, from its root.
+pub fn findIn(self: *App, root: ecs.Entity, name: []const u8) ?ecs.Entity {
+    for (self.children(root)) |child| {
+        if (self.names.get(child)) |own| if (std.mem.eql(u8, own, name)) return child;
+    }
+    for (self.children(root)) |child| {
+        if (self.findIn(child, name)) |found| return found;
+    }
+    return null;
 }
 
 // -------------------------------------------------------------------------
@@ -2255,28 +2502,12 @@ pub fn themeSource(self: *App, handle: theme.ThemeHandle) ?[]const u8 {
 }
 
 /// A parent's children in their order, as many as `found` holds, the first
-/// ones kept when there are more; `.none` for the roots. One walk over the
-/// world each time.
+/// ones kept when there are more; `.none` for the roots. See `children` for
+/// the slice itself.
 pub fn childrenOf(self: *App, parent: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
-    if (found.len == 0) return found;
-    var count: usize = 0;
-    for (self.world.archetypeSlice()) |*archetype| {
-        for (archetype.entities.items) |entity| {
-            if (!self.parentOf(entity).eql(parent)) continue;
-            if (count < found.len) {
-                found[count] = entity;
-                count += 1;
-                continue;
-            }
-            // Full: this one replaces the last in order, if it comes before.
-            var last: usize = 0;
-            for (found[1..], 1..) |held, i| {
-                if (self.siblingBefore(found[last], held)) last = i;
-            }
-            if (self.siblingBefore(entity, found[last])) found[last] = entity;
-        }
-    }
-    std.mem.sort(ecs.Entity, found[0..count], @as(*const App, self), siblingBefore);
+    const family = self.children(parent);
+    const count = @min(family.len, found.len);
+    @memcpy(found[0..count], family[0..count]);
     return found[0..count];
 }
 
@@ -2284,21 +2515,16 @@ pub fn childrenOf(self: *App, parent: ecs.Entity, found: []ecs.Entity) []ecs.Ent
 /// one that is not alive.
 pub fn siblingIndex(self: *App, entity: ecs.Entity) ?u32 {
     if (!self.world.isAlive(entity)) return null;
-    const parent = self.parentOf(entity);
-    const rank = self.siblingRank(entity);
-    var before: u32 = 0;
-    for (self.world.archetypeSlice()) |*archetype| {
-        for (archetype.entities.items) |other| {
-            if (other.eql(entity) or !self.parentOf(other).eql(parent)) continue;
-            if (self.siblingRank(other) < rank) before += 1;
-        }
+    for (self.children(self.parentOf(entity)), 0..) |sibling, at| {
+        if (sibling.eql(entity)) return @intCast(at);
     }
-    return before;
+    return null;
 }
 
 /// Put an entity at `index` among its parent's children, the ones from
-/// there on moving along one. An index past the end is the end. Kept beside the world, and written into a scene as the order
-/// its list is in, so it comes back as it was.
+/// there on moving along one. An index past the end is the end. Kept beside
+/// the world, and written into a scene as the order its list is in, so it
+/// comes back as it was.
 pub fn setSiblingIndex(self: *App, entity: ecs.Entity, index: u32) (error{NoSuchEntity} || Allocator.Error)!void {
     if (!self.world.isAlive(entity)) return error.NoSuchEntity;
     const parent = self.parentOf(entity);
@@ -2306,13 +2532,9 @@ pub fn setSiblingIndex(self: *App, entity: ecs.Entity, index: u32) (error{NoSuch
     // Numbered afresh, the whole family, so none of it is left half placed.
     var family: std.ArrayList(ecs.Entity) = .empty;
     defer family.deinit(self.gpa);
-    for (self.world.archetypeSlice()) |*archetype| {
-        for (archetype.entities.items) |other| {
-            if (other.eql(entity) or !self.parentOf(other).eql(parent)) continue;
-            try family.append(self.gpa, other);
-        }
+    for (self.children(parent)) |other| {
+        if (!other.eql(entity)) try family.append(self.gpa, other);
     }
-    std.mem.sort(ecs.Entity, family.items, @as(*const App, self), siblingBefore);
     try family.insert(self.gpa, @min(index, family.items.len), entity);
     try self.placeInOrder(family.items);
 }
@@ -2325,6 +2547,7 @@ pub fn placeInOrder(self: *App, entities: []const ecs.Entity) Allocator.Error!vo
         self.sibling_ranks.putAssumeCapacity(entity, self.next_rank);
         self.next_rank += 1;
     }
+    self.tree.forget();
 }
 
 /// Give every living entity that has no place one, in the order of its
@@ -2352,6 +2575,125 @@ fn forgetDeadPlaces(self: *App) void {
         at -= 1;
         const entity = self.sibling_ranks.keys()[at];
         if (!self.world.isAlive(entity)) self.sibling_ranks.swapRemoveAt(at);
+    }
+}
+
+// -------------------------------------------------------------------------
+// Groups
+// -------------------------------------------------------------------------
+//
+// A group is a name entities are put under - "enemies", "pickups" - to be
+// found and called together, wherever they are in the tree. Kept beside the
+// world, as names are, and written into a scene with each entity.
+
+/// Put an entity in a group, made the first time it is named. Once is
+/// enough: being put in again changes nothing.
+pub fn addToGroup(self: *App, entity: ecs.Entity, group: []const u8) (error{NoSuchEntity} || Allocator.Error)!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    if (self.isInGroup(entity, group)) return;
+    const known = self.groups.getPtr(group);
+    const members = known orelse blk: {
+        const copy = try self.gpa.dupe(u8, group);
+        errdefer self.gpa.free(copy);
+        try self.groups.put(self.gpa, copy, .empty);
+        break :blk self.groups.getPtr(copy).?;
+    };
+    try members.append(self.gpa, entity);
+}
+
+/// Take an entity out of a group. The group stays, empty.
+pub fn removeFromGroup(self: *App, entity: ecs.Entity, group: []const u8) void {
+    const members = self.groups.getPtr(group) orelse return;
+    for (members.items, 0..) |member, at| {
+        if (!member.eql(entity)) continue;
+        _ = members.orderedRemove(at);
+        return;
+    }
+}
+
+pub fn isInGroup(self: *const App, entity: ecs.Entity, group: []const u8) bool {
+    const members = self.groups.getPtr(group) orelse return false;
+    for (members.items) |member| {
+        if (member.eql(entity)) return true;
+    }
+    return false;
+}
+
+/// A group's members, in the order they joined: a slice good until a member
+/// joins or leaves. One despawned this frame is still in it until the frame
+/// ends.
+pub fn groupMembers(self: *const App, group: []const u8) []const ecs.Entity {
+    const members = self.groups.getPtr(group) orelse return &.{};
+    return members.items;
+}
+
+/// How many living members a group has.
+pub fn groupSize(self: *const App, group: []const u8) i64 {
+    var count: i64 = 0;
+    for (self.groupMembers(group)) |member| {
+        if (self.world.isAlive(member)) count += 1;
+    }
+    return count;
+}
+
+/// A group's living member at `index`, in the order they joined; null past
+/// the end.
+pub fn groupMember(self: *const App, group: []const u8, index: i64) ?ecs.Entity {
+    var at: i64 = 0;
+    for (self.groupMembers(group)) |member| {
+        if (!self.world.isAlive(member)) continue;
+        if (at == index) return member;
+        at += 1;
+    }
+    return null;
+}
+
+/// The groups an entity is in, as many as `found` holds.
+pub fn groupsOf(self: *const App, entity: ecs.Entity, found: [][]const u8) [][]const u8 {
+    var count: usize = 0;
+    for (self.groups.keys(), self.groups.values()) |name, members| {
+        if (count == found.len) break;
+        for (members.items) |member| {
+            if (!member.eql(entity)) continue;
+            found[count] = name;
+            count += 1;
+            break;
+        }
+    }
+    return found[0..count];
+}
+
+/// Call a method on every living member of a group, in the order they
+/// joined - a component's, the script's, or one `addMethod` added: see
+/// `callMethodOn`. A member that has no such method is passed over. The
+/// members are copied first, so a call may add to the group or take from it.
+pub fn callGroup(self: *App, group: []const u8, method: []const u8) anyerror!void {
+    const members = try self.gpa.dupe(ecs.Entity, self.groupMembers(group));
+    defer self.gpa.free(members);
+    for (members) |member| {
+        if (!self.world.isAlive(member)) continue;
+        self.callMethodOn(member, method, &.{}) catch |err| switch (err) {
+            error.NoSuchMethod => continue,
+            else => return err,
+        };
+    }
+}
+
+/// Take the dead out of every group, at the end of the frame.
+fn forgetDeadGroupMembers(self: *App) void {
+    for (self.groups.values()) |*members| {
+        var at = members.items.len;
+        while (at > 0) {
+            at -= 1;
+            if (!self.world.isAlive(members.items[at])) _ = members.orderedRemove(at);
+        }
+    }
+}
+
+fn freeGroups(self: *App) void {
+    for (self.groups.keys(), self.groups.values()) |name, *members| {
+        self.gpa.free(name);
+        members.deinit(self.gpa);
     }
 }
 
@@ -2454,9 +2796,11 @@ pub fn clearWorld(self: *App) void {
     self.snapshots.clearRetainingCapacity();
     self.orphans.clearRetainingCapacity();
     self.tile_chunks.clearRetainingCapacity();
-    for (self.names.values()) |name| self.gpa.free(name);
     self.names.clearRetainingCapacity();
-    self.by_name.clearRetainingCapacity();
+    self.freeNames();
+    self.tree.forget();
+    self.freeGroups();
+    self.groups.clearRetainingCapacity();
     self.uuids.clearRetainingCapacity();
     self.by_uuid.clearRetainingCapacity();
     self.sibling_ranks.clearRetainingCapacity();
@@ -2760,8 +3104,23 @@ pub const reflect_opaque = true;
 pub const reflect_methods = .{
     .quit,
     .setName,
+    .setFreeName,
     .nameOf,
     .find,
+    .setParent,
+    .parentOf,
+    .hangsFrom,
+    .childCount,
+    .childAt,
+    .childNamed,
+    .findPath,
+    .findIn,
+    .addToGroup,
+    .removeFromGroup,
+    .isInGroup,
+    .groupSize,
+    .groupMember,
+    .callGroup,
     .clearWorld,
     .addComponentNamed,
     .removeComponentNamed,
@@ -4320,7 +4679,7 @@ test "clearing the world leaves nothing in it, and frees every name" {
     defer app.destroy();
     const door = try app.world.spawnWith(.{components.Transform2D.at(1, 2)});
     try app.setName(door, "door");
-    _ = try app.world.spawnWith(.{components.Transform2D.childOf(door, 0, 1)});
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(0, 1), components.Parent.of(door) });
 
     app.clearWorld();
     try testing.expectEqual(@as(usize, 0), app.world.count());
@@ -4433,7 +4792,7 @@ test "a child is where its parent put it, and its own numbers stay local" {
         components.Sprite.solid(.white, 20, 20),
     });
     const turret = try app.world.spawnWith(.{
-        components.Transform2D.childOf(tank, 0, -12),
+        components.Transform2D.at(0, -12), components.Parent.of(tank),
         components.Sprite.solid(.white, 8, 8),
     });
 
@@ -4454,8 +4813,8 @@ test "a grandchild is composed through the whole chain" {
     defer app.destroy();
 
     const root = try app.world.spawnWith(.{components.Transform2D.at(10, 0)});
-    const middle = try app.world.spawnWith(.{components.Transform2D.childOf(root, 5, 0)});
-    const leaf = try app.world.spawnWith(.{components.Transform2D.childOf(middle, 2, 0)});
+    const middle = try app.world.spawnWith(.{ components.Transform2D.at(5, 0), components.Parent.of(root) });
+    const leaf = try app.world.spawnWith(.{ components.Transform2D.at(2, 0), components.Parent.of(middle) });
 
     try app.run();
     try testing.expectApproxEqAbs(@as(f32, 17), app.worldTransform(leaf).?.x, 0.0001);
@@ -4466,7 +4825,7 @@ test "an entity put somewhere in the world lands there under its parents, and ke
     defer app.destroy();
     // A parent turned a quarter, twice the size.
     const tank = try app.world.spawnWith(.{components.Transform2D{ .x = 100, .y = 50, .rotation = std.math.pi / 2.0, .scale_x = 2, .scale_y = 2 }});
-    const turret = try app.world.spawnWith(.{components.Transform2D.childOf(tank, 10, 0)});
+    const turret = try app.world.spawnWith(.{ components.Transform2D.at(10, 0), components.Parent.of(tank) });
 
     // Ten along the tank's +x, which the quarter turn points down the
     // screen, at twice the length.
@@ -4486,7 +4845,7 @@ test "an entity put somewhere in the world lands there under its parents, and ke
     try testing.expectApproxEqAbs(@as(f32, 3), placed.scale_y, 1e-5);
     // Its own numbers are still the tank's space.
     const own = app.world.get(turret, components.Transform2D).?;
-    try testing.expect(own.parent.eql(tank));
+    try testing.expect(app.parentOf(turret).eql(tank));
     try testing.expectApproxEqAbs(@as(f32, -std.math.pi / 2.0), own.rotation, 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 0.5), own.scale_x, 1e-5);
 
@@ -4508,7 +4867,7 @@ test "what does not inherit its parent's turn or scale is put in the world by it
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const post = try app.world.spawnWith(.{components.Transform2D{ .x = 10, .rotation = 1, .scale_x = 4, .scale_y = 4 }});
-    const plate = try app.world.spawnWith(.{components.Transform2D{ .parent = post, .inherit_rotation = false, .inherit_scale = false }});
+    const plate = try app.world.spawnWith(.{ components.Transform2D{ .inherit_rotation = false, .inherit_scale = false }, components.Parent.of(post) });
     try app.setGlobalRotation(plate, 0.25);
     try app.setGlobalScale(plate, .init(2, 2));
     const own = app.world.get(plate, components.Transform2D).?;
@@ -4521,7 +4880,7 @@ test "a point goes into an entity's space and back, and an entity turns to face 
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const arm = try app.world.spawnWith(.{components.Transform2D{ .x = 30, .y = -20, .rotation = 0.5, .scale_x = 2, .scale_y = 0.5 }});
-    const hand = try app.world.spawnWith(.{components.Transform2D{ .x = 4, .y = 6, .rotation = -0.25, .parent = arm }});
+    const hand = try app.world.spawnWith(.{ components.Transform2D{ .x = 4, .y = 6, .rotation = -0.25 }, components.Parent.of(arm) });
     const point: math.Vec2 = .init(-12, 40);
     const back = app.toGlobal(hand, app.toLocal(hand, point).?).?;
     try testing.expectApproxEqAbs(point.x, back.x, 1e-3);
@@ -4531,7 +4890,7 @@ test "a point goes into an entity's space and back, and an entity turns to face 
     const body = try app.world.spawnWith(.{components.Transform2D{ .x = 5, .y = 5, .rotation = 2, .scale_x = 3, .scale_y = 3 }});
     // Its own scale not the same both ways: facing still is, in its own
     // space.
-    const eye = try app.world.spawnWith(.{components.Transform2D{ .x = 1, .y = -2, .rotation = 0.7, .scale_x = 2, .scale_y = 0.5, .parent = body }});
+    const eye = try app.world.spawnWith(.{ components.Transform2D{ .x = 1, .y = -2, .rotation = 0.7, .scale_x = 2, .scale_y = 0.5 }, components.Parent.of(body) });
     try app.lookAt(eye, point);
     try testing.expectApproxEqAbs(@as(f32, 0), app.getAngleTo(eye, point).?, 1e-4);
     const from = app.globalPosition(eye).?;
@@ -4567,8 +4926,8 @@ test "where an entity is in the space of something above it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const root = try app.world.spawnWith(.{components.Transform2D.at(100, 0)});
-    const middle = try app.world.spawnWith(.{components.Transform2D{ .x = 10, .rotation = std.math.pi / 2.0, .parent = root }});
-    const leaf = try app.world.spawnWith(.{components.Transform2D.childOf(middle, 5, 0)});
+    const middle = try app.world.spawnWith(.{ components.Transform2D{ .x = 10, .rotation = std.math.pi / 2.0 }, components.Parent.of(root) });
+    const leaf = try app.world.spawnWith(.{ components.Transform2D.at(5, 0), components.Parent.of(middle) });
 
     const within = app.getRelativeTransformToParent(leaf, root).?;
     try testing.expectApproxEqAbs(@as(f32, 10), within.x, 1e-4);
@@ -4588,14 +4947,14 @@ test "writing where an entity is says why it cannot: no transform, or a parent t
     try testing.expect(app.globalPosition(bare) == null);
 
     const parent = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
-    const orphan = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 1, 1)});
+    const orphan = try app.world.spawnWith(.{ components.Transform2D.at(1, 1), components.Parent.of(parent) });
     app.world.despawn(parent);
     try testing.expectError(error.Unplaced, app.setGlobalPosition(orphan, .init(0, 0)));
     try testing.expectError(error.Unplaced, app.lookAt(orphan, .init(5, 5)));
 
     // A living parent with no transform of its own places nothing.
     const holder = try app.world.spawnWith(.{components.Camera2D{}});
-    const held = try app.world.spawnWith(.{components.Transform2D.childOf(holder, 3, 4)});
+    const held = try app.world.spawnWith(.{ components.Transform2D.at(3, 4), components.Parent.of(holder) });
     try app.setGlobalPosition(held, .init(7, 8));
     try testing.expectEqual(@as(f32, 7), app.world.get(held, components.Transform2D).?.x);
     try testing.expectEqual(@as(f32, 8), app.world.get(held, components.Transform2D).?.y);
@@ -4610,11 +4969,11 @@ test "what hangs from something that died goes with it" {
         components.Sprite.solid(.white, 20, 20),
     });
     const turret = try app.world.spawnWith(.{
-        components.Transform2D.childOf(tank, 0, -12),
+        components.Transform2D.at(0, -12), components.Parent.of(tank),
         components.Sprite.solid(.white, 8, 8),
     });
     const barrel = try app.world.spawnWith(.{
-        components.Transform2D.childOf(turret, 10, 0),
+        components.Transform2D.at(10, 0), components.Parent.of(turret),
         components.Sprite.solid(.white, 12, 2),
     });
     const bystander = try app.world.spawnWith(.{
@@ -4644,7 +5003,7 @@ test "a parent with no transform places nothing and still owns what hangs from i
     // An entity with no components at all.
     const spell = try app.world.spawn();
     const spark = try app.world.spawnWith(.{
-        components.Transform2D.childOf(spell, 40, 30),
+        components.Transform2D.at(40, 30), components.Parent.of(spell),
         components.Sprite.solid(.white, 4, 4),
     });
 
@@ -5205,7 +5564,7 @@ test "the names of the dead are given back at the end of the frame" {
     defer app.destroy();
 
     const ship = try app.world.spawnWith(.{components.Transform2D.at(10, 10)});
-    const flame = try app.world.spawnWith(.{components.Transform2D.childOf(ship, 0, 8)});
+    const flame = try app.world.spawnWith(.{ components.Transform2D.at(0, 8), components.Parent.of(ship) });
     const buoy = try app.world.spawn();
     try app.setName(ship, "ship");
     try app.setName(flame, "flame");
@@ -5219,6 +5578,137 @@ test "the names of the dead are given back at the end of the frame" {
     try testing.expect(app.find("buoy").?.eql(buoy));
     try testing.expectEqual(@as(usize, 1), app.names.count());
     try testing.expectEqual(@as(u32, 1), app.by_name.count());
+}
+
+test "a name is its siblings' own: two parents may each have a child of it, and a clash takes the next free one" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const left = try app.world.spawn();
+    const right = try app.world.spawn();
+    try app.setName(left, "left");
+    try app.setName(right, "right");
+    const first = try app.world.spawnWith(.{components.Parent.of(left)});
+    const second = try app.world.spawnWith(.{components.Parent.of(right)});
+    const third = try app.world.spawnWith(.{components.Parent.of(left)});
+    try app.setName(first, "hand");
+    try app.setName(second, "hand");
+    try testing.expectError(error.NameTaken, app.setName(third, "hand"));
+    try app.setFreeName(third, "hand");
+    try testing.expectEqualStrings("hand 2", app.nameOf(third).?);
+
+    // `find` answers with the first given it; a path says which.
+    try testing.expect(app.find("hand").?.eql(first));
+    try testing.expect(app.findPath(right, "hand").?.eql(second));
+    try testing.expect(app.findPath(second, "../../left/hand 2").?.eql(third));
+    try testing.expect(app.findPath(second, "/left/./hand").?.eql(first));
+    try testing.expect(app.findPath(left, "nobody") == null);
+    try testing.expect(app.findPath(left, "../..") == null);
+    try testing.expect(app.findIn(.none, "hand 2").?.eql(third));
+    try testing.expect(app.findIn(right, "hand").?.eql(second));
+    try testing.expect(app.findIn(right, "hand 2") == null);
+
+    // Moved in among others of its name, it takes the next free one, and
+    // comes last.
+    try app.setParent(second, left, false);
+    try testing.expectEqualStrings("hand 3", app.nameOf(second).?);
+    try testing.expectEqual(@as(i64, 3), app.childCount(left));
+    try testing.expect(app.childAt(left, 0).?.eql(first));
+    try testing.expect(app.childAt(left, 2).?.eql(second));
+    try testing.expect(app.childAt(left, 3) == null);
+    try testing.expectEqual(@as(i64, 0), app.childCount(right));
+}
+
+test "anything hangs in the one tree, and goes with what it hangs from" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const panel = try app.world.spawnWith(.{control.Control{}});
+    const button = try app.world.spawnWith(.{ control.Control{}, components.Parent.of(panel), control.Button.of("OK") });
+    const clock = try app.world.spawnWith(.{ timer.Timer{}, components.Parent.of(button) });
+    try testing.expect(app.hangsFrom(clock, panel));
+    try testing.expect(!app.hangsFrom(panel, clock));
+
+    // A loop is refused, and changes nothing.
+    try testing.expectError(error.Loop, app.setParent(panel, clock, false));
+    try testing.expectError(error.Loop, app.setParent(panel, panel, false));
+    try testing.expect(app.parentOf(panel).isNone());
+
+    app.world.despawn(panel);
+    _ = try app.step();
+    try testing.expect(!app.world.isAlive(button));
+    try testing.expect(!app.world.isAlive(clock));
+}
+
+test "an entity hung elsewhere stays where it is in the world, or keeps its own numbers" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const ship = try app.world.spawnWith(.{components.Transform2D.at(10, 10)});
+    const rock = try app.world.spawnWith(.{components.Transform2D.at(15, 10)});
+
+    try app.setParent(rock, ship, true);
+    try testing.expectEqual(@as(f32, 5), app.world.get(rock, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 15), app.worldTransform(rock).?.x);
+
+    try app.setParent(rock, .none, true);
+    try testing.expectEqual(@as(f32, 15), app.world.get(rock, components.Transform2D).?.x);
+    try testing.expect(!app.world.has(rock, components.Parent));
+
+    try app.setParent(rock, ship, false);
+    try testing.expectEqual(@as(f32, 15), app.world.get(rock, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 25), app.worldTransform(rock).?.x);
+
+    const gone = try app.world.spawn();
+    app.world.despawn(gone);
+    try testing.expectError(error.NoSuchEntity, app.setParent(rock, gone, false));
+}
+
+fn nudge(app: *App, self: ecs.Entity) !void {
+    app.world.get(self, components.Transform2D).?.x += 1;
+}
+
+test "a group is found and called wherever its members are, and lets the dead go" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addMethod("nudge", nudge);
+
+    const bat = try app.world.spawnWith(.{components.Transform2D{}});
+    const ghost = try app.world.spawnWith(.{ components.Transform2D{}, components.Parent.of(bat) });
+    const lamp = try app.world.spawnWith(.{components.Transform2D{}});
+    try app.addToGroup(bat, "enemies");
+    try app.addToGroup(ghost, "enemies");
+    try app.addToGroup(ghost, "enemies");
+    try app.addToGroup(ghost, "loud");
+
+    try testing.expectEqual(@as(i64, 2), app.groupSize("enemies"));
+    try testing.expect(app.groupMember("enemies", 1).?.eql(ghost));
+    try testing.expect(app.groupMember("enemies", 2) == null);
+    try testing.expect(!app.isInGroup(lamp, "enemies"));
+    try testing.expectEqual(@as(i64, 0), app.groupSize("nobody"));
+    var held: [4][]const u8 = undefined;
+    const groups = app.groupsOf(ghost, &held);
+    try testing.expectEqual(@as(usize, 2), groups.len);
+    try testing.expectEqualStrings("enemies", groups[0]);
+    try testing.expectEqualStrings("loud", groups[1]);
+
+    try app.callGroup("enemies", "nudge");
+    // A member with no such method is passed over.
+    try app.callGroup("enemies", "no such thing");
+    try testing.expectEqual(@as(f32, 1), app.world.get(bat, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 1), app.world.get(ghost, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 0), app.world.get(lamp, components.Transform2D).?.x);
+
+    app.removeFromGroup(bat, "enemies");
+    try testing.expectEqual(@as(i64, 1), app.groupSize("enemies"));
+
+    // The dead are no members at once, and are let go of at the end of the
+    // frame.
+    app.world.despawn(ghost);
+    try testing.expectEqual(@as(i64, 0), app.groupSize("enemies"));
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.groupMembers("loud").len);
+    try testing.expectError(error.NoSuchEntity, app.addToGroup(ghost, "enemies"));
 }
 
 /// Escape pressed on the third frame, the way the platform would deliver it.
@@ -6530,9 +7020,9 @@ test "a parent's children keep the order they are put in, and a new one comes la
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const parent = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
-    const a = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 1, 0)});
-    const b = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 2, 0)});
-    const c = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 3, 0)});
+    const a = try app.world.spawnWith(.{ components.Transform2D.at(1, 0), components.Parent.of(parent) });
+    const b = try app.world.spawnWith(.{ components.Transform2D.at(2, 0), components.Parent.of(parent) });
+    const c = try app.world.spawnWith(.{ components.Transform2D.at(3, 0), components.Parent.of(parent) });
     var found: [8]ecs.Entity = undefined;
 
     // Never placed: the order the handles were given out in.
@@ -6549,7 +7039,7 @@ test "a parent's children keep the order they are put in, and a new one comes la
     try testing.expectEqualSlices(ecs.Entity, &.{ c, b, a }, app.childrenOf(parent, &found));
 
     // A child made afterwards comes after the ones placed.
-    const d = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 4, 0)});
+    const d = try app.world.spawnWith(.{ components.Transform2D.at(4, 0), components.Parent.of(parent) });
     try testing.expectEqualSlices(ecs.Entity, &.{ c, b, a, d }, app.childrenOf(parent, &found));
 
     // The roots are a family of their own, untouched.
@@ -6572,9 +7062,9 @@ test "the order of a parent's children goes through a scene and back" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const parent = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
-    const first = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 1, 0)});
-    const second = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 2, 0)});
-    const third = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 3, 0)});
+    const first = try app.world.spawnWith(.{ components.Transform2D.at(1, 0), components.Parent.of(parent) });
+    const second = try app.world.spawnWith(.{ components.Transform2D.at(2, 0), components.Parent.of(parent) });
+    const third = try app.world.spawnWith(.{ components.Transform2D.at(3, 0), components.Parent.of(parent) });
     try app.setName(first, "first");
     try app.setName(second, "second");
     try app.setName(third, "third");
@@ -6597,11 +7087,11 @@ test "the order of a parent's children goes through a scene and back" {
 
     var found: [8]ecs.Entity = undefined;
     const copied_parent = copy.findUuid(app.uuidOf(parent).?).?;
-    const children = copy.childrenOf(copied_parent, &found);
-    try testing.expectEqual(@as(usize, 3), children.len);
-    try testing.expectEqualStrings("third", copy.nameOf(children[0]).?);
-    try testing.expectEqualStrings("second", copy.nameOf(children[1]).?);
-    try testing.expectEqualStrings("first", copy.nameOf(children[2]).?);
+    const family = copy.childrenOf(copied_parent, &found);
+    try testing.expectEqual(@as(usize, 3), family.len);
+    try testing.expectEqualStrings("third", copy.nameOf(family[0]).?);
+    try testing.expectEqualStrings("second", copy.nameOf(family[1]).?);
+    try testing.expectEqualStrings("first", copy.nameOf(family[2]).?);
     const roots = copy.childrenOf(.none, &found);
     try testing.expect(roots[0].eql(before));
 

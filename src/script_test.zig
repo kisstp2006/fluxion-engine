@@ -33,6 +33,8 @@ const Marker = extern struct {
 
 const Health = extern struct {
     hp: f32 = 10,
+    /// Who it is set on: a component's field that holds an entity.
+    target: Entity = .none,
 
     pub const reflect_name = "Health";
     pub const signals = .{ .hit = struct { damage: f32, by: Entity } };
@@ -725,6 +727,7 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
         \\var mine = false;
         \\var placed = 0.0;
         \\var parented = false;
+        \\var hung = false;
         \\var heard = false;
         \\var kept: any = null;
         \\var me: any = null;
@@ -739,9 +742,11 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
         \\        var place = app.worldTransform(app.find("other"));
         \\        app.nameOf(self.entity);
         \\        placed = place.x;
-        \\        var transform = self.entity.get("Transform2D");
-        \\        transform.parent = app.find("other");
-        \\        parented = transform.parent == app.find("other");
+        \\        var health = self.entity.get("Health");
+        \\        health.target = app.find("other");
+        \\        parented = health.target == app.find("other");
+        \\        app.setParent(self.entity, app.find("other"), false);
+        \\        hung = app.parentOf(self.entity) == app.find("other") and app.childAt(app.find("other"), 0) == self.entity;
         \\        kept = app.find("other");
         \\        me = self;
         \\    }
@@ -752,8 +757,8 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
         \\struct Point {
         \\    var x: int = 0;
         \\}
-        \\fn unparent() { app.find("finder").get("Transform2D").parent = null; }
-        \\fn parentOf() { return app.find("finder").get("Transform2D").parent; }
+        \\fn unparent() { app.findPath(app.find("other"), "finder").get("Health").target = null; }
+        \\fn parentOf() { return app.findPath(app.find("other"), "finder").get("Health").target; }
         \\fn byInstance() { return app.nameOf(me); }
         \\fn keptAlive() { return kept.alive(); }
         \\fn number() { return app.nameOf(5); }
@@ -777,7 +782,10 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
     try testing.expectEqual(@as(f64, 6), global(app, file, "placed").asFloat());
     // Written into a component's field, and read back as the same handle.
     try testing.expect(global(app, file, "parented").asBool());
-    try testing.expect(app.world.get(finder, Transform2D).?.parent.eql(other));
+    try testing.expect(app.world.get(finder, Health).?.target.eql(other));
+    // Hung from another from a script, and found there by a path.
+    try testing.expect(global(app, file, "hung").asBool());
+    try testing.expect(app.parentOf(finder).eql(other));
 
     // A signal's entity is the same handle too.
     try app.emit(other, Health, .hit, .{ .damage = 1, .by = other });
@@ -787,7 +795,7 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
     const scripts = app.scripts.?;
     const module = scripts.moduleOf(file).?;
     _ = try scripts.vm.callName(module, "unparent", &.{});
-    try testing.expect(app.world.get(finder, Transform2D).?.parent.isNone());
+    try testing.expect(app.world.get(finder, Health).?.target.isNone());
     try testing.expect((try scripts.vm.callName(module, "parentOf", &.{})).tag == .null);
     try testing.expectEqualStrings("finder", (try scripts.vm.callName(module, "byInstance", &.{})).as(flux.object.String).bytes());
 
@@ -810,6 +818,8 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
     var handles = scripts.handles.valueIterator();
     while (handles.next()) |handle| try testing.expect(scripts.vm.held.contains(handle.obj()));
     const other_handle = scripts.handles.get(other).?;
+    // Taken back to the root first, or it would go with the one it hangs from.
+    try app.setParent(finder, .none, false);
     app.world.despawn(other);
     _ = try app.step();
     try testing.expect(!scripts.handles.contains(other));

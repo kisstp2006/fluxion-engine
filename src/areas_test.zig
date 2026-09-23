@@ -271,8 +271,8 @@ test "an area carries the colliders hanging from it, and every one of them is a 
     const app = try headless();
     defer app.destroy();
     const room = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{} });
-    const left = try app.world.spawnWith(.{ Transform2D.childOf(room, -40, 0), Collider2D.rectangle(10, 10) });
-    _ = try app.world.spawnWith(.{ Transform2D.childOf(room, 40, 0), Collider2D.rectangle(10, 10) });
+    const left = try app.world.spawnWith(.{ Transform2D.at(-40, 0), components.Parent.of(room), Collider2D.rectangle(10, 10) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(40, 0), components.Parent.of(room), Collider2D.rectangle(10, 10) });
     const walker = try app.world.spawnWith(.{ Transform2D.at(-40, 0), RigidBody2D{ .type = .kinematic }, Collider2D.rectangle(5, 5) });
     try watch(app, room);
 

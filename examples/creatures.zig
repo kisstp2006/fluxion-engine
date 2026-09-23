@@ -79,6 +79,7 @@ const std = @import("std");
 const fx = @import("fluxion_engine");
 
 const Transform2D = fx.Transform2D;
+const Parent = fx.Parent;
 const Sprite = fx.Sprite;
 const Camera2D = fx.Camera2D;
 const Animation = fx.Animation;
@@ -222,7 +223,7 @@ fn spawn(app: *App) !void {
     _ = try world.spawnWith(.{
         // Where in the camera's space it goes is worked out every frame by
         // `pinHeading`; this only says whose corner it is.
-        Transform2D{ .parent = camera, .inherit_rotation = false },
+        Transform2D{ .inherit_rotation = false }, Parent.of(camera),
         heading,
         Heading{},
     });
@@ -290,7 +291,7 @@ fn spawn(app: *App) !void {
             // A ring round the one being driven, so it can be found in a
             // crowd. Parented, so it never has to be moved.
             _ = try world.spawnWith(.{
-                Transform2D{ .parent = body, .inherit_rotation = false },
+                Transform2D{ .inherit_rotation = false }, Parent.of(body),
                 Sprite{
                     .texture = sheet,
                     .region = .cell(cell.ring, atlas_columns, atlas_rows),
@@ -305,7 +306,7 @@ fn spawn(app: *App) !void {
         // The shadow does not inherit the body's rotation: a shadow on the
         // ground stays flat however much the thing above it leans.
         _ = try world.spawnWith(.{
-            Transform2D{ .x = 0, .y = 15, .parent = body, .inherit_rotation = false },
+            Transform2D{ .x = 0, .y = 15, .inherit_rotation = false }, Parent.of(body),
             Sprite{
                 .texture = sheet,
                 .region = .cell(cell.shadow, atlas_columns, atlas_rows),
@@ -319,7 +320,7 @@ fn spawn(app: *App) !void {
         // Two eyes, which do turn with it - that is the whole point of them.
         for ([_]f32{ -7, 7 }) |offset| {
             _ = try world.spawnWith(.{
-                Transform2D.childOf(body, offset, -4),
+                Transform2D.at(offset, -4), Parent.of(body),
                 Sprite{
                     .texture = sheet,
                     .region = .cell(cell.eye, atlas_columns, atlas_rows),
@@ -342,7 +343,7 @@ fn spawn(app: *App) !void {
         plate.layer = 2;
 
         _ = try world.spawnWith(.{
-            Transform2D{ .x = 0, .y = -32, .parent = body, .inherit_rotation = false },
+            Transform2D{ .x = 0, .y = -32, .inherit_rotation = false }, Parent.of(body),
             plate,
         });
     }

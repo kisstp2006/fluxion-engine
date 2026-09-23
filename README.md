@@ -158,7 +158,7 @@ fn hits(app: *fx.App) !void {
             if (!struck(app, place)) continue;
             try app.commands.despawn(bullet);                    // when this system returns
             const spark = try app.commands.spawn(.{ place, Spark{} });
-            _ = try app.commands.spawn(.{ fx.Transform2D.childOf(spark, 0, -8), Glow{} });
+            _ = try app.commands.spawn(.{ fx.Transform2D.at(0, -8), fx.Parent.of(spark), Glow{} });
         }
     }
 }
@@ -611,6 +611,64 @@ fn keep(app: *fx.App) !void {
   canvas's pixels - exact for a canvas that fills the page, which is what a
   game is, and an over-estimate for one with a page above it.
 
+## 🌳 One tree
+
+```zig
+const tank = try app.world.spawnWith(.{ fx.Transform2D.at(100, 100), fx.Sprite.of(hull) });
+const turret = try app.world.spawnWith(.{ fx.Transform2D.at(0, -6), fx.Parent.of(tank), fx.Sprite.of(gun) });
+try app.setName(turret, "turret");
+const reload = try app.world.spawnWith(.{ fx.Timer{ .wait_time = 2 }, fx.Parent.of(turret) });  // no transform: a clock
+try app.addToGroup(tank, "enemies");
+
+const barrel = app.findPath(tank, "turret/barrel");   // null until there is one
+try app.callGroup("enemies", "alert");
+```
+
+- **`Parent` is the one link between entities.** Whatever an entity is - a
+  sprite, a control, a timer, something with only a script - it hangs from
+  its `Parent`, or it is a root. A transform's numbers are in the space of the
+  transform above it, a control is laid out in the control above it, and a
+  timer or a sound belongs to what it hangs from. **What hangs from something
+  goes with it**: despawn the tank and the turret goes at the end of the
+  frame, and the clock on the turret with it.
+- **`app.setParent(entity, parent, keep_global)` moves an entity in the
+  tree**, `.none` for the roots, last among its new siblings. With
+  `keep_global` it stays where it is in the world, its own transform written
+  to land there; without, its numbers stay and it moves with the new parent.
+  A loop - the entity itself, or something under it - is `error.Loop`.
+  `app.parentOf` and `app.hangsFrom` read it. A `Parent` written straight
+  into the component is seen after the next spawn, despawn or change of
+  components, and renames nothing, so an inspector shows it read-only and
+  leaves the move to `setParent`.
+- **A parent's children keep an order**: `app.childrenOf(parent, &buf)` in
+  it - `.none` for the roots - `app.childCount` and `app.childAt` one at a
+  time, `app.siblingIndex(entity)` for one's place, and
+  `app.setSiblingIndex(entity, i)` to move one, the ones from there on moving
+  along. A child never placed comes after the ones that were, in the order it
+  was made. A scene writes its list in this order and a read keeps it, so the
+  tree comes back as it was, after whatever was in the world already.
+  `app.siblingBefore` sorts siblings a caller has grouped itself. The
+  families are an index kept beside the world and built again when the world
+  changes shape, so asking every frame is a lookup, not a walk over the world.
+- **A name is its siblings' own.** Two children of one parent - or two roots
+  - cannot share one: `app.setName` says `error.NameTaken`, and
+  `app.setFreeName` takes the first free one after it, "Rock 2", which is
+  what a scene read into a family and `setParent` do. Two copies of a scene
+  keep the names inside them. `app.find(name)` answers with the first living
+  entity given it; `app.findPath(from, "Arm/Hand")` follows names down, `..`
+  up and a leading `/` from the roots; `app.findIn(root, name)` looks
+  anywhere under a root.
+- **A group is a name many entities are put under**, wherever they are in the
+  tree: `addToGroup`, `removeFromGroup`, `isInGroup`, `groupMembers`,
+  `groupSize` and `groupMember`, `groupsOf`, and `callGroup(group, method)`,
+  which calls a method - a component's, the script's, or one `addMethod` gave
+  - on every member that has it. Groups are kept beside the world, as names
+  are, because one entity is in any number of them; a scene writes them with
+  each entity, and the dead leave at the end of the frame.
+- **All of it is a script's too**: `app.setParent(self.entity,
+  app.find("ship"), true)`, `app.findPath(self.entity, "../Door")`,
+  `app.callGroup("lights", "flicker")`.
+
 ## 🎨 The 2D layer
 
 One quad in a vertex buffer and a second buffer stepping once per instance
@@ -652,14 +710,12 @@ _ = try world.spawnWith(.{
   One pipeline, no branch in the shader, no artwork for a health bar.
 - **A sprite with no size is the size of its own artwork**, so most sprites
   need no size at all.
-- **A transform's `parent` attaches one entity to another**, so a turret rides
-  on a tank and a health bar rides over an enemy. The numbers in a transform
-  are *local* - in the parent's space, and in the world's only when there is
-  no parent. `app.worldTransform(entity)` is the other one, and it costs a
-  walk up the chain rather than a field read. `inherit_rotation = false` is
-  the shadow that does not tip over. **What hangs from something goes with
-  it**: despawn the tank and the turret goes at the end of the frame, and the
-  barrel on the turret with it.
+- **A transform's numbers are *local*** - in the space of the transform it
+  hangs from through its `Parent`, so a turret rides on a tank and a health
+  bar rides over an enemy, and in the world's only when there is none above.
+  `app.worldTransform(entity)` is the other one, and it costs a walk up the
+  chain rather than a field read. `inherit_rotation = false` is the shadow
+  that does not tip over. See [One tree](#-one-tree).
 - **Calls on the app work through the chain**:
   - `globalPosition`, `globalRotation`, `globalScale` and `worldTransform` read where an entity is in the world, and their `set` twins put it there under the parents it keeps.
   - `globalTranslate` moves it by an amount in the world, and `toLocal`/`toGlobal` take a point in and out of its space.
@@ -667,13 +723,6 @@ _ = try world.spawnWith(.{
   - `moveLocalX`/`moveLocalY`, `rotate` and `applyScale` change its own numbers along its own axes.
   - `getRelativeTransformToParent` says where it is in an ancestor's space.
   - These are where the entity is. What an entity that `interpolate`s is drawn at between two steps is `drawnTransform`.
-- **A parent's children keep an order**: `app.childrenOf(parent, &buf)` in
-  it - `.none` for the roots - `app.siblingIndex(entity)` for one's place, and
-  `app.setSiblingIndex(entity, i)` to move one, the ones from there on moving
-  along. A child never placed comes after the ones that were, in the order it
-  was made. A scene writes its list in this order and a read keeps it, so the
-  tree comes back as it was, after whatever was in the world already.
-  `app.siblingBefore` sorts siblings a caller has grouped itself.
 - **An `Animation` is a sheet and a rate**, and the engine writes the cell it
   lands on into `Sprite.region` once a frame. One sheet holds a walk, an idle
   and an attack; swapping between them is writing two numbers.
@@ -873,13 +922,13 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
 try app.useControlNodes();
 const ui_theme = try app.loadTheme("res://ui/game.theme");
 const root = try app.world.spawnWith(.{ fx.Control{ .theme = ui_theme, .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, fx.CanvasLayer{} });
-const play = try app.world.spawnWith(.{ fx.Control{ .parent = root }, fx.Button.of("Play") });
+const play = try app.world.spawnWith(.{ fx.Control{}, fx.Parent.of(root), fx.Button.of("Play") });
 try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{});   // menu: an entity whose script has start()
 ```
 
-- **Controls are components.** A `Control` is the box - its
-  parent, its size as fit, fixed, grow, a share or a ratio, and in the flow
-  of its parent or anchored to one of nine places in it. What it is comes
+- **Controls are components.** A `Control` is the box - its size as fit,
+  fixed, grow, a share or a ratio, and in the flow of the control it hangs
+  from or anchored to one of nine places in it. What it is comes
   beside it: `Label`, `Button`, `CheckBox`, `LineEdit`, `Slider`,
   `ProgressBar`, `TabContainer`, `TextureRect`, `NinePatchRect`, and the
   containers `PanelContainer`, `BoxContainer`, `MarginContainer`,
@@ -1436,17 +1485,20 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
 
 ```json
 {
-  "fluxion_scene": 2,
+  "fluxion_scene": 3,
   "entities": [
     {
       "uuid": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c",
       "name": "player",
+      "groups": ["heroes"],
       "Transform2D": { "x": 320.0, "y": 180.0 },
       "Sprite": { "texture": "res://art/hero.png", "width": 48.0, "height": 48.0 }
     },
     {
       "uuid": "5c2d7e9f-0a1b-4c3d-8e5f-6a7b8c9d0e1f",
-      "Transform2D": { "y": -6.0, "parent": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c" },
+      "parent": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c",
+      "name": "turret",
+      "Transform2D": { "y": -6.0 },
       "Sprite": { "texture": "res://art/turret.png" }
     }
   ],
@@ -1458,12 +1510,13 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
 ```
 
 - **An entity is an object of its components**, each under its type's name,
-  with the entity's UUID and name beside them. A field that holds its default
+  with the entity's UUID, its parent, its name and its groups beside them. A
+  name taken among the siblings it is read into becomes the next free one. A field that holds its default
   is left out, so the file says what is particular about each thing - and a
   field added to a component later reads as its default from every scene
   written before it.
 - **What a handle points at is written, not the handle.** An entity in a
-  field - a transform's `parent`, a game's `leader` - is that entity's UUID,
+  field - an entity's `parent`, a game's `leader` - is that entity's UUID,
   so adding one at the top changes no other line of the file. A texture or a
   font is its file's `res://` path - `{ "file": ..., "member": 1 }` for a
   font of a collection past its first - and in `assets` its UUID and, for a
@@ -1472,9 +1525,10 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   world, so one scene can name an entity another brought - and loads the
   files or finds them already loaded. A texture made from pixels has no
   file, and is written as `null`.
-- **Only version 2 is read.** A version 1 scene - references by their place
-  in the list, paths from the scene file's own directory - is refused with a
-  message that says so, and so is a newer one.
+- **Only version 3 is read.** An older scene - a version 2 one with its
+  parent inside a `Transform2D` or a `Control`, or a version 1 one with
+  references by their place in the list - is refused with a message that says
+  so, and so is a newer one.
 - **JSON and CBOR are one scene in two spellings.**
   [Fluxion JSON](https://github.com/kisstp2006/fluxion-json) writes and reads
   both, and loading tells them apart by the bytes CBOR starts with. CBOR is
@@ -1493,7 +1547,7 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   and the path to the value - and leaves the world as it was:
 
   ```
-  meadow.json:3:32: no entity in this scene or in the world has the UUID 77777777-7777-4777-8777-777777777777 (at /entities/1/Transform2D/parent)
+  meadow.json:3:32: no entity in this scene or in the world has the UUID 77777777-7777-4777-8777-777777777777 (at /entities/1/parent)
   ```
 
 - **A scene that is wrong is an error, never a crash**, so an editor shows it
@@ -1671,7 +1725,7 @@ struct Door {
   `uuid()`, `has(name)`, `get(name)`, `add(name)` and `remove(name)`.
   - A component from `get` is looked up again each time the script uses it, so keeping it in a field is safe while the world's rows move.
   - Once it is gone, using it stops the script with a panic saying so.
-  - An entity is one handle wherever a script is handed it: `self.entity`, `app.find("door")`, a field such as `Transform2D.parent`, a signal's argument. So `app.find("door") == self.entity` says whether it is this one, and none is null.
+  - An entity is one handle wherever a script is handed it: `self.entity`, `app.find("door")`, a field such as `Parent.entity`, a signal's argument. So `app.find("door") == self.entity` says whether it is this one, and none is null.
   - Where a call or a field wants an entity, `app.nameOf(app.find("door"))`, the script gives that handle, a scripted entity's instance, or null. Anything else stops it with a panic saying what it gave.
 - **A script cannot stop the game.**
   - Each call has a budget of loop rounds, `Options.budget`, ten million by default, and a call that runs past it is stopped.
@@ -1876,8 +1930,9 @@ Here, and checked by the tests:
   one of, and engine shortcuts for quitting and fullscreen, off unless asked
   for.
 - Names that belong to the entity rather than to a component:
-  `app.setName`, `app.find` and `app.nameOf`, one living entity to a name,
-  and the name free again the moment its entity dies.
+  `app.setName`, `app.find` and `app.nameOf`, unique among siblings, found by
+  a path of them, and free again the moment their entity dies; and groups, one
+  entity in any number, called together.
 - The engine's command-line flags, read into a struct by name with room for
   a game's own, and captures that are the same picture on every machine.
 - Controllers: sixteen slots, levels and edges, round dead zones, any pad or
@@ -1913,8 +1968,10 @@ Here, and checked by the tests:
   layer, visibility, additive blending, textures that repeat, interpolation
   between fixed steps, and a camera with zoom, rotation and an area it always
   fits to the window.
-- Parenting, one entity to another, resolved where it is needed rather than
-  cached into a second component, and taken down with its parent.
+- One tree of every entity through `Parent`, whatever the entity is: placing
+  resolved where it is needed rather than cached into a second component, the
+  families in an index built again when the world changes shape, and what
+  hangs from something taken down with it.
 - Sprite animation over a sheet, looping or one-shot.
 - Text: a shelf-packed glyph atlas per font, kerning, several lines, three
   alignments, and a label that formats into itself. Not here yet: wrapping, an
@@ -2036,20 +2093,20 @@ before this package existed - the seam was cut for it deliberately.
 
 ## 🧩 What counts as a component
 
-In 2D: `Transform2D`, `Sprite`, `Text2D`, `Animation`, `Camera2D`,
-`RigidBody2D`, `Collider2D`, `Area2D` and `TileMap`; `Timer`; and the
-interface's `Control` with what goes beside it - see
-[Controls and themes](#-controls-and-themes). Each one is something a
+`Parent`, which every entity may have. In 2D: `Transform2D`, `Sprite`,
+`Text2D`, `Animation`, `Camera2D`, `RigidBody2D`, `Collider2D`, `Area2D` and
+`TileMap`; `Timer`; and the interface's `Control` with what goes beside it -
+see [Controls and themes](#-controls-and-themes). Each one is something a
 person making a game would name, which is the test. A map's chunks are
 entities of the engine's own, which a scene never writes.
 
-Two things that used to be on that list are not any more, and the reason is
-the same for both. `Parent` was a component holding a link and an offset; it
-is a field of `Transform2D` now, because parenting is what a transform *does*,
-and nobody building a scene thinks "I will add a Parent to this".
-`Previous2D` held where something was a step ago; that is the engine's own
-bookkeeping and a game should never have to declare it, so it is a flag on
-the transform and a table beside the world.
+`Parent` is on the list because what something hangs from is not a
+transform's business alone: a timer, a sound or a control belongs somewhere
+in the tree too, with no transform, and one link for all of them is one tree
+rather than one for things in the world and another for the interface.
+`Previous2D` is not on it: it held where something was a step ago, which is
+the engine's own bookkeeping and a game should never have to declare, so it
+is a flag on the transform and a table beside the world.
 
 The rule that falls out: **a component is a thing, not a mechanism.** If it
 exists so that the engine can do its job rather than so that the game can say
@@ -2073,9 +2130,9 @@ fn pan(app: *fx.App) !void {
 ```
 
 Naming something does not move it into another table or change which queries
-match it. And a name picks out one living entity at a time - a second one is
-`error.NameTaken` - because a `find` that had to choose between two would
-sometimes choose the wrong one. Many things of one kind are a component and a
+match it. A name picks out one child of a parent - a sibling with it already
+is `error.NameTaken` - so a path of names leads to one thing, and two copies
+of a scene keep the names inside them. Many things of one kind are a component and a
 query; a name is for the camera, the player, the door to the next room.
 
 **Nor is a body's handle.** `RigidBody2D` says that something falls and

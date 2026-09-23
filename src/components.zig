@@ -38,19 +38,40 @@ pub const Entity = ecs.Entity;
 /// A colour, four floats from zero to one. See `color`.
 pub const Color = @import("color.zig").Color;
 
-/// Where a thing is, how big, which way round, and what it hangs from.
+/// What an entity hangs from: the one tree every entity is in, whatever it
+/// is - where a sprite is placed from, which control holds a button, what a
+/// timer or a sound belongs to. An entity without one is a root.
 ///
 /// ```zig
 /// const tank = try world.spawnWith(.{ Transform2D.at(100, 100), Sprite.of(hull) });
-/// _ = try world.spawnWith(.{
-///     Transform2D.childOf(tank, 0, -6),
-///     Sprite.of(turret),
-/// });
+/// _ = try world.spawnWith(.{ Transform2D.at(0, -6), Parent.of(tank), Sprite.of(turret) });
 /// ```
 ///
-/// The numbers are local - in the parent's space - and `App.worldTransform`
-/// gives the world's. The parent is a field rather than a component, so
-/// gaining one does not move the entity to another archetype.
+/// When the parent is despawned, so is this, at the end of that frame - and
+/// whatever hangs from this in turn. `App.setParent` hangs an entity from
+/// another, keeping names unique among siblings; the tree `App.childrenOf`
+/// walks is built again whenever an entity is spawned, despawned, or gains
+/// or loses a component, and at once after `setParent`. A parent written
+/// straight into the component is seen after the next of those, and keeps
+/// no name free: an inspector shows it and leaves the change to `setParent`.
+pub const Parent = extern struct {
+    entity: Entity = .none,
+
+    pub const reflect_name = "Parent";
+    pub const reflect_fields = .{
+        .entity = .{ attr.ReadOnly{}, attr.Doc{ .text = "Changed by moving the entity in the tree" } },
+    };
+
+    pub fn of(parent: Entity) Parent {
+        return .{ .entity = parent };
+    }
+};
+
+/// Where a thing is, how big and which way round.
+///
+/// The numbers are local - in the space of the entity it hangs from, its
+/// `Parent` - and `App.worldTransform` gives the world's. A parent with no
+/// `Transform2D` places nothing: the numbers are the world's.
 pub const Transform2D = extern struct {
     x: f32 = 0,
     y: f32 = 0,
@@ -58,14 +79,6 @@ pub const Transform2D = extern struct {
     rotation: f32 = 0,
     scale_x: f32 = 1,
     scale_y: f32 = 1,
-
-    /// Whose space `x` and `y` are in. `.none` is the world.
-    ///
-    /// When the parent is despawned, so is this, at the end of that frame -
-    /// and whatever hangs from this in turn. To keep it, write
-    /// `App.worldTransform` over it first. A living parent with no
-    /// `Transform2D` places nothing, and still owns what hangs from it.
-    parent: Entity = .none,
 
     /// Whether this turns with its parent. Its offset turns either way; off is
     /// for a shadow or a name plate that should not tip over.
@@ -86,18 +99,12 @@ pub const Transform2D = extern struct {
     pub const reflect_name = "Transform2D";
     pub const reflect_fields = .{
         .rotation = .{ attr.Angle{}, attr.Doc{ .text = "Clockwise on screen" } },
-        .parent = .{attr.Doc{ .text = "Whose space x and y are in; none is the world's" }},
     };
     pub const reflect_methods = .{.translate};
 
-    /// A transform at a point, unrotated, unscaled and unparented.
+    /// A transform at a point, unrotated and unscaled.
     pub fn at(x: f32, y: f32) Transform2D {
         return .{ .x = x, .y = y };
-    }
-
-    /// A transform at a point in something else's space.
-    pub fn childOf(parent: Entity, x: f32, y: f32) Transform2D {
-        return .{ .x = x, .y = y, .parent = parent };
     }
 
     /// Move by an amount, in whatever space this transform is in.
@@ -148,8 +155,7 @@ pub const Transform2D = extern struct {
         };
     }
 
-    /// Where `local` ends up, given where its parent ended up. The result has
-    /// no parent of its own.
+    /// Where `local` ends up, given where its parent ended up.
     pub fn compose(parent: Transform2D, local: Transform2D) Transform2D {
         const placed = parent.apply(local.x, local.y);
         return .{
@@ -167,7 +173,6 @@ pub const Transform2D = extern struct {
                 parent.scale_y * local.scale_y
             else
                 local.scale_y,
-            .parent = .none,
             .interpolate = local.interpolate,
         };
     }
@@ -797,12 +802,6 @@ test "scale multiplies down the chain" {
     const parent: Transform2D = .{ .scale_x = 2, .scale_y = 2 };
     const local: Transform2D = .{ .scale_x = 3, .scale_y = 3 };
     try testing.expectEqual(@as(f32, 6), Transform2D.compose(parent, local).scale_x);
-}
-
-test "a composed transform has no parent left to apply" {
-    const parent: Transform2D = .at(5, 5);
-    const local: Transform2D = .childOf(.none, 1, 1);
-    try testing.expect(Transform2D.compose(parent, local).parent.isNone());
 }
 
 test "a label carries its own text" {
