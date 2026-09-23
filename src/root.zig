@@ -105,9 +105,14 @@ pub const ScriptHandle = script.ScriptHandle;
 /// with `flux.service` and `app.scriptSetup()`.
 pub const flux = script.flux;
 
-/// Where a game's files are: `res://` paths from the project's root, and
-/// files known by the UUID in the `.uid` file beside them: `app.project`.
+/// Where a game's files are: `res://` paths from the project's root, files
+/// known by the UUID in the `.uid` file beside them, and the player's own
+/// under `user://`: `app.project`. `app.readText`, `app.writeText` and the
+/// rest take any of them.
 pub const Project = @import("Project.zig");
+/// Settings a game keeps for itself, in sections of keys that need no
+/// declaring: the player's volume, in `user://settings.cfg`.
+pub const ConfigFile = @import("config.zig").ConfigFile;
 /// A file of settings in sections, read and written from the struct that
 /// describes it: what `project.fluxion` is, and what an editor keeps its own
 /// settings with.
@@ -397,6 +402,7 @@ test {
     _ = @import("script_test.zig");
     _ = Project;
     _ = settings_file;
+    _ = @import("config.zig");
     _ = dialog;
     _ = attr;
     _ = assets;

@@ -53,7 +53,8 @@
 | `dialog` | The system's file and folder dialogs: what `app.openFileDialog` asks for, and the answer `app.input` holds for a frame. |
 | `Commands` | Spawns, despawns, adds and removes that wait for the system asking for them to return. |
 | `States` | A game's own states, each an enum with one value at a time, and the systems that run in them. |
-| `Project` | Where a game's files are: `res://` paths from the project's root, the UUIDs in the `.uid` files beside them, and `project.fluxion`, whose renderer chooses the backend. |
+| `Project` | Where a game's files are: `res://` paths from the project's root, the UUIDs in the `.uid` files beside them, the player's own under `user://`, and `project.fluxion`, whose renderer chooses the backend. |
+| `ConfigFile` | Settings a game keeps for itself, in sections of keys: the player's volume in `user://settings.cfg`. |
 | `DebugViews` | What the engine draws into `app.debug` by itself: colliders, bodies, transforms, sprites, cameras, stats. |
 | `attr` | What a component's field means, for an inspector to show it by: a range, an angle, a unit, layers, several lines, a value behind a getter and a setter. |
 
@@ -1473,6 +1474,46 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   backend of its renderer - `--backend gl` on Windows - and one outside it is
   allowed, and said in the log.
 
+## 💾 Saves and settings
+
+```zig
+try app.writeText("user://slots/one.json", text);           // written beside, then put in place
+const again = try app.readText(gpa, "user://slots/one.json"); // error.FileNotFound before the first save
+const slots = try app.listDir(gpa, "user://slots");          // sorted; a folder's name ends with "/"
+defer slots.deinit(gpa);
+
+var config = try fx.ConfigFile.load(app, "user://settings.cfg"); // empty on the first run
+defer config.deinit();
+const music = config.getFloat("audio", "music", 0.8);
+try config.set("display", "fullscreen", true);
+try config.save(app, "user://settings.cfg");
+```
+
+- **`user://` is the player's folder**, one of the game's own under the one
+  the system keeps for programs' data: `%APPDATA%` on Windows,
+  `~/.local/share` on Linux, `~/Library/Application Support` on a Mac. It is
+  named after the project's `application.name`, or the title a game gives
+  with no project, and made when the first file is written in it.
+  `Options.user_root` puts it somewhere else: a test's folder, or beside a
+  game kept on a stick. A `user://` path that climbs out with `..` is
+  `error.OutsideProject`, as a `res://` one is.
+- **Files by any path.** `readText`, `writeText`, `fileExists`, `makeDir`,
+  `listDir` and `removeFile` take `res://`, `user://`, `uid://` and the
+  system's own paths. `writeText` makes the folders on the way and writes
+  the new text beside the old before putting it in place, so a game that
+  stops halfway through a save leaves the last one whole. `removeFile` takes
+  a file, or a folder with nothing in it.
+- **A config file needs no declaring.** `ConfigFile` is sections of keys, a
+  JSON object of objects to read and to edit by hand, with comments allowed.
+  A key is whatever it was last set to - a bool, a number, text - read with
+  `getFloat`, `getInt`, `getBool` and `getString` and a default for one it
+  has not got. What the file holds that the game does not ask for, written
+  by a newer build or by hand, is kept and saved back. A game whose
+  settings have a shape of their own reads them into a struct with
+  `fx.settings_file` instead, as the project file is read.
+- **A script saves the same way**, with `files` and the language's `json`
+  module: see [Scripts](#️-scripts).
+
 ## 🆔 UUIDs
 
 ```zig
@@ -1824,6 +1865,8 @@ struct Door {
 - **What a script reaches.** `app` is the engine, with the calls
   `App.reflect_methods` lists. `self.entity` has `alive()`, `name()`,
   `uuid()`, `has(name)`, `get(name)`, `add(name)` and `remove(name)`.
+  `files` reads the game's files and reads and writes the player's - see
+  below.
   - A component from `get` is looked up again each time the script uses it, so keeping it in a field is safe while the world's rows move.
   - Once it is gone, using it stops the script with a panic saying so.
   - An entity is one handle wherever a script is handed it: `self.entity`, `app.find("door")`, a field such as `Parent.entity`, a signal's argument. So `app.find("door") == self.entity` says whether it is this one, and none is null.
@@ -1845,6 +1888,25 @@ struct Door {
   - A signal from a component, or another script's, calls a method the target's script declares, listed by `app.methodsOf`.
   - An `Entity` argument arrives as the entity's handle, and the script's instance or its entity's handle goes back to the engine as an `Entity`.
   - A connection made while its script did not compile is heard once it does.
+- **A script keeps a save in the player's folder, and reaches no other.**
+  `files.readText(path)`, `writeText(path, text)`, `exists(path)`,
+  `makeDir(path)`, `list(path)` and `remove(path)` read under `res://` and
+  `user://`, and write under `user://` only. Any other path is
+  `error.NotAllowed`, so a script neither reads the player's documents nor
+  breaks the game it came with. A call that fails gives an error to `catch`:
+
+  ```zig
+  const json = @import("json");
+
+  fn save(slot: any) {
+      files.writeText("user://save.json", json.stringify(slot, 2)) catch |e| print("not saved:", e.name);
+  }
+
+  fn load() any {
+      const text = files.readText("user://save.json") catch return null;
+      return json.parse(text) catch null;
+  }
+  ```
 - **In a scene**, a `Script` is its file's path and its struct, and once the
   scene is saved, the file's UUID as well. Reading the scene loads the file:
   `"Script": { "source": "res://scripts/door.flux", "struct_name": "Door" }`
@@ -2127,6 +2189,9 @@ Here, and checked by the tests:
   away from, `uid://` for a file by the UUID beside it, files moved with
   their `.uid` files found where they went, and entities' UUIDs kept beside
   the world as names are.
+- The player's own files under `user://`, written whole or not at all, a
+  `ConfigFile` of sections that keeps what it does not know, and scripts
+  that save there and reach nowhere else.
 - Files moved, copied and thrown away as an editor does it: UUIDs moved
   along and copies given their own, what was loaded following its file, the
   system's trash, and textures and fonts read again in place when their

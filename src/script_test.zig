@@ -1128,3 +1128,72 @@ test "a connection an editor made while its script did not compile is known once
     try testing.expect(app.connectionsFrom(door, &connections)[0].known);
     try testing.expect(app.scripts.?.instanceOf(door) == null);
 }
+
+test "a script reads the game's files and keeps a save in the player's, and reaches nowhere else" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "levels.txt", .data = "meadow" });
+
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    app.project.user_root = try std.fs.path.join(testing.allocator, &.{ root, "saves" });
+    const file = try app.addScript("saver.flux",
+        \\const json = @import("json");
+        \\var level = "";
+        \\var loaded = 0;
+        \\var names = 0;
+        \\var first = "";
+        \\var refused = "";
+        \\var escaped = "";
+        \\var missing = "";
+        \\var outside = true;
+        \\
+        \\fn save(slot: any) {
+        \\    files.writeText("user://slots/one.json", json.stringify(slot, 2)) catch |e| print("not saved:", e.name);
+        \\}
+        \\
+        \\fn load() any {
+        \\    const text = files.readText("user://slots/one.json") catch return null;
+        \\    return json.parse(text) catch null;
+        \\}
+        \\
+        \\struct Saver {
+        \\    fn ready(self) {
+        \\        level = files.readText("res://levels.txt") catch "";
+        \\        save({"level": 3});
+        \\        loaded = load()["level"];
+        \\        files.makeDir("user://slots/old") catch {};
+        \\        const listed = files.list("user://slots") catch [];
+        \\        names = listed.len;
+        \\        first = listed[0];
+        \\        refused = files.writeText("res://levels.txt", "broken") catch |e| e.name;
+        \\        escaped = files.readText("user://../../outside.txt") catch |e| e.name;
+        \\        missing = files.readText("user://none.json") catch |e| e.name;
+        \\        outside = files.exists("levels.txt");
+        \\        files.remove("user://slots/old") catch {};
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+
+    try testing.expectEqual(@as(u32, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("meadow", globalText(app, file, "level"));
+    try testing.expectEqual(@as(i64, 3), global(app, file, "loaded").asInt());
+    try testing.expectEqual(@as(i64, 2), global(app, file, "names").asInt());
+    try testing.expectEqualStrings("old/", globalText(app, file, "first"));
+    try testing.expectEqualStrings("NotAllowed", globalText(app, file, "refused"));
+    try testing.expectEqualStrings("OutsideProject", globalText(app, file, "escaped"));
+    try testing.expectEqualStrings("FileNotFound", globalText(app, file, "missing"));
+    try testing.expect(!global(app, file, "outside").asBool());
+    try testing.expect(!app.fileExists("user://slots/old"));
+
+    const saved = try app.readText(testing.allocator, "user://slots/one.json");
+    defer testing.allocator.free(saved);
+    try testing.expect(std.mem.indexOf(u8, saved, "\"level\": 3") != null);
+    const kept = try tmp.dir.readFileAlloc(testing.io, "levels.txt", testing.allocator, .limited(64));
+    defer testing.allocator.free(kept);
+    try testing.expectEqualStrings("meadow", kept);
+}

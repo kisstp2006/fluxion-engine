@@ -74,6 +74,7 @@ const sprite = @import("render/sprite.zig");
 const View = @import("render/view.zig").View;
 
 const Color = @import("color.zig").Color;
+const ConfigFile = @import("config.zig").ConfigFile;
 const Schedule = schedule_mod.Schedule;
 const Stage = schedule_mod.Stage;
 const System = schedule_mod.System;
@@ -186,6 +187,12 @@ pub const Options = struct {
     /// `project.fluxion`, which names the same directory. Null is the working
     /// directory. See `Project`.
     root: ?[]const u8 = null,
+
+    /// Where `user://` is: the player's saves and settings. Null is a folder
+    /// named after the game in the one the system keeps for programs' data.
+    /// A test gives its own; so may a game kept on a stick, with its saves
+    /// beside it. See `Project.userRoot`.
+    user_root: ?[]const u8 = null,
 
     /// Where the project file went wrong, when it did: `create` fails then,
     /// and says it in the log as well.
@@ -701,6 +708,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.random_source = .init(options.random_seed orelse self.drawnSeed());
     self.project = try .init(gpa, options.io, options.root);
     errdefer self.project.deinit();
+    if (options.user_root) |held| self.project.user_root = try gpa.dupe(u8, held);
+    if (options.title) |held| self.project.fallback_name = try gpa.dupe(u8, held);
     // Before the backend is chosen: the project's renderer chooses it, and
     // the window has to know whether it is OpenGL's. A project file that is
     // wrong stops the start, and says why - where the caller asked for it,
@@ -3219,6 +3228,104 @@ pub fn sceneInfo(self: *App, path: []const u8, diagnostics: ?*json.Diagnostics) 
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .unlimited);
     defer self.gpa.free(bytes);
     return scene.readInfo(self.gpa, bytes, diagnostics);
+}
+
+/// The most a file is read as text: `readText`.
+pub const text_limit = 64 << 20;
+
+/// The text of the file at `path` - `res://`, `user://`, `uid://` or the
+/// system's own - in `gpa`'s memory, for the caller to free.
+/// `error.FileNotFound` where there is none.
+pub fn readText(self: *App, gpa: Allocator, path: []const u8) ![]u8 {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    return std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(text_limit));
+}
+
+/// Write `text` to the file at `path`, over what it held, making the
+/// folders on the way. The new text is written beside the old and then put
+/// in its place, so a game that stops halfway through a save leaves the
+/// last one whole.
+pub fn writeText(self: *App, path: []const u8, text: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, file, .{ .replace = true, .make_path = true });
+    defer atomic.deinit(io);
+    try atomic.file.writeStreamingAll(io, text);
+    try atomic.replace(io);
+}
+
+/// Whether there is a file or a folder at `path`.
+pub fn fileExists(self: *App, path: []const u8) bool {
+    const io = self.io orelse return false;
+    const file = self.project.osPath(self.gpa, path) catch return false;
+    defer self.gpa.free(file);
+    std.Io.Dir.cwd().access(io, file, .{}) catch return false;
+    return true;
+}
+
+/// Make the folder at `path`, and the ones it is in. One there already is
+/// fine.
+pub fn makeDir(self: *App, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try std.Io.Dir.cwd().createDirPath(io, file);
+}
+
+/// Take out the file at `path`, or the folder, when it is empty.
+pub fn removeFile(self: *App, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    std.Io.Dir.cwd().deleteFile(io, file) catch |err| switch (err) {
+        error.IsDir => try std.Io.Dir.cwd().deleteDir(io, file),
+        else => return err,
+    };
+}
+
+/// What a folder holds, by name, in order. See `listDir`.
+pub const Listing = struct {
+    /// A folder's name ends with `/`: `slots/`.
+    names: [][]u8,
+
+    pub fn deinit(self: Listing, gpa: Allocator) void {
+        for (self.names) |name| gpa.free(name);
+        gpa.free(self.names);
+    }
+};
+
+/// The names in the folder at `path`, sorted, a folder's ending with `/`.
+/// `error.FileNotFound` where there is none.
+pub fn listDir(self: *App, gpa: Allocator, path: []const u8) !Listing {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    var dir = try std.Io.Dir.cwd().openDir(io, file, .{ .iterate = true });
+    defer dir.close(io);
+
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (names.items) |name| gpa.free(name);
+        names.deinit(gpa);
+    }
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        try names.ensureUnusedCapacity(gpa, 1);
+        const folder = entry.kind == .directory;
+        const name = try gpa.alloc(u8, entry.name.len + @intFromBool(folder));
+        @memcpy(name[0..entry.name.len], entry.name);
+        if (folder) name[entry.name.len] = '/';
+        names.appendAssumeCapacity(name);
+    }
+    std.mem.sort([]u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return .{ .names = try names.toOwnedSlice(gpa) };
 }
 
 /// Everything out of the world at once - every entity, name and UUID - and
@@ -7427,6 +7534,63 @@ test "a new scene is written empty, never over another, and says what it is with
 
     try files.tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.json", .data = "{ \"hello\": 1 }" });
     try testing.expect(try app.sceneInfo("res://notes.json", null) == null);
+}
+
+test "a game's files are read, written whole, listed and taken out, under user:// and elsewhere" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    const app = try files.app();
+    defer app.destroy();
+    app.project.user_root = try std.fs.path.join(testing.allocator, &.{ try files.at(), "saves" });
+
+    try testing.expect(!app.fileExists("user://slots/one.json"));
+    try testing.expectError(error.FileNotFound, app.readText(testing.allocator, "user://slots/one.json"));
+    try app.writeText("user://slots/one.json", "{ \"level\": 1 }");
+    try app.writeText("user://slots/one.json", "{ \"level\": 2 }");
+    try testing.expect(app.fileExists("user://slots/one.json"));
+    const text = try app.readText(testing.allocator, "user://slots/one.json");
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("{ \"level\": 2 }", text);
+
+    try app.makeDir("user://slots/old");
+    try app.makeDir("user://slots/old");
+    try app.writeText("user://slots/a.json", "{}");
+    {
+        const listed = try app.listDir(testing.allocator, "user://slots");
+        defer listed.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 3), listed.names.len);
+        try testing.expectEqualStrings("a.json", listed.names[0]);
+        try testing.expectEqualStrings("old/", listed.names[1]);
+        try testing.expectEqualStrings("one.json", listed.names[2]);
+    }
+    try app.removeFile("user://slots/old");
+    try app.removeFile("user://slots/a.json");
+    try testing.expect(!app.fileExists("user://slots/a.json"));
+    try testing.expectError(error.FileNotFound, app.removeFile("user://slots/a.json"));
+
+    // The project's own files are read the same way.
+    try files.tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.txt", .data = "hello" });
+    const notes = try app.readText(testing.allocator, "res://notes.txt");
+    defer testing.allocator.free(notes);
+    try testing.expectEqualStrings("hello", notes);
+}
+
+test "a config file keeps a game's settings in user://, and is empty until there is one" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    const app = try files.app();
+    defer app.destroy();
+    app.project.user_root = try std.fs.path.join(testing.allocator, &.{ try files.at(), "saves" });
+
+    var config = try ConfigFile.load(app, "user://settings.cfg");
+    defer config.deinit();
+    try testing.expectEqual(@as(usize, 0), config.sections().len);
+    try config.set("audio", "music", 0.5);
+    try config.save(app, "user://settings.cfg");
+
+    var again = try ConfigFile.load(app, "user://settings.cfg");
+    defer again.deinit();
+    try testing.expectEqual(@as(f64, 0.5), again.getFloat("audio", "music", 1));
 }
 
 test "a program in the background runs no systems until it is back, but for the frame it left in" {

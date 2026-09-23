@@ -47,7 +47,25 @@
 //! **Every script sees `app`**: the engine, with the calls
 //! `App.reflect_methods` lists. **Every instance sees `self.entity`**, which
 //! it reads and cannot assign. `App.scriptSetup` gives an editor's language
-//! service the same two, so it checks and completes what the game runs.
+//! service the same, so it checks and completes what the game runs.
+//!
+//! **And `files`**: the game's own files to read, the player's to read and
+//! write - `files.readText`, `writeText`, `exists`, `makeDir`, `list`,
+//! `remove` - and no others. See `FileAccess`. A save is JSON with the
+//! language's `json` module:
+//!
+//! ```
+//! const json = @import("json");
+//!
+//! fn save(slot: any) {
+//!     files.writeText("user://save.json", json.stringify(slot, 2)) catch |e| print("not saved:", e.name);
+//! }
+//!
+//! fn load() any {
+//!     const text = files.readText("user://save.json") catch return null;
+//!     return json.parse(text) catch null;
+//! }
+//! ```
 //!
 //! **A component is found again at each use.** `self.entity.get("Health")`
 //! is a handle the engine looks up every time the script touches it, so
@@ -297,6 +315,74 @@ pub const EntityRef = struct {
     }
 };
 
+/// What a script reaches as `files`: the files a game ships to read, and the
+/// player's own under `user://` to read and write. Nothing else on the
+/// computer - a path anywhere else is `error.NotAllowed` - so a script can
+/// neither read the player's documents nor break the game it came with.
+/// A call that fails gives an error to `catch`: `FileNotFound`,
+/// `NotAllowed`, and whatever else the system said.
+pub const FileAccess = struct {
+    app: *App,
+
+    pub const reflect_name = "Files";
+    pub const reflect_opaque = true;
+    pub const reflect_methods = .{ .readText, .writeText, .exists, .makeDir, .list, .remove };
+
+    /// The text of a file: the game's (`res://`) or the player's
+    /// (`user://`).
+    pub fn readText(self: *FileAccess, vm: *flux.Vm, path: []const u8) anyerror!flux.Value {
+        try readable(path);
+        const text = try self.app.readText(self.app.gpa, path);
+        defer self.app.gpa.free(text);
+        return flux.bind.toValue(vm, text);
+    }
+
+    /// Write a file under `user://`, over what it held, and the folders it
+    /// is in. A game stopped halfway through leaves the old file whole.
+    pub fn writeText(self: *FileAccess, path: []const u8, text: []const u8) anyerror!void {
+        try writable(path);
+        try self.app.writeText(path, text);
+    }
+
+    /// Whether there is a file or a folder there - false for a path a
+    /// script may not read.
+    pub fn exists(self: *FileAccess, path: []const u8) bool {
+        readable(path) catch return false;
+        return self.app.fileExists(path);
+    }
+
+    /// Make a folder under `user://`, and the ones it is in.
+    pub fn makeDir(self: *FileAccess, path: []const u8) anyerror!void {
+        try writable(path);
+        try self.app.makeDir(path);
+    }
+
+    /// The names in a folder, sorted; a folder's end with `/`.
+    pub fn list(self: *FileAccess, vm: *flux.Vm, path: []const u8) anyerror!flux.Value {
+        try readable(path);
+        const listed = try self.app.listDir(self.app.gpa, path);
+        defer listed.deinit(self.app.gpa);
+        return flux.bind.toValue(vm, listed.names);
+    }
+
+    /// Take out a file under `user://`, or a folder with nothing in it.
+    pub fn remove(self: *FileAccess, path: []const u8) anyerror!void {
+        try writable(path);
+        try self.app.removeFile(path);
+    }
+
+    fn readable(path: []const u8) error{NotAllowed}!void {
+        inline for (.{ Project.scheme, Project.uid_scheme, Project.user_scheme }) |prefix| {
+            if (std.mem.startsWith(u8, path, prefix)) return;
+        }
+        return error.NotAllowed;
+    }
+
+    fn writable(path: []const u8) error{NotAllowed}!void {
+        if (!std.mem.startsWith(u8, path, Project.user_scheme)) return error.NotAllowed;
+    }
+};
+
 /// A file, as read and compiled.
 const File = struct {
     /// The path it was read from, as `Project.canonical` spells it, or the
@@ -387,6 +473,8 @@ pub const Scripts = struct {
     calls: Calls,
     /// How a component handle finds its component again.
     resolver: flux.Resolver,
+    /// What scripts reach as `files`.
+    file_access: FileAccess,
     files: FileTable = .empty,
     /// Each entity's instance, in the order they were made.
     instances: std.AutoArrayHashMapUnmanaged(Entity, Instance) = .empty,
@@ -432,6 +520,7 @@ pub const Scripts = struct {
                 .resolve = findComponent,
                 .why = "its entity was despawned, or the component was taken off",
             },
+            .file_access = .{ .app = app },
         };
         const vm = try flux.Vm.create(app.gpa, .{
             .out = options.out orelse &self.printed.writer,
@@ -443,7 +532,7 @@ pub const Scripts = struct {
         });
         errdefer vm.destroy();
         vm.host = self;
-        try install(vm, try vm.handle(app));
+        try install(vm, try vm.handle(app), try vm.handle(&self.file_access));
         self.vm = vm;
         return self;
     }
@@ -1304,9 +1393,10 @@ fn notAnEntity(vm: *flux.Vm, value: flux.Value) flux.Vm.Error {
 /// What every VM that compiles the game's scripts is given - the game's
 /// own, and each of an editor's analyses - so the two agree on what a
 /// script may name.
-pub fn install(vm: *flux.Vm, app: flux.Value) Allocator.Error!void {
+pub fn install(vm: *flux.Vm, app: flux.Value, files: flux.Value) Allocator.Error!void {
     try vm.declareHostMember("entity", "The entity this script is on: `alive()`, `name()`, `uuid()`, `has(name)`, `get(name)`, `add(name)`, `remove(name)`.");
     try vm.defineGlobal("app", app, "The engine: the calls `App.reflect_methods` lists.");
+    try vm.defineGlobal("files", files, "The game's files to read (`res://`) and the player's to read and write (`user://`): `readText(path)`, `writeText(path, text)`, `exists(path)`, `makeDir(path)`, `list(path)`, `remove(path)`.");
 }
 
 /// For `App.scriptSetup`. An analysis only compiles, so `app` is a name
@@ -1317,7 +1407,7 @@ pub fn serviceOptions(app: *App) flux.service.Options {
 
 fn installForAnalysis(context: ?*anyopaque, vm: *flux.Vm) anyerror!void {
     _ = context;
-    try install(vm, .null);
+    try install(vm, .null, .null);
 }
 
 /// The struct a `Script` names: the one it names, or else the one named
