@@ -385,6 +385,9 @@ pub const NinePatchRect = extern struct {
 
 pub const Nodes = struct {
     textures: std.ArrayList(rhi.Texture) = .empty,
+    /// A check box's tick, white on clear, made the first time one is
+    /// drawn and tinted with the theme's words.
+    check_mark: Assets.TextureHandle = .none,
     preview_ui: ?ui.Ui = null,
     preview_interface: Interface = .{},
     enabled: bool = false,
@@ -556,7 +559,7 @@ pub const Nodes = struct {
     fn content(self: *Nodes, context: Context, entity: Entity) !void {
         const app = context.app;
         if (app.world.get(entity, CheckBox)) |checkbox| {
-            try checkboxContent(context, entity, checkbox, self.resolvedStyle(context, entity, .check_box, stateOf(context, entity)));
+            try checkboxContent(self, context, entity, checkbox, self.resolvedStyle(context, entity, .check_box, stateOf(context, entity)));
             return;
         }
         if (app.world.get(entity, LineEdit)) |line| {
@@ -813,7 +816,7 @@ fn themeOf(app: *App, entity: Entity) struct { handle: ThemeHandle, variation: [
     return .{ .handle = found, .variation = variation };
 }
 
-fn checkboxContent(context: Context, entity: Entity, checkbox: *CheckBox, style: ResolvedStyle) !void {
+fn checkboxContent(self: *Nodes, context: Context, entity: Entity, checkbox: *CheckBox, style: ResolvedStyle) !void {
     const app = context.app;
     const layout = context.layout;
     const ignored = app.world.get(entity, Control).?.mouse_filter == .ignore;
@@ -824,18 +827,63 @@ fn checkboxContent(context: Context, entity: Entity, checkbox: *CheckBox, style:
     // As tall as the words beside it, so the pair agrees at any text size
     // rather than only at the one this was written for.
     const side: f32 = @max(12, @as(f32, @floatFromInt(style.font_size)));
+    // Framed in the words' colour too: the box is the check box's own style
+    // on the check box's own style, and without a frame an empty one would
+    // not show at all.
     layout.open(.{
         .width = .fixed(side),
         .height = .fixed(side),
         .padding = .all(@intFromFloat(@round(side / 6))),
         .background_color = color(style.background_color),
         .corner_radius = .all(3),
+        .border = .all(color(style.text_color), 1),
     });
-    // The tick is the box's mark, drawn in what the theme writes its words
-    // in: one colour for the pair, rather than two that can disagree.
-    if (checkbox.checked) layout.empty(.{ .width = .grow, .height = .grow, .background_color = color(style.text_color), .corner_radius = .all(2) });
+    // The tick is drawn in what the theme writes its words in: one colour for
+    // the pair, rather than two that can disagree.
+    if (checkbox.checked) {
+        if (self.image(app, try checkMark(self, app), style.text_color, .full)) |tick| layout.empty(.{ .width = .grow, .height = .grow, .image = tick });
+    }
     layout.close();
     if (app.world.get(entity, Label)) |label| drawLabel(context, label, style);
+}
+
+/// How many pixels across the tick is drawn at: enough to stay smooth at
+/// any size a check box is shown at.
+const check_side = 64;
+
+/// The tick, made once: two strokes, their edges soft over a pixel.
+fn checkMark(self: *Nodes, app: *App) !Assets.TextureHandle {
+    if (app.assets.get(self.check_mark) != null) return self.check_mark;
+    var pixels: [check_side * check_side * 4]u8 = undefined;
+    paintCheck(&pixels);
+    self.check_mark = try app.assets.textureFromPixels(check_side, check_side, &pixels, .{});
+    return self.check_mark;
+}
+
+fn paintCheck(pixels: *[check_side * check_side * 4]u8) void {
+    const side: f32 = check_side;
+    const a: [2]f32 = .{ 0.16 * side, 0.52 * side };
+    const b: [2]f32 = .{ 0.40 * side, 0.76 * side };
+    const c: [2]f32 = .{ 0.84 * side, 0.26 * side };
+    const half = 0.075 * side;
+    for (0..check_side) |row| for (0..check_side) |column| {
+        const p: [2]f32 = .{ @as(f32, @floatFromInt(column)) + 0.5, @as(f32, @floatFromInt(row)) + 0.5 };
+        const away = @min(toSegment(p, a, b), toSegment(p, b, c));
+        const cover = std.math.clamp(half - away + 0.5, 0, 1);
+        const at = (row * check_side + column) * 4;
+        pixels[at..][0..4].* = .{ 255, 255, 255, @intFromFloat(@round(cover * 255)) };
+    };
+}
+
+/// How far `p` is from the segment from `a` to `b`.
+fn toSegment(p: [2]f32, a: [2]f32, b: [2]f32) f32 {
+    const along = [2]f32{ b[0] - a[0], b[1] - a[1] };
+    const to_p = [2]f32{ p[0] - a[0], p[1] - a[1] };
+    const length = along[0] * along[0] + along[1] * along[1];
+    const t = if (length <= 0) 0 else std.math.clamp((to_p[0] * along[0] + to_p[1] * along[1]) / length, 0, 1);
+    const dx = to_p[0] - t * along[0];
+    const dy = to_p[1] - t * along[1];
+    return @sqrt(dx * dx + dy * dy);
 }
 
 fn lineEditContent(context: Context, entity: Entity, line: *LineEdit, style: ResolvedStyle) !void {
@@ -1097,6 +1145,31 @@ test "form controls share the retained Control tree" {
         try testing.expect(app.ui.boxOf(idOf(&id, entity)) != null);
     }
     try testing.expectEqualStrings("Player", app.world.get(field, LineEdit).?.slice());
+}
+
+test "a check box that is ticked draws a tick, made once, and one that is not draws none" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100, .frames = 2 });
+    defer app.destroy();
+    try app.useControlNodes();
+    const root = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{} });
+    const box = try app.world.spawnWith(.{ Control{ .parent = root, .width = .{ .mode = .fixed, .value = 40 }, .height = .{ .mode = .fixed, .value = 20 } }, CheckBox{} });
+    try app.run();
+    try testing.expect(app.control_nodes.check_mark.isNone());
+
+    app.world.get(box, CheckBox).?.checked = true;
+    app.frames_left = 2;
+    app.running = true;
+    try app.run();
+    const mark = app.control_nodes.check_mark;
+    try testing.expect(!mark.isNone());
+    try testing.expect(std.mem.indexOfScalar(rhi.Texture, app.control_nodes.textures.items, app.assets.get(mark).?.gpu) != null);
+
+    // Solid on the stroke, clear in the corner.
+    var pixels: [check_side * check_side * 4]u8 = undefined;
+    paintCheck(&pixels);
+    const bend = (@as(usize, @intFromFloat(0.76 * check_side)) * check_side + @as(usize, @intFromFloat(0.40 * check_side))) * 4;
+    try testing.expectEqual(@as(u8, 255), pixels[bend + 3]);
+    try testing.expectEqual(@as(u8, 0), pixels[3]);
 }
 
 test "a scene keeps the theme a control names, what it is drawn as, and a button's words" {
