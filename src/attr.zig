@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const reflect = @import("fluxion_reflect");
+const AssetKind = @import("asset_kind.zig").AssetKind;
 
 /// The span a number is meant to keep to, and the step to move it by.
 pub const Range = reflect.attr.Range;
@@ -68,12 +69,10 @@ pub const Layers = struct {
 // `settings_file.zig`. An editor draws its settings windows by them.
 
 /// Text that names a file of the project's - `res://` or `uid://`, or empty -
-/// of this kind: checked when the file is read and written, and shown as a
-/// field that takes a file of the kind.
+/// of this kind, or of any kind when it says none: checked when the file is
+/// read and written, and shown as a field that takes a file of the kind.
 pub const ProjectFile = struct {
-    kind: Kind = .any,
-
-    pub const Kind = enum { any, scene, texture, font, theme, tileset, script };
+    kind: ?AssetKind = null,
 };
 
 /// A setting that has to say something: a project's name.

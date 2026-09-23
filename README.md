@@ -1257,6 +1257,21 @@ game --root ../my-game          # or App.Options.root; the working directory oth
   folder, or the `project.fluxion` in it - or else the working directory.
 
 ```zig
+const kind = fx.AssetKind.ofPath("res://ui/game.theme").?;                    // .theme
+const set = try app.loadAsset(fx.TileSetHandle, "res://tiles/terrain.tileset"); // read once, found after
+const path = app.assetSource(sprite.texture) orelse "made in memory";          // the file a handle holds
+```
+
+- **Every kind of file is one entry in `fx.AssetKind`**: textures, fonts,
+  scenes, scripts, tile sets and themes - what each is called, the endings
+  of its files, and the handle a component holds one by
+  (`AssetKind.Handle(.texture)`, `AssetKind.of(fx.TextureHandle)`).
+  `app.assetSource`, `app.loadAsset` and `app.findAsset` take any handle
+  type. A scene writes and reads every handle through them, a project
+  setting names a file of a kind with `attr.ProjectFile{ .kind = .scene }`,
+  and an editor draws a field for each kind the list has.
+
+```zig
 try app.moveFile("res://art/hero.png", "res://art/people/ada.png"); // with its .uid, and what was read from it
 try app.copyFile("res://art/people", "res://art/crowd");             // folders too; a copy gets a UUID of its own
 try app.moveToTrash("res://art/old.png");                            // where the person can take it back from
@@ -1378,6 +1393,37 @@ try app.setUuid(respawned, uuid);                      // an editor's undo bring
   one it had - unless an entity in the world has that one already, as when
   the same scene is loaded twice, and then a new one (`loaded.reassigned`);
   references inside the scene still find their own.
+
+## 🎲 Chance, points and boxes
+
+```zig
+const roll = app.randomInt(1, 6);                // either end can come up
+if (app.randomChance(0.25)) try spawnRat(app);   // one time in four
+app.seedRandom(1234);                            // a replay draws the same numbers again
+
+const cell = app.cellAt(map, app.pointerInWorld()).?;  // an fx.Vec2i
+const used = app.usedCells(map).?;                      // an fx.Rect2i
+if (used.hasPoint(cell)) try paint(app, cell);
+
+const red = fx.Color.parse("#C8434F").?;         // #RGB, #RGBA, #RRGGBB, #RRGGBBAA
+```
+
+- **The game's chance is its own**, apart from what UUIDs are drawn from:
+  `randomFloat`, `randomRange`, `randomInt`, `randomChance` and
+  `randomIndex` (a place in a list, to pick one of it). The operating system
+  seeds it when the app is made, `Options.random_seed` or `seedRandom`
+  instead, so a run seeded the same draws the same; `randomize` seeds it
+  from the system again. A script calls the same:
+  `app.randomInt(1, 6)`. Not for secrets.
+- **`fx.Vec2i` is a point of a grid** - a cell, a pixel, a window's place -
+  and `fx.Rect2` and `fx.Rect2i` are boxes by where they start and how big
+  they are, with fractions and without. `end` is the first point past a
+  box, so two boxes side by side share no point; `hasPoint`, `intersection`,
+  `merge`, `grow`, `expandTo`, and for cells `fromCells` and `last`. A map's
+  cells are `Vec2i`s and its used cells a `Rect2i`, from Zig and from a
+  script alike.
+- **A colour reads from text** with `fx.Color.parse`, as a theme file and a
+  colour field write one.
 
 ## 🎬 Scenes
 

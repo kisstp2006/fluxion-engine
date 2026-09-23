@@ -730,21 +730,10 @@ fn insetsOf(given: json.Value) ?Insets {
 /// `#RRGGBB` or `#RRGGBBAA`, as a stylesheet writes one.
 fn colorOf(source: []const u8, given: json.Value) ?Color {
     const text = given.asString() orelse return null;
-    return parseHex(text) orelse {
+    return Color.parse(text) orelse {
         log.warn("{s}: {s} is not a colour; one is written #RRGGBB or #RRGGBBAA", .{ source, text });
         return null;
     };
-}
-
-pub fn parseHex(text: []const u8) ?Color {
-    const digits = if (text.len > 0 and text[0] == '#') text[1..] else text;
-    if (digits.len != 6 and digits.len != 8) return null;
-    var value: u32 = 0;
-    for (digits) |digit| {
-        const nibble = std.fmt.charToDigit(digit, 16) catch return null;
-        value = value << 4 | nibble;
-    }
-    return if (digits.len == 6) .hex(@intCast(value)) else .hexa(value);
 }
 
 fn stateNamed(name: []const u8) ?State {
@@ -876,7 +865,7 @@ test "a theme says what it changes, and the rest is what the engine is born with
 
     const normal = app.themes.styleOf(handle, .button, .normal, "");
     try testing.expectEqual(@as(f32, 4), normal.corners.?.top_left);
-    try testing.expectEqualDeep(parseHex("#6B4FC8").?, normal.background.?);
+    try testing.expectEqualDeep(Color.parse("#6B4FC8").?, normal.background.?);
     try testing.expectEqual(@as(u16, 10), normal.padding.?.left);
     try testing.expectEqual(@as(u16, 5), normal.padding.?.top);
     // Said by the theme, not by the part.
@@ -886,7 +875,7 @@ test "a theme says what it changes, and the rest is what the engine is born with
 
     // A state says only what it changes; the rest comes from `normal`.
     const hover = app.themes.styleOf(handle, .button, .hover, "");
-    try testing.expectEqualDeep(parseHex("#8F72E8").?, hover.background.?);
+    try testing.expectEqualDeep(Color.parse("#8F72E8").?, hover.background.?);
     try testing.expectEqual(@as(f32, 4), hover.corners.?.top_left);
 
     // A part the theme never mentions is drawn as it always was.
@@ -902,7 +891,7 @@ test "a variation is laid over the type it is built on" {
     const header = app.themes.styleOf(handle, .button, .normal, "Header");
     try testing.expectEqual(@as(u16, 24), header.font_size.?);
     // What the variation does not say, the type it is built on does.
-    try testing.expectEqualDeep(parseHex("#6B4FC8").?, header.background.?);
+    try testing.expectEqualDeep(Color.parse("#6B4FC8").?, header.background.?);
     // And a control that does not ask for it is untouched.
     const plain = app.themes.styleOf(handle, .button, .normal, "");
     try testing.expectEqual(@as(u16, 18), plain.font_size.?);
@@ -919,7 +908,7 @@ test "a base theme is under the theme that names it" {
     );
 
     const style = app.themes.styleOf(handle, .button, .normal, "");
-    try testing.expectEqualDeep(parseHex("#222222").?, style.background.?);
+    try testing.expectEqualDeep(Color.parse("#222222").?, style.background.?);
     try testing.expectEqual(@as(f32, 9), style.corners.?.top_left);
 }
 
@@ -931,8 +920,8 @@ test "a state a variation does not speak of is its base type's, looked up by the
         \\  "Button": { "styles": { "normal": { "background": "#111111" }, "hover": { "background": "#222222" } } },
         \\  "Danger": { "base_type": "Button", "styles": { "normal": { "background": "#AA0000" } } } } }
     );
-    try testing.expectEqualDeep(parseHex("#AA0000").?, app.themes.styleOf(handle, .button, .normal, "Danger").background.?);
-    try testing.expectEqualDeep(parseHex("#222222").?, app.themes.styleOf(handle, .button, .hover, "Danger").background.?);
+    try testing.expectEqualDeep(Color.parse("#AA0000").?, app.themes.styleOf(handle, .button, .normal, "Danger").background.?);
+    try testing.expectEqualDeep(Color.parse("#222222").?, app.themes.styleOf(handle, .button, .hover, "Danger").background.?);
 }
 
 test "a control's own look lies over every theme's normal one and under what they say of a state" {
@@ -944,26 +933,26 @@ test "a control's own look lies over every theme's normal one and under what the
     const near = try app.themes.add(app, "near.theme",
         \\{ "fluxion_theme": 1, "types": { "Button": { "styles": { "normal": { "background": "#111111" }, "hover": { "background": "#222222" } } } } }
     );
-    const own: Style = .{ .background = parseHex("#FF0000").?, .border_width = 3 };
+    const own: Style = .{ .background = Color.parse("#FF0000").?, .border_width = 3 };
 
     // The project's theme is under the control's, and the engine's under both.
     const plain = app.themes.styleWith(near, project, .button, .normal, "", .{});
-    try testing.expectEqualDeep(parseHex("#111111").?, plain.background.?);
+    try testing.expectEqualDeep(Color.parse("#111111").?, plain.background.?);
     try testing.expectEqual(@as(f32, 7), plain.corners.?.top_left);
     try testing.expectEqual(@as(u16, 21), plain.font_size.?);
 
     const normal = app.themes.styleWith(near, project, .button, .normal, "", own);
-    try testing.expectEqualDeep(parseHex("#FF0000").?, normal.background.?);
+    try testing.expectEqualDeep(Color.parse("#FF0000").?, normal.background.?);
     try testing.expectEqual(@as(u16, 3), normal.border_width.?);
     // A state the themes speak of is theirs; the rest of the control's own
     // holds in it.
     const hover = app.themes.styleWith(near, project, .button, .hover, "", own);
-    try testing.expectEqualDeep(parseHex("#222222").?, hover.background.?);
+    try testing.expectEqualDeep(Color.parse("#222222").?, hover.background.?);
     try testing.expectEqual(@as(u16, 3), hover.border_width.?);
     const pressed = app.themes.styleWith(near, project, .button, .pressed, "", own);
-    try testing.expectEqualDeep(parseHex("#333333").?, pressed.background.?);
+    try testing.expectEqualDeep(Color.parse("#333333").?, pressed.background.?);
     const focus = app.themes.styleWith(near, project, .button, .focus, "", own);
-    try testing.expectEqualDeep(parseHex("#FF0000").?, focus.background.?);
+    try testing.expectEqualDeep(Color.parse("#FF0000").?, focus.background.?);
 }
 
 test "a theme written back reads as the theme it was" {
@@ -975,7 +964,7 @@ test "a theme written back reads as the theme it was" {
     defer testing.allocator.free(text);
     const again = try app.themes.add(app, "again.theme", text);
     const style = app.themes.styleOf(again, .button, .hover, "");
-    try testing.expectEqualDeep(parseHex("#8F72E8").?, style.background.?);
+    try testing.expectEqualDeep(Color.parse("#8F72E8").?, style.background.?);
     try testing.expectEqual(@as(u16, 18), style.font_size.?);
     try testing.expectEqual(@as(u16, 24), app.themes.styleOf(again, .button, .normal, "Header").font_size.?);
 
@@ -996,13 +985,13 @@ test "a theme that does not read is kept empty, and new text that does not read 
     const before = app.themes.get(handle).?.revision;
     try app.themes.setText(app, handle, "{ not a theme");
     try testing.expectEqual(before, app.themes.get(handle).?.revision);
-    try testing.expectEqualDeep(parseHex("#6B4FC8").?, app.themes.styleOf(handle, .button, .normal, "").background.?);
+    try testing.expectEqualDeep(Color.parse("#6B4FC8").?, app.themes.styleOf(handle, .button, .normal, "").background.?);
 }
 
 test "a colour is read and written the way a stylesheet writes one" {
     var buffer: [16]u8 = undefined;
-    try testing.expectEqualStrings("#6B4FC8", hexOf(&buffer, parseHex("#6b4fc8").?));
-    try testing.expectEqualStrings("#12345680", hexOf(&buffer, parseHex("#12345680").?));
-    try testing.expect(parseHex("#12345") == null);
-    try testing.expect(parseHex("purple") == null);
+    try testing.expectEqualStrings("#6B4FC8", hexOf(&buffer, Color.parse("#6b4fc8").?));
+    try testing.expectEqualStrings("#12345680", hexOf(&buffer, Color.parse("#12345680").?));
+    try testing.expect(Color.parse("#12345") == null);
+    try testing.expect(Color.parse("purple") == null);
 }

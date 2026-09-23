@@ -662,7 +662,8 @@ test "a script reads what a tile says as the number or the truth it is" {
         \\var damage: any = null;
         \\var water: any = null;
         \\var slow: any = null;
-        \\var cell: any = null;
+        \\var cell_x: any = null;
+        \\var cell_y: any = null;
         \\var nothing: any = 1;
         \\struct Reader {
         \\    fn ready(self) {
@@ -670,7 +671,9 @@ test "a script reads what a tile says as the number or the truth it is" {
         \\        damage = app.tileDataAt(ground, vec2(20, 4), "damage");
         \\        water = app.tileData(ground, 1, 0, "water");
         \\        slow = app.tileData(ground, 1, 0, "slow");
-        \\        cell = app.cellAt(ground, vec2(20, 4));
+        \\        var cell = app.cellAt(ground, vec2(20, 4));
+        \\        cell_x = cell.x;
+        \\        cell_y = cell.y;
         \\        nothing = app.tileData(ground, 5, 5, "damage");
         \\    }
         \\}
@@ -681,8 +684,36 @@ test "a script reads what a tile says as the number or the truth it is" {
     try testing.expectEqual(@as(i64, 3), global(app, file, "damage").asInt());
     try testing.expect(global(app, file, "water").asBool());
     try testing.expectEqual(@as(f64, 0.5), global(app, file, "slow").asFloat());
-    try testing.expect(global(app, file, "cell").tag == .list);
+    try testing.expectEqual(@as(i64, 1), global(app, file, "cell_x").asInt());
+    try testing.expectEqual(@as(i64, 0), global(app, file, "cell_y").asInt());
     try testing.expect(global(app, file, "nothing").tag == .null);
+}
+
+test "a script draws the game's chance, the same again from the same seed" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("dice.flux",
+        \\var first = 0;
+        \\var again = 0;
+        \\var inside = true;
+        \\struct Dice {
+        \\    fn ready(self) {
+        \\        app.seedRandom(42);
+        \\        first = app.randomInt(1, 6);
+        \\        app.seedRandom(42);
+        \\        again = app.randomInt(1, 6);
+        \\        var x = app.randomRange(2.0, 3.0);
+        \\        inside = x >= 2.0 and x < 3.0 and app.randomIndex(3) < 3;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+
+    const first = global(app, file, "first").asInt();
+    try testing.expect(first >= 1 and first <= 6);
+    try testing.expectEqual(first, global(app, file, "again").asInt());
+    try testing.expect(global(app, file, "inside").asBool());
 }
 
 test "an entity is one handle to the scripts, wherever they are handed it" {

@@ -55,6 +55,25 @@ pub const Color = extern struct {
         };
     }
 
+    /// A colour written as text: `#RRGGBB` or `#RRGGBBAA`, or the short
+    /// `#RGB` and `#RGBA`, the `#` optional and spaces round it allowed.
+    /// Null for anything else.
+    pub fn parse(text: []const u8) ?Color {
+        const digits = std.mem.trimStart(u8, std.mem.trim(u8, text, " "), "#");
+        var bytes: [4]u8 = .{ 0, 0, 0, 255 };
+        switch (digits.len) {
+            3, 4 => for (digits, 0..) |digit, i| {
+                const nibble = std.fmt.charToDigit(digit, 16) catch return null;
+                bytes[i] = nibble * 17;
+            },
+            6, 8 => for (0..digits.len / 2) |i| {
+                bytes[i] = std.fmt.parseInt(u8, digits[i * 2 ..][0..2], 16) catch return null;
+            },
+            else => return null,
+        }
+        return .{ .r = channel(bytes[0]), .g = channel(bytes[1]), .b = channel(bytes[2]), .a = channel(bytes[3]) };
+    }
+
     pub inline fn rgb(r: f32, g: f32, b: f32) Color {
         return .{ .r = r, .g = g, .b = b, .a = 1 };
     }
@@ -143,6 +162,16 @@ test "the alpha of hexa is the last byte, not the first" {
     const c: Color = .hexa(0x102030_80);
     try testing.expectApproxEqAbs(@as(f32, 0.502), c.a, 0.005);
     try testing.expectApproxEqAbs(@as(f32, 0.0627), c.r, 0.001);
+}
+
+test "a colour is read from the ways it is written as text, and nothing else is" {
+    try testing.expectEqual(Color.hex(0xFF8000), Color.parse("#FF8000").?);
+    try testing.expectEqual(Color.hexa(0x10203080), Color.parse("10203080").?);
+    try testing.expectEqual(Color.hex(0xFF8800), Color.parse(" #f80 ").?);
+    try testing.expectEqual(Color.hexa(0xFF880044), Color.parse("#F804").?);
+    try testing.expect(Color.parse("#12345") == null);
+    try testing.expect(Color.parse("#GG0000") == null);
+    try testing.expect(Color.parse("") == null);
 }
 
 test "oklch with no chroma is a grey" {

@@ -1324,7 +1324,7 @@ test "a scene keeps the theme a control names, what it is drawn as, and a button
     try testing.expect(!control.theme.isNone());
 
     const style = app.control_nodes.resolvedStyle(.{ .app = app, .layout = &app.ui }, entity, .button, .normal);
-    try testing.expectEqual(@import("theme.zig").parseHex("#C8434F").?, style.background_color);
+    try testing.expectEqual(Color.parse("#C8434F").?, style.background_color);
 }
 
 test "a control is drawn from the theme the control above it names" {

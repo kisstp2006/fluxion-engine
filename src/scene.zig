@@ -101,6 +101,7 @@ const TileMap = tilemap.TileMap;
 const TileChunk = tilemap.TileChunk;
 const TileSetHandle = @import("tileset.zig").TileSetHandle;
 const ThemeHandle = @import("theme.zig").ThemeHandle;
+const AssetKind = @import("asset_kind.zig").AssetKind;
 const Uuid = @import("fluxion_id").Uuid;
 const math = @import("fluxion_math");
 const Color = @import("color.zig").Color;
@@ -723,43 +724,33 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
         const text = held.toString();
         return w.writeString(&text);
     }
-    if (T == TextureHandle) {
-        const texture = s.app.assets.get(value.*) orelse return w.writeNull();
-        if (texture.source.len == 0) return w.writeNull();
-        try s.files.put(s.app.gpa, texture.source, .{ .filter = texture.filter, .wrap = texture.wrap });
-        return w.writeString(texture.source);
-    }
-    if (T == ScriptHandle) {
-        const source = s.app.scriptSource(value.*) orelse return w.writeNull();
+    // A file is written as its path, and the path kept for `assets`.
+    if (comptime AssetKind.of(T)) |kind| {
+        const source = s.app.assetSource(value.*) orelse return w.writeNull();
         const kept = try s.files.getOrPut(s.app.gpa, source);
         if (!kept.found_existing) kept.value_ptr.* = .{};
+        switch (kind) {
+            // How a texture is sampled is the file's, and goes in `assets`.
+            .texture => {
+                const texture = s.app.assets.get(value.*).?;
+                kept.value_ptr.* = .{ .filter = texture.filter, .wrap = texture.wrap };
+            },
+            // The first font of a file is the file. Another font of a
+            // collection is an object that says which, so one scene can
+            // hold two of a file.
+            .font => {
+                const member = s.app.assets.fontMember(value.*);
+                if (member != 0) {
+                    try w.beginObject();
+                    try w.field("file", source);
+                    try w.key("member");
+                    try w.writeInt(member);
+                    return w.endObject();
+                }
+            },
+            else => {},
+        }
         return w.writeString(source);
-    }
-    if (T == TileSetHandle) {
-        const source = s.app.tileSetSource(value.*) orelse return w.writeNull();
-        const kept = try s.files.getOrPut(s.app.gpa, source);
-        if (!kept.found_existing) kept.value_ptr.* = .{};
-        return w.writeString(source);
-    }
-    if (T == ThemeHandle) {
-        const source = s.app.themeSource(value.*) orelse return w.writeNull();
-        const kept = try s.files.getOrPut(s.app.gpa, source);
-        if (!kept.found_existing) kept.value_ptr.* = .{};
-        return w.writeString(source);
-    }
-    if (T == FontHandle) {
-        const source = s.app.assets.fontSource(value.*) orelse return w.writeNull();
-        const kept = try s.files.getOrPut(s.app.gpa, source);
-        if (!kept.found_existing) kept.value_ptr.* = .{};
-        // The first font of a file is the file. Another font of a collection
-        // is an object that says which, so one scene can hold two of a file.
-        const member = s.app.assets.fontMember(value.*);
-        if (member == 0) return w.writeString(source);
-        try w.beginObject();
-        try w.field("file", source);
-        try w.key("member");
-        try w.writeInt(member);
-        return w.endObject();
     }
     switch (@typeInfo(T)) {
         .bool => try w.writeBool(value.*),
@@ -1110,12 +1101,11 @@ const Loading = struct {
     entities: []const Entity = &.{},
     /// What the first pass learnt. Null during it.
     told: ?*const Told = null,
-    /// Textures found or loaded already, by the path the file gives.
-    textures: std.StringHashMapUnmanaged(TextureHandle) = .empty,
+    /// Files found or loaded already, by their kind and the path the file
+    /// gives, as the eight bytes every handle is.
+    handles: std.StringHashMapUnmanaged(u64) = .empty,
+    /// Fonts the same, by the path and which font of the file.
     fonts: std.StringHashMapUnmanaged(FontHandle) = .empty,
-    scripts: std.StringHashMapUnmanaged(ScriptHandle) = .empty,
-    tile_sets: std.StringHashMapUnmanaged(TileSetHandle) = .empty,
-    themes: std.StringHashMapUnmanaged(ThemeHandle) = .empty,
     /// The entity being filled in, for a value kept beside its component:
     /// a map's tiles.
     entity: Entity = .none,
@@ -1479,49 +1469,23 @@ const Loading = struct {
         return .{ try l.arena.dupe(u8, now), info };
     }
 
-    fn texture(l: *Loading, path: []const u8) anyerror!TextureHandle {
-        if (l.textures.get(path)) |known| return known;
+    /// A file the scene names, read once however many things name it. A
+    /// texture is sampled as `assets` says. A script that does not compile,
+    /// a tile set or a theme that does not read, is still loaded, and the
+    /// scene opens with it: what uses it makes nothing, draws white squares
+    /// or draws with no theme, until a reload reads it.
+    fn asset(l: *Loading, comptime H: type, path: []const u8) anyerror!H {
+        const kind = comptime AssetKind.of(H).?;
+        const seen = try std.fmt.allocPrint(l.arena, "{t}\x00{s}", .{ kind, path });
+        if (l.handles.get(seen)) |known| return @bitCast(known);
         const where, const info = try l.file(path);
-        const assets = &l.app.assets;
-        const handle = assets.findTexture(where) orelse assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap }) catch |err|
-            return l.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err });
-        try l.textures.put(l.arena, try l.arena.dupe(u8, path), handle);
-        return handle;
-    }
-
-    /// A script the scene names. One that does not compile is still loaded,
-    /// and the scene opens with it: its `Script` makes nothing until a
-    /// reload compiles.
-    fn script(l: *Loading, path: []const u8) anyerror!ScriptHandle {
-        if (l.scripts.get(path)) |known| return known;
-        const where, _ = try l.file(path);
-        const handle = l.app.loadScript(where) catch |err|
-            return l.fail(err, "cannot read the script \"{s}\": {t}", .{ where, err });
-        try l.scripts.put(l.arena, try l.arena.dupe(u8, path), handle);
-        return handle;
-    }
-
-    /// A tile set the scene names. One that does not read is still loaded,
-    /// and the scene opens with it: its maps draw white squares until it
-    /// does.
-    fn tileSet(l: *Loading, path: []const u8) anyerror!TileSetHandle {
-        if (l.tile_sets.get(path)) |known| return known;
-        const where, _ = try l.file(path);
-        const handle = l.app.loadTileSet(where) catch |err|
-            return l.fail(err, "cannot read the tile set \"{s}\": {t}", .{ where, err });
-        try l.tile_sets.put(l.arena, try l.arena.dupe(u8, path), handle);
-        return handle;
-    }
-
-    /// A theme the scene names. One that does not read is still loaded, and
-    /// the scene opens with it: its controls are drawn the way they are with
-    /// no theme at all until it does.
-    fn themeAt(l: *Loading, path: []const u8) anyerror!ThemeHandle {
-        if (l.themes.get(path)) |known| return known;
-        const where, _ = try l.file(path);
-        const handle = l.app.loadTheme(where) catch |err|
-            return l.fail(err, "cannot read the theme \"{s}\": {t}", .{ where, err });
-        try l.themes.put(l.arena, try l.arena.dupe(u8, path), handle);
+        const handle: H = switch (kind) {
+            .texture => l.app.assets.findTexture(where) orelse l.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap }) catch |err|
+                return l.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err }),
+            else => l.app.loadAsset(H, where) catch |err|
+                return l.fail(err, "cannot read the {s} \"{s}\": {t}", .{ kind.label(), where, err }),
+        };
+        try l.handles.put(l.arena, seen, @bitCast(handle));
         return handle;
     }
 
@@ -1759,49 +1723,13 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
         };
         return;
     }
-    if (T == TextureHandle) {
+    if (comptime AssetKind.of(T)) |kind| {
         const token = try l.next();
         out.* = switch (token) {
             .null => .none,
-            .string => |path| try l.texture(path),
-            else => return l.wrong("the file it was read from, or null", token),
-        };
-        return;
-    }
-    if (T == ScriptHandle) {
-        const token = try l.next();
-        out.* = switch (token) {
-            .null => .none,
-            .string => |path| try l.script(path),
-            else => return l.wrong("the file it was read from, or null", token),
-        };
-        return;
-    }
-    if (T == TileSetHandle) {
-        const token = try l.next();
-        out.* = switch (token) {
-            .null => .none,
-            .string => |path| try l.tileSet(path),
-            else => return l.wrong("the file it was read from, or null", token),
-        };
-        return;
-    }
-    if (T == ThemeHandle) {
-        const token = try l.next();
-        out.* = switch (token) {
-            .null => .none,
-            .string => |path| try l.themeAt(path),
-            else => return l.wrong("the file it was read from, or null", token),
-        };
-        return;
-    }
-    if (T == FontHandle) {
-        const token = try l.next();
-        out.* = switch (token) {
-            .null => .none,
-            .string => |path| try l.font(path, 0),
-            .object_begin => try l.fontObject(),
-            else => return l.wrong("the file it was read from, its file and member, or null", token),
+            .string => |path| if (kind == .font) try l.font(path, 0) else try l.asset(T, path),
+            .object_begin => if (kind == .font) try l.fontObject() else return l.wrong("the file it was read from, or null", token),
+            else => return l.wrong(if (kind == .font) "the file it was read from, its file and member, or null" else "the file it was read from, or null", token),
         };
         return;
     }

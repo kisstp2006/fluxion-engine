@@ -59,6 +59,8 @@ const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
 const timer = @import("timer.zig");
 const tilemap = @import("tilemap.zig");
+const geometry = @import("geometry.zig");
+const AssetKind = @import("asset_kind.zig").AssetKind;
 const theme = @import("theme.zig");
 const tileset = @import("tileset.zig");
 const scene = @import("scene.zig");
@@ -165,6 +167,11 @@ pub const Options = struct {
     /// What files are read with and the clock is read from. Null means no
     /// files and a fixed step, as in a test.
     io: ?std.Io = null,
+
+    /// Where the game's chance starts - `randomFloat` and the rest - so a
+    /// run can be played again the same. Null draws it from the operating
+    /// system, or with no `io` is a constant.
+    random_seed: ?u64 = null,
 
     /// The project's root directory, which `res://` paths are from - or its
     /// `project.fluxion`, which names the same directory. Null is the working
@@ -487,6 +494,8 @@ next_rank: u64 = 0,
 /// What `newUuid` draws from: seeded by the operating system, or with no
 /// `Io` by a constant, so a test makes the same ones every run.
 uuid_source: std.Random.DefaultCsprng,
+/// What the game's chance is drawn from: `randomFloat` and the rest.
+random_source: std.Random.DefaultPrng,
 
 /// What a scene can hold, and what each component is called in one: the
 /// engine's own from the start, and a game's once `registerComponents` has
@@ -620,6 +629,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .uuids = .empty,
         .by_uuid = .empty,
         .uuid_source = undefined,
+        .random_source = undefined,
         .scene_components = .{},
         .signals = .init(gpa),
         .event_channels = .empty,
@@ -651,6 +661,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = @splat(0x5E);
     if (options.io) |io| io.random(&seed);
     self.uuid_source = .init(seed);
+    self.random_source = .init(options.random_seed orelse self.drawnSeed());
     self.project = try .init(gpa, options.io, options.root);
     errdefer self.project.deinit();
     // Before the backend is chosen: the project's renderer chooses it, and
@@ -717,7 +728,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle }) catch |err| switch (err) {
+    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -1782,6 +1793,59 @@ pub const UuidError = error{
     NoSuchEntity,
 } || Allocator.Error;
 
+// -------------------------------------------------------------------------
+// Chance
+// -------------------------------------------------------------------------
+//
+// The game's own source of chance, apart from the one UUIDs are drawn from:
+// seeded by the operating system when the app is made, or by
+// `Options.random_seed` or `seedRandom`, so a run seeded the same way draws
+// the same numbers. Not for secrets.
+
+/// A number from nought up to, but not including, one.
+pub fn randomFloat(self: *App) f32 {
+    return self.random_source.random().float(f32);
+}
+
+/// A number from `low` up to `high`.
+pub fn randomRange(self: *App, low: f32, high: f32) f32 {
+    return low + (high - low) * self.randomFloat();
+}
+
+/// A whole number from `low` to `high`, either of them possible, whichever
+/// way round they are given.
+pub fn randomInt(self: *App, low: i64, high: i64) i64 {
+    return self.random_source.random().intRangeAtMost(i64, @min(low, high), @max(low, high));
+}
+
+/// True that part of the time: `randomChance(0.25)` one time in four.
+pub fn randomChance(self: *App, chance: f32) bool {
+    return self.randomFloat() < chance;
+}
+
+/// A place in a list of `count` things, to pick one of them by. Nought for
+/// a list of none.
+pub fn randomIndex(self: *App, count: i64) i64 {
+    if (count <= 0) return 0;
+    return self.random_source.random().intRangeLessThan(i64, 0, count);
+}
+
+/// Start the numbers again from `seed`: the same seed, the same numbers.
+pub fn seedRandom(self: *App, seed: i64) void {
+    self.random_source = .init(@bitCast(seed));
+}
+
+/// Start the numbers again from a seed of the operating system's.
+pub fn randomize(self: *App) void {
+    self.random_source = .init(self.drawnSeed());
+}
+
+fn drawnSeed(self: *const App) u64 {
+    var seed: u64 = 0x5EED_F1A5_0000_0001;
+    if (self.io) |io| io.random(std.mem.asBytes(&seed));
+    return seed;
+}
+
 /// A new random UUID - version 4 - for an entity, or for anything else a
 /// game wants named once and for good.
 pub fn newUuid(self: *App) Uuid {
@@ -1992,22 +2056,21 @@ pub fn tileSizeOf(self: *App, map: ecs.Entity) [2]f32 {
 /// Which cell of `map` a point of the world is in, counted in tiles from the
 /// map's origin as `setTile` counts them. Null for an entity with no
 /// `TileMap`.
-pub fn cellAt(self: *App, map: ecs.Entity, point: math.Vec2) ?[2]i32 {
+pub fn cellAt(self: *App, map: ecs.Entity, point: math.Vec2) ?geometry.Vec2i {
     if (!self.world.has(map, tilemap.TileMap)) return null;
     const placed = self.worldTransform(map) orelse return null;
     const local = placed.unapply(point.x, point.y);
     const tile = self.tileSizeOf(map);
-    return .{
+    return .init(
         std.math.lossyCast(i32, @floor(local.x / tile[0])),
         std.math.lossyCast(i32, @floor(local.y / tile[1])),
-    };
+    );
 }
 
 /// The cells of `map` something is painted in: the smallest rectangle that
-/// holds them all, by its first and last cell. Null for a map with nothing
-/// painted.
-pub fn usedCells(self: *App, map: ecs.Entity) ?CellRect {
-    var out: ?CellRect = null;
+/// holds them all. Null for a map with nothing painted.
+pub fn usedCells(self: *App, map: ecs.Entity) ?geometry.Rect2i {
+    var out: ?geometry.Rect2i = null;
     var it = self.tile_chunks.iterator();
     while (it.next()) |entry| {
         const key = entry.key_ptr.*;
@@ -2019,20 +2082,12 @@ pub fn usedCells(self: *App, map: ecs.Entity) ?CellRect {
             if (cell.isEmpty()) continue;
             const x = key.x * tilemap.chunk_side + @as(i32, @intCast(at % tilemap.chunk_side));
             const y = key.y * tilemap.chunk_side + @as(i32, @intCast(at / tilemap.chunk_side));
-            if (out) |*held| {
-                held.first = .{ @min(held.first[0], x), @min(held.first[1], y) };
-                held.last = .{ @max(held.last[0], x), @max(held.last[1], y) };
-            } else out = .{ .first = .{ x, y }, .last = .{ x, y } };
+            const place: geometry.Vec2i = .init(x, y);
+            out = if (out) |held| held.expandTo(place) else .fromCells(place, place);
         }
     }
     return out;
 }
-
-/// A rectangle of a map's cells, by its first and its last: both are in it.
-pub const CellRect = struct {
-    first: [2]i32,
-    last: [2]i32,
-};
 
 /// What the tile at `x`, `y` of `map` says under its tile set's data layer
 /// called `layer`: nought, or false, where it says nothing, and null where
@@ -2048,7 +2103,59 @@ pub fn tileData(self: *App, map: ecs.Entity, x: i32, y: i32, layer: []const u8) 
 /// stands on, say.
 pub fn tileDataAt(self: *App, map: ecs.Entity, point: math.Vec2, layer: []const u8) ?tileset.Value {
     const cell = self.cellAt(map, point) orelse return null;
-    return self.tileData(map, cell[0], cell[1], layer);
+    return self.tileData(map, cell.x, cell.y, layer);
+}
+
+// -------------------------------------------------------------------------
+// Files of every kind
+// -------------------------------------------------------------------------
+//
+// One call each for what every kind of file has - where a handle's file is,
+// and the handle of a file - whatever the kind: what a scene writes and
+// reads handles by, and what an editor's file fields go through. See
+// `AssetKind`.
+
+/// The file a handle was read from, whatever kind of file it holds: its
+/// `res://` path. Null for `.none`, for an expired handle, and for one made
+/// in memory.
+pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
+    const H = @TypeOf(handle);
+    const kind = comptime AssetKind.of(H) orelse @compileError(@typeName(H) ++ " holds no file");
+    return switch (kind) {
+        .texture => self.assets.textureSource(handle),
+        .font => self.assets.fontSource(handle),
+        .script => self.scriptSource(handle),
+        .tileset => self.tileSetSource(handle),
+        .theme => self.themeSource(handle),
+        .scene => unreachable,
+    };
+}
+
+/// The handle of the file at `path`, read now if nothing has read it yet: a
+/// texture sampled as textures are by default, the first font of a file.
+pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
+    const kind = comptime AssetKind.of(H) orelse @compileError(@typeName(H) ++ " holds no file");
+    return switch (kind) {
+        .texture => self.assets.findTexture(path) orelse try self.assets.loadTexture(path, .{}),
+        .font => self.assets.findFont(path) orelse try self.assets.loadFont(path, .{}),
+        .script => self.loadScript(path),
+        .tileset => self.loadTileSet(path),
+        .theme => self.loadTheme(path),
+        .scene => unreachable,
+    };
+}
+
+/// The handle of the file at `path`, if something has read it.
+pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
+    const kind = comptime AssetKind.of(H) orelse @compileError(@typeName(H) ++ " holds no file");
+    return switch (kind) {
+        .texture => self.assets.findTexture(path),
+        .font => self.assets.findFont(path),
+        .script => self.findScript(path),
+        .tileset => self.findTileSet(path),
+        .theme => self.findTheme(path),
+        .scene => unreachable,
+    };
 }
 
 /// Read a `.tileset` file, or find the one read from there already. See
@@ -2663,6 +2770,13 @@ pub const reflect_methods = .{
     .saveScene,
     .loadScene,
     .createTimer,
+    .randomFloat,
+    .randomRange,
+    .randomInt,
+    .randomChance,
+    .randomIndex,
+    .seedRandom,
+    .randomize,
     .worldTransform,
     .setWorldTransform,
     .globalPosition,
@@ -3474,9 +3588,10 @@ pub fn setWindowPosition(self: *App, x: i32, y: i32) Window.Error!void {
 
 /// Where the top left of the window's content area is on the desktop, or
 /// null when there is no window. Always nought, nought on Wayland.
-pub fn windowPosition(self: *const App) ?[2]i32 {
-    if (self.window) |*window| return window.position();
-    return null;
+pub fn windowPosition(self: *const App) ?geometry.Vec2i {
+    const window = if (self.window) |*held| held else return null;
+    const at = window.position();
+    return .init(at[0], at[1]);
 }
 
 /// How small and how large the player may drag the window. A window already
@@ -4024,13 +4139,13 @@ test "a map's used cells are the smallest rectangle round what is painted, acros
     _ = try app.setTile(map, 3, 2, .at(0, 0, 0));
     _ = try app.setTile(map, -20, 40, .at(0, 0, 0));
     const used = app.usedCells(map).?;
-    try testing.expectEqual([2]i32{ -20, 2 }, used.first);
-    try testing.expectEqual([2]i32{ 3, 40 }, used.last);
+    try testing.expectEqual(geometry.Vec2i.init(-20, 2), used.position);
+    try testing.expectEqual(geometry.Vec2i.init(3, 40), used.last());
 
     // Another map's cells are its own.
     const other = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{} });
     _ = try app.setTile(other, 100, 100, .at(0, 0, 0));
-    try testing.expectEqual([2]i32{ 3, 40 }, app.usedCells(map).?.last);
+    try testing.expectEqual(geometry.Vec2i.init(3, 40), app.usedCells(map).?.last());
 }
 
 test "a tile's data is asked for by its cell, or by a point of the world over it" {
@@ -4050,8 +4165,8 @@ test "a tile's data is asked for by its cell, or by a point of the world over it
     try testing.expect(app.tileData(map, 2, 1, "speed") == null);
 
     // The map starts 100 to the right: cell (2, 1) is from 132 to 148 across.
-    try testing.expectEqual([2]i32{ 2, 1 }, app.cellAt(map, .init(140, 20)).?);
-    try testing.expectEqual([2]i32{ -1, -1 }, app.cellAt(map, .init(99, -1)).?);
+    try testing.expectEqual(geometry.Vec2i.init(2, 1), app.cellAt(map, .init(140, 20)).?);
+    try testing.expectEqual(geometry.Vec2i.init(-1, -1), app.cellAt(map, .init(99, -1)).?);
     try testing.expectEqual(tileset.Value{ .int = 3 }, app.tileDataAt(map, .init(140, 20), "damage").?);
     const nothing = try app.world.spawnWith(.{components.Transform2D{}});
     try testing.expect(app.cellAt(nothing, .init(0, 0)) == null);
@@ -6495,4 +6610,24 @@ test "the order of a parent's children goes through a scene and back" {
     const again = try scene.write(copy, testing.allocator, .{});
     defer testing.allocator.free(again);
     try testing.expectEqualStrings(bytes, again);
+}
+
+test "the game's chance is the same from the same seed, and keeps to the ranges it is given" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .random_seed = 7 });
+    defer app.destroy();
+    var first: [8]i64 = undefined;
+    for (&first) |*n| n.* = app.randomInt(1, 6);
+    app.seedRandom(7);
+    for (first) |n| try testing.expectEqual(n, app.randomInt(6, 1));
+    for (0..200) |_| {
+        const x = app.randomRange(-2, 3);
+        try testing.expect(x >= -2 and x < 3);
+        const i = app.randomIndex(4);
+        try testing.expect(i >= 0 and i < 4);
+        const f = app.randomFloat();
+        try testing.expect(f >= 0 and f < 1);
+    }
+    try testing.expectEqual(@as(i64, 0), app.randomIndex(0));
+    try testing.expect(!app.randomChance(0));
+    try testing.expect(app.randomChance(1));
 }

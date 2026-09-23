@@ -289,6 +289,15 @@ pub const Vec2 = math.Vec2;
 /// A colour, four floats from zero to one.
 pub const Color = color.Color;
 
+/// Whole-number points, and boxes of either kind.
+pub const geometry = @import("geometry.zig");
+pub const Vec2i = geometry.Vec2i;
+pub const Rect2 = geometry.Rect2;
+pub const Rect2i = geometry.Rect2i;
+
+/// The kinds of file a game is made of, and the handle each is held by.
+pub const AssetKind = @import("asset_kind.zig").AssetKind;
+
 /// What a `Sprite` points at.
 pub const TextureHandle = assets.TextureHandle;
 
@@ -350,6 +359,8 @@ pub const Entity = ecs.Entity;
 pub const Query = ecs.Query;
 
 test {
+    _ = geometry;
+    _ = @import("asset_kind.zig");
     _ = control;
     _ = tileset;
     _ = @import("tilemap.zig");
