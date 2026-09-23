@@ -646,6 +646,45 @@ test "an engine signal calls a method its target's script declares, an entity ar
     try testing.expectEqual(@as(usize, 0), app.signals.failures);
 }
 
+test "a script reads what a tile says as the number or the truth it is" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const set = try app.addTileSet("data.tileset",
+        \\{ "fluxion_tileset": 1, "tile_size": [16, 16],
+        \\  "data_layers": [{ "name": "damage", "type": "int" }, { "name": "water", "type": "bool" }, { "name": "slow", "type": "float" }],
+        \\  "sources": [{ "id": 0, "tiles": [{ "at": [0, 0], "data": { "damage": 3, "water": true, "slow": 0.5 } }] }] }
+    );
+    const TileMap = @import("tilemap.zig").TileMap;
+    const map = try app.world.spawnWith(.{ Transform2D{}, TileMap{ .tile_set = set } });
+    try app.setName(map, "ground");
+    _ = try app.setTile(map, 1, 0, .at(0, 0, 0));
+    const file = try app.addScript("reader.flux",
+        \\var damage: any = null;
+        \\var water: any = null;
+        \\var slow: any = null;
+        \\var cell: any = null;
+        \\var nothing: any = 1;
+        \\struct Reader {
+        \\    fn ready(self) {
+        \\        var ground = app.find("ground");
+        \\        damage = app.tileDataAt(ground, vec2(20, 4), "damage");
+        \\        water = app.tileData(ground, 1, 0, "water");
+        \\        slow = app.tileData(ground, 1, 0, "slow");
+        \\        cell = app.cellAt(ground, vec2(20, 4));
+        \\        nothing = app.tileData(ground, 5, 5, "damage");
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+
+    try testing.expectEqual(@as(i64, 3), global(app, file, "damage").asInt());
+    try testing.expect(global(app, file, "water").asBool());
+    try testing.expectEqual(@as(f64, 0.5), global(app, file, "slow").asFloat());
+    try testing.expect(global(app, file, "cell").tag == .list);
+    try testing.expect(global(app, file, "nothing").tag == .null);
+}
+
 test "an entity is one handle to the scripts, wherever they are handed it" {
     const app = try scripted(.{});
     defer app.destroy();

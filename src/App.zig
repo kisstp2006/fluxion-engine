@@ -1930,6 +1930,37 @@ pub fn tileSizeOf(self: *App, map: ecs.Entity) [2]f32 {
     return .{ @floatFromInt(set.tile_width), @floatFromInt(set.tile_height) };
 }
 
+/// Which cell of `map` a point of the world is in, counted in tiles from the
+/// map's origin as `setTile` counts them. Null for an entity with no
+/// `TileMap`.
+pub fn cellAt(self: *App, map: ecs.Entity, point: math.Vec2) ?[2]i32 {
+    if (!self.world.has(map, tilemap.TileMap)) return null;
+    const placed = self.worldTransform(map) orelse return null;
+    const local = placed.unapply(point.x, point.y);
+    const tile = self.tileSizeOf(map);
+    return .{
+        std.math.lossyCast(i32, @floor(local.x / tile[0])),
+        std.math.lossyCast(i32, @floor(local.y / tile[1])),
+    };
+}
+
+/// What the tile at `x`, `y` of `map` says under its tile set's data layer
+/// called `layer`: nought, or false, where it says nothing, and null where
+/// nothing is painted or the set has no layer of that name. A script has the
+/// number, or the truth, itself.
+pub fn tileData(self: *App, map: ecs.Entity, x: i32, y: i32, layer: []const u8) ?tileset.Value {
+    const held = self.world.getConst(map, tilemap.TileMap) orelse return null;
+    const set = self.tile_sets.get(held.tile_set) orelse return null;
+    return set.dataOf(self.tileAt(map, x, y), layer);
+}
+
+/// The same for the tile under a point of the world: the one something
+/// stands on, say.
+pub fn tileDataAt(self: *App, map: ecs.Entity, point: math.Vec2, layer: []const u8) ?tileset.Value {
+    const cell = self.cellAt(map, point) orelse return null;
+    return self.tileData(map, cell[0], cell[1], layer);
+}
+
 /// Read a `.tileset` file, or find the one read from there already. See
 /// `tileset.TileSets`.
 pub fn loadTileSet(self: *App, path: []const u8) !tileset.TileSetHandle {
@@ -2529,6 +2560,9 @@ pub const reflect_methods = .{
     .keyDown,
     .keyAxis,
     .isOnFloor,
+    .cellAt,
+    .tileData,
+    .tileDataAt,
     .screenToWorld,
     .worldToScreen,
     .pointerInWorld,
@@ -3844,6 +3878,30 @@ test "the tile set says which tiles are solid, and they become one body" {
     _ = try app.setTile(map, 1, 0, .empty);
     try app.bodies.sync(app);
     try testing.expectEqual(@as(usize, 0), app.physics.shapeCount());
+}
+
+test "a tile's data is asked for by its cell, or by a point of the world over it" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const set = try app.addTileSet("data.tileset",
+        \\{ "fluxion_tileset": 1, "tile_size": [16, 16], "data_layers": [{ "name": "damage", "type": "int" }],
+        \\  "sources": [{ "id": 0, "tiles": [{ "at": [1, 0], "data": { "damage": 3 } }] }] }
+    );
+    const map = try app.world.spawnWith(.{ components.Transform2D{ .x = 100 }, tilemap.TileMap{ .tile_set = set } });
+    _ = try app.setTile(map, 2, 1, .at(0, 1, 0));
+    _ = try app.setTile(map, 3, 1, .at(0, 0, 0));
+
+    try testing.expectEqual(tileset.Value{ .int = 3 }, app.tileData(map, 2, 1, "damage").?);
+    try testing.expectEqual(tileset.Value{ .int = 0 }, app.tileData(map, 3, 1, "damage").?);
+    try testing.expect(app.tileData(map, 4, 1, "damage") == null);
+    try testing.expect(app.tileData(map, 2, 1, "speed") == null);
+
+    // The map starts 100 to the right: cell (2, 1) is from 132 to 148 across.
+    try testing.expectEqual([2]i32{ 2, 1 }, app.cellAt(map, .init(140, 20)).?);
+    try testing.expectEqual([2]i32{ -1, -1 }, app.cellAt(map, .init(99, -1)).?);
+    try testing.expectEqual(tileset.Value{ .int = 3 }, app.tileDataAt(map, .init(140, 20), "damage").?);
+    const nothing = try app.world.spawnWith(.{components.Transform2D{}});
+    try testing.expect(app.cellAt(nothing, .init(0, 0)) == null);
 }
 
 test "a tile's own shape is a polygon, turned the way its cell is" {

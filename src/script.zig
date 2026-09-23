@@ -104,6 +104,7 @@ const App = @import("App.zig");
 const attr = @import("attr.zig");
 const Project = @import("Project.zig");
 const signals = @import("signals.zig");
+const tileset = @import("tileset.zig");
 const Color = @import("color.zig").Color;
 
 const Entity = ecs.Entity;
@@ -433,7 +434,7 @@ pub const Scripts = struct {
             .io = app.io,
             .on_task_panic = sayTaskPanic,
             .on_emit = heardEmit,
-            .host_types = &.{entity_type},
+            .host_types = &.{ entity_type, tile_value_type },
         });
         errdefer vm.destroy();
         vm.host = self;
@@ -1216,6 +1217,34 @@ const entity_type: flux.HostType = .{
     .to_script = entityToScript,
     .from_script = entityFromScript,
 };
+
+/// How a script sees what a tile says under a data layer: the number, or the
+/// truth, itself - `app.tileDataAt(map, at, "damage") > 0` - rather than a
+/// box with one of three fields in it.
+const tile_value_type: flux.HostType = .{
+    .type = reflect.typeOf(tileset.Value),
+    .to_script = tileValueToScript,
+    .from_script = tileValueFromScript,
+};
+
+fn tileValueToScript(_: *flux.Vm, value: reflect.Value) flux.Vm.Error!flux.Value {
+    return switch (value.asConst(tileset.Value).?.*) {
+        .int => |n| .int(n),
+        .float => |f| .float(f),
+        .bool => |b| .boolean(b),
+    };
+}
+
+fn tileValueFromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flux.Vm.Error!void {
+    const given: tileset.Value = switch (value.tag) {
+        .int => .{ .int = value.asInt() },
+        .float => .{ .float = value.asFloat() },
+        .bool => .{ .bool = value.asBool() },
+        else => return vm.fail("a tile's data is a number, true or false, not {s}", .{typeName(value)}),
+    };
+    const place = into.as(tileset.Value) orelse return vm.fail("this tile's data can only be read", .{});
+    place.* = given;
+}
 
 fn entityToScript(vm: *flux.Vm, value: reflect.Value) flux.Vm.Error!flux.Value {
     const self: *Scripts = @ptrCast(@alignCast(vm.host.?));

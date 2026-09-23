@@ -7,21 +7,28 @@
 //! {
 //!   "fluxion_tileset": 1,
 //!   "tile_size": [16, 16],
+//!   "data_layers": [{ "name": "damage", "type": "int" }],
 //!   "sources": [{
 //!     "id": 0, "texture": "res://art/terrain.png", "margin": [0, 0], "separation": [0, 0],
 //!     "tiles": [
 //!       { "at": [0, 0], "collision": "full" },
-//!       { "at": [2, 0], "collision": "polygon", "polygon": [[0, 16], [16, 0], [16, 16]] }
+//!       { "at": [2, 0], "collision": "polygon", "polygon": [[0, 16], [16, 0], [16, 16]] },
+//!       { "at": [1, 0], "probability": 0.5, "data": { "damage": 2 } }
 //!     ]
 //!   }]
 //! }
 //! ```
 //!
 //! A source is one sheet cut into a grid of tiles. Every cell of the grid is a
-//! tile a map can hold; `tiles` lists only those with something more to say,
-//! such as a shape the physics stops at. A source without a texture is one
-//! tile of the white texel, which a map's tint colours: blocking out a level
-//! before its art exists.
+//! tile a map can hold; `tiles` lists only those with something more to say:
+//! a shape the physics stops at, how often a random brush picks it, or a
+//! value under one of the set's data layers. A source without a texture is
+//! one tile of the white texel, which a map's tint colours: blocking out a
+//! level before its art exists.
+//!
+//! A data layer is a value every tile of the set may carry under one name -
+//! how much a tile hurts, whether it is water - which a game asks for with
+//! `App.tileData`, as Godot's custom data layers are asked for.
 //!
 //! Kept beside the world, as scripts are, and pointed at by a handle: a
 //! component holds no memory. A file that does not read still gets a handle,
@@ -54,6 +61,9 @@ pub const default_tile_size = 16;
 
 /// The most corners a tile's shape may have: as many as the physics' polygons.
 pub const max_points = 8;
+
+/// The most data layers a set has: a tile keeps a value for each in place.
+pub const max_data_layers = 8;
 
 /// The largest tile set file read.
 const file_limit = 4 << 20;
@@ -97,6 +107,56 @@ pub const Collision = enum {
     polygon,
 };
 
+/// What a data layer holds.
+pub const DataKind = enum { int, float, bool };
+
+/// What a tile says under one data layer.
+pub const Value = union(DataKind) {
+    int: i64,
+    float: f64,
+    bool: bool,
+
+    /// What a tile that says nothing under a layer of this kind says: nought,
+    /// or false.
+    pub fn zero(kind: DataKind) Value {
+        return switch (kind) {
+            .int => .{ .int = 0 },
+            .float => .{ .float = 0 },
+            .bool => .{ .bool = false },
+        };
+    }
+
+    pub fn isZero(self: Value) bool {
+        return switch (self) {
+            .int => |n| n == 0,
+            .float => |f| f == 0,
+            .bool => |b| !b,
+        };
+    }
+};
+
+/// A value every tile of a set may carry under one name: Godot's custom data
+/// layer.
+pub const DataLayer = struct {
+    name_bytes: [name_capacity]u8 = @splat(0),
+    name_len: u8 = 0,
+    kind: DataKind = .int,
+
+    pub const name_capacity = 31;
+
+    pub fn name(self: *const DataLayer) []const u8 {
+        return self.name_bytes[0..@min(self.name_len, name_capacity)];
+    }
+
+    /// Kept to `name_capacity` bytes, cut where a character starts.
+    pub fn setName(self: *DataLayer, text: []const u8) void {
+        var cut = @min(text.len, name_capacity);
+        while (cut > 0 and cut < text.len and text[cut] & 0xC0 == 0x80) cut -= 1;
+        @memcpy(self.name_bytes[0..cut], text[0..cut]);
+        self.name_len = @intCast(cut);
+    }
+};
+
 /// What one tile of a source is, beyond its picture.
 pub const Tile = struct {
     collision: Collision = .none,
@@ -105,6 +165,13 @@ pub const Tile = struct {
     /// `.polygon`.
     points: [max_points]math.Vec2 = @splat(.zero),
     point_count: u8 = 0,
+    /// How often a random brush picks this tile against the others it may
+    /// pick: Godot's probability. One is as often as a tile that says
+    /// nothing; nought is never.
+    probability: f32 = 1,
+    /// What the tile says under each of the set's data layers, by the
+    /// layer's place. Nought, or false, is saying nothing.
+    data: [max_data_layers]Value = @splat(.{ .int = 0 }),
 
     pub fn polygon(self: *const Tile) []const math.Vec2 {
         return self.points[0..self.point_count];
@@ -113,7 +180,19 @@ pub const Tile = struct {
     /// Whether nothing is said of this tile beyond its picture, so that a
     /// source need not keep it and a file need not name it.
     pub fn isPlain(self: *const Tile) bool {
-        return self.collision == .none;
+        if (self.collision != .none or self.probability != 1) return false;
+        for (self.data) |value| {
+            if (!value.isZero()) return false;
+        }
+        return true;
+    }
+
+    /// What the tile says under the layer at `index`, which holds `kind`: a
+    /// value of another kind - one the layer held before it changed - is
+    /// nothing.
+    pub fn valueIn(self: *const Tile, index: usize, kind: DataKind) Value {
+        const held = self.data[index];
+        return if (held == kind) held else .zero(kind);
     }
 
     /// The corners a shape is drawn round, keeping at most `max_points` of
@@ -202,9 +281,102 @@ pub const TileSet = struct {
     tile_width: u16 = default_tile_size,
     tile_height: u16 = default_tile_size,
     sources: std.ArrayList(Source) = .empty,
+    /// The values every tile may carry, in the order a tile keeps them.
+    layers: [max_data_layers]DataLayer = @splat(.{}),
+    layer_count: u8 = 0,
     /// Stepped whenever what it says changes, so what was built from it -
     /// a map's physics - knows to build again.
     revision: u32 = 1,
+
+    pub fn dataLayers(self: *const TileSet) []const DataLayer {
+        return self.layers[0..self.layer_count];
+    }
+
+    /// Where the layer called `name` is, among `dataLayers`.
+    pub fn dataLayerNamed(self: *const TileSet, name: []const u8) ?u8 {
+        for (self.dataLayers(), 0..) |*layer, i| {
+            if (std.mem.eql(u8, layer.name(), name)) return @intCast(i);
+        }
+        return null;
+    }
+
+    pub const DataLayerError = error{
+        /// A set has `max_data_layers` at most.
+        TooManyDataLayers,
+        /// Another layer has that name.
+        DataLayerTaken,
+        /// A layer is asked for by its name, so it has to have one.
+        NoName,
+    };
+
+    /// A layer every tile may say a `kind` under, after the others; every
+    /// tile says nothing under it yet. Answers its place.
+    pub fn addDataLayer(self: *TileSet, name: []const u8, kind: DataKind) DataLayerError!u8 {
+        try self.checkName(name, null);
+        if (self.layer_count >= max_data_layers) return error.TooManyDataLayers;
+        const index = self.layer_count;
+        self.layers[index] = .{ .kind = kind };
+        self.layers[index].setName(name);
+        self.layer_count += 1;
+        // A layer taken away earlier may have left a value behind here.
+        self.forget(index);
+        return index;
+    }
+
+    pub fn renameDataLayer(self: *TileSet, index: u8, name: []const u8) DataLayerError!void {
+        try self.checkName(name, index);
+        self.layers[index].setName(name);
+    }
+
+    fn checkName(self: *const TileSet, name: []const u8, except: ?u8) DataLayerError!void {
+        if (name.len == 0) return error.NoName;
+        var probe: DataLayer = .{};
+        probe.setName(name);
+        for (self.dataLayers(), 0..) |*layer, i| {
+            if (except) |skip| if (skip == i) continue;
+            if (std.mem.eql(u8, layer.name(), probe.name())) return error.DataLayerTaken;
+        }
+    }
+
+    /// Take a layer out, and what every tile said under it; the layers after
+    /// it move up one.
+    pub fn removeDataLayer(self: *TileSet, index: u8) void {
+        if (index >= self.layer_count) return;
+        for (self.sources.items) |*source| {
+            var it = source.tiles.valueIterator();
+            while (it.next()) |tile| {
+                std.mem.copyForwards(Value, tile.data[index .. max_data_layers - 1], tile.data[index + 1 ..]);
+                tile.data[max_data_layers - 1] = .{ .int = 0 };
+            }
+        }
+        std.mem.copyForwards(DataLayer, self.layers[index .. max_data_layers - 1], self.layers[index + 1 ..]);
+        self.layer_count -= 1;
+        self.layers[self.layer_count] = .{};
+    }
+
+    /// Let a layer hold another kind. What tiles said under it goes: a
+    /// number is not a truth.
+    pub fn setDataLayerKind(self: *TileSet, index: u8, kind: DataKind) void {
+        if (index >= self.layer_count or self.layers[index].kind == kind) return;
+        self.layers[index].kind = kind;
+        self.forget(index);
+    }
+
+    /// Every tile says nothing under the layer at `index`.
+    fn forget(self: *TileSet, index: u8) void {
+        for (self.sources.items) |*source| {
+            var it = source.tiles.valueIterator();
+            while (it.next()) |tile| tile.data[index] = .{ .int = 0 };
+        }
+    }
+
+    /// What the tile a cell holds says under the layer called `name`: null
+    /// for an empty cell, or a name the set has no layer of.
+    pub fn dataOf(self: *const TileSet, cell: Cell, name: []const u8) ?Value {
+        if (cell.isEmpty()) return null;
+        const index = self.dataLayerNamed(name) orelse return null;
+        return self.tileOf(cell).valueIn(index, self.layers[index].kind);
+    }
 
     pub fn sourceById(self: *const TileSet, source_id: u8) ?*const Source {
         for (self.sources.items) |*held| {
@@ -445,6 +617,17 @@ const Document = struct {
         try w.beginObject();
         try w.field("fluxion_tileset", @as(u32, version));
         try w.field("tile_size", [2]u16{ self.set.tile_width, self.set.tile_height });
+        if (self.set.layer_count > 0) {
+            try w.key("data_layers");
+            try w.beginArray();
+            for (self.set.dataLayers()) |*layer| {
+                try w.beginObject();
+                try w.field("name", layer.name());
+                try w.field("type", layer.kind);
+                try w.endObject();
+            }
+            try w.endArray();
+        }
         try w.key("sources");
         try w.beginArray();
         for (self.set.sources.items) |*source| try self.writeSource(w, source);
@@ -468,23 +651,42 @@ const Document = struct {
             var x: u16 = 0;
             while (x < 256) : (x += 1) {
                 const tile = source.tiles.get(Source.key(@intCast(x), @intCast(y))) orelse continue;
-                try writeTile(w, @intCast(x), @intCast(y), tile);
+                // One a layer taken away left with nothing to say.
+                if (tile.isPlain()) continue;
+                try self.writeTile(w, @intCast(x), @intCast(y), tile);
             }
         }
         try w.endArray();
         try w.endObject();
     }
 
-    fn writeTile(w: *json.Writer, x: u8, y: u8, tile: Tile) json.Writer.Error!void {
+    fn writeTile(self: Document, w: *json.Writer, x: u8, y: u8, tile: Tile) json.Writer.Error!void {
         try w.beginObject();
         try w.field("at", [2]u8{ x, y });
-        try w.field("collision", tile.collision);
+        if (tile.collision != .none) try w.field("collision", tile.collision);
         if (tile.collision == .polygon) {
             try w.key("polygon");
             try w.beginArray();
             for (tile.points[0..tile.point_count]) |point| try w.write([2]f32{ point.x, point.y });
             try w.endArray();
         }
+        if (tile.probability != 1) try w.field("probability", tile.probability);
+        var any = false;
+        for (self.set.dataLayers(), 0..) |*layer, i| {
+            const value = tile.valueIn(i, layer.kind);
+            if (value.isZero()) continue;
+            if (!any) {
+                any = true;
+                try w.key("data");
+                try w.beginObject();
+            }
+            switch (value) {
+                .int => |n| try w.field(layer.name(), n),
+                .float => |f| try w.field(layer.name(), f),
+                .bool => |b| try w.field(layer.name(), b),
+            }
+        }
+        if (any) try w.endObject();
         try w.endObject();
     }
 };
@@ -497,7 +699,13 @@ const Document = struct {
 const FileShape = struct {
     fluxion_tileset: u32,
     tile_size: [2]u16 = .{ default_tile_size, default_tile_size },
+    data_layers: []const LayerShape = &.{},
     sources: []const SourceShape = &.{},
+};
+
+const LayerShape = struct {
+    name: []const u8,
+    type: DataKind,
 };
 
 const SourceShape = struct {
@@ -512,6 +720,9 @@ const TileShape = struct {
     at: [2]u8,
     collision: Collision = .none,
     polygon: []const [2]f32 = &.{},
+    probability: f32 = 1,
+    /// Values by the name of the layer they are under.
+    data: json.Value = .null,
 };
 
 /// Fill `into`, which has no content yet, from a file's text. What does not
@@ -541,6 +752,13 @@ fn read(app: *App, into: *TileSet, text: []const u8) !void {
     errdefer into.deinitContent(gpa);
     into.tile_width = @max(shape.tile_size[0], 1);
     into.tile_height = @max(shape.tile_size[1], 1);
+    for (shape.data_layers) |layer| {
+        _ = into.addDataLayer(layer.name, layer.type) catch |err| switch (err) {
+            error.TooManyDataLayers => log.warn("{s} has more than {d} data layers; {s} is passed over", .{ into.source, max_data_layers, layer.name }),
+            error.DataLayerTaken => log.warn("{s} has two data layers named {s}; the second is passed over", .{ into.source, layer.name }),
+            error.NoName => log.warn("{s} has a data layer with no name, which is passed over", .{into.source}),
+        };
+    }
     for (shape.sources) |given| {
         if (into.sourceById(given.id) != null) {
             log.warn("{s} has two sources numbered {d}; the second is passed over", .{ into.source, given.id });
@@ -569,10 +787,56 @@ fn read(app: *App, into: *TileSet, text: []const u8) !void {
                     kept.point_count = @intCast(tile.polygon.len);
                 }
             }
+            if (tile.probability >= 0) {
+                kept.probability = tile.probability;
+            } else log.warn("{s}: tile ({d}, {d}) is picked with a probability of {d}, and none is below nought; it has 1", .{ into.source, tile.at[0], tile.at[1], tile.probability });
+            readData(into, &kept, tile);
+            if (kept.isPlain()) continue;
             try made.tiles.put(gpa, Source.key(tile.at[0], tile.at[1]), kept);
         }
         try into.sources.append(gpa, made);
     }
+}
+
+/// A tile's values, by the names of the layers they are under. A name the set
+/// has no layer of, or a value its layer cannot hold, is said and passed over.
+fn readData(set: *const TileSet, into: *Tile, given: TileShape) void {
+    const values = switch (given.data) {
+        .null => return,
+        .object => |object| object,
+        else => return log.warn("{s}: the data of tile ({d}, {d}) is not names and values", .{ set.source, given.at[0], given.at[1] }),
+    };
+    for (values.keys(), values.values()) |name, value| {
+        const index = set.dataLayerNamed(name) orelse {
+            log.warn("{s}: tile ({d}, {d}) says {s}, and the set has no data layer of that name", .{ set.source, given.at[0], given.at[1], name });
+            continue;
+        };
+        const kind = set.layers[index].kind;
+        into.data[index] = valueOf(kind, value) orelse {
+            log.warn("{s}: tile ({d}, {d}) says {s}, which holds {t}, and what it says is not one", .{ set.source, given.at[0], given.at[1], name, kind });
+            continue;
+        };
+    }
+}
+
+/// A value from the file as a layer of `kind` holds it: a whole number is a
+/// float as well, and nothing else is anything but itself.
+fn valueOf(kind: DataKind, value: json.Value) ?Value {
+    return switch (kind) {
+        .int => switch (value) {
+            .int => |n| .{ .int = n },
+            else => null,
+        },
+        .float => switch (value) {
+            .int => |n| .{ .float = @floatFromInt(n) },
+            .float => |f| .{ .float = f },
+            else => null,
+        },
+        .bool => switch (value) {
+            .bool => |b| .{ .bool = b },
+            else => null,
+        },
+    };
 }
 
 // -------------------------------------------------------------------------
@@ -665,6 +929,104 @@ test "a set written back reads as the set it was, with what an editor changed" {
     const twice = try app.tile_sets.textOf(app, testing.allocator, handle);
     defer testing.allocator.free(twice);
     try testing.expectEqualStrings(text, twice);
+}
+
+const with_data =
+    \\{
+    \\  "fluxion_tileset": 1,
+    \\  "tile_size": [16, 16],
+    \\  "data_layers": [{ "name": "damage", "type": "int" }, { "name": "water", "type": "bool" }, { "name": "slow", "type": "float" }],
+    \\  "sources": [{
+    \\    "id": 0,
+    \\    "tiles": [
+    \\      { "at": [0, 0], "collision": "full", "data": { "damage": 2 } },
+    \\      { "at": [1, 0], "probability": 0.25, "data": { "water": true, "slow": 1 } },
+    \\      { "at": [2, 0], "data": { "damage": 0 } },
+    \\    ]
+    \\  }]
+    \\}
+;
+
+test "a tile set's data layers and a tile's probability read, and write back as they were" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const handle = try app.tile_sets.add(app, "data.tileset", with_data);
+    const set = app.tile_sets.get(handle).?;
+
+    try testing.expectEqual(@as(usize, 3), set.dataLayers().len);
+    try testing.expectEqual(DataKind.bool, set.dataLayers()[1].kind);
+    try testing.expectEqual(Value{ .int = 2 }, set.dataOf(.at(0, 0, 0), "damage").?);
+    try testing.expectEqual(Value{ .bool = true }, set.dataOf(.at(0, 1, 0), "water").?);
+    // A whole number is a float too, where the layer holds floats.
+    try testing.expectEqual(Value{ .float = 1 }, set.dataOf(.at(0, 1, 0), "slow").?);
+    // A tile that says nothing under a layer says its nought.
+    try testing.expectEqual(Value{ .int = 0 }, set.dataOf(.at(0, 1, 0), "damage").?);
+    try testing.expectEqual(Value{ .bool = false }, set.dataOf(.at(0, 5, 5), "water").?);
+    // No layer of that name, and no tile at all, say nothing.
+    try testing.expect(set.dataOf(.at(0, 0, 0), "speed") == null);
+    try testing.expect(set.dataOf(.empty, "damage") == null);
+    try testing.expectEqual(@as(f32, 0.25), set.tileOf(.at(0, 1, 0)).probability);
+    try testing.expectEqual(@as(f32, 1), set.tileOf(.at(0, 0, 0)).probability);
+    // A tile whose every word is its default is not kept.
+    try testing.expect(!set.sources.items[0].tiles.contains(Source.key(2, 0)));
+
+    const text = try app.tile_sets.textOf(app, testing.allocator, handle);
+    defer testing.allocator.free(text);
+    const again = app.tile_sets.get(try app.tile_sets.add(app, "again.tileset", text)).?;
+    try testing.expectEqual(@as(usize, 3), again.dataLayers().len);
+    try testing.expectEqualStrings("slow", again.dataLayers()[2].name());
+    try testing.expectEqual(Value{ .int = 2 }, again.dataOf(.at(0, 0, 0), "damage").?);
+    try testing.expectEqual(Value{ .float = 1 }, again.dataOf(.at(0, 1, 0), "slow").?);
+    try testing.expectEqual(@as(f32, 0.25), again.tileOf(.at(0, 1, 0)).probability);
+    // What says nothing is not written: no collision of none, no probability
+    // of one, no nought.
+    try testing.expect(std.mem.indexOf(u8, text, "\"none\"") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"probability\": 1") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"damage\": 0") == null);
+}
+
+test "a value for a layer the set has not got, or of the wrong kind, is passed over and the rest reads" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const handle = try app.tile_sets.add(app, "odd.tileset",
+        \\{ "fluxion_tileset": 1, "data_layers": [{ "name": "damage", "type": "int" }],
+        \\  "sources": [{ "id": 0, "tiles": [{ "at": [0, 0], "collision": "full", "data": { "damage": 1.5, "speed": 3 } }] }] }
+    );
+    const set = app.tile_sets.get(handle).?;
+    try testing.expectEqual(Collision.full, set.tileOf(.at(0, 0, 0)).collision);
+    try testing.expectEqual(Value{ .int = 0 }, set.dataOf(.at(0, 0, 0), "damage").?);
+
+    // A kind the engine has no layer of does not read at all.
+    const unknown = try app.tile_sets.add(app, "unknown.tileset",
+        \\{ "fluxion_tileset": 1, "data_layers": [{ "name": "colour", "type": "color" }] }
+    );
+    try testing.expectEqual(@as(usize, 0), app.tile_sets.get(unknown).?.dataLayers().len);
+}
+
+test "a data layer taken out moves the ones after it up, and one given another kind forgets its values" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const handle = try app.tile_sets.add(app, "data.tileset", with_data);
+    const set = app.tile_sets.edit(handle).?;
+
+    set.removeDataLayer(0);
+    try testing.expectEqual(@as(usize, 2), set.dataLayers().len);
+    try testing.expect(set.dataOf(.at(0, 0, 0), "damage") == null);
+    try testing.expectEqual(Value{ .bool = true }, set.dataOf(.at(0, 1, 0), "water").?);
+    try testing.expectEqual(Value{ .float = 1 }, set.dataOf(.at(0, 1, 0), "slow").?);
+
+    set.setDataLayerKind(0, .int);
+    try testing.expectEqual(Value{ .int = 0 }, set.dataOf(.at(0, 1, 0), "water").?);
+
+    // A new layer starts with every tile saying nothing under it, whatever a
+    // layer taken away left behind in its place.
+    try testing.expectEqual(@as(u8, 2), try set.addDataLayer("depth", .int));
+    try testing.expectEqual(Value{ .int = 0 }, set.dataOf(.at(0, 1, 0), "depth").?);
+    try testing.expectError(error.DataLayerTaken, set.addDataLayer("water", .bool));
+    try testing.expectError(error.DataLayerTaken, set.renameDataLayer(2, "slow"));
+    try testing.expectError(error.NoName, set.addDataLayer("", .bool));
+    try set.renameDataLayer(2, "deep");
+    try testing.expect(set.dataLayerNamed("deep") != null);
 }
 
 test "a shape of fewer than three corners is no shape" {
