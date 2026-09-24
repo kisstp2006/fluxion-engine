@@ -123,6 +123,14 @@
             .url = "git+https://github.com/kisstp2006/fluxion-id#a52c29dfe5ac0a49a5d5469cdc1a4fb96b799ccc",
             .hash = "fluxion_id-0.1.0--9Hv-nGFAQAW36SvJvMB6L1nUNErZzh7JC0-nRPlrotw",
         },
+
+        // Sound: the mixer graph, its decoders and the sound devices, C++
+        // compiled by Zig. Its fluxion-id is pinned where this one is, so a
+        // clip's handle is one type.
+        .fluxion_audio = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-audio#f7b50ca01d948e3e52b48bdf53abbded13e267b7",
+            .hash = "fluxion_audio-0.1.0-uP5dN2OUBwDQ7prUABb-MDHhxAuVIOEnjLkciCdgypGN",
+        },
     },
     .paths = .{
         "build.zig",
