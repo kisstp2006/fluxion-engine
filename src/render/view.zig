@@ -46,6 +46,9 @@ pub const View = struct {
     width: f32,
     height: f32,
 
+    /// The render layers it sees: its camera's `cull_mask`.
+    cull_mask: u32 = 0xFFFF_FFFF,
+
     /// A world with no camera: the origin at the top left, one unit to the
     /// pixel.
     pub fn screen(width: f32, height: f32) View {
@@ -68,7 +71,9 @@ pub const View = struct {
             const places = chunk.slice(Transform2D);
             const cameras = chunk.slice(Camera2D);
             for (places, cameras, chunk.entities) |local, camera, entity| {
-                if (!camera.active) continue;
+                // A camera that draws a picture of its own is never looked
+                // through at the screen.
+                if (!camera.active or world.has(entity, components.RenderView)) continue;
                 // Ties go to the first found; see `Camera2D.priority`.
                 if (best_priority) |priority| {
                     if (camera.priority <= priority) continue;
@@ -79,20 +84,35 @@ pub const View = struct {
                 const placed = hierarchy.resolve(world, snapshots, entity, local, 1) orelse continue;
 
                 best_priority = camera.priority;
-                const scale = pixelsPerUnit(camera, width, height);
-                best = .{
-                    .x = placed.x,
-                    .y = placed.y,
-                    // The camera's own scale multiplies the zoom.
-                    .zoom_x = positive(scale * placed.scale_x),
-                    .zoom_y = positive(scale * placed.scale_y),
-                    .rotation = camera.rotation + placed.rotation,
-                    .width = width,
-                    .height = height,
-                };
+                best = .through(camera, placed, width, height);
             }
         }
         return best;
+    }
+
+    /// The same, with everything `by` times bigger: a stretched canvas's
+    /// scale on top of the camera's own.
+    pub fn zoomed(self: View, by: f32) View {
+        var out = self;
+        out.zoom_x = positive(self.zoom_x * by);
+        out.zoom_y = positive(self.zoom_y * by);
+        return out;
+    }
+
+    /// What one camera sees from where it is placed, at this size.
+    pub fn through(camera: Camera2D, placed: Transform2D, width: f32, height: f32) View {
+        const scale = pixelsPerUnit(camera, width, height);
+        return .{
+            .x = placed.x,
+            .y = placed.y,
+            // The camera's own scale multiplies the zoom.
+            .zoom_x = positive(scale * placed.scale_x),
+            .zoom_y = positive(scale * placed.scale_y),
+            .rotation = camera.rotation + placed.rotation,
+            .width = width,
+            .height = height,
+            .cull_mask = camera.cull_mask,
+        };
     }
 
     /// Where a point in the world is drawn, in pixels from the top left.

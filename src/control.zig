@@ -20,6 +20,7 @@ const attr = @import("attr.zig");
 const hierarchy = @import("hierarchy.zig");
 const Appearance = @import("inherited.zig").Appearance;
 const theme_file = @import("theme.zig");
+const shaders_mod = @import("shaders.zig");
 
 /// What a control looks like lives in a `.theme` file rather than in the
 /// world: see `theme.zig`. These are its words.
@@ -596,6 +597,9 @@ pub const NinePatchRect = extern struct {
 
 pub const Nodes = struct {
     textures: std.ArrayList(rhi.Texture) = .empty,
+    /// The boxes this frame's controls leave for their materials, by the
+    /// number the interface hands back: see `drawCustom`.
+    customs: std.ArrayList(Custom) = .empty,
     /// The names a control is declared with - its own, and the neighbours
     /// its focus goes to - kept until it is opened, which is when the
     /// interface reads them.
@@ -618,6 +622,7 @@ pub const Nodes = struct {
 
     pub fn deinit(self: *Nodes, gpa: std.mem.Allocator) void {
         self.textures.deinit(gpa);
+        self.customs.deinit(gpa);
         if (self.preview_ui) |*held_ui| held_ui.deinit();
         self.preview_interface.deinit();
         self.* = .{};
@@ -677,6 +682,7 @@ pub const Nodes = struct {
     fn drawRoots(self: *Nodes, context: Context) !void {
         const app = context.app;
         self.textures.clearRetainingCapacity();
+        self.customs.clearRetainingCapacity();
         for (app.world.archetypeSlice()) |*archetype| {
             for (archetype.entities.items) |entity| {
                 if (!app.world.has(entity, Control)) continue;
@@ -852,14 +858,17 @@ pub const Nodes = struct {
             .no_drag_scroll = !scroll.drag,
             .scrollbar = if (scroll.scrollbar) .{} else null,
         };
-        if (app.world.get(entity, TextureRect)) |picture| if (self.image(app, picture.texture, picture.tint, picture.region)) |drawn| {
-            out.image = drawn;
-            switch (picture.stretch) {
-                .fill => {},
-                .contain => out.contain = ratio(app, picture.texture),
-                .cover => out.cover = ratio(app, picture.texture),
+        if (app.world.get(entity, TextureRect)) |picture| {
+            const shown = shownTexture(app, entity, picture.texture);
+            if (self.image(app, shown, picture.tint, picture.region)) |drawn| {
+                out.image = drawn;
+                switch (picture.stretch) {
+                    .fill => {},
+                    .contain => out.contain = ratio(app, shown),
+                    .cover => out.cover = ratio(app, shown),
+                }
             }
-        };
+        }
         if (app.world.get(entity, NinePatchRect)) |picture| if (self.image(app, picture.texture, picture.tint, picture.region)) |drawn| {
             out.image = drawn;
             out.image.?.nine_slice = .{
@@ -870,6 +879,13 @@ pub const Nodes = struct {
                 .border = padding(picture.patch_margin),
             };
         };
+        // A colour or a picture with a material is drawn by its shader, in
+        // the box the interface leaves for it.
+        if (self.customOf(app, entity)) |index| {
+            out.custom = index;
+            out.background_color = .transparent;
+            out.image = null;
+        }
         const pressable = app.world.has(entity, Button) or app.world.has(entity, CheckBox) or app.world.has(entity, Slider);
         if (pressable and control.mouse_filter != .ignore) {
             out.cursor = .pointing_hand;
@@ -1040,7 +1056,47 @@ pub const Nodes = struct {
         layout.close();
         self.preview_interface.commands = try layout.end();
         self.preview_interface.textures = self.textures.items;
+        self.preview_interface.custom = app.interface.custom;
         try self.preview_interface.draw(app.gpa, &app.device, faces.slice(), .{ .texture = into }, width, height);
+    }
+
+    /// The number of the box a `ColorRect` or a `TextureRect` with a
+    /// material leaves for its shader, kept for `drawCustom`; null for one
+    /// drawn as it is.
+    fn customOf(self: *Nodes, app: *App, entity: Entity) ?u32 {
+        const held = app.world.get(entity, shaders_mod.Material) orelse return null;
+        if (app.shaders.compiledOf(held.shader) == null) return null;
+        var made: Custom = .{ .entity = entity, .shader = held.shader, .texture = app.assets.white };
+        if (app.world.get(entity, ColorRect)) |rect| {
+            made.tint = rect.color;
+        } else if (app.world.get(entity, TextureRect)) |picture| {
+            const shown = shownTexture(app, entity, picture.texture);
+            const texture = app.assets.get(shown) orelse return null;
+            made.texture = shown;
+            made.tint = picture.tint;
+            made.region = if (texture.upside_down) picture.region.flippedY() else picture.region;
+        } else return null;
+        self.customs.append(app.gpa, made) catch return null;
+        return @intCast(self.customs.items.len - 1);
+    }
+
+    /// Draw one of the boxes controls left for their materials: a quad over
+    /// the box, through the shader, with the picture and the colour the
+    /// control would have had. What the interface hands over between its
+    /// passes; see `ui_rhi.CustomDraw`.
+    pub fn drawCustom(self: *Nodes, app: *App, command: ui.RenderCommand, scissor: ?rhi.Rect, into: rhi.RenderTarget, size: ui.Dimensions) !void {
+        const index = command.config.custom.data;
+        if (index >= self.customs.items.len) return;
+        const made = self.customs.items[index];
+        const texture = app.assets.get(made.texture) orelse app.assets.get(app.assets.white) orelse return;
+        const box = command.bounding_box;
+        const faded = command.config.custom.tint;
+        try app.sprites.drawQuad(app.gpa, made.entity, made.shader, into, size.width, size.height, .{
+            .placement = .{ box.x, box.y, box.width, box.height },
+            .spin = .{ 0, 0, 1, 0 },
+            .tint = .{ made.tint.r * faded.r, made.tint.g * faded.g, made.tint.b * faded.b, made.tint.a * faded.a },
+            .uv_rect = .{ made.region.u0, made.region.v0, made.region.u1, made.region.v1 },
+        }, texture.gpu, app.assets.samplerFor(texture.filter, texture.wrap), scissor);
     }
 
     pub fn previewBox(self: *Nodes, entity: Entity) ?ui.BoundingBox {
@@ -1049,8 +1105,11 @@ pub const Nodes = struct {
         return layout.boxOf(idOf(&id, entity));
     }
 
-    fn image(self: *Nodes, app: *App, handle: Assets.TextureHandle, tint: Color, region: Region) ?ui.layout.Image {
+    fn image(self: *Nodes, app: *App, handle: Assets.TextureHandle, tint: Color, own_region: Region) ?ui.layout.Image {
         const texture = app.assets.get(handle) orelse return null;
+        // A picture drawn into, on a backend that counts rows from the
+        // bottom, is shown turned over.
+        const region = if (texture.upside_down) own_region.flippedY() else own_region;
         var slot: ?u32 = null;
         for (self.textures.items, 0..) |held, index| if (std.meta.eql(held, texture.gpu)) {
             slot = @intCast(index);
@@ -1066,6 +1125,21 @@ pub const Nodes = struct {
             .tint = color(tint),
         };
     }
+};
+
+/// The texture a texture rect shows: a render view's picture, for one with a
+/// `ViewTexture`, or its own.
+fn shownTexture(app: *App, entity: Entity, own: Assets.TextureHandle) Assets.TextureHandle {
+    return app.views.shown(&app.world, entity, own);
+}
+
+/// A box a control left for its material, and what to draw in it.
+const Custom = struct {
+    entity: Entity,
+    shader: shaders_mod.ShaderHandle,
+    texture: Assets.TextureHandle,
+    tint: Color = .white,
+    region: Region = .full,
 };
 
 const Context = struct {

@@ -358,8 +358,13 @@ pub const Camera2D = extern struct {
 
     active: bool = true,
 
+    /// The render layers it sees: what an `Appearance` puts on layers it
+    /// does not have is not drawn through it. See `Appearance.render_layers`.
+    cull_mask: u32 = 0xFFFF_FFFF,
+
     pub const reflect_name = "Camera2D";
     pub const reflect_fields = .{
+        .cull_mask = .{ attr.Layers{ .names = .render_2d }, attr.Doc{ .text = "The render layers it sees" } },
         .fit_width = .{attr.Doc{ .text = "Always shown whole; zero is no fit" }},
         .fit_height = .{attr.Doc{ .text = "Always shown whole; zero is no fit" }},
         .rotation = .{ attr.Angle{}, attr.Doc{ .text = "Clockwise on screen; the world turns the other way" } },
@@ -373,6 +378,47 @@ pub const Camera2D = extern struct {
     pub fn fitting(width: f32, height: f32) Camera2D {
         return .{ .fit_width = width, .fit_height = height };
     }
+};
+
+/// A camera that draws into a picture of its own rather than onto the
+/// screen: a game in an arcade cabinet, a minimap, a monitor on a wall.
+/// Beside a `Camera2D`, which says how close it is and what it sees, and a
+/// `Transform2D`, which says where it looks. The screen is never looked at
+/// through it.
+///
+/// What it draws is shown by a `ViewTexture` on a `Sprite` or a
+/// `TextureRect`, or by `App.viewTexture` from code: drawn every frame
+/// before the screen is, so what shows it shows this frame's.
+pub const RenderView = extern struct {
+    width: u32 = 320,
+    height: u32 = 180,
+    clear_color: Color = .black,
+    /// Nearest keeps a small picture's pixels square when it is shown
+    /// bigger; linear smooths it.
+    filter: Filter = .nearest,
+    /// Off, it keeps the last picture it drew.
+    active: bool = true,
+
+    pub const Filter = enum(u8) { nearest, linear };
+
+    pub const reflect_name = "RenderView";
+    pub const reflect_fields = .{
+        .width = .{ attr.Range{ .min = 1, .max = 4096, .step = 1 }, attr.Unit{ .text = "px" } },
+        .height = .{ attr.Range{ .min = 1, .max = 4096, .step = 1 }, attr.Unit{ .text = "px" } },
+        .clear_color = .{attr.Doc{ .text = "What the picture is cleared to before the world is drawn" }},
+        .active = .{attr.Doc{ .text = "Off, it keeps the last picture it drew" }},
+    };
+};
+
+/// Shows the picture a `RenderView` draws, in place of its own texture:
+/// beside a `Sprite` or a `TextureRect`.
+pub const ViewTexture = extern struct {
+    view: Entity = .none,
+
+    pub const reflect_name = "ViewTexture";
+    pub const reflect_fields = .{
+        .view = .{attr.Doc{ .text = "The entity whose RenderView's picture is shown" }},
+    };
 };
 
 /// Something that moves as a solid object: it falls, is pushed and bounces.

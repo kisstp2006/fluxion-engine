@@ -100,6 +100,13 @@ fixed_button_released: Buttons = .initEmpty(),
 /// simply right. `App` sets it around the fixed stage; nothing else should.
 clock: Clock = .frame,
 
+/// Where on the window the frame is shown, and how many of its pixels one of
+/// the window's is: what turns every pointer position and movement this
+/// reads from the window's pixels into the frame's. The identity until a
+/// project stretches its game to the window; see `stretch.zig`.
+frame_origin: math.Vec2 = .zero,
+frame_ratio: f32 = 1,
+
 /// Where the pointer is, in pixels from the top left of the content area,
 /// and how far it moved this frame.
 pointer: Pointer = .{},
@@ -1000,6 +1007,15 @@ pub fn readPads(self: *Input, devices: []const platform.Gamepad) void {
 /// Fold one platform event in. Events that are not input are ignored, so a
 /// caller may hand over everything the queue produced. A dialog's answer is
 /// input too: see `dialogAnswers`.
+/// A point across the window, in the frame's pixels.
+fn frameX(self: *const Input, x: f64) f32 {
+    return (@as(f32, @floatCast(x)) - self.frame_origin.x) * self.frame_ratio;
+}
+
+fn frameY(self: *const Input, y: f64) f32 {
+    return (@as(f32, @floatCast(y)) - self.frame_origin.y) * self.frame_ratio;
+}
+
 pub fn apply(self: *Input, ev: platform.Event) void {
     if (comptime dialog.available) {
         switch (ev) {
@@ -1053,8 +1069,8 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             self.mods = b.mods;
             // A locked pointer has no position to report.
             if (!self.pointer.locked) {
-                self.pointer.x = @floatCast(b.x);
-                self.pointer.y = @floatCast(b.y);
+                self.pointer.x = self.frameX(b.x);
+                self.pointer.y = self.frameY(b.y);
             }
             const i = @intFromEnum(b.button);
             if (i >= button_span) return;
@@ -1090,16 +1106,17 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 // in the background, the hand on the mouse is using another
                 // program.
                 if (self.focused) {
-                    self.pointer.dx += @floatCast(m.dx);
-                    self.pointer.dy += @floatCast(m.dy);
+                    self.pointer.dx += @as(f32, @floatCast(m.dx)) * self.frame_ratio;
+                    self.pointer.dy += @as(f32, @floatCast(m.dy)) * self.frame_ratio;
                 }
                 return;
             }
-            self.pointer.x = @floatCast(m.x);
-            self.pointer.y = @floatCast(m.y);
-            self.pointer.dx += @floatCast(m.dx);
-            self.pointer.dy += @floatCast(m.dy);
-            self.pushMotion(.init(@floatCast(m.dx), @floatCast(m.dy)));
+            self.pointer.x = self.frameX(m.x);
+            self.pointer.y = self.frameY(m.y);
+            const moved: math.Vec2 = .init(@as(f32, @floatCast(m.dx)) * self.frame_ratio, @as(f32, @floatCast(m.dy)) * self.frame_ratio);
+            self.pointer.dx += moved.x;
+            self.pointer.dy += moved.y;
+            self.pushMotion(moved);
         },
         .cursor_enter => |s| self.pointer.inside = s.value,
         .scroll => |w| {
@@ -1122,8 +1139,8 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             const point = comptime @hasField(platform.event.DropEvent, "x");
             self.dropFiles(.{
                 .paths = d.paths,
-                .x = if (point) @floatCast(d.x) else self.pointer.x,
-                .y = if (point) @floatCast(d.y) else self.pointer.y,
+                .x = if (point) self.frameX(d.x) else self.pointer.x,
+                .y = if (point) self.frameY(d.y) else self.pointer.y,
             });
         },
         .suspended => {

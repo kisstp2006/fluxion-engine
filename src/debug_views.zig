@@ -143,7 +143,7 @@ fn drawSprites(app: *App) !void {
 }
 
 fn drawCameras(app: *App) !void {
-    const view: View = .of(&app.world, &app.snapshots, @floatFromInt(app.width), @floatFromInt(app.height));
+    const view = app.currentView();
     app.debug.polygon2d(&.{
         view.toWorld(.init(0, 0)),
         view.toWorld(.init(view.width, 0)),

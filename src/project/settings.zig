@@ -45,6 +45,7 @@ const audio = @import("../audio.zig");
 const attr = @import("../attr.zig");
 const Color = @import("../color.zig").Color;
 const settings_file = @import("../settings_file.zig");
+const stretch = @import("../stretch.zig");
 
 /// What the file is called, at the root of a project's folder.
 pub const file_name = "project.fluxion";
@@ -130,6 +131,13 @@ pub const Display = struct {
     resizable: bool = true,
     mode: Mode = .windowed,
     vsync: bool = true,
+    /// How the game, made at `width` by `height`, is shown in a window of
+    /// another size. See `stretch.zig`.
+    stretch_mode: stretch.Mode = .disabled,
+    stretch_aspect: stretch.Aspect = .keep,
+    /// The least the player may drag the window to; nought is no least.
+    min_width: u32 = 0,
+    min_height: u32 = 0,
 
     pub const Mode = enum {
         /// A window of `width` by `height`.
@@ -146,6 +154,10 @@ pub const Display = struct {
         .resizable = .{ attr.Restart{}, attr.Doc{ .text = "Whether the player may drag the window's edges." } },
         .mode = .{ attr.Restart{}, attr.Doc{ .text = "Whether the game opens in a window, maximised, or filling the screen." } },
         .vsync = .{ attr.Restart{}, attr.Doc{ .text = "Wait for the screen between frames, so a frame is never shown half drawn." } },
+        .stretch_mode = .{ attr.Restart{}, attr.Doc{ .text = "Disabled: a bigger window shows more. Canvas: laid out at the width and height above and drawn at the window's, scaled. Picture: drawn at that size and the picture scaled to the window, for pixel art." } },
+        .stretch_aspect = .{ attr.Restart{}, attr.Doc{ .text = "Keep: always this shape, with bars where the window has room to spare. Expand: the spare room shows more of the game." } },
+        .min_width = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "The narrowest the window may be dragged to; nought is no least." } },
+        .min_height = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "The lowest the window may be dragged to; nought is no least." } },
     };
 };
 
@@ -153,12 +165,18 @@ pub const Display = struct {
 pub const Rendering = struct {
     renderer: Renderer = .compatibility,
     clear_color: Color = default_clear_color,
+    /// How a texture is sampled when it does not say: nearest keeps pixel
+    /// art's pixels square, linear smooths a painting.
+    default_texture_filter: TextureFilter = .nearest,
+
+    pub const TextureFilter = enum { nearest, linear };
 
     pub const default_clear_color: Color = .hex(0x0E1013);
 
     pub const reflect_fields = .{
         .renderer = .{ attr.Restart{}, attr.Doc{ .text = "The family of graphics APIs the game is drawn with." } },
         .clear_color = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "What every frame is cleared to, under the world." } },
+        .default_texture_filter = .{ attr.Restart{}, attr.Doc{ .text = "How a texture is sampled when it does not say: nearest for pixel art, linear for a painting." } },
     };
 };
 
@@ -192,6 +210,9 @@ pub const LayerNames = struct {
     /// The 2D physics layers, first to last, `""` for one with no name - at
     /// most 32: what an editor shows beside a layer's toggle.
     physics_2d: []const []const u8 = &.{},
+    /// The 2D render layers, the same way: what an `Appearance` puts a
+    /// branch on and a camera sees.
+    render_2d: []const []const u8 = &.{},
 
     pub const max = 32;
 
@@ -203,11 +224,22 @@ pub const LayerNames = struct {
             attr.Range{ .min = 0, .max = max },
             attr.Doc{ .text = "A name for each 2D physics layer, shown beside its toggle." },
         },
+        .render_2d = .{
+            attr.Label{ .text = "2D Render" },
+            attr.Layers{ .names = .render_2d },
+            attr.Range{ .min = 0, .max = max },
+            attr.Doc{ .text = "A name for each 2D render layer, shown beside its toggle." },
+        },
     };
 
     /// The name of the 2D physics layer numbered from 0, or `""`.
     pub fn physics2d(self: LayerNames, layer: usize) []const u8 {
         return if (layer < self.physics_2d.len) self.physics_2d[layer] else "";
+    }
+
+    /// The name of the 2D render layer numbered from 0, or `""`.
+    pub fn render2d(self: LayerNames, layer: usize) []const u8 {
+        return if (layer < self.render_2d.len) self.render_2d[layer] else "";
     }
 };
 

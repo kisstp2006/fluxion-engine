@@ -80,9 +80,14 @@ pub const Appearance = extern struct {
     z: i16 = 0,
     /// Whether `z` is added to the one it inherits, or stands on its own.
     z_relative: bool = true,
+    /// The render layers it and what hangs from it are drawn on, as a
+    /// camera's `cull_mask` sees them: a game in a cabinet on one only its
+    /// view sees. Nought is its parent's, and the top's is the first.
+    render_layers: u32 = 0,
 
     pub const reflect_name = "Appearance";
     pub const reflect_fields = .{
+        .render_layers = .{ attr.Layers{ .names = .render_2d }, attr.Doc{ .text = "The render layers it and everything under it are on; none is its parent's" } },
         .visible = .{attr.Doc{ .text = "Whether it and everything under it is drawn" }},
         .modulate = .{attr.Doc{ .text = "Multiplied into its colours and everything under it" }},
         .z = .{attr.Doc{ .text = "Added to the layer it and everything under it is drawn on" }},
@@ -97,6 +102,8 @@ pub const Resolved = struct {
     visible: bool = true,
     modulate: Color = .white,
     z: i32 = 0,
+    /// Never nought: the first, unless something above says otherwise.
+    render_layers: u32 = 1,
 
     /// The layer something on `layer` is drawn on under this.
     pub fn layer(self: Resolved, own: i16) i16 {
@@ -182,6 +189,7 @@ fn ownOver(world: *const ecs.World, entity: Entity, above: Resolved) Resolved {
         out.visible = above.visible and appearance.visible;
         out.modulate = times(above.modulate, appearance.modulate);
         out.z = if (appearance.z_relative) above.z + appearance.z else appearance.z;
+        if (appearance.render_layers != 0) out.render_layers = appearance.render_layers;
     }
     return out;
 }

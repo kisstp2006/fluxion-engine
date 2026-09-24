@@ -106,6 +106,13 @@ what layering costs - no extra textures, no compositing pass. What
 Today **the 2D layer and the interface are written**. The 3D pass has its
 place in `App.drawLayers` and nothing in it.
 
+A frame something reads - a shader of a material's that reads what is drawn
+under it - or a game stretched to its window is drawn into a texture of its
+own instead, copied where it is read, and put on the window last: see
+[Shaders and materials](#-shaders-and-materials) and
+[Made at one size](#-made-at-one-size). Every other frame is drawn straight
+on the window, as before.
+
 ## 🔁 The frame
 
 Seven stages, and the list is the frame in order:
@@ -536,7 +543,32 @@ if (app.resized) layOutAgain(app.width, app.height);
   at once.
 - **`Options.resizable` and `Options.maximized`** say what can only be said
   when the window is made. Without a window - headless - all of this is
-  nothing, and says so without failing.
+  nothing, and says so without failing. The project's `display.min_width`
+  and `min_height` are the least the player may drag the window to.
+
+## 📐 Made at one size
+
+```json
+"display": { "width": 640, "height": 360, "stretch_mode": "canvas", "stretch_aspect": "keep" }
+```
+
+- **`stretch_mode` fits a game made at one size to a window of any.**
+  `disabled` is the window as it is: a bigger one shows more. `canvas` lays
+  the world and the interface out at the project's `width` and `height` and
+  draws them at the window's, scaled - text stays sharp at any size.
+  `picture` draws everything at the project's size, into a picture of its
+  own, and scales the picture - pixel art stays pixels, sampled as
+  `rendering.default_texture_filter` says.
+- **`stretch_aspect` says what the spare room is.** `keep` keeps the
+  project's shape and fills the rest with bars; `expand` shows more of the
+  game the long way, the project's size the least of it.
+- **What the game sees is the frame**: `app.frame` - its `width` and
+  `height`, what the interface is laid out in and the camera's view is
+  sized by, and its `scale` - and the pointer in the frame's pixels, turned
+  from the window's as it comes, so `pointerInWorld` and a click on a
+  control need nothing. `app.width` and `app.height` are still the window's.
+- **An editor's window is its own**: `Options.stretch = .{}` is the window
+  itself, whatever the project says.
 
 ## 📋 The clipboard
 
@@ -884,7 +916,9 @@ _ = try world.spawnWith(.{
   is drawn on, added to the one it inherits unless `z_relative` is off. It is
   optional, as `Processing` is: an entity without one is shown as its parent
   is. A control takes the alpha and the visibility: see
-  [Controls and themes](#-controls-and-themes).
+  [Controls and themes](#-controls-and-themes). `render_layers` puts it and
+  everything under it on render layers of its own, which only a camera whose
+  `cull_mask` has them sees: see [Render views](#-render-views).
 - **Sorted back to front, blended, with no depth test.** A depth buffer and
   half-transparent pixels disagree about what is behind what. The sort is by
   `layer`, then `order`, then blend mode, then texture, then the order the
@@ -957,7 +991,9 @@ _ = try world.spawnWith(.{
   coordinate system the interface layer uses, so a game that has not thought
   about cameras yet can lay things out in screen coordinates. A game designed
   at one size says so - `Camera2D.fitting(640, 360)` - and the whole of that
-  area is on screen in any window, with `zoom` multiplying it.
+  area is on screen in any window, with `zoom` multiplying it - or the
+  project's stretch fits the whole game to the window at once: see
+  [Made at one size](#-made-at-one-size).
 - **The pointer is found in the world through the same camera.**
   `app.pointerInWorld()`, `app.screenToWorld(x, y)` and
   `app.worldToScreen(x, y)` run the view the renderer draws with, forwards
@@ -978,7 +1014,99 @@ _ = try world.spawnWith(.{
 - **The shader is written once**, in
   [Fluxion Shader](https://github.com/kisstp2006/fluxion-shader)'s language,
   and comes out as GLSL and as HLSL. Two hand-written copies would drift, and
-  the drift shows up as one backend drawing correctly and the other not.
+  the drift shows up as one backend drawing correctly and the other not. A
+  sprite with no material is drawn with the plainest material there is -
+  its picture times its colour - through the same vertex stage as every
+  other.
+
+## ✨ Shaders and materials
+
+```
+// res://shaders/crt.shader
+uniform Crt : 1 {
+    float lines = 180.0;
+    float darkness = 0.35;
+}
+
+fragment {
+    vec4 under = sample(SCREEN_TEXTURE, SCREEN_UV);
+    float scan = step(0.5, fract(SCREEN_UV.y * lines));
+    target = vec4(under.rgb * mix(1.0, scan, darkness), 1.0) * COLOR;
+}
+```
+
+```zig
+const crt = try app.loadShader("res://shaders/crt.shader");
+try app.world.add(screen, fx.Material{ .shader = crt });
+try app.setShaderParam(screen, "darkness", &.{0.6});
+```
+
+- **A `.shader` file is a fragment stage**, in Fluxion Shader's language:
+  functions, constants, one `uniform` block of its own at slot 1, and a
+  `fragment` block. The engine writes the rest after it - the vertex stage
+  that places the quad, and what a material reads - so a line a message
+  names is the file's own. It reads `UV`, `COLOR` and `TEXTURE` for its
+  picture, `SCREEN_UV`, `SCREEN_TEXTURE` and `SCREEN_PIXEL_SIZE` for what is
+  drawn under it, and `TIME`, the seconds since the game started.
+- **A `Material` beside a `Sprite`, a `ColorRect` or a `TextureRect` draws
+  it through the shader.** A colour rect's picture is white and its colour
+  its own; a texture rect's is its texture. A control's box is left by the
+  interface for the shader and drawn in its place among the other controls:
+  a CRT on a canvas layer over everything is a colour rect with a material,
+  the size of the screen, that reads the screen.
+- **The block's fields are the material's numbers**, and a field says what
+  it starts as - `float darkness = 0.35;` - until a material gives it its
+  own: `app.setShaderParam(e, "darkness", &.{0.6})`, `app.shaderParam`,
+  and from a script as the material's own field,
+  `self.entity.get("Material").darkness = 0.6`. A `vec4` is a colour to a
+  script, a `vec2` and a `vec3` vectors. The numbers are the app's, kept
+  under the entity, and a scene writes them as the material's `params`.
+- **Materials batch as sprites do.** Sprites with the same shader, giving
+  it the same numbers, are one draw call; each set of numbers is a uniform
+  buffer of its own.
+- **Reading the screen costs a copy.** A frame with a material that reads
+  `SCREEN_TEXTURE` is drawn into a texture of its own, and what is drawn so
+  far is copied just before it - once, and again only when more has been
+  drawn since. A frame without one is drawn as it always was.
+- **A file that does not compile keeps its handle**, says why in the log at
+  its own lines - `3:14: cannot assign a vec3 ...` - and draws what names it
+  as though it named none. `app.shaderOf(handle).problems` keeps the words,
+  and `app.reloadShader` reads the file again. A name the engine's part
+  declares, written again in the file, is said to clash with "the engine's
+  part".
+- **Not here yet**: textures of a material's own besides its picture and the
+  screen's, a vertex stage of the file's, and materials on tile maps and on
+  a `Text2D`.
+
+## 📺 Render views
+
+```zig
+const arcade = try app.world.spawnWith(.{
+    fx.Transform2D.at(5000, 0),
+    fx.Camera2D{ .cull_mask = 0b10 },
+    fx.RenderView{ .width = 256, .height = 224 },
+});
+_ = try app.world.spawnWith(.{ fx.Transform2D.at(400, 200), fx.Sprite{}, fx.ViewTexture{ .view = arcade } });
+```
+
+- **A `RenderView` is a camera that draws into a picture** rather than on
+  the screen: a game in an arcade cabinet, a minimap, a monitor on a wall.
+  It sits beside a `Camera2D`, which says how close it is and what it sees,
+  and a `Transform2D`, which says where it looks. It is drawn every frame
+  it is `active`, before the screen, at its `width` and `height`, cleared to
+  its `clear_color`; the screen is never looked at through it.
+- **A `ViewTexture` shows the picture** in place of a `Sprite`'s or a
+  `TextureRect`'s own texture, at the picture's size unless the sprite says
+  one: `app.viewTexture(view)` is the picture's handle, for anything else a
+  texture goes on. A picture is never drawn into itself, and one drawn on
+  OpenGL is turned over as it is shown.
+- **Render layers keep a world out of the screen.** An `Appearance`'s
+  `render_layers` puts a branch on layers of its own, and a camera's
+  `cull_mask` says which layers it sees: the game in the cabinet on the
+  second layer, the main camera seeing only the first. Nought is the
+  parent's, and the top is on the first. `layer_names.render_2d` names them.
+- **The picture goes with its view**, at the end of the frame the view dies
+  in or loses its `RenderView`.
 
 ## 🧱 Tile maps
 
@@ -1613,7 +1741,7 @@ _ = try app.assets.reloadFile("res://art/hero.png");                 // changed 
 {
   "fluxion_project": 2,
   "application": { "name": "Meadow", "icon": "res://icon.png", "main_scene": "res://levels/meadow.json", "tags": ["2d"] },
-  "display": { "width": 1600, "height": 900, "mode": "maximized" },
+  "display": { "width": 1600, "height": 900, "mode": "maximized", "stretch_mode": "canvas" },
   "physics_2d": { "default_gravity": 420 },
   "layer_names": { "physics_2d": ["world", "player"] },
   "gui": { "theme": "res://ui/game.theme" },
@@ -1648,7 +1776,9 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   inside a section that no setting reads is passed over with a warning.
 - **The project says how the game opens**: the window's `width`, `height`,
   `resizable`, `mode` (`windowed`, `maximized`, `fullscreen`) and `vsync`,
-  the `clear_color`, the `ticks_per_second` of the fixed step, and the
+  how the game is fitted to it - `stretch_mode`, `stretch_aspect` - and the
+  least it may be dragged to, the `clear_color` and the
+  `default_texture_filter`, the `ticks_per_second` of the fixed step, and the
   `icon` on the window. What the game's own `App.Options` say overrules it,
   field by field; what neither says is the sections' defaults, so a folder
   with no project file opens as it always did.
@@ -2445,6 +2575,15 @@ Here, and checked by the tests:
   the system's own interface font and its monospaced one, as the system
   names them.
 - Culling against the camera, sprites and labels alike.
+- Materials: `.shader` files that are a fragment stage with the engine's
+  part after them, their block's first values and a material's own numbers
+  kept by entity, in scenes and from Flux; sprites, colour rects and texture
+  rects drawn through them, batched by shader and numbers; the frame copied
+  for what reads what is under it, at every place it is read.
+- Render views: cameras that draw into pictures a view texture shows,
+  render layers a camera's mask sees, and pictures let go of with their view.
+- A game made at one size, fitted to any window as a canvas or a picture,
+  keeping its shape or showing more, with the pointer in its pixels.
 - Tile maps: four-byte cells turned and flipped, in chunks found through an
   index, written compactly in scenes; `.tileset` files with sheets, shapes
   the physics stops at, probabilities and data layers asked for from Zig and

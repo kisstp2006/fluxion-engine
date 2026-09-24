@@ -25,6 +25,7 @@ const animation = @import("animation.zig");
 const sprite_frames = @import("sprite_frames.zig");
 const scenes = @import("scenes.zig");
 const script = @import("script.zig");
+const shaders = @import("shaders.zig");
 const theme = @import("theme.zig");
 const tileset = @import("tileset.zig");
 
@@ -39,6 +40,7 @@ pub const AssetKind = enum {
     audio,
     animation,
     frames,
+    shader,
 
     /// What a person calls one.
     pub fn label(self: AssetKind) []const u8 {
@@ -53,6 +55,7 @@ pub const AssetKind = enum {
             .audio => "sound",
             .animation => "animation library",
             .frames => "sprite frames",
+            .shader => "shader",
         };
     }
 
@@ -69,6 +72,7 @@ pub const AssetKind = enum {
             .audio => "A WAV, Ogg Vorbis or MP3 file",
             .animation => "Animations an AnimationPlayer plays",
             .frames => "Animations of pictures an AnimatedSprite shows",
+            .shader => "What a Material draws with",
         };
     }
 
@@ -85,6 +89,7 @@ pub const AssetKind = enum {
             .audio => "res://sounds/door.ogg",
             .animation => "res://ui/menu.anim",
             .frames => "res://art/hero.frames",
+            .shader => "res://shaders/crt.shader",
         };
     }
 
@@ -101,6 +106,7 @@ pub const AssetKind = enum {
             .audio => &audio.extensions,
             .animation => &.{animation.extension},
             .frames => &.{sprite_frames.extension},
+            .shader => &.{shaders.extension},
         };
     }
 
@@ -131,6 +137,7 @@ pub const AssetKind = enum {
             .audio => audio.AudioClipHandle,
             .animation => animation.AnimationLibraryHandle,
             .frames => sprite_frames.SpriteFramesHandle,
+            .shader => shaders.ShaderHandle,
         };
     }
 
@@ -143,7 +150,7 @@ pub const AssetKind = enum {
     }
 
     /// Every kind a component can hold a file of: the ones with a handle.
-    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio, .animation, .frames };
+    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio, .animation, .frames, .shader };
 };
 
 test "a file's kind is its ending's, whatever its case, and a scene's JSON is not said by its name" {

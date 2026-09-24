@@ -80,6 +80,10 @@ const events_mod = @import("events.zig");
 const script_mod = @import("script.zig");
 const sprite = @import("render/sprite.zig");
 const View = @import("render/view.zig").View;
+const Screen = @import("render/screen.zig").Screen;
+const shaders_mod = @import("shaders.zig");
+const views_mod = @import("views.zig");
+const stretch_mod = @import("stretch.zig");
 
 const Color = @import("color.zig").Color;
 const ConfigFile = @import("config.zig").ConfigFile;
@@ -177,6 +181,16 @@ pub const Options = struct {
     /// Open filling the screen. `width` and `height` are still the size of
     /// the window it goes back to.
     fullscreen: ?Fullscreen = null,
+
+    /// How the frame fits the window. Null is the project file's
+    /// `display.stretch_mode` and `stretch_aspect`, over its `width` and
+    /// `height`: an editor, whose window is its own and not the game's, says
+    /// `.{}` - the window itself. See `stretch.zig`.
+    stretch: ?stretch_mod.Stretch = null,
+
+    /// The least the window may be dragged to. Null is the project file's
+    /// `display.min_width` and `min_height`; an editor says its own.
+    min_size: ?[2]u32 = null,
 
     /// Put the project file's `application.icon` on the window. An editor,
     /// whose window is its own and not the game's, leaves it off.
@@ -439,6 +453,19 @@ audio: audio_mod.Audio,
 tweens: tween_mod.Tweens = .{},
 /// The words components keep beside them: see `texts.zig` and `textOf`.
 texts: texts_mod.Texts = .{},
+/// Every `.shader` file read, compiled for the 2D layer: see `shaders.zig`
+/// and `loadShader`.
+shaders: shaders_mod.Shaders = .{},
+/// The numbers each `Material` gives its shader: see `setShaderParam`.
+shader_params: shaders_mod.Params = .{},
+/// The picture each `RenderView` draws: see `views.zig` and `viewTexture`.
+views: views_mod.Views = .{},
+/// How the frame fits the window, and the size the game was made at. See
+/// `stretch.zig`.
+stretch: stretch_mod.Stretch = .{},
+/// What this frame is laid out and drawn at, and where on the window it is
+/// shown: the window itself unless the project stretches its game.
+frame: stretch_mod.Frame = .window(1, 1),
 /// Every `.anim` file read: see `animation.zig` and `loadAnimations`.
 animation_libraries: animation_mod.Libraries = .{},
 /// What each `AnimationPlayer`'s tracks are bound to.
@@ -473,6 +500,9 @@ project: Project,
 
 assets: Assets,
 sprites: sprite.Renderer,
+/// Where a frame something reads is drawn, and copied for what reads it.
+/// See `render/screen.zig`.
+screen: Screen,
 
 /// Lines, shapes and text drawn over everything, for one frame unless its
 /// style says for how many seconds. Inside `.fixed` they last until the next
@@ -679,6 +709,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .project = undefined,
         .assets = undefined,
         .sprites = undefined,
+        .screen = undefined,
         .debug = undefined,
         .debug_frame = .init(gpa),
         .debug_steps = .init(gpa),
@@ -782,6 +813,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.background = resolved.background;
     self.width = resolved.width;
     self.height = resolved.height;
+    self.stretch = resolved.stretch;
+    self.fitFrame();
     self.vsync_on = resolved.vsync;
     self.time.fixed_delta = resolved.fixed_delta;
     self.time.max_fps = resolved.max_fps;
@@ -796,6 +829,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Sprite,
         components.Text2D,
         components.Camera2D,
+        components.RenderView,
+        components.ViewTexture,
         components.RigidBody2D,
         components.Collider2D,
         components.Area2D,
@@ -806,6 +841,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         tween_mod.Tween,
         animation_mod.AnimationPlayer,
         sprite_frames_mod.AnimatedSprite,
+        shaders_mod.Material,
         inherited_mod.Processing,
         inherited_mod.Appearance,
         tilemap.TileMap,
@@ -836,7 +872,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, animation_mod.AnimationLibraryHandle, sprite_frames_mod.SpriteFramesHandle, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
+    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, animation_mod.AnimationLibraryHandle, sprite_frames_mod.SpriteFramesHandle, shaders_mod.ShaderHandle, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -870,6 +906,10 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             return err;
         };
         self.clipboard.system = &self.window.?.ctx;
+        if (resolved.min_size[0] > 0 or resolved.min_size[1] > 0) {
+            self.window.?.setSizeLimits(.{ .min_width = resolved.min_size[0], .min_height = resolved.min_size[1] }) catch |err|
+                log.warn("the window's least size could not be set: {t}", .{err});
+        }
     }
     errdefer if (self.window) |*w| w.close();
 
@@ -940,11 +980,22 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 
     self.assets = try .init(gpa, &self.device, options.io, &self.project);
     errdefer self.assets.deinit();
+    if (self.project.settings) |held| self.assets.default_filter = switch (held.rendering.default_texture_filter) {
+        .nearest => .nearest,
+        .linear => .linear,
+    };
     if (options.project_icon) self.useProjectIcon();
 
     self.sprites = try .init(gpa, &self.device);
     errdefer self.sprites.deinit(gpa);
+    self.screen = try .init(gpa, &self.device);
+    errdefer self.screen.deinit();
     self.sprites.texts = &self.texts;
+    self.sprites.shaders = &self.shaders;
+    self.sprites.params = &self.shader_params;
+    self.sprites.screen = &self.screen;
+    self.sprites.views = &self.views;
+    self.interface.custom = .{ .context = self, .draw = drawControlBox };
 
     self.debug_renderer = try .init(gpa, &self.device, .{});
     errdefer self.debug_renderer.deinit();
@@ -972,6 +1023,8 @@ fn titleOf(options: Options, settings: ?Project.Settings) []const u8 {
 const Resolved = struct {
     width: u32,
     height: u32,
+    stretch: stretch_mod.Stretch,
+    min_size: [2]u32,
     vsync: bool,
     resizable: bool,
     maximized: bool,
@@ -989,6 +1042,14 @@ const Resolved = struct {
         return .{
             .width = options.width orelse display.width,
             .height = options.height orelse display.height,
+            // Made at the project's size, whatever size the window opens.
+            .stretch = options.stretch orelse .{
+                .mode = display.stretch_mode,
+                .aspect = display.stretch_aspect,
+                .width = display.width,
+                .height = display.height,
+            },
+            .min_size = options.min_size orelse .{ display.min_width, display.min_height },
             .vsync = options.vsync orelse display.vsync,
             .resizable = options.resizable orelse display.resizable,
             .maximized = options.maximized orelse (display.mode == .maximized),
@@ -1027,6 +1088,7 @@ pub fn destroy(self: *App) void {
     self.audio.deinit();
     self.tweens.deinit(gpa);
     self.texts.deinit(gpa);
+    self.shader_params.deinit(gpa);
     self.animation_players.deinit(gpa);
     self.animation_libraries.deinit(gpa);
     self.sprite_frames.deinit(gpa);
@@ -1057,6 +1119,9 @@ pub fn destroy(self: *App) void {
     self.control_nodes.deinit(gpa);
     self.ui.deinit();
     self.sprites.deinit(gpa);
+    self.screen.deinit();
+    self.shaders.deinit(gpa, &self.device);
+    self.views.deinit(gpa, &self.assets);
     self.assets.deinit();
     self.project.deinit();
     self.jobs.deinit();
@@ -1356,6 +1421,7 @@ pub fn step(self: *App) anyerror!bool {
     // Every action from this frame's keys, buttons and sticks, for the
     // interface and the first system alike.
     self.input.updateActions();
+    self.fitFrame();
     self.fitInterface();
 
     // In the background - an Android app switched away from, a page hidden -
@@ -1490,6 +1556,8 @@ pub fn step(self: *App) anyerror!bool {
     self.exports.forgetDead(&self.world);
     self.tweens.forgetDead(self.gpa, &self.world);
     self.texts.forgetDead(self.gpa, &self.world);
+    self.shader_params.forgetDead(self.gpa, &self.world);
+    self.views.forgetDead(self.gpa, &self.world, &self.assets, components.RenderView);
     self.animation_players.forgetDead(self.gpa, &self.world);
     self.signals.forgetDead(&self.world);
     try self.animate();
@@ -1566,7 +1634,7 @@ fn feedInterface(self: *App) !void {
 
 fn layOutInterface(self: *App) !void {
     self.interface.commands = &.{};
-    self.ui.begin(self.interface.surface(@floatFromInt(self.width), @floatFromInt(self.height)));
+    self.ui.begin(self.interface.surface(@floatFromInt(self.frame.width), @floatFromInt(self.frame.height)));
     {
         // One root for every `.ui` system: fluxion-ui makes the first element
         // the root, so a second system's would land beside it. `.grow`,
@@ -1582,15 +1650,26 @@ fn layOutInterface(self: *App) !void {
     }
 }
 
+/// This frame's size and place on the window, as the stretch says, and the
+/// pointer's pixels turned into its. See `stretch.zig`.
+fn fitFrame(self: *App) void {
+    self.frame = self.stretch.frameOf(self.width, self.height);
+    self.input.frame_origin = .init(self.frame.shown.x, self.frame.shown.y);
+    self.input.frame_ratio = self.frame.ratio();
+}
+
 /// The interface's scale for this frame: the game's `zoom` times the
 /// display's, which it follows unless told not to - and 1 with no window.
+/// A stretched game's is its frame's scale instead, which already counts
+/// the window's pixels.
 fn fitInterface(self: *App) void {
     const display: f32 = if (self.window) |*window|
         (if (self.interface.follow_display) window.content_scale else 1)
     else
         1;
     self.interface.display_scale = display;
-    self.interface.scale = self.interface.zoom * display;
+    const outer: f32 = if (self.stretch.mode == .disabled) display else self.frame.scale;
+    self.interface.scale = self.interface.zoom * outer;
     if (self.interface.follow_safe_area) {
         const edges = self.safeArea();
         self.interface.safe_area = .{
@@ -1630,6 +1709,7 @@ fn interfaceFaces(self: *App) []const *const typeface.Font {
 fn adoptSize(self: *App, width: u32, height: u32) !void {
     self.width = width;
     self.height = height;
+    self.fitFrame();
     self.resized = true;
     if (self.surface) |surface| try self.device.resizeSurface(surface, width, height);
 }
@@ -2590,6 +2670,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .audio => self.audioSource(handle),
         .animation => self.animation_libraries.sourceOf(handle),
         .frames => self.sprite_frames.sourceOf(handle),
+        .shader => self.shaders.sourceOf(handle),
     };
 }
 
@@ -2608,6 +2689,7 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .audio => self.loadAudio(path),
         .animation => self.loadAnimations(path),
         .frames => self.loadSpriteFrames(path),
+        .shader => self.loadShader(path),
     };
 }
 
@@ -2625,6 +2707,7 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .audio => self.findAudio(path),
         .animation => self.findAnimations(path),
         .frames => self.findSpriteFrames(path),
+        .shader => self.findShader(path),
     };
 }
 
@@ -3126,6 +3209,142 @@ pub fn reloadSpriteFrames(self: *App, handle: sprite_frames_mod.SpriteFramesHand
     return self.sprite_frames.reload(self, handle);
 }
 
+/// Read a `.shader` file, or find the one read from there already: what a
+/// `Material` draws with. One that does not compile says why in the log and
+/// draws as none. See `shaders.zig`.
+pub fn loadShader(self: *App, path: []const u8) !shaders_mod.ShaderHandle {
+    return self.shaders.load(self, path);
+}
+
+/// A shader from text rather than a file: a test's, or a tool's. A name
+/// given before gets the new text.
+pub fn addShader(self: *App, name: []const u8, text: []const u8) !shaders_mod.ShaderHandle {
+    return self.shaders.add(self, name, text);
+}
+
+pub fn findShader(self: *App, path: []const u8) ?shaders_mod.ShaderHandle {
+    if (self.shaders.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.shaders.find(named);
+}
+
+/// Read a shader's file again, for an editor that has just saved it: what
+/// names it draws with the new one from the next frame.
+pub fn reloadShader(self: *App, handle: shaders_mod.ShaderHandle) !bool {
+    return self.shaders.reload(self, handle);
+}
+
+/// A shader as it was read: its text, what it compiled to, and why it did
+/// not when it did not.
+pub fn shaderOf(self: *App, handle: shaders_mod.ShaderHandle) ?*const shaders_mod.Shader {
+    return self.shaders.get(handle);
+}
+
+/// Give `entity`'s material a number for its shader's field `name`: one
+/// float, or one per component of a vector, a matrix's column by column.
+/// None gives it back what the file says.
+pub fn setShaderParam(self: *App, entity: ecs.Entity, name: []const u8, numbers: []const f32) !void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    try self.shader_params.set(self.gpa, entity, name, numbers);
+}
+
+/// What `entity`'s material gives its shader's field `name`, or null when it
+/// gives what the file says.
+pub fn shaderParam(self: *App, entity: ecs.Entity, name: []const u8) ?[]const f32 {
+    return self.shader_params.get(entity, name);
+}
+
+/// The field `name` of `entity`'s material's shader, or null for none: one
+/// its shader has not, or a shader that did not compile.
+pub fn shaderParamField(self: *App, entity: ecs.Entity, name: []const u8) ?shaders_mod.material.Field {
+    const held = self.world.get(entity, shaders_mod.Material) orelse return null;
+    const drawn = self.shaders.get(held.shader) orelse return null;
+    for (drawn.params()) |field| {
+        if (std.mem.eql(u8, field.name, name)) return field;
+    }
+    return null;
+}
+
+/// What `entity`'s material gives its shader's field `name` - its own, or
+/// else the file's - as the floats `shaders.pack` puts in the buffer, into
+/// `out`. Null for a field its shader does not have.
+pub fn shaderParamOrDefault(self: *App, entity: ecs.Entity, name: []const u8, out: *[16]f32) ?[]const f32 {
+    const held = self.world.get(entity, shaders_mod.Material) orelse return null;
+    const drawn = self.shaders.get(held.shader) orelse return null;
+    for (drawn.params()) |field| {
+        if (!std.mem.eql(u8, field.name, name)) continue;
+        const count = shaders_mod.componentsOf(field.ty);
+        out.* = @splat(0);
+        if (field.default) |first| @memcpy(out[0..@min(first.len, count)], first[0..@min(first.len, count)]);
+        if (self.shader_params.get(entity, name)) |own| @memcpy(out[0..@min(own.len, count)], own[0..@min(own.len, count)]);
+        return out[0..count];
+    }
+    return null;
+}
+
+/// Whether a frame has something in it that reads what is drawn under it:
+/// then it is drawn where it can be read. See `render/screen.zig`.
+fn readsScreen(self: *App) bool {
+    var it = ecs.Query(.{shaders_mod.Material}).over(&self.world) catch return false;
+    while (it.next()) |chunk| {
+        for (chunk.slice(shaders_mod.Material)) |held| {
+            const compiled = self.shaders.compiledOf(held.shader) orelse continue;
+            if (compiled.readsScreen()) return true;
+        }
+    }
+    return false;
+}
+
+/// Draw what each active `RenderView` sees into its picture: before the
+/// screen, so what shows one shows this frame's. See `views.zig`.
+fn drawViews(self: *App) !void {
+    var it = try ecs.Query(.{ components.Transform2D, components.Camera2D, components.RenderView }).over(&self.world);
+    while (it.next()) |chunk| {
+        const places = chunk.slice(components.Transform2D);
+        const cameras = chunk.slice(components.Camera2D);
+        const views = chunk.slice(components.RenderView);
+        for (places, cameras, views, chunk.entities) |local, camera, view, entity| {
+            if (!view.active) continue;
+            const placed = hierarchy.resolve(&self.world, &self.snapshots, entity, local, self.time.alpha()) orelse continue;
+            const picture = try self.viewPicture(entity, view);
+            const gpu = (self.assets.get(picture) orelse continue).gpu;
+            self.sprites.drawing = entity;
+            defer self.sprites.drawing = .none;
+            const through: View = .through(camera, placed, @floatFromInt(@max(view.width, 1)), @floatFromInt(@max(view.height, 1)));
+            try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, &self.inherited, .{ .texture = gpu }, through, view.clear_color, self.time.alpha());
+        }
+    }
+}
+
+/// A render view's picture, at the size it says now.
+fn viewPicture(self: *App, entity: ecs.Entity, view: components.RenderView) !Assets.TextureHandle {
+    const filter: rhi.Filter = if (view.filter == .linear) .linear else .nearest;
+    if (self.views.textureOf(entity)) |held| {
+        try self.assets.resizeRenderTexture(held, view.width, view.height, filter);
+        return held;
+    }
+    const made = try self.assets.addRenderTexture(view.width, view.height, filter, self.drawnUpsideDown(), "render view");
+    errdefer self.assets.unload(made);
+    try self.views.textures.put(self.gpa, entity, made);
+    return made;
+}
+
+/// The picture a `RenderView` draws, as a texture: to put on a sprite, a
+/// texture rect, or anything else a texture goes, from code. Made now if it
+/// has not drawn one yet; `error.NotAView` for an entity with no view.
+pub fn viewTexture(self: *App, view: ecs.Entity) !Assets.TextureHandle {
+    const held = self.world.get(view, components.RenderView) orelse return error.NotAView;
+    return self.viewPicture(view, held.*);
+}
+
+/// Draw a control's box the interface left for its material: see
+/// `control.Nodes.drawCustom`.
+fn drawControlBox(context: ?*anyopaque, command: ui_lib.RenderCommand, scissor: ?rhi.Rect, into: rhi.RenderTarget, size: ui_lib.Dimensions) anyerror!void {
+    const self: *App = @ptrCast(@alignCast(context.?));
+    try self.control_nodes.drawCustom(self, command, scissor, into, size);
+}
+
 /// Read a sound's file - `.wav`, `.ogg` or `.mp3` - or find the one read
 /// from there already. What an `AudioPlayer` plays; see `audio.zig`.
 pub fn loadAudio(self: *App, path: []const u8) !audio_mod.AudioClipHandle {
@@ -3450,7 +3669,7 @@ fn showBootSplash(self: *App, splash: Project.Application.BootSplash) void {
     var shown: ?ecs.Entity = null;
     if (splash.image.len > 0) {
         if (self.assets.loadTexture(splash.image, .{ .filter = .linear })) |picture| {
-            const middle = self.screenToWorld(@as(f32, @floatFromInt(self.width)) / 2, @as(f32, @floatFromInt(self.height)) / 2);
+            const middle = self.screenToWorld(@as(f32, @floatFromInt(self.frame.width)) / 2, @as(f32, @floatFromInt(self.frame.height)) / 2);
             shown = self.world.spawnWith(.{ components.Transform2D.at(middle.x, middle.y), components.Sprite.of(picture) }) catch null;
         } else |err| log.warn("the boot splash's picture {s} did not read: {t}", .{ splash.image, err });
     }
@@ -3667,6 +3886,8 @@ pub fn clearWorld(self: *App) void {
     self.audio.clear();
     self.tweens.clear(self.gpa);
     self.texts.clear(self.gpa);
+    self.shader_params.clear(self.gpa);
+    self.views.clear(&self.assets);
     self.animation_players.clear(self.gpa);
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
@@ -3814,6 +4035,7 @@ pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
     try self.audio.renamed(old, new);
     try self.animation_libraries.renamed(self.gpa, old, new);
     try self.sprite_frames.renamed(self.gpa, old, new);
+    try self.shaders.renamed(self.gpa, old, new);
     try self.themes.renamed(self.gpa, old, new);
     if (self.scripts) |scripts| try scripts.renamed(old, new);
 }
@@ -4734,7 +4956,8 @@ pub fn isOnFloor(self: *App, entity: ecs.Entity, distance: f32) bool {
 pub fn spriteCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     const drawn = (self.world.get(entity, components.Sprite) orelse return null).*;
     const placed = self.drawnTransform(entity) orelse return null;
-    const texture = self.assets.get(drawn.texture) orelse self.assets.get(self.assets.white) orelse return null;
+    const shown = self.views.shown(&self.world, entity, drawn.texture);
+    const texture = self.assets.get(shown) orelse self.assets.get(self.assets.white) orelse return null;
     return sprite.cornersOf(drawn, placed, texture);
 }
 
@@ -4889,9 +5112,15 @@ pub fn drawnCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     return self.spriteCorners(entity) orelse self.textCorners(entity) orelse self.tileMapCorners(entity);
 }
 
-/// What the camera sees, at the size of the window.
-fn currentView(self: *App) View {
-    return .of(&self.world, &self.snapshots, @floatFromInt(self.width), @floatFromInt(self.height));
+/// What the camera sees, at the frame's size and scale: the view the world
+/// is drawn through and the pointer is found in.
+pub fn currentView(self: *App) View {
+    return self.viewAt(self.frame, @floatFromInt(self.frame.width), @floatFromInt(self.frame.height));
+}
+
+/// What the camera sees in a frame this size, as the stretch scales it.
+fn viewAt(self: *App, frame: stretch_mod.Frame, width: f32, height: f32) View {
+    return View.of(&self.world, &self.snapshots, width, height).zoomed(frame.scale);
 }
 
 // -------------------------------------------------------------------------
@@ -5321,13 +5550,35 @@ fn render(self: *App) !void {
 
 /// Every layer, in order, into whatever it is given. Separate from `render`,
 /// so that `capture` can draw the same frame somewhere else.
+///
+/// A frame with a material in it that reads what is drawn under it is drawn
+/// into a texture of its own - a surface cannot be read - and put on `into`
+/// after. See `render/screen.zig`.
 fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void {
+    self.sprites.time = @floatCast(self.interface.seconds);
+    self.screen.copies = 0;
+    try self.drawViews();
+    // The frame for a target this size: the window's, or a capture's.
+    const frame = self.stretch.frameOf(@intFromFloat(width), @intFromFloat(height));
+    const frame_width: f32 = @floatFromInt(frame.width);
+    const frame_height: f32 = @floatFromInt(frame.height);
+    if (!frame.apart and !self.readsScreen()) return self.drawLayersInto(into, frame, frame_width, frame_height);
+    const picture = try self.screen.frameOf(frame.width, frame.height);
+    try self.drawLayersInto(.{ .texture = picture }, frame, frame_width, frame_height);
+    // A picture scaled to the window is sampled as the project's textures
+    // are; a canvas is one pixel to one.
+    const filter: rhi.Filter = if (self.stretch.mode == .picture) self.assets.default_filter else .nearest;
+    const shown = frame.shown;
+    try self.screen.present(picture, into, .{ .x = shown.x, .y = shown.y, .width = shown.width, .height = shown.height }, self.assets.samplerFor(filter, .clamp_to_edge), .black);
+}
+
+fn drawLayersInto(self: *App, into: rhi.RenderTarget, frame: stretch_mod.Frame, width: f32, height: f32) !void {
     // 1. The 3D layer, with a depth test, clearing the frame. Not written
     //    yet; when it is, the 2D pass below stops clearing.
 
     // 2. The 2D layer: sprites and text, sorted back to front, blended, no
     //    depth - or, with the world off the screen, only the clearing.
-    const view: View = .of(&self.world, &self.snapshots, width, height);
+    const view = self.viewAt(frame, width, height);
     if (self.world_on_screen) {
         const clear = try self.drawDebugUnder(into, view);
         try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, &self.inherited, into, view, clear, self.time.alpha());
@@ -5363,6 +5614,8 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
 /// On OpenGL a texture drawn into is read bottom row first, so shown in the
 /// interface it wants its `source` turned over; see `drawnUpsideDown`.
 pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
+    self.sprites.time = @floatCast(self.interface.seconds);
+    try self.drawViews();
     const clear = try self.drawDebugUnder(.{ .texture = into }, view);
     try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, &self.inherited, .{ .texture = into }, view, clear, self.time.alpha());
     if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
@@ -7572,7 +7825,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 40), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 43), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

@@ -140,6 +140,7 @@ const attr = @import("attr.zig");
 const Project = @import("Project.zig");
 const signals = @import("signals.zig");
 const tileset = @import("tileset.zig");
+const shaders_mod = @import("shaders.zig");
 const Color = @import("color.zig").Color;
 
 const Entity = ecs.Entity;
@@ -1996,6 +1997,8 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
             if (!entry.type.same(h.value.type)) continue;
             // The words a component keeps beside it: `label.text`.
             if (App.textAttributeOf(entry.type, name) != null) return try vm.string(self.app.textNamed(source, entry.name, name));
+            // A material's numbers: `material.strength`.
+            if (entry.type.same(reflect.typeOf(shaders_mod.Material))) if (try shaderParamOf(self, source, name)) |value| return value;
             for (entry.signals) |decl| {
                 if (std.mem.eql(u8, decl.name, name)) return try self.bridgeOf(source, entry.name, decl.name, decl.args.fields().len);
             }
@@ -2028,6 +2031,7 @@ fn hostSetMember(vm: *flux.Vm, handle: flux.Value, name: []const u8, value: flux
     const source = Entity.fromInt(h.key);
     for (self.app.scene_components.entries.items) |*entry| {
         if (!entry.type.same(h.value.type)) continue;
+        if (entry.type.same(reflect.typeOf(shaders_mod.Material))) return setShaderParamOf(self, source, name, value);
         if (App.textAttributeOf(entry.type, name) == null) return false;
         if (value.tag != .string) return vm.fail("{s}.{s} is text, not {s}", .{ entry.name, name, typeName(value) });
         self.app.setTextNamed(source, entry.name, name, value.as(flux.object.String).bytes()) catch |err| switch (err) {
@@ -2037,6 +2041,62 @@ fn hostSetMember(vm: *flux.Vm, handle: flux.Value, name: []const u8, value: flux
         return true;
     }
     return false;
+}
+
+/// What a material gives its shader's field `name`, as a script sees it: a
+/// number, a `vec2`, a `vec3`, or a `color` for a `vec4`. Null for a field
+/// its shader has not, and for a matrix.
+fn shaderParamOf(self: *Scripts, entity: Entity, name: []const u8) flux.Vm.Error!?flux.Value {
+    const field = self.app.shaderParamField(entity, name) orelse return null;
+    var buffer: [16]f32 = undefined;
+    const n = self.app.shaderParamOrDefault(entity, name, &buffer) orelse return null;
+    return switch (field.ty) {
+        .float => .float(n[0]),
+        .int => .int(@intFromFloat(@round(n[0]))),
+        .vec2 => .vec2(n[0], n[1]),
+        .vec3 => .vec3(n[0], n[1], n[2]),
+        .vec4 => try self.vm.newColor(.{ n[0], n[1], n[2], n[3] }),
+        else => null,
+    };
+}
+
+/// A material's number written from a script: `material.strength = 0.6`,
+/// `material.glow = Color(1, 0.8, 0.3)`.
+fn setShaderParamOf(self: *Scripts, entity: Entity, name: []const u8, value: flux.Value) flux.Vm.Error!bool {
+    const vm = self.vm;
+    const held = self.app.world.get(entity, shaders_mod.Material) orelse return false;
+    // A shader that compiled says what it has; one that did not is given
+    // what it is given.
+    if (self.app.shaders.compiledOf(held.shader) != null and self.app.shaderParamField(entity, name) == null) return false;
+    var numbers: [4]f32 = undefined;
+    const given: []const f32 = switch (value.tag) {
+        .int => blk: {
+            numbers[0] = @floatFromInt(value.asInt());
+            break :blk numbers[0..1];
+        },
+        .float => blk: {
+            numbers[0] = @floatCast(value.asFloat());
+            break :blk numbers[0..1];
+        },
+        .vec2 => blk: {
+            numbers[0..2].* = value.asVec2();
+            break :blk numbers[0..2];
+        },
+        .vec3 => blk: {
+            numbers[0..3].* = value.asVec3();
+            break :blk numbers[0..3];
+        },
+        .color => blk: {
+            numbers = value.as(flux.object.Color).rgba;
+            break :blk numbers[0..4];
+        },
+        else => return vm.fail("Material.{s} is a number, a vec2, a vec3 or a color, not {s}", .{ name, typeName(value) }),
+    };
+    self.app.setShaderParam(entity, name, given) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return vm.fail("Material.{s} could not be written: {t}", .{ name, err }),
+    };
+    return true;
 }
 
 /// How a script sees an `Entity`: see "An entity is one handle" above.

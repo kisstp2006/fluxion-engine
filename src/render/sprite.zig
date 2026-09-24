@@ -20,7 +20,6 @@ const Allocator = std.mem.Allocator;
 const ecs = @import("fluxion_ecs");
 const rhi = @import("fluxion_rhi");
 const math = @import("fluxion_math");
-const shader = @import("fluxion_shader");
 const typeface = @import("fluxion_font");
 
 const Assets = @import("../assets.zig");
@@ -41,30 +40,17 @@ const text_key = texts_mod.keyFor(Text2D, "text");
 const View = view_mod.View;
 const Bounds = view_mod.Bounds;
 
+const shaders_mod = @import("../shaders.zig");
+const material = shaders_mod.material;
+const ShaderHandle = shaders_mod.ShaderHandle;
+const Screen = @import("screen.zig").Screen;
+const views_mod = @import("../views.zig");
+
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
 const Labels = ecs.Query(.{ Transform2D, Text2D });
 const TileChunks = ecs.Query(.{tilemap.TileChunk});
 
 pub const Error = rhi.Error || Allocator.Error || error{ShaderFailed};
-
-/// The shader, in the one language that becomes both GLSL and HLSL.
-const source = @embedFile("shaders/sprite.fxs");
-
-/// Which vertex buffer an attribute is read from: `corner` is the quad that
-/// never changes, and everything else is per instance.
-fn bufferOf(name: []const u8) u32 {
-    return if (std.mem.eql(u8, name, "corner")) 0 else 1;
-}
-
-fn vertexFormat(ty: shader.Type) !rhi.VertexFormat {
-    return switch (ty) {
-        .float => .float,
-        .vec2 => .float2,
-        .vec3 => .float3,
-        .vec4 => .float4,
-        else => error.NotAVertexFormat,
-    };
-}
 
 /// One sprite, as the vertex shader reads it: 64 bytes. `extern`, because it
 /// is copied into a vertex buffer; the attribute offsets come from the
@@ -79,10 +65,9 @@ pub const Instance = extern struct {
     uv_rect: [4]f32,
 };
 
-/// What the frame tells the shader: one matrix.
-const Frame = extern struct {
-    view_projection: math.Mat4,
-};
+/// No numbers of a material's own: a plain picture, or a shader with no
+/// block.
+const no_params = std.math.maxInt(u32);
 
 /// A sprite waiting to be drawn, with what decides its place in the queue.
 const Item = struct {
@@ -98,6 +83,11 @@ const Item = struct {
     texture: rhi.Texture,
     sampler: rhi.Sampler,
     blend: Sprite.Blend,
+    /// The shader its `Material` names, or none for a plain picture.
+    shader: ShaderHandle = .none,
+    /// Which of this frame's sets of numbers its material gives, or
+    /// `no_params`.
+    params: u32 = no_params,
 
     fn before(_: void, a: Item, b: Item) bool {
         const layer_a = a.key >> 32;
@@ -105,12 +95,16 @@ const Item = struct {
         if (layer_a != layer_b) return layer_a < layer_b;
         if (a.order != b.order) return a.order < b.order;
         if (a.blend != b.blend) return @intFromEnum(a.blend) < @intFromEnum(b.blend);
+        if (!a.shader.eql(b.shader)) return a.shader.index < b.shader.index;
+        if (a.params != b.params) return a.params < b.params;
         if (a.key != b.key) return a.key < b.key;
         return a.sequence < b.sequence;
     }
 
     fn sharesDrawWith(self: Item, other: Item) bool {
         return self.blend == other.blend and
+            self.shader.eql(other.shader) and
+            self.params == other.params and
             std.meta.eql(self.texture, other.texture) and
             std.meta.eql(self.sampler, other.sampler);
     }
@@ -119,26 +113,61 @@ const Item = struct {
 /// The four corners of the unit square, as a triangle strip.
 const quad_corners = [8]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
 
+/// One set of a frame's material numbers: where its bytes are, and a hash
+/// that finds another set of the same.
+const ParamSet = struct {
+    start: u32,
+    len: u32,
+};
+
+/// A uniform buffer a set of numbers is put in, kept from frame to frame.
+const ParamBuffer = struct {
+    buffer: rhi.Buffer,
+    size: u32,
+};
+
 pub const Renderer = struct {
     device: *rhi.Device,
     /// What each `Text2D` says: the app's. Nothing is drawn of one without.
     texts: ?*const texts_mod.Texts = null,
+    /// The shaders a `Material` names, and the numbers each gives. Without
+    /// them every sprite is a plain picture.
+    shaders: ?*const shaders_mod.Shaders = null,
+    params: ?*const shaders_mod.Params = null,
+    /// Where what is drawn so far is copied for a shader that reads it. With
+    /// none, such a shader reads a white picture.
+    screen: ?*Screen = null,
+    /// Seconds, as `TIME`.
+    time: f32 = 0,
+    /// The picture each `RenderView` draws, for what a `ViewTexture` shows.
+    views: ?*const views_mod.Views = null,
+    /// The render view being drawn, whose own picture is not drawn into it.
+    drawing: ecs.Entity = .none,
 
-    /// Kept, because the pipeline was described with names inside it.
-    module: shader.Module,
-    pipelines: std.EnumArray(Sprite.Blend, rhi.Pipeline),
+    /// A picture, coloured: what a sprite with no material is drawn with.
+    plain: material.Compiled,
 
     quad: rhi.Buffer,
     instances: rhi.Buffer,
     /// How many instances the buffer has room for. Grown, never shrunk.
     capacity: u32,
     frame: rhi.Buffer,
+    /// What a shader that reads the screen reads when there is no copy of it.
+    white: rhi.Texture,
+    white_sampler: rhi.Sampler,
 
     /// This frame's sprites, gathered and sorted. Kept for its capacity.
     items: std.ArrayList(Item) = .empty,
 
     /// The sorted instances, contiguous, as they are uploaded.
     staging: std.ArrayList(Instance) = .empty,
+
+    /// This frame's sets of material numbers, their bytes one after
+    /// another, and the uniform buffers they are put in.
+    param_sets: std.ArrayList(ParamSet) = .empty,
+    param_bytes: std.ArrayList(u8) = .empty,
+    param_found: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    param_buffers: std.ArrayList(ParamBuffer) = .empty,
 
     /// How many draw calls the last frame took: the number of textures in use.
     draw_calls: u32 = 0,
@@ -153,103 +182,66 @@ pub const Renderer = struct {
     tile_chunks_culled: u32 = 0,
 
     pub fn init(gpa: Allocator, device: *rhi.Device) Error!Renderer {
-        var log: std.Io.Writer.Allocating = .init(gpa);
-        defer log.deinit();
-
-        var module = shader.compile(gpa, source, &log.writer) catch {
-            // The message names a line and a column in the shader source.
-            std.log.scoped(.fluxion_engine).err("sprite shader: {s}", .{log.written()});
-            return Error.ShaderFailed;
-        };
-        errdefer module.deinit();
-
-        const handle = device.createShader(.{
-            .glsl = .{ .vertex = module.glsl.vertex, .fragment = module.glsl.fragment },
-            .hlsl = .{ .vertex = module.hlsl.vertex, .fragment = module.hlsl.fragment },
-            .label = "sprites",
-        }) catch |err| {
-            std.log.scoped(.fluxion_engine).err("sprite shader: {s}", .{device.diagnostics()});
+        var problems: std.Io.Writer.Allocating = .init(gpa);
+        defer problems.deinit();
+        var plain = material.compile(gpa, device, material.plain, "sprites", &problems.writer) catch |err| {
+            std.log.scoped(.fluxion_engine).err("sprite shader: {s}", .{problems.written()});
             return err;
         };
+        errdefer plain.deinit(device);
 
-        // Locations and formats come from the shader; only which buffer each
-        // is packed into is decided here, by `bufferOf`.
-        var attributes: [8]rhi.VertexAttribute = undefined;
-        var strides: [2]u32 = @splat(0);
-        for (module.attributes, 0..) |a, i| {
-            const buffer = bufferOf(a.name);
-            const format = vertexFormat(a.ty) catch return Error.ShaderFailed;
-            attributes[i] = .{
-                .location = a.location,
-                .format = format,
-                .offset = strides[buffer],
-                .buffer = buffer,
-            };
-            strides[buffer] += format.size();
-        }
-
-        var pipelines: std.EnumArray(Sprite.Blend, rhi.Pipeline) = .initFill(.none);
-        errdefer for (pipelines.values) |pipeline| device.destroyPipeline(pipeline);
-        for (std.enums.values(Sprite.Blend)) |blend| {
-            pipelines.set(blend, device.createPipeline(.{
-                .shader = handle,
-                .attributes = attributes[0..module.attributes.len],
-                .buffers = &.{
-                    .{ .stride = strides[0] },
-                    .{ .stride = strides[1], .step = .instance },
-                },
-                .topology = .triangle_strip,
-                .blend = switch (blend) {
-                    .alpha => .alpha,
-                    .additive => .additive,
-                },
-                // Both lists come out of the shader, in slot order.
-                .uniform_blocks = (try module.uniformBlockNames()) orelse return Error.ShaderFailed,
-                .textures = (try module.textureNames()) orelse return Error.ShaderFailed,
-                .label = "sprites",
-            }) catch |err| {
-                std.log.scoped(.fluxion_engine).err("sprite pipeline: {s}", .{device.diagnostics()});
-                return err;
-            });
-        }
-
-        const block = module.block("Frame") orelse return Error.ShaderFailed;
         const initial_capacity = 256;
+        const quad = try device.createBuffer(.{
+            .kind = .vertex,
+            .size = @sizeOf(@TypeOf(quad_corners)),
+            .data = std.mem.asBytes(&quad_corners),
+            .label = "sprite quad",
+        });
+        errdefer device.destroyBuffer(quad);
+        const instances = try device.createBuffer(.{
+            .kind = .vertex,
+            .size = initial_capacity * @sizeOf(Instance),
+            .dynamic = true,
+            .label = "sprite instances",
+        });
+        errdefer device.destroyBuffer(instances);
+        const frame = try device.createBuffer(.{
+            .kind = .uniform,
+            .size = @sizeOf(material.Frame),
+            .label = "sprite frame",
+        });
+        errdefer device.destroyBuffer(frame);
+        const white_texel = [4]u8{ 255, 255, 255, 255 };
+        const white = try device.createTexture(.{ .width = 1, .height = 1, .data = &white_texel, .label = "no screen" });
+        errdefer device.destroyTexture(white);
+        const white_sampler = try device.createSampler(.{});
 
         return .{
             .device = device,
-            .module = module,
-            .pipelines = pipelines,
-            .quad = try device.createBuffer(.{
-                .kind = .vertex,
-                .size = @sizeOf(@TypeOf(quad_corners)),
-                .data = std.mem.asBytes(&quad_corners),
-                .label = "sprite quad",
-            }),
-            .instances = try device.createBuffer(.{
-                .kind = .vertex,
-                .size = initial_capacity * @sizeOf(Instance),
-                .dynamic = true,
-                .label = "sprite instances",
-            }),
+            .plain = plain,
+            .quad = quad,
+            .instances = instances,
             .capacity = initial_capacity,
-            // The size the shader says the block is.
-            .frame = try device.createBuffer(.{
-                .kind = .uniform,
-                .size = block.size,
-                .label = "sprite frame",
-            }),
+            .frame = frame,
+            .white = white,
+            .white_sampler = white_sampler,
         };
     }
 
     pub fn deinit(self: *Renderer, gpa: Allocator) void {
         self.items.deinit(gpa);
         self.staging.deinit(gpa);
-        self.module.deinit();
+        self.param_sets.deinit(gpa);
+        self.param_bytes.deinit(gpa);
+        self.param_found.deinit(gpa);
+        for (self.param_buffers.items) |held| self.device.destroyBuffer(held.buffer);
+        self.param_buffers.deinit(gpa);
+        self.plain.deinit(self.device);
         self.device.destroyBuffer(self.quad);
         self.device.destroyBuffer(self.instances);
         self.device.destroyBuffer(self.frame);
-        for (self.pipelines.values) |pipeline| self.device.destroyPipeline(pipeline);
+        self.device.destroyTexture(self.white);
+        self.device.destroySampler(self.white_sampler);
         self.* = undefined;
     }
 
@@ -273,17 +265,17 @@ pub const Renderer = struct {
         clear: ?Color,
         alpha: f32,
     ) !void {
+        self.forgetParams();
         // The box that culls and the matrix that draws are two readings of
         // the same view.
-        try self.gather(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view.bounds());
+        try self.gather(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view);
 
         // Gathering the text may have rasterised new letters, so the atlases
         // go up once, before anything samples them.
         try assets.flushFonts();
 
-        try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&Frame{
-            .view_projection = view.matrix(self.device.clip()),
-        }));
+        try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&self.frameOf(view.matrix(self.device.clip()), view.width, view.height)));
+        try self.uploadParams(gpa);
 
         if (self.items.items.len > 0) {
             try self.reserve(@intCast(self.items.items.len));
@@ -295,17 +287,8 @@ pub const Renderer = struct {
             try self.device.updateBuffer(self.instances, 0, std.mem.sliceAsBytes(self.staging.items));
         }
 
-        const list = self.device.begin();
-        try list.beginPass(.{ .color = .{
-            .target = target,
-            .load = if (clear == null) .load else .clear,
-            .clear_color = if (clear) |c| c.array() else .{ 0, 0, 0, 1 },
-        } });
-        try list.setViewport(.{ .width = view.width, .height = view.height });
-        var bound_blend: Sprite.Blend = .alpha;
-        try list.setPipeline(self.pipelines.get(bound_blend));
-        try list.setVertexBuffer(0, self.quad, 0);
-        try list.setUniformBuffer(0, self.frame);
+        var pass: Pass = .{ .renderer = self, .target = target, .width = view.width, .height = view.height };
+        try pass.begin(clear);
 
         self.draw_calls = 0;
         self.drawn = @intCast(self.items.items.len);
@@ -317,23 +300,195 @@ pub const Renderer = struct {
             var end = start + 1;
             while (end < self.items.items.len and first.sharesDrawWith(self.items.items[end])) : (end += 1) {}
 
-            if (first.blend != bound_blend) {
-                bound_blend = first.blend;
-                try list.setPipeline(self.pipelines.get(bound_blend));
-            }
-            try list.setTexture(0, first.texture, first.sampler);
+            try pass.use(first.shader, first.blend, first.params);
+            try pass.bindPicture(first.texture, first.sampler);
             // A draw has no first-instance argument, so the buffer binding is
             // moved to the start of the run instead.
-            try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
-            try list.draw(.{ .vertex_count = 4, .instance_count = @intCast(end - start) });
+            try pass.list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
+            try pass.list.draw(.{ .vertex_count = 4, .instance_count = @intCast(end - start) });
+            pass.drew = true;
             self.draw_calls += 1;
 
             start = end;
         }
 
-        try list.endPass();
-        try self.device.submit();
+        try pass.end();
     }
+
+    /// Draw one quad through `entity`'s material into `target`, which is
+    /// `width` by `height` pixels, with the pixels as its space: a
+    /// control's box the interface left for its shader. `scissor` clips it.
+    pub fn drawQuad(
+        self: *Renderer,
+        gpa: Allocator,
+        entity: ecs.Entity,
+        shader: ShaderHandle,
+        target: rhi.RenderTarget,
+        width: f32,
+        height: f32,
+        instance: Instance,
+        texture: rhi.Texture,
+        sampler: rhi.Sampler,
+        scissor: ?rhi.Rect,
+    ) !void {
+        self.forgetParams();
+        const compiled = (if (self.shaders) |table| table.compiledOf(shader) else null) orelse return;
+        const params = try self.paramSetOf(gpa, compiled, entity);
+        try self.uploadParams(gpa);
+        try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&self.frameOf(View.screen(width, height).matrix(self.device.clip()), width, height)));
+        try self.reserve(1);
+        try self.device.updateBuffer(self.instances, 0, std.mem.asBytes(&instance));
+
+        var pass: Pass = .{ .renderer = self, .target = target, .width = width, .height = height, .scissor = scissor };
+        try pass.begin(null);
+        try pass.use(shader, .alpha, params);
+        try pass.bindPicture(texture, sampler);
+        try pass.list.setVertexBuffer(1, self.instances, 0);
+        try pass.list.draw(.{ .vertex_count = 4, .instance_count = 1 });
+        try pass.end();
+    }
+
+    fn frameOf(self: *const Renderer, projection: math.Mat4, width: f32, height: f32) material.Frame {
+        return .{
+            .projection = projection,
+            .screen_pixel_size = .{ 1 / @max(width, 1), 1 / @max(height, 1) },
+            .time = self.time,
+            .screen_flip = material.screenFlip(self.device),
+        };
+    }
+
+    /// The compiled shader a handle names, or the plain one.
+    fn compiledOf(self: *const Renderer, shader: ShaderHandle) *const material.Compiled {
+        if (shader.isNone()) return &self.plain;
+        const table = self.shaders orelse return &self.plain;
+        return table.compiledOf(shader) orelse &self.plain;
+    }
+
+    fn forgetParams(self: *Renderer) void {
+        self.param_sets.clearRetainingCapacity();
+        self.param_bytes.clearRetainingCapacity();
+        self.param_found.clearRetainingCapacity();
+    }
+
+    /// Which of this frame's sets of numbers `entity`'s material gives
+    /// `compiled`: one made for it, or the same one another gave.
+    fn paramSetOf(self: *Renderer, gpa: Allocator, compiled: *const material.Compiled, entity: ecs.Entity) !u32 {
+        const block = compiled.params orelse return no_params;
+        const given = if (self.params) |store| store.of(entity) else &.{};
+        const start: u32 = @intCast(self.param_bytes.items.len);
+        try self.param_bytes.resize(gpa, start + block.size);
+        const bytes = self.param_bytes.items[start..];
+        shaders_mod.pack(block, given, bytes);
+        const hash = std.hash.Wyhash.hash(block.size, bytes);
+        const found = try self.param_found.getOrPut(gpa, hash);
+        if (found.found_existing) {
+            self.param_bytes.shrinkRetainingCapacity(start);
+            return found.value_ptr.*;
+        }
+        found.value_ptr.* = @intCast(self.param_sets.items.len);
+        try self.param_sets.append(gpa, .{ .start = start, .len = block.size });
+        return found.value_ptr.*;
+    }
+
+    /// Put each set of numbers in a uniform buffer of its own: a buffer is
+    /// bound whole, with no offset.
+    fn uploadParams(self: *Renderer, gpa: Allocator) !void {
+        for (self.param_sets.items, 0..) |set, index| {
+            if (index == self.param_buffers.items.len) try self.param_buffers.append(gpa, .{ .buffer = .none, .size = 0 });
+            const held = &self.param_buffers.items[index];
+            if (held.size < set.len) {
+                if (held.size > 0) self.device.destroyBuffer(held.buffer);
+                held.* = .{ .size = 0, .buffer = .none };
+                held.buffer = try self.device.createBuffer(.{ .kind = .uniform, .size = set.len, .label = "material numbers" });
+                held.size = set.len;
+            }
+            try self.device.updateBuffer(held.buffer, 0, self.param_bytes.items[set.start..][0..set.len]);
+        }
+    }
+
+    /// A pass into the frame's target, and what is bound in it: begun again
+    /// after a copy of the screen, with all of it bound again.
+    const Pass = struct {
+        renderer: *Renderer,
+        target: rhi.RenderTarget,
+        width: f32,
+        height: f32,
+        scissor: ?rhi.Rect = null,
+        list: *rhi.CommandList = undefined,
+        compiled: *const material.Compiled = undefined,
+        shader: ?ShaderHandle = null,
+        blend: Sprite.Blend = .alpha,
+        params: u32 = no_params,
+        /// Whether anything has been drawn since the screen was last copied.
+        drew: bool = false,
+        /// The copy a shader reading the screen reads, while it holds.
+        copy: ?rhi.Texture = null,
+
+        fn begin(self: *Pass, clear: ?Color) !void {
+            const r = self.renderer;
+            self.list = r.device.begin();
+            try self.list.beginPass(.{ .color = .{
+                .target = self.target,
+                .load = if (clear == null) .load else .clear,
+                .clear_color = if (clear) |c| c.array() else .{ 0, 0, 0, 1 },
+            } });
+            try self.list.setViewport(.{ .width = self.width, .height = self.height });
+            if (self.scissor) |clip| try self.list.setScissor(clip);
+            if (self.shader) |shader| {
+                const blend = self.blend;
+                const params = self.params;
+                self.shader = null;
+                try self.use(shader, blend, params);
+            }
+        }
+
+        fn end(self: *Pass) !void {
+            try self.list.setScissor(null);
+            try self.list.endPass();
+            try self.renderer.device.submit();
+        }
+
+        /// Draw with a shader, a way of blending and a set of numbers.
+        fn use(self: *Pass, shader: ShaderHandle, blend: Sprite.Blend, params: u32) !void {
+            const r = self.renderer;
+            if (self.shader) |bound| if (bound.eql(shader) and self.blend == blend and self.params == params) return;
+            self.compiled = r.compiledOf(shader);
+            self.shader = shader;
+            self.blend = blend;
+            self.params = params;
+            try self.list.setPipeline(self.compiled.pipelines.get(blend));
+            try self.list.setVertexBuffer(0, r.quad, 0);
+            try self.list.setUniformBuffer(0, r.frame);
+            if (params != no_params and self.compiled.params != null) {
+                try self.list.setUniformBuffer(material.params_slot, r.param_buffers.items[params].buffer);
+            }
+        }
+
+        /// Bind a run's picture, and - for a shader that reads the screen -
+        /// a copy of what is drawn so far, made now if more has been drawn
+        /// since the last.
+        fn bindPicture(self: *Pass, texture: rhi.Texture, sampler: rhi.Sampler) !void {
+            const r = self.renderer;
+            if (self.compiled.texture_slot) |slot| try self.list.setTexture(slot, texture, sampler);
+            const slot = self.compiled.screen_slot orelse return;
+            const screen = r.screen orelse return self.list.setTexture(slot, r.white, r.white_sampler);
+            const from = switch (self.target) {
+                .texture => |held| held,
+                // A surface cannot be read; a frame that reads it is drawn
+                // into a texture instead - see `App.drawLayers`.
+                else => return self.list.setTexture(slot, r.white, r.white_sampler),
+            };
+            if (self.copy == null or self.drew) {
+                try self.end();
+                self.copy = try screen.copyOf(from, @intFromFloat(self.width), @intFromFloat(self.height), r.white_sampler);
+                self.drew = false;
+                try self.begin(null);
+                // `begin` bound the shader again; the picture goes back too.
+                if (self.compiled.texture_slot) |picture_slot| try self.list.setTexture(picture_slot, texture, sampler);
+            }
+            try self.list.setTexture(slot, self.copy.?, r.white_sampler);
+        }
+    };
 
     /// Walk the world and turn every visible sprite into an instance: shown
     /// as its `Appearance` and everything above it say - hidden, its colour
@@ -347,8 +502,9 @@ pub const Renderer = struct {
         snapshots: *const hierarchy.Snapshots,
         inherited: *Inherited,
         alpha: f32,
-        bounds: Bounds,
+        view: View,
     ) !void {
+        const bounds = view.bounds();
         self.items.clearRetainingCapacity();
         self.culled = 0;
         self.tile_chunks_drawn = 0;
@@ -365,7 +521,8 @@ pub const Renderer = struct {
                 if (!sprite.visible or sprite.tint.a <= 0) continue;
                 const looks = inherited.of(gpa, world, entity);
                 const tint = looks.tint(sprite.tint);
-                if (!looks.visible or tint.a <= 0) continue;
+                if (!looks.visible or tint.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
+                const picture = self.pictureOf(world, entity, sprite.texture) orelse continue;
 
                 // Interpolated, then carried through whatever it hangs from.
                 // What cannot be placed - its parent died this frame, or its
@@ -374,8 +531,11 @@ pub const Renderer = struct {
 
                 // A handle that no longer resolves draws as the white texel:
                 // a coloured rectangle is a bug somebody notices.
-                const texture = assets.get(sprite.texture) orelse
+                const texture = assets.get(picture) orelse
                     assets.get(assets.white) orelse continue;
+                // A picture drawn into on a backend that counts rows from
+                // the bottom is shown turned over.
+                const region = if (texture.upside_down) sprite.region.flippedY() else sprite.region;
 
                 const size = spriteSize(sprite, texture);
                 const drawn_width = size.width * transform.scale_x;
@@ -389,34 +549,52 @@ pub const Renderer = struct {
 
                 const c = @cos(transform.rotation);
                 const s = @sin(transform.rotation);
+                const drawn_with = try self.materialOf(gpa, world, entity);
 
                 defer sequence += 1;
                 try self.items.append(gpa, .{
-                    .key = sortKey(looks.layer(sprite.layer), sprite.texture),
+                    .key = sortKey(looks.layer(sprite.layer), picture),
                     .order = sprite.order,
                     .sequence = sequence,
                     .texture = texture.gpu,
                     .sampler = assets.samplerFor(texture.filter, texture.wrap),
                     .blend = sprite.blend,
+                    .shader = drawn_with.shader,
+                    .params = drawn_with.params,
                     .instance = .{
                         .placement = .{ transform.x, transform.y, drawn_width, drawn_height },
                         .spin = .{ sprite.pivot_x, sprite.pivot_y, c, s },
                         .tint = .{ tint.r, tint.g, tint.b, tint.a },
-                        .uv_rect = .{
-                            sprite.region.u0,
-                            sprite.region.v0,
-                            sprite.region.u1,
-                            sprite.region.v1,
-                        },
+                        .uv_rect = .{ region.u0, region.v0, region.u1, region.v1 },
                     },
                 });
             }
         }
 
-        try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, inherited, alpha, bounds, &sequence);
-        try self.gatherText(gpa, world, assets, snapshots, inherited, alpha, bounds, &sequence);
+        try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view, &sequence);
+        try self.gatherText(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
 
         std.sort.pdq(Item, self.items.items, {}, Item.before);
+    }
+
+    /// The texture a sprite shows: a render view's picture, for one with a
+    /// `ViewTexture`, or its own. Null for one showing the view being drawn,
+    /// which cannot be read while it is drawn into.
+    fn pictureOf(self: *const Renderer, world: *ecs.World, entity: ecs.Entity, own: Assets.TextureHandle) ?Assets.TextureHandle {
+        const views = self.views orelse return own;
+        if (world.get(entity, components.ViewTexture)) |held| {
+            if (!self.drawing.isNone() and held.view.eql(self.drawing)) return null;
+        }
+        return views.shown(world, entity, own);
+    }
+
+    /// The shader an entity's `Material` names - when it compiled - and the
+    /// set of numbers it gives it; none for a plain picture.
+    fn materialOf(self: *Renderer, gpa: Allocator, world: *ecs.World, entity: ecs.Entity) !struct { shader: ShaderHandle = .none, params: u32 = no_params } {
+        const held = world.get(entity, shaders_mod.Material) orelse return .{};
+        const table = self.shaders orelse return .{};
+        const compiled = table.compiledOf(held.shader) orelse return .{};
+        return .{ .shader = held.shader, .params = try self.paramSetOf(gpa, compiled, entity) };
     }
 
     /// Every tile of every chunk near the camera, as one instance each: a
@@ -435,9 +613,10 @@ pub const Renderer = struct {
         snapshots: *const hierarchy.Snapshots,
         inherited: *Inherited,
         alpha: f32,
-        bounds: Bounds,
+        view: View,
         sequence: *u32,
     ) !void {
+        const bounds = view.bounds();
         var it = try TileChunks.over(world);
         while (it.next()) |chunk| {
             for (chunk.slice(tilemap.TileChunk)) |tiles| {
@@ -446,7 +625,7 @@ pub const Renderer = struct {
                 // A chunk is shown as its map is.
                 const looks = inherited.of(gpa, world, tiles.map);
                 const tint = looks.tint(map.tint);
-                if (!looks.visible or tint.a <= 0) continue;
+                if (!looks.visible or tint.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
                 const layer = looks.layer(map.layer);
                 const local = world.get(tiles.map, Transform2D) orelse continue;
                 const placed = hierarchy.resolve(world, snapshots, tiles.map, local.*, alpha) orelse continue;
@@ -518,9 +697,10 @@ pub const Renderer = struct {
         snapshots: *const hierarchy.Snapshots,
         inherited: *Inherited,
         alpha: f32,
-        bounds: Bounds,
+        view: View,
         sequence: *u32,
     ) !void {
+        const bounds = view.bounds();
         var it = try Labels.over(world);
         while (it.next()) |chunk| {
             const transforms = chunk.slice(Transform2D);
@@ -530,7 +710,7 @@ pub const Renderer = struct {
                 const run = (self.texts orelse return).get(entity, text_key);
                 if (!label.visible or run.len == 0 or label.color.a <= 0) continue;
                 const looks = inherited.of(gpa, world, entity);
-                if (!looks.visible or looks.modulate.a <= 0) continue;
+                if (!looks.visible or looks.modulate.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
                 // A scene's words are UTF-8 by the time they are read, but a
                 // label's bytes can be written by hand, and the walk through
                 // its characters below takes them on trust.

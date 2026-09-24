@@ -110,6 +110,9 @@ follow_safe_area: bool = true,
 textures: []const rhi.Texture = &.{},
 
 renderer: ?ui_rhi.Renderer = null,
+/// What draws a box the interface leaves for the program: a control's
+/// material. See `ui_rhi.CustomDraw`.
+custom: ?ui_rhi.CustomDraw = null,
 /// The `Assets.font_reloads` the renderer's glyphs were drawn at: a font
 /// read again keeps its address, so its face alone cannot say.
 font_reloads: u32 = 0,
@@ -360,7 +363,7 @@ pub fn draw(
     try renderer.setFaces(faces);
     renderer.setTextures(self.textures);
     renderer.setTime(self.seconds);
-    try renderer.draw(target, .init(width, height), self.commands, null);
+    try renderer.drawWith(target, .init(width, height), self.commands, null, self.custom);
 }
 
 /// Forget the glyphs of every face, so each is rasterised again from the

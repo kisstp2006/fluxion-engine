@@ -98,6 +98,7 @@ const Label = @import("control.zig").Label;
 const LineEdit = @import("control.zig").LineEdit;
 const Button = @import("control.zig").Button;
 const Control = @import("control.zig").Control;
+const Material = @import("shaders.zig").Material;
 const ScriptHandle = @import("script.zig").ScriptHandle;
 const Script = @import("script.zig").Script;
 const tilemap = @import("tilemap.zig");
@@ -945,6 +946,28 @@ fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T
         }
     }
     if (T == TileMap) try writeCells(s, w);
+    if (T == Material) try writeParams(s, w);
+    try w.endObject();
+}
+
+/// A material's numbers, as an object by field: one number, or a list of
+/// them for a vector or a matrix. What it gives nothing is left out.
+fn writeParams(s: *Saving, w: *json.Writer) json.Writer.Error!void {
+    const given = s.app.shader_params.of(s.entity);
+    if (given.len == 0) return;
+    try w.key("params");
+    try w.beginObject();
+    for (given) |*param| {
+        try w.key(param.name);
+        const numbers = param.slice();
+        if (numbers.len == 1) {
+            try w.writeFloat(numbers[0]);
+            continue;
+        }
+        try w.beginArray();
+        for (numbers) |number| try w.writeFloat(number);
+        try w.endArray();
+    }
     try w.endObject();
 }
 
@@ -2011,6 +2034,8 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
             out.variation = @splat(0);
             out.variation_len = 0;
         }
+        // Numbers left out are the file's.
+        if (T == Material and !l.entity.isNone()) l.app.shader_params.clearOf(l.app.gpa, l.entity);
     }
     while (try l.key()) |name| {
         var said = false;
@@ -2029,6 +2054,12 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
         }
         if (T == Control and std.mem.eql(u8, name, "type_variation")) {
             try readVariation(l, out);
+            continue;
+        }
+        if (T == Material and std.mem.eql(u8, name, "params")) {
+            const mark = l.path.push("params", .{});
+            try readParams(l);
+            l.path.pop(mark);
             continue;
         }
         var matched = false;
@@ -2068,6 +2099,41 @@ fn readName(l: *Loading, out: []u8) anyerror!void {
     if (text.len > out.len) return l.fail(error.OutOfRange, "the name is {d} bytes, and {d} are kept", .{ text.len, out.len });
     @memset(out, 0);
     @memcpy(out[0..text.len], text);
+}
+
+/// A material's numbers, by field: a number, a list of up to sixteen, or a
+/// colour written `"#rrggbb"`.
+fn readParams(l: *Loading) anyerror!void {
+    try l.open(.object_begin, "a material's numbers, which is an object of its shader's fields");
+    while (try l.key()) |name| {
+        var numbers: [16]f32 = undefined;
+        var len: usize = 0;
+        switch (try l.next()) {
+            .number => |n| {
+                numbers[0] = n.asFloat(f32);
+                len = 1;
+            },
+            .string => |text| {
+                const colour = Color.parse(text) orelse
+                    return l.fail(error.WrongType, "{s} is not a colour, which is written #rrggbb or #rrggbbaa", .{text});
+                numbers[0..4].* = .{ colour.r, colour.g, colour.b, colour.a };
+                len = 4;
+            },
+            .array_begin => while (true) {
+                switch (try l.next()) {
+                    .array_end => break,
+                    .number => |n| {
+                        if (len == numbers.len) return l.fail(error.OutOfRange, "{s} is more than sixteen numbers", .{name});
+                        numbers[len] = n.asFloat(f32);
+                        len += 1;
+                    },
+                    else => |other| return l.wrong("a number", other),
+                }
+            },
+            else => |other| return l.wrong("a number, a list of them or a colour", other),
+        }
+        if (!l.entity.isNone()) try l.app.setShaderParam(l.entity, name, numbers[0..len]);
+    }
 }
 
 /// One of a component's words, kept beside it for the entity being read.

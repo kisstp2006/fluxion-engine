@@ -51,6 +51,10 @@ pub const Texture = struct {
     /// operating system's absolute path outside it - or empty when it was
     /// made from pixels in memory. What a scene writes in the handle's place.
     source: []const u8 = "",
+    /// Drawn into, and read bottom row first where the backend counts rows
+    /// from the bottom: a picture of it is turned over to be shown. See
+    /// `addRenderTexture`.
+    upside_down: bool = false,
 };
 
 /// What a `Sprite` holds: eight bytes, safe in a component or a save file.
@@ -166,7 +170,8 @@ pub const FontOptions = struct {
 /// How a texture should be sampled, and what it is called in a debugger.
 pub const LoadOptions = struct {
     /// `.nearest` by default: a blurred sprite is the harder mistake to spot.
-    filter: rhi.Filter = .nearest,
+    /// Null is `Assets.default_filter`.
+    filter: ?rhi.Filter = null,
     wrap: rhi.Wrap = .clamp_to_edge,
     label: []const u8 = "",
 };
@@ -191,6 +196,10 @@ font_reloads: u32 = 0,
 
 /// One opaque white texel. See the module comment.
 white: TextureHandle = .none,
+
+/// How a texture is sampled when what loads it does not say: the project's
+/// `rendering.default_texture_filter`.
+default_filter: rhi.Filter = .nearest,
 
 samplers: Samplers,
 
@@ -275,10 +284,49 @@ fn addTexture(
         .gpu = gpu,
         .width = width,
         .height = height,
-        .filter = options.filter,
+        .filter = options.filter orelse self.default_filter,
         .wrap = options.wrap,
         .source = source,
     }));
+}
+
+/// A texture to draw into, `width` by `height` and cleared: what a
+/// `RenderView` draws its picture in. `upside_down` is whether the backend
+/// counts its rows from the bottom, so that what shows it turns it over.
+pub fn addRenderTexture(self: *Assets, width: u32, height: u32, filter: rhi.Filter, upside_down: bool, label: []const u8) Error!TextureHandle {
+    const gpu = try self.device.createTexture(.{
+        .width = @max(width, 1),
+        .height = @max(height, 1),
+        .usage = .{ .sampled = true, .render_target = true },
+        .label = label,
+    });
+    errdefer self.device.destroyTexture(gpu);
+    return .fromId(try self.textures.add(self.gpa, .{
+        .gpu = gpu,
+        .width = @max(width, 1),
+        .height = @max(height, 1),
+        .filter = filter,
+        .wrap = .clamp_to_edge,
+        .upside_down = upside_down,
+    }));
+}
+
+/// Make a texture to draw into `width` by `height`, if it is not: its
+/// handle stays, and what it held is gone.
+pub fn resizeRenderTexture(self: *Assets, handle: TextureHandle, width: u32, height: u32, filter: rhi.Filter) Error!void {
+    const texture = self.textures.get(handle.toId()) orelse return;
+    texture.filter = filter;
+    if (texture.width == @max(width, 1) and texture.height == @max(height, 1)) return;
+    const gpu = try self.device.createTexture(.{
+        .width = @max(width, 1),
+        .height = @max(height, 1),
+        .usage = .{ .sampled = true, .render_target = true },
+        .label = "render view",
+    });
+    self.device.destroyTexture(texture.gpu);
+    texture.gpu = gpu;
+    texture.width = @max(width, 1);
+    texture.height = @max(height, 1);
 }
 
 /// A texture from a PNG: `res://art/hero.png`, `uid://...`, or the
@@ -300,7 +348,7 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
         decoded.height,
         decoded.pixels,
         .{
-            .filter = options.filter,
+            .filter = options.filter orelse self.default_filter,
             .wrap = options.wrap,
             .label = if (options.label.len == 0) source else options.label,
         },
@@ -315,7 +363,7 @@ pub fn adoptTexture(self: *Assets, path: []const u8, width: u32, height: u32, rg
     errdefer self.gpa.free(source);
     self.learnUid(source);
     return self.addTexture(width, height, rgba, .{
-        .filter = options.filter,
+        .filter = options.filter orelse self.default_filter,
         .wrap = options.wrap,
         .label = if (options.label.len == 0) source else options.label,
     }, source);

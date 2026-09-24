@@ -780,7 +780,7 @@ fn listenerOf(app: *App) Vec2 {
 }
 
 fn cameraMiddle(app: *App) Vec2 {
-    const view = View.of(&app.world, &app.snapshots, @floatFromInt(app.width), @floatFromInt(app.height));
+    const view = app.currentView();
     return .init(view.x, view.y);
 }
 

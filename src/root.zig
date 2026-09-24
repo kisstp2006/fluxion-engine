@@ -148,6 +148,10 @@ pub const render = struct {
     pub const sprite = @import("render/sprite.zig");
     /// What the camera sees, and where the pointer is in the world.
     pub const view = @import("render/view.zig");
+    /// A `.shader` file's fragment stage, with the engine's part after it.
+    pub const material = @import("render/material.zig");
+    /// The frame, drawn where it can be read.
+    pub const screen = @import("render/screen.zig");
 };
 
 /// Every glyph the game has drawn, in one texture.
@@ -389,6 +393,17 @@ pub const reflect = @import("fluxion_reflect");
 pub const attr = @import("attr.zig");
 /// The words components keep beside them: see `App.textOf`.
 pub const texts = @import("texts.zig");
+/// Shaders from `.shader` files, and what a `Material` gives one: see
+/// `App.loadShader`.
+pub const shaders = @import("shaders.zig");
+pub const Material = shaders.Material;
+/// The picture each `RenderView` draws: see `App.viewTexture`.
+pub const views = @import("views.zig");
+pub const RenderView = components.RenderView;
+pub const ViewTexture = components.ViewTexture;
+/// A game made at one size, shown in a window of any: see `App.frame`.
+pub const stretch = @import("stretch.zig");
+pub const ShaderHandle = shaders.ShaderHandle;
 
 /// A physical key, by its position on a US layout.
 pub const Key = platform.Key;
@@ -436,6 +451,11 @@ test {
     _ = @import("property.zig");
     _ = @import("tween.zig");
     _ = @import("texts.zig");
+    _ = @import("shaders.zig");
+    _ = @import("render/material.zig");
+    _ = @import("render/screen.zig");
+    _ = @import("render_test.zig");
+    _ = @import("stretch.zig");
     _ = @import("ui_test.zig");
     _ = @import("animation.zig");
     _ = @import("sprite_frames.zig");
