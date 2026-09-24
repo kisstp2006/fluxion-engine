@@ -82,10 +82,21 @@ pub const Control = extern struct {
     width: Size = .{},
     height: Size = .{},
     position: Position = .flow,
-    anchor_x: AnchorX = .left,
-    anchor_y: AnchorY = .top,
-    offset_x: f32 = 0,
-    offset_y: f32 = 0,
+    /// Where an anchored control is held in its parent, as parts of it:
+    /// nought is the parent's left or top edge, one its right or bottom. See
+    /// `Position.anchored`.
+    anchor_left: f32 = 0,
+    anchor_top: f32 = 0,
+    anchor_right: f32 = 0,
+    anchor_bottom: f32 = 0,
+    /// Pixels from each anchor to the control's edge.
+    offset_left: f32 = 0,
+    offset_top: f32 = 0,
+    offset_right: f32 = 0,
+    offset_bottom: f32 = 0,
+    /// Which way a pinned control grows from its anchor: see `Grow`.
+    grow_horizontal: Grow = .end,
+    grow_vertical: Grow = .end,
     visible: bool = true,
     clip: bool = false,
     mouse_filter: MouseFilter = .pass,
@@ -96,24 +107,113 @@ pub const Control = extern struct {
     scale: f32 = 1,
 
     pub const variation_capacity = 31;
+    /// In its parent's flow - one after another, as a box container lays
+    /// them out - or **anchored**: held between two points of its parent on
+    /// each axis, `anchor_left` and `anchor_right` across, `anchor_top` and
+    /// `anchor_bottom` down. Two that differ **stretch** it: its edges are
+    /// its offsets from them, and it resizes with its parent. Two that are
+    /// the same **pin** it: it keeps its own `width` or `height`, and sits
+    /// `offset_left` or `offset_top` from the point, growing the way `Grow`
+    /// says.
     pub const Position = enum(u8) { flow, anchored };
-    pub const AnchorX = enum(u8) { left, center, right };
-    pub const AnchorY = enum(u8) { top, center, bottom };
+    /// Which way a pinned control grows from its anchor: right or down from
+    /// it, `end`; left or up, `begin`; or both, with its middle on it.
+    pub const Grow = enum(u8) { begin, end, both };
     pub const MouseFilter = enum(u8) { stop, pass, ignore };
+
+    /// Where an anchored control goes, in one word.
+    pub const AnchorsPreset = enum(u8) {
+        top_left,
+        top,
+        top_right,
+        left,
+        center,
+        right,
+        bottom_left,
+        bottom,
+        bottom_right,
+        left_wide,
+        top_wide,
+        right_wide,
+        bottom_wide,
+        vcenter_wide,
+        hcenter_wide,
+        full_rect,
+    };
 
     pub const reflect_name = "Control";
     pub const reflect_attributes = .{
         attr.Property{ .name = "type_variation", .get = "variationSlice", .set = "setVariation" },
+        attr.Text{ .name = "tooltip_text", .multiline = true },
         // A UI over the whole screen would take every click in the scene.
         attr.Pickable{ .by_default = false },
     };
     pub const reflect_fields = .{
         .variation = .{attr.Hidden{}},
         .variation_len = .{attr.Hidden{}},
-        .offset_x = .{attr.Unit{ .text = "px" }},
-        .offset_y = .{attr.Unit{ .text = "px" }},
+        .anchor_left = .{attr.Range{ .min = 0, .max = 1 }},
+        .anchor_top = .{attr.Range{ .min = 0, .max = 1 }},
+        .anchor_right = .{attr.Range{ .min = 0, .max = 1 }},
+        .anchor_bottom = .{attr.Range{ .min = 0, .max = 1 }},
+        .offset_left = .{attr.Unit{ .text = "px" }},
+        .offset_top = .{attr.Unit{ .text = "px" }},
+        .offset_right = .{attr.Unit{ .text = "px" }},
+        .offset_bottom = .{attr.Unit{ .text = "px" }},
     };
-    pub const reflect_methods = .{ .setVariation = .{}, .variationSlice = .{} };
+    pub const reflect_methods = .{ .setVariation = .{}, .variationSlice = .{}, .setAnchorsPreset = .{} };
+
+    /// Anchored where `preset` says, flush with its parent's edges or on its
+    /// points: its offsets are nought, and a pinned axis grows away from the
+    /// edge it is pinned to.
+    pub fn setAnchorsPreset(self: *Control, preset: AnchorsPreset) void {
+        const place: struct { l: f32, t: f32, r: f32, b: f32 } = switch (preset) {
+            .top_left => .{ .l = 0, .t = 0, .r = 0, .b = 0 },
+            .top => .{ .l = 0.5, .t = 0, .r = 0.5, .b = 0 },
+            .top_right => .{ .l = 1, .t = 0, .r = 1, .b = 0 },
+            .left => .{ .l = 0, .t = 0.5, .r = 0, .b = 0.5 },
+            .center => .{ .l = 0.5, .t = 0.5, .r = 0.5, .b = 0.5 },
+            .right => .{ .l = 1, .t = 0.5, .r = 1, .b = 0.5 },
+            .bottom_left => .{ .l = 0, .t = 1, .r = 0, .b = 1 },
+            .bottom => .{ .l = 0.5, .t = 1, .r = 0.5, .b = 1 },
+            .bottom_right => .{ .l = 1, .t = 1, .r = 1, .b = 1 },
+            .left_wide => .{ .l = 0, .t = 0, .r = 0, .b = 1 },
+            .top_wide => .{ .l = 0, .t = 0, .r = 1, .b = 0 },
+            .right_wide => .{ .l = 1, .t = 0, .r = 1, .b = 1 },
+            .bottom_wide => .{ .l = 0, .t = 1, .r = 1, .b = 1 },
+            .vcenter_wide => .{ .l = 0.5, .t = 0, .r = 0.5, .b = 1 },
+            .hcenter_wide => .{ .l = 0, .t = 0.5, .r = 1, .b = 0.5 },
+            .full_rect => .{ .l = 0, .t = 0, .r = 1, .b = 1 },
+        };
+        self.position = .anchored;
+        self.anchor_left = place.l;
+        self.anchor_top = place.t;
+        self.anchor_right = place.r;
+        self.anchor_bottom = place.b;
+        self.offset_left = 0;
+        self.offset_top = 0;
+        self.offset_right = 0;
+        self.offset_bottom = 0;
+        self.grow_horizontal = growFrom(place.l);
+        self.grow_vertical = growFrom(place.t);
+    }
+
+    fn growFrom(anchor: f32) Grow {
+        if (anchor >= 1) return .begin;
+        if (anchor > 0) return .both;
+        return .end;
+    }
+
+    /// Which preset its anchors are, if they are one.
+    pub fn anchorsPreset(self: *const Control) ?AnchorsPreset {
+        if (self.position != .anchored) return null;
+        for (std.enums.values(AnchorsPreset)) |preset| {
+            var probe: Control = .{};
+            probe.setAnchorsPreset(preset);
+            if (probe.anchor_left == self.anchor_left and probe.anchor_top == self.anchor_top and
+                probe.anchor_right == self.anchor_right and probe.anchor_bottom == self.anchor_bottom) return preset;
+        }
+        return null;
+    }
 
     pub fn setVariation(self: *Control, name: []const u8) void {
         var cut = @min(name.len, variation_capacity);
@@ -225,6 +325,32 @@ pub const ThemeOverride = extern struct {
         .border_width = .{ attr.Range{ .min = 0, .max = 64 }, attr.Unit{ .text = "px" } },
         .corner_radius = .{ attr.Range{ .min = 0, .max = 128 }, attr.Unit{ .text = "px" } },
     };
+    pub const reflect_methods = .{ .styleBox = .{}, .setStyleBox = .{} };
+
+    /// Its box as one value: what it says of the background, the border, the
+    /// corners and the padding.
+    pub fn styleBox(self: *const ThemeOverride) StyleBox {
+        return .{
+            .background = self.background,
+            .border_color = self.border_color,
+            .border_width = self.border_width,
+            .corner_radius = self.corner_radius,
+            .padding = self.padding,
+        };
+    }
+
+    /// Say all of `box` of its box, each switched on.
+    pub fn setStyleBox(self: *ThemeOverride, box: StyleBox) void {
+        self.override_background = true;
+        self.background = box.background;
+        self.override_border = true;
+        self.border_color = box.border_color;
+        self.border_width = box.border_width;
+        self.override_corners = true;
+        self.corner_radius = box.corner_radius;
+        self.override_padding = true;
+        self.padding = box.padding;
+    }
 
     /// What it says, as a theme says it: only what is switched on.
     pub fn style(self: ThemeOverride) theme_file.Style {
@@ -242,52 +368,24 @@ pub const ThemeOverride = extern struct {
     }
 };
 
+/// Words in a control. What they say is the app's, as long as it is: see
+/// `texts.zig`.
 pub const Label = extern struct {
-    bytes: [capacity]u8 = @splat(0),
-    len: u8 = 0,
     /// Drawn round the letters, which no theme says: a label over a picture
     /// needs it and a label on a panel does not.
     outline_color: Color = .black,
     outline_width: u16 = 0,
     wrap: Wrap = .words,
 
-    pub const capacity = 127;
     pub const Wrap = enum(u8) { words, newline, none };
     pub const reflect_name = "Label";
-    pub const reflect_attributes = .{attr.Property{ .name = "text", .get = "slice", .set = "set" }};
-    pub const reflect_fields = .{
-        .bytes = .{attr.Hidden{}},
-        .len = .{attr.Hidden{}},
-    };
-    pub const reflect_methods = .{
-        .set = .{attr.Multiline{}},
-        .slice = .{},
-    };
-
-    pub fn of(text: []const u8) Label {
-        var out: Label = .{};
-        out.set(text);
-        return out;
-    }
-
-    pub fn set(self: *Label, text: []const u8) void {
-        var cut = @min(text.len, capacity);
-        while (cut > 0 and cut < text.len and text[cut] & 0xC0 == 0x80) cut -= 1;
-        @memcpy(self.bytes[0..cut], text[0..cut]);
-        self.len = @intCast(cut);
-    }
-
-    pub fn slice(self: *const Label) []const u8 {
-        return self.bytes[0..@min(self.len, capacity)];
-    }
+    pub const reflect_attributes = .{attr.Text{ .name = "text", .multiline = true }};
 };
 
 /// A box that says what it does and hears that it was clicked. It carries
 /// its own words and picture: a button is one thing, not a button with a
 /// label inside it.
 pub const Button = extern struct {
-    bytes: [capacity]u8 = @splat(0),
-    len: u8 = 0,
     /// Drawn before the words, where there is one.
     icon: Assets.TextureHandle = .none,
     disabled: bool = false,
@@ -298,34 +396,13 @@ pub const Button = extern struct {
     hovered: bool = false,
     held: bool = false,
 
-    pub const capacity = 63;
     pub const reflect_name = "Button";
-    pub const reflect_attributes = .{attr.Property{ .name = "text", .get = "slice", .set = "set" }};
+    pub const reflect_attributes = .{attr.Text{ .name = "text" }};
     pub const reflect_fields = .{
-        .bytes = .{attr.Hidden{}},
-        .len = .{attr.Hidden{}},
         .hovered = .{attr.ReadOnly{}},
         .held = .{attr.ReadOnly{}},
     };
-    pub const reflect_methods = .{ .set = .{}, .slice = .{} };
     pub const signals = .{ .pressed = struct {}, .toggled = struct { pressed: bool } };
-
-    pub fn of(text: []const u8) Button {
-        var out: Button = .{};
-        out.set(text);
-        return out;
-    }
-
-    pub fn set(self: *Button, text: []const u8) void {
-        var cut = @min(text.len, capacity);
-        while (cut > 0 and cut < text.len and text[cut] & 0xC0 == 0x80) cut -= 1;
-        @memcpy(self.bytes[0..cut], text[0..cut]);
-        self.len = @intCast(cut);
-    }
-
-    pub fn slice(self: *const Button) []const u8 {
-        return self.bytes[0..@min(self.len, capacity)];
-    }
 };
 
 pub const CheckBox = extern struct {
@@ -335,51 +412,21 @@ pub const CheckBox = extern struct {
     pub const signals = .{ .toggled = struct { checked: bool } };
 };
 
+/// Words to type. What is typed, and what shows before anything is, are
+/// the app's: see `texts.zig`.
 pub const LineEdit = extern struct {
-    bytes: [capacity]u8 = @splat(0),
-    len: u16 = 0,
-    placeholder: [capacity]u8 = @splat(0),
-    placeholder_len: u16 = 0,
     multiline: bool = false,
     password: bool = false,
     disabled: bool = false,
+    /// How many characters may be typed; nought for no end.
+    max_length: u32 = 0,
 
-    pub const capacity = 255;
     pub const reflect_name = "LineEdit";
     pub const reflect_attributes = .{
-        attr.Property{ .name = "text", .get = "slice", .set = "set" },
-        attr.Property{ .name = "placeholder_text", .get = "placeholderSlice", .set = "setPlaceholder" },
+        attr.Text{ .name = "text", .multiline = true },
+        attr.Text{ .name = "placeholder_text" },
     };
-    pub const reflect_fields = .{
-        .bytes = .{attr.Hidden{}},
-        .len = .{attr.Hidden{}},
-        .placeholder = .{attr.Hidden{}},
-        .placeholder_len = .{attr.Hidden{}},
-    };
-    pub const reflect_methods = .{ .set = .{attr.Multiline{}}, .slice = .{}, .setPlaceholder = .{}, .placeholderSlice = .{} };
-    pub const signals = .{ .changed = struct {}, .submitted = struct {} };
-
-    pub fn of(text: []const u8) LineEdit {
-        var out: LineEdit = .{};
-        out.set(text);
-        return out;
-    }
-
-    pub fn set(self: *LineEdit, text: []const u8) void {
-        self.len = copyText(&self.bytes, text);
-    }
-
-    pub fn slice(self: *const LineEdit) []const u8 {
-        return self.bytes[0..@min(self.len, capacity)];
-    }
-
-    pub fn setPlaceholder(self: *LineEdit, text: []const u8) void {
-        self.placeholder_len = copyText(&self.placeholder, text);
-    }
-
-    pub fn placeholderSlice(self: *const LineEdit) []const u8 {
-        return self.placeholder[0..@min(self.placeholder_len, capacity)];
-    }
+    pub const signals = .{ .text_changed = struct {}, .text_submitted = struct {} };
 };
 
 pub const Slider = extern struct {
@@ -390,7 +437,7 @@ pub const Slider = extern struct {
     vertical: bool = false,
     disabled: bool = false,
     pub const reflect_name = "Slider";
-    pub const signals = .{ .changed = struct { value: f32 } };
+    pub const signals = .{ .value_changed = struct { value: f32 } };
 };
 
 pub const ProgressBar = extern struct {
@@ -399,6 +446,116 @@ pub const ProgressBar = extern struct {
     value: f32 = 0,
     show_percentage: bool = true,
     pub const reflect_name = "ProgressBar";
+};
+
+/// How a control takes the keyboard's and a pad's focus, beside its
+/// `Control`: without one, a button, a box and a slider take it from a press,
+/// Tab and the arrows, and the rest do not; a field always does.
+pub const Focus = extern struct {
+    mode: Mode = .all,
+    /// Where the arrows, Tab and Shift+Tab go from it, when not to the
+    /// nearest that way or the next declared. `.none` for that.
+    left: Entity = .none,
+    right: Entity = .none,
+    up: Entity = .none,
+    down: Entity = .none,
+    next: Entity = .none,
+    previous: Entity = .none,
+
+    /// `none`; `click`, from a press on it and nothing else; `all`, from a
+    /// press, Tab and the arrows.
+    pub const Mode = enum(u8) { none, click, all };
+    pub const reflect_name = "Focus";
+};
+
+/// A box of one colour: a backdrop, a fade to black, a bar.
+pub const ColorRect = extern struct {
+    color: Color = .white,
+    pub const reflect_name = "ColorRect";
+};
+
+/// Words with styles written into them - `{color=red|...}`, `{b|heavy}`,
+/// `{size=24|large}`, `{img=res://icons/key.png|}` and every other tag
+/// fluxion-ui's markup reads - wrapping between words, each set in its own
+/// size and weight. The words are the app's: see `texts.zig`.
+///
+/// **One letter after another**, for credits and a line of dialogue: with a
+/// `reveal_speed`, `reveal()` shows them from the first at that many a
+/// second, each keeping its room so nothing moves as they come, and
+/// `revealed` is said when the last shows. `visible_characters` is how many
+/// show, -1 for all of them.
+pub const RichText = extern struct {
+    visible_characters: i32 = -1,
+    /// Characters a second `reveal()` shows them at.
+    reveal_speed: f32 = 30,
+    /// The font a `{b|...}` stretch is set in; `.none` draws the words' own
+    /// font with an outline of their colour.
+    bold_font: Assets.FontHandle = .none,
+    /// How far the reveal has come, in characters.
+    revealed: f32 = 0,
+
+    pub const reflect_name = "RichText";
+    pub const reflect_attributes = .{attr.Text{ .name = "text", .multiline = true }};
+    pub const reflect_fields = .{
+        .reveal_speed = .{attr.Unit{ .text = "/s" }},
+        .revealed = .{attr.Hidden{}},
+    };
+    pub const reflect_methods = .{ .reveal = .{}, .showAll = .{} };
+    pub const signals = .{ .revealed = struct {} };
+
+    /// Show the words from the first, one after another.
+    pub fn reveal(self: *RichText) void {
+        self.revealed = 0;
+        self.visible_characters = 0;
+    }
+
+    /// Show all of them at once.
+    pub fn showAll(self: *RichText) void {
+        self.visible_characters = -1;
+    }
+};
+
+/// A box over everything else while it is open, in the middle of the screen
+/// or where its control's own place says: a dialog, a pause menu. What is in
+/// it is its children, drawn as any control's are.
+///
+/// **Modal**, what is under it takes no clicks, behind a veil. A press
+/// outside it, or the `ui_cancel` action, closes it when it says so, and
+/// `closed` is said whenever it closes.
+pub const Popup = extern struct {
+    open: bool = false,
+    modal: bool = true,
+    close_on_click_outside: bool = true,
+    /// In the middle of the screen; off, where its control's place puts it.
+    centered: bool = true,
+    /// The veil drawn over what is under a modal one.
+    veil: Color = .rgba(0, 0, 0, 0.5),
+    /// Open when it was last drawn, to say `closed` when it no longer is.
+    was_open: bool = false,
+
+    pub const reflect_name = "Popup";
+    pub const reflect_fields = .{ .was_open = .{attr.Hidden{}} };
+    pub const reflect_methods = .{ .popup = .{}, .hide = .{} };
+    pub const signals = .{ .closed = struct {} };
+
+    pub fn popup(self: *Popup) void {
+        self.open = true;
+    }
+
+    pub fn hide(self: *Popup) void {
+        self.open = false;
+    }
+};
+
+/// What a `ThemeOverride` says of a control's box, as one value: from a
+/// script, `override.setStyleBox(box)` after `var box = override.styleBox()`.
+pub const StyleBox = extern struct {
+    background: Color = .black,
+    border_color: Color = .white,
+    border_width: u16 = 0,
+    corner_radius: f32 = 0,
+    padding: Insets = .{},
+    pub const reflect_name = "StyleBox";
 };
 
 pub const TabContainer = extern struct {
@@ -439,6 +596,19 @@ pub const NinePatchRect = extern struct {
 
 pub const Nodes = struct {
     textures: std.ArrayList(rhi.Texture) = .empty,
+    /// The names a control is declared with - its own, and the neighbours
+    /// its focus goes to - kept until it is opened, which is when the
+    /// interface reads them.
+    names: [7][48]u8 = undefined,
+    /// The control with words to show whose box the pointer is over, found
+    /// as the controls are declared, and the one it was last frame, and for
+    /// how long the pointer has rested there.
+    tooltip_under: Entity = .none,
+    tooltip_was: Entity = .none,
+    tooltip_rested: f32 = 0,
+    /// Seconds the pointer rests on a control before its `tooltip_text`
+    /// shows: the project's `gui.tooltip_delay`.
+    tooltip_delay: f32 = 0.5,
     /// A check box's tick, white on clear, made the first time one is
     /// drawn and tinted with the theme's words.
     check_mark: Assets.TextureHandle = .none,
@@ -463,8 +633,45 @@ pub const Nodes = struct {
 
     fn draw(app: *App) !void {
         const self = &app.control_nodes;
+        self.tooltip_under = .none;
         try self.drawRoots(.{ .app = app, .layout = &app.ui, .interactive = true });
+        try self.tooltip(app);
         app.interface.textures = self.textures.items;
+    }
+
+    /// The words of the control the pointer has rested on long enough, by
+    /// the pointer, over everything.
+    fn tooltip(self: *Nodes, app: *App) !void {
+        const under = self.tooltip_under;
+        if (under.isNone() or !under.eql(self.tooltip_was)) {
+            self.tooltip_was = under;
+            self.tooltip_rested = 0;
+            return;
+        }
+        self.tooltip_rested += app.time.unscaled_delta;
+        const delay = if (app.project.settings) |project| project.gui.tooltip_delay else self.tooltip_delay;
+        if (self.tooltip_rested < delay) return;
+        const words = app.textOf(under, Control, "tooltip_text");
+        const context: Context = .{ .app = app, .layout = &app.ui };
+        const style = self.resolvedStyle(context, under, .tooltip, .normal);
+        const scale = @max(app.interface.scale, 0.01);
+        var box: ui.Declaration = .{
+            .id = "control-tooltip",
+            .floating = .{
+                .attach = .root,
+                .offset = .{ .x = app.input.pointer.x / scale + 12, .y = app.input.pointer.y / scale + 18 },
+                .z_index = 1000,
+            },
+        };
+        self.applyStyle(app, &box, style);
+        app.ui.open(box);
+        defer app.ui.close();
+        app.ui.text(words, .{
+            .font = app.interface.addFont(style.font) catch 0,
+            .font_size = style.font_size,
+            .color = color(style.text_color),
+            .wrap = .none,
+        });
     }
 
     fn drawRoots(self: *Nodes, context: Context) !void {
@@ -548,18 +755,55 @@ pub const Nodes = struct {
             opacity = looks.modulate.a;
         }
         const own = context.at(entity);
+        const popup = app.world.get(entity, Popup);
+        if (popup) |held| {
+            // Said once it is shut, however it was.
+            if (held.was_open and !held.open and own.interactive) {
+                held.was_open = false;
+                try app.signal(entity, Popup, .closed).emit(.{});
+            }
+            // An editor, which draws it without answering anything, shows it
+            // as it would be open, to be laid out.
+            if (!held.open and own.interactive) return;
+            if (own.interactive) held.was_open = true;
+        }
         var declared = self.declaration(own, entity, control);
         declared.opacity = opacity;
+        if (popup) |held| {
+            const z: i16 = 900 +| control.z_index;
+            if (held.modal and own.interactive) context.layout.empty(.{
+                .width = .grow,
+                .height = .grow,
+                .background_color = color(held.veil),
+                .capture = true,
+                .floating = .{ .attach = .root, .z_index = z - 1 },
+            });
+            if (held.centered) {
+                declared.floating = .{ .attach = .root, .anchor = .centered, .z_index = z };
+            } else if (declared.floating) |*float| {
+                float.z_index = z;
+            } else declared.floating = .{ .z_index = z };
+        }
         context.layout.open(declared);
         defer context.layout.close();
+        if (own.interactive and app.textOf(entity, Control, "tooltip_text").len > 0 and context.layout.hovered()) self.tooltip_under = entity;
         try self.content(own, entity);
         try self.children(context, entity, depth + 1);
+        if (popup) |held| if (own.interactive) {
+            const layout = context.layout;
+            const outside = layout.pointer.justPressed() and !layout.isPointerOver(self.idFor(entity));
+            if ((held.close_on_click_outside and outside) or app.input.actionJustPressed("ui_cancel")) held.open = false;
+        };
+    }
+
+    /// The name a control is declared with, into the first of `names`.
+    fn idFor(self: *Nodes, entity: Entity) []const u8 {
+        return idOf(&self.names[0], entity);
     }
 
     fn declaration(self: *Nodes, context: Context, entity: Entity, control: Control) ui.Declaration {
         const app = context.app;
-        var id: [48]u8 = undefined;
-        const name = idOf(&id, entity);
+        const name = self.idFor(entity);
         var out: ui.Declaration = .{
             .id = name,
             .width = control.width.layout(),
@@ -569,15 +813,24 @@ pub const Nodes = struct {
             .capture = control.mouse_filter == .stop,
             .scale = if (control.scale != 1) .by(control.scale) else null,
         };
-        if (control.position == .anchored) out.floating = .{
-            .anchor = .{
-                .element_x = alignX(control.anchor_x),
-                .element_y = alignY(control.anchor_y),
-                .parent_x = alignX(control.anchor_x),
-                .parent_y = alignY(control.anchor_y),
-            },
-            .offset = .{ .x = control.offset_x, .y = control.offset_y },
-        };
+        if (control.position == .anchored) {
+            // Stretched between two points of its parent, or pinned to one
+            // and its own size: see `Control.Position`.
+            const across = control.anchor_right > control.anchor_left;
+            const down = control.anchor_bottom > control.anchor_top;
+            if (across) out.width = stretched(control.width, control.anchor_right - control.anchor_left, control.offset_right - control.offset_left);
+            if (down) out.height = stretched(control.height, control.anchor_bottom - control.anchor_top, control.offset_bottom - control.offset_top);
+            out.floating = .{
+                .fractions = .{
+                    .element_x = if (across) 0 else growFraction(control.grow_horizontal),
+                    .element_y = if (down) 0 else growFraction(control.grow_vertical),
+                    .target_x = control.anchor_left,
+                    .target_y = control.anchor_top,
+                },
+                .offset = .{ .x = control.offset_left, .y = control.offset_top },
+            };
+        }
+        if (app.world.get(entity, ColorRect)) |rect| out.background_color = color(rect.color);
         if (app.world.get(entity, BoxContainer)) |box| {
             out.direction = if (box.direction == .horizontal) .left_to_right else .top_to_bottom;
             out.gap = box.separation;
@@ -617,11 +870,21 @@ pub const Nodes = struct {
                 .border = padding(picture.patch_margin),
             };
         };
-        if ((app.world.has(entity, Button) or app.world.has(entity, CheckBox) or app.world.has(entity, Slider)) and control.mouse_filter != .ignore) {
-            out.focus = .{};
+        const pressable = app.world.has(entity, Button) or app.world.has(entity, CheckBox) or app.world.has(entity, Slider);
+        if (pressable and control.mouse_filter != .ignore) {
             out.cursor = .pointing_hand;
             out.capture = true;
         }
+        const asked: Focus = if (app.world.get(entity, Focus)) |own| own.* else .{ .mode = if (pressable) .all else .none };
+        if (asked.mode != .none and control.mouse_filter != .ignore) out.focus = .{
+            .tab_stop = asked.mode == .all,
+            .left = self.neighbour(app, 1, asked.left),
+            .right = self.neighbour(app, 2, asked.right),
+            .up = self.neighbour(app, 3, asked.up),
+            .down = self.neighbour(app, 4, asked.down),
+            .next = self.neighbour(app, 5, asked.next),
+            .previous = self.neighbour(app, 6, asked.previous),
+        };
         if (roleOf(app, entity)) |role| {
             // A label is words, not a box: it takes the theme's text but none
             // of its background. Nor does a panel told not to draw one.
@@ -632,8 +895,19 @@ pub const Nodes = struct {
         return out;
     }
 
+    /// The name a neighbour of the focus takes the keyboard by, into the
+    /// `slot`th of `names`: null for none.
+    fn neighbour(self: *Nodes, app: *App, slot: usize, entity: Entity) ?[]const u8 {
+        if (entity.isNone() or !app.world.isAlive(entity)) return null;
+        return focusIdOf(app, &self.names[slot], entity);
+    }
+
     fn content(self: *Nodes, context: Context, entity: Entity) !void {
         const app = context.app;
+        if (app.world.get(entity, RichText)) |rich| {
+            try richContent(self, context, entity, rich, self.resolvedStyle(context, entity, .label, stateOf(context, entity)));
+            return;
+        }
         if (app.world.get(entity, CheckBox)) |checkbox| {
             try checkboxContent(self, context, entity, checkbox, self.resolvedStyle(context, entity, .check_box, stateOf(context, entity)));
             return;
@@ -656,9 +930,9 @@ pub const Nodes = struct {
             return;
         }
         const style = self.resolvedStyle(context, entity, roleOf(app, entity) orelse .panel, stateOf(context, entity));
-        if (app.world.get(entity, Label)) |label| drawLabel(context, label, style);
+        if (app.world.get(entity, Label)) |label| drawLabel(context, entity, label, style);
         if (app.world.get(entity, Button)) |button| {
-            buttonFace(self, context, button, style);
+            buttonFace(self, context, entity, button, style);
             const control = app.world.get(entity, Control).?;
             if (control.mouse_filter == .ignore) {
                 button.hovered = false;
@@ -854,6 +1128,7 @@ const ResolvedStyle = struct {
 
 fn roleOf(app: *App, entity: Entity) ?Part {
     const world = &app.world;
+    if (world.has(entity, RichText)) return .label;
     if (world.has(entity, Button)) return .button;
     if (world.has(entity, CheckBox)) return .check_box;
     if (world.has(entity, LineEdit)) return .line_edit;
@@ -937,7 +1212,7 @@ fn checkboxContent(self: *Nodes, context: Context, entity: Entity, checkbox: *Ch
         if (self.image(app, try checkMark(self, app), style.text_color, .full)) |tick| layout.empty(.{ .width = .grow, .height = .grow, .image = tick });
     }
     layout.close();
-    if (app.world.get(entity, Label)) |label| drawLabel(context, label, style);
+    if (app.world.get(entity, Label)) |label| drawLabel(context, entity, label, style);
 }
 
 /// How many pixels across the tick is drawn at: enough to stay smooth at
@@ -986,17 +1261,19 @@ fn lineEditContent(context: Context, entity: Entity, line: *LineEdit, style: Res
     const name = std.fmt.bufPrint(&id, "control-{d}-{d}-input", .{ entity.index, entity.generation }) catch "control-input";
     // What is not there yet is written the way anything disabled is.
     const quiet = ResolvedStyle.from(app.themes.styleOf(themeOf(app, entity).handle, .line_edit, .disabled, "")).text_color;
+    const typed = app.textOf(entity, LineEdit, "text");
+    const placeholder = app.textOf(entity, LineEdit, "placeholder_text");
     if (line.disabled) {
-        layout.text(if (line.len > 0) line.slice() else line.placeholderSlice(), .{
+        layout.text(if (typed.len > 0) typed else placeholder, .{
             .font_size = style.font_size,
-            .color = color(if (line.len > 0) style.text_color else quiet),
+            .color = color(if (typed.len > 0) style.text_color else quiet),
             .wrap = if (line.multiline) .words else .none,
         });
         return;
     }
     layout.textInput(.{ .id = name, .width = .grow, .height = .grow }, .{
-        .placeholder = line.placeholderSlice(),
-        .max_length = LineEdit.capacity,
+        .placeholder = placeholder,
+        .max_length = if (line.max_length == 0) null else line.max_length,
         .password = line.password,
         .multiline = line.multiline,
         .drag_select = true,
@@ -1006,12 +1283,12 @@ fn lineEditContent(context: Context, entity: Entity, line: *LineEdit, style: Res
         .cursor_color = color(style.text_color),
     });
     if (context.interactive and layout.textChanged(name)) {
-        line.set(layout.textValueOf(name) orelse "");
-        try app.signal(entity, LineEdit, .changed).emit(.{});
+        try app.setText(entity, LineEdit, "text", layout.textValueOf(name) orelse "");
+        try app.signal(entity, LineEdit, .text_changed).emit(.{});
     } else if (layout.textValueOf(name)) |held| {
-        if (!std.mem.eql(u8, held, line.slice())) layout.setTextValue(name, line.slice());
+        if (!std.mem.eql(u8, held, typed)) layout.setTextValue(name, typed);
     }
-    if (context.interactive and layout.textSubmitted(name)) try app.signal(entity, LineEdit, .submitted).emit(.{});
+    if (context.interactive and layout.textSubmitted(name)) try app.signal(entity, LineEdit, .text_submitted).emit(.{});
 }
 
 fn sliderContent(context: Context, entity: Entity, slider: *Slider, fill_style: ResolvedStyle) !void {
@@ -1032,7 +1309,7 @@ fn sliderContent(context: Context, entity: Entity, slider: *Slider, fill_style: 
             next = std.math.clamp(next, @min(slider.min, slider.max), @max(slider.min, slider.max));
             if (next != slider.value) {
                 slider.value = next;
-                try app.signal(entity, Slider, .changed).emit(.{ .value = next });
+                try app.signal(entity, Slider, .value_changed).emit(.{ .value = next });
                 fraction = if (span > 0) (next - slider.min) / span else 0;
             }
         }
@@ -1080,16 +1357,17 @@ fn progressContent(context: Context, progress: *const ProgressBar, style: Resolv
 }
 
 /// What a button shows: its picture, then its words.
-fn buttonFace(self: *Nodes, context: Context, button: *const Button, style: ResolvedStyle) void {
+fn buttonFace(self: *Nodes, context: Context, entity: Entity, button: *const Button, style: ResolvedStyle) void {
     const layout = context.layout;
+    const words = context.app.textOf(entity, Button, "text");
     if (self.image(context.app, button.icon, .white, .full)) |drawn| {
         const side: f32 = @floatFromInt(@max(style.font_size, 1));
         var picture = drawn;
         picture.background_color = .transparent;
         layout.empty(.{ .width = .fixed(side), .height = .fixed(side), .image = picture });
     }
-    if (button.len == 0) return;
-    layout.text(button.slice(), .{
+    if (words.len == 0) return;
+    layout.text(words, .{
         .font = context.app.interface.addFont(style.font) catch 0,
         .font_size = style.font_size,
         .color = color(style.text_color),
@@ -1097,8 +1375,8 @@ fn buttonFace(self: *Nodes, context: Context, button: *const Button, style: Reso
     });
 }
 
-fn drawLabel(context: Context, label: *const Label, style: ResolvedStyle) void {
-    context.layout.text(label.slice(), .{
+fn drawLabel(context: Context, entity: Entity, label: *const Label, style: ResolvedStyle) void {
+    context.layout.text(context.app.textOf(entity, Label, "text"), .{
         .font = context.app.interface.addFont(style.font) catch 0,
         .font_size = style.font_size,
         .color = color(style.text_color),
@@ -1111,31 +1389,79 @@ fn drawLabel(context: Context, label: *const Label, style: ResolvedStyle) void {
     });
 }
 
-fn copyText(out: *[LineEdit.capacity]u8, text: []const u8) u16 {
-    var len = @min(text.len, out.len);
-    while (len > 0 and len < text.len and text[len] & 0xC0 == 0x80) len -= 1;
-    @memcpy(out[0..len], text[0..len]);
-    return @intCast(len);
+/// Words with styles written into them, shown one letter after another
+/// while a reveal is under way.
+fn richContent(self: *Nodes, context: Context, entity: Entity, rich: *RichText, style: ResolvedStyle) !void {
+    const app = context.app;
+    const words = app.textOf(entity, RichText, "text");
+    if (rich.visible_characters >= 0 and context.interactive and app.time.delta > 0) {
+        rich.revealed += app.time.delta * @max(rich.reveal_speed, 0);
+        const total = characters(app.gpa, words);
+        const reached: usize = @intFromFloat(@max(0, @floor(rich.revealed)));
+        if (reached >= total) {
+            rich.visible_characters = -1;
+            try app.signal(entity, RichText, .revealed).emit(.{});
+        } else rich.visible_characters = @intCast(reached);
+    }
+    var pictures: Pictures = .{ .nodes = self, .app = app };
+    context.layout.richText(words, .{
+        .font = app.interface.addFont(style.font) catch 0,
+        .font_size = style.font_size,
+        .color = color(style.text_color),
+    }, .{
+        .bold_font = if (rich.bold_font.isNone()) null else app.interface.addFont(rich.bold_font) catch null,
+        .visible = if (rich.visible_characters >= 0) @intCast(rich.visible_characters) else null,
+        .image = .{ .context = &pictures, .find = Pictures.find },
+    });
+}
+
+/// How many characters of markup a reader sees: its tags taken out.
+fn characters(gpa: std.mem.Allocator, raw: []const u8) usize {
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    var spans: std.ArrayList(ui.markup.Span) = .empty;
+    defer spans.deinit(gpa);
+    const parsed = ui.markup.parse(&text, &spans, null, null, gpa, raw, null) catch return raw.len;
+    return std.unicode.utf8CountCodepoints(parsed.text) catch parsed.text.len;
+}
+
+/// The pictures a rich text's `{img=...|}` tags name: textures by their
+/// paths, read the first time one is named.
+const Pictures = struct {
+    nodes: *Nodes,
+    app: *App,
+
+    fn find(context: ?*anyopaque, name: []const u8) ?ui.layout.Image {
+        const self: *Pictures = @ptrCast(@alignCast(context.?));
+        const handle = self.app.loadAsset(Assets.TextureHandle, name) catch return null;
+        return self.nodes.image(self.app, handle, .white, .full);
+    }
+};
+
+/// The name the element that takes a control's focus is declared with: a
+/// field's is the input inside it.
+pub fn focusIdOf(app: *App, buffer: []u8, entity: Entity) []const u8 {
+    if (app.world.has(entity, LineEdit)) return std.fmt.bufPrint(buffer, "control-{d}-{d}-input", .{ entity.index, entity.generation }) catch "control-input";
+    return idOf(buffer, entity);
+}
+
+/// A size between two anchors: that part of the parent, and the offsets'
+/// difference more, within the size's own bounds.
+fn stretched(size: Size, part: f32, pixels: f32) ui.Sizing {
+    return .{ .kind = .percent, .fraction = part, .extra = pixels, .min = size.min, .max = size.max };
+}
+
+/// Which point of a pinned control is on its anchor, across or down.
+fn growFraction(grow: Control.Grow) f32 {
+    return switch (grow) {
+        .end => 0,
+        .begin => 1,
+        .both => 0.5,
+    };
 }
 
 fn color(value: Color) ui.Color {
     return .rgba(value.r, value.g, value.b, value.a);
-}
-
-fn alignX(value: Control.AnchorX) ui.AlignX {
-    return switch (value) {
-        .left => .left,
-        .center => .center,
-        .right => .right,
-    };
-}
-
-fn alignY(value: Control.AnchorY) ui.AlignY {
-    return switch (value) {
-        .top => .top,
-        .center => .center,
-        .bottom => .bottom,
-    };
 }
 
 fn boxAlignX(value: BoxContainer.AlignX) ui.AlignX {
@@ -1189,9 +1515,10 @@ test "control components build one screen-space Fluxion UI tree" {
         Control{ .width = .{ .mode = .fixed, .value = 100 }, .height = .{ .mode = .fixed, .value = 40 } }, Parent.of(root),
         PanelContainer{},
         ScrollContainer{},
-        Label.of("Outlined"),
+        Label{},
         NinePatchRect{ .texture = app.assets.white, .patch_margin = .all(4) },
     });
+    try app.setText(panel, Label, "text", "Outlined");
     app.world.get(panel, Label).?.outline_width = 2;
     try app.run();
 
@@ -1239,8 +1566,10 @@ test "form controls share the retained Control tree" {
     _ = app.assets.loadSystemFont(.{ .atlas = 128 }) catch return error.SkipZigTest;
     try app.useControlNodes();
     const root = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{}, BoxContainer{ .direction = .vertical } });
-    const check = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 140 }, .height = .{ .mode = .fixed, .value = 30 } }, Parent.of(root), CheckBox{ .checked = true }, Label.of("Enabled") });
-    const field = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 32 } }, Parent.of(root), LineEdit.of("Player") });
+    const check = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 140 }, .height = .{ .mode = .fixed, .value = 30 } }, Parent.of(root), CheckBox{ .checked = true }, Label{} });
+    try app.setText(check, Label, "text", "Enabled");
+    const field = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 32 } }, Parent.of(root), LineEdit{} });
+    try app.setText(field, LineEdit, "text", "Player");
     const slider = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 20 } }, Parent.of(root), Slider{ .value = 50 } });
     const progress = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 20 } }, Parent.of(root), ProgressBar{ .value = 75 } });
     try app.run();
@@ -1249,7 +1578,7 @@ test "form controls share the retained Control tree" {
         var id: [48]u8 = undefined;
         try testing.expect(app.ui.boxOf(idOf(&id, entity)) != null);
     }
-    try testing.expectEqualStrings("Player", app.world.get(field, LineEdit).?.slice());
+    try testing.expectEqualStrings("Player", app.textOf(field, LineEdit, "text"));
 }
 
 test "a check box that is ticked draws a tick, made once, and one that is not draws none" {
@@ -1358,7 +1687,7 @@ test "a scene keeps the theme a control names, what it is drawn as, and a button
     const entity = app.find("Delete").?;
     const control = app.world.get(entity, Control).?;
     try testing.expectEqualStrings("Danger", control.variationSlice());
-    try testing.expectEqualStrings("Delete", app.world.get(entity, Button).?.slice());
+    try testing.expectEqualStrings("Delete", app.textOf(entity, Button, "text"));
     try testing.expect(!control.theme.isNone());
 
     const style = app.control_nodes.resolvedStyle(.{ .app = app, .layout = &app.ui }, entity, .button, .normal);
@@ -1387,10 +1716,12 @@ test "a control is drawn from the theme the control above it names" {
         Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow }, .theme = handle },
         CanvasLayer{},
     });
-    const button = try app.world.spawnWith(.{ Control{}, Parent.of(root), Button.of("Styled") });
+    const button = try app.world.spawnWith(.{ Control{}, Parent.of(root), Button{} });
+    try app.setText(button, Button, "text", "Styled");
     var loud: Control = .{};
     loud.setVariation("Loud");
-    const shouty = try app.world.spawnWith(.{ loud, Parent.of(root), Button.of("Loud") });
+    const shouty = try app.world.spawnWith(.{ loud, Parent.of(root), Button{} });
+    try app.setText(shouty, Button, "text", "Loud");
     try app.run();
 
     const context: Context = .{ .app = app, .layout = &app.ui };

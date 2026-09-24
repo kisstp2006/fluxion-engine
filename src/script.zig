@@ -718,6 +718,7 @@ pub const Scripts = struct {
             .on_emit = heardEmit,
             .host_types = &host_types,
             .host_member = hostMember,
+            .host_set_member = hostSetMember,
         });
         errdefer vm.destroy();
         vm.host = self;
@@ -1993,6 +1994,8 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
         const source = Entity.fromInt(h.key);
         for (self.app.scene_components.entries.items) |*entry| {
             if (!entry.type.same(h.value.type)) continue;
+            // The words a component keeps beside it: `label.text`.
+            if (App.textAttributeOf(entry.type, name) != null) return try vm.string(self.app.textNamed(source, entry.name, name));
             for (entry.signals) |decl| {
                 if (std.mem.eql(u8, decl.name, name)) return try self.bridgeOf(source, entry.name, decl.name, decl.args.fields().len);
             }
@@ -2014,6 +2017,26 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
         if (std.mem.eql(u8, decl.name, found.name)) return try self.bridgeOf(ref.entity, entry.name, decl.name, decl.args.fields().len);
     }
     return null;
+}
+
+/// A component's words written from a script, `label.text = "Paused"`:
+/// kept beside it, as its `attr.Text` says. See `texts.zig`.
+fn hostSetMember(vm: *flux.Vm, handle: flux.Value, name: []const u8, value: flux.Value) flux.Vm.Error!bool {
+    const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
+    const h = handle.as(flux.object.Handle);
+    if (h.live == null or h.live.? != &self.resolver) return false;
+    const source = Entity.fromInt(h.key);
+    for (self.app.scene_components.entries.items) |*entry| {
+        if (!entry.type.same(h.value.type)) continue;
+        if (App.textAttributeOf(entry.type, name) == null) return false;
+        if (value.tag != .string) return vm.fail("{s}.{s} is text, not {s}", .{ entry.name, name, typeName(value) });
+        self.app.setTextNamed(source, entry.name, name, value.as(flux.object.String).bytes()) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return vm.fail("{s}.{s} could not be written: {t}", .{ entry.name, name, err }),
+        };
+        return true;
+    }
+    return false;
 }
 
 /// How a script sees an `Entity`: see "An entity is one handle" above.

@@ -219,6 +219,11 @@ pub const ThemeOverride = control.ThemeOverride;
 pub const LineEdit = control.LineEdit;
 pub const Slider = control.Slider;
 pub const ProgressBar = control.ProgressBar;
+pub const ColorRect = control.ColorRect;
+pub const Focus = control.Focus;
+pub const RichText = control.RichText;
+pub const Popup = control.Popup;
+pub const StyleBox = control.StyleBox;
 pub const TabContainer = control.TabContainer;
 pub const TextureRect = control.TextureRect;
 pub const NinePatchRect = control.NinePatchRect;
@@ -382,6 +387,8 @@ pub const reflect = @import("fluxion_reflect");
 /// an angle, a unit, layers, several lines, a value behind a getter and a
 /// setter. `reflect.attr`'s five and five more, in one namespace.
 pub const attr = @import("attr.zig");
+/// The words components keep beside them: see `App.textOf`.
+pub const texts = @import("texts.zig");
 
 /// A physical key, by its position on a US layout.
 pub const Key = platform.Key;
@@ -428,6 +435,8 @@ test {
     _ = @import("audio.zig");
     _ = @import("property.zig");
     _ = @import("tween.zig");
+    _ = @import("texts.zig");
+    _ = @import("ui_test.zig");
     _ = @import("animation.zig");
     _ = @import("sprite_frames.zig");
     _ = @import("animation_test.zig");

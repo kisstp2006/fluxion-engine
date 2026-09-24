@@ -134,6 +134,8 @@ pub const Part = enum(u8) {
     tab_active,
     focus,
     label,
+    /// The box of words that shows over a control the pointer rests on.
+    tooltip,
 
     /// What a theme file calls it.
     pub fn typeName(self: Part) []const u8 {
@@ -150,6 +152,7 @@ pub const Part = enum(u8) {
             .tab_active => "TabActive",
             .focus => "Focus",
             .label => "Label",
+            .tooltip => "Tooltip",
         };
     }
 };
@@ -587,6 +590,7 @@ pub fn builtIn(part: Part, state: State) Style {
             else => if (part == .tab_active) Palette.accent else Palette.button,
         },
         .check_box, .focus, .label => .transparent,
+        .tooltip => Palette.field,
         .slider_track, .progress_track => if (off) Palette.disabled else Palette.field,
         .slider_fill, .progress_fill => if (off) Palette.disabled else Palette.accent,
     };
@@ -600,10 +604,11 @@ pub fn builtIn(part: Part, state: State) Style {
         // text no longer fits is a line of text pushed off its middle.
         .padding = switch (part) {
             .check_box, .focus, .label => .all(0),
+            .tooltip => .xy(8, 4),
             else => Palette.padding,
         },
         .font_color = if (off) Palette.disabled_text else Palette.text,
-        .font_size = Palette.font_size,
+        .font_size = if (part == .tooltip) Palette.font_size - 2 else Palette.font_size,
     };
 }
 

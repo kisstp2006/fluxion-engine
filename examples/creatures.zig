@@ -37,9 +37,11 @@
 //! parent's space, so `-4` above the eyes means four above the body wherever
 //! the body has got to.
 //!
-//! **A `Text2D` carries its own words.** The name over each creature is a
-//! child entity like an eye is, and the line in the corner is a child of the
-//! *camera* - which is the whole of what a heads-up display is here. Every
+//! **A `Text2D` is words at a transform**, and the words are the app's:
+//! `app.setText` once, `app.printText` every frame for the line that
+//! changes. The name over each creature is a child entity like an eye is,
+//! and the line in the corner is a child of the *camera* - which is the
+//! whole of what a heads-up display is here. Every
 //! letter of both comes out of one glyph atlas, so all the text in the window
 //! is one more draw call and not one per label.
 //!
@@ -237,10 +239,7 @@ fn spawn(app: *App) !void {
     // A line of text pinned to the camera rather than to the world, which is
     // what a heads-up display is: a child of the camera, so it slides along
     // with it and stays the same size on screen whatever the world does.
-    var heading: Text2D = .of("");
-    heading.size = 15;
-    heading.color = theme.heading;
-    heading.layer = 50;
+    const heading: Text2D = .{ .size = 15, .color = theme.heading, .layer = 50 };
 
     _ = try world.spawnWith(.{
         // Where in the camera's space it goes is worked out every frame by
@@ -350,16 +349,11 @@ fn spawn(app: *App) !void {
         // has to be moved - and not inheriting the lean, because a name plate
         // that tips over with the thing it names is a name plate nobody can
         // read.
-        var plate: Text2D = .of(names[i % names.len]);
-        plate.size = 13;
-        plate.color = theme.name;
-        plate.alignment = .center;
-        plate.layer = 2;
-
-        _ = try world.spawnWith(.{
+        const plate = try world.spawnWith(.{
             Transform2D{ .x = 0, .y = -32, .inherit_rotation = false }, Parent.of(body),
-            plate,
+            Text2D{ .size = 13, .color = theme.name, .alignment = .center, .layer = 2 },
         });
+        try app.setText(plate, Text2D, "text", names[i % names.len]);
     }
 }
 
@@ -479,8 +473,9 @@ const Headings = fx.Query(.{ Text2D, Heading, Transform2D });
 
 /// Write what is going on into the pinned label, and hold it in the corner.
 ///
-/// `print` formats straight into the component, which is what a score, a
-/// timer and a frame counter all are: a number that changed since last frame.
+/// `printText` formats the words it keeps beside the label, which is what a
+/// score, a timer and a frame counter all are: a number that changed since
+/// last frame.
 ///
 /// In `.late` and after the camera has been moved, because where the corner
 /// of the screen *is* depends on where the camera ended up and how far in it
@@ -495,8 +490,8 @@ fn pinHeading(app: *App) !void {
 
     var it = try Headings.over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(Text2D), chunk.slice(Heading), chunk.slice(Transform2D)) |*label, pinned, *place| {
-            label.print("{d} creatures  {d} fps", .{
+        for (chunk.entities, chunk.slice(Heading), chunk.slice(Transform2D)) |label, pinned, *place| {
+            try app.printText(label, Text2D, "text", "{d} creatures  {d} fps", .{
                 herd,
                 @as(u32, @intFromFloat(app.time.fps())),
             });

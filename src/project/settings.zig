@@ -214,10 +214,13 @@ pub const LayerNames = struct {
 /// How the project's interface looks when nothing nearer says.
 pub const Gui = struct {
     theme: []const u8 = "",
+    /// Seconds the pointer rests on a control before its tooltip shows.
+    tooltip_delay: f32 = 0.5,
 
     pub const reflect_attributes = .{attr.Label{ .text = "GUI" }};
     pub const reflect_fields = .{
         .theme = .{ attr.ProjectFile{ .kind = .theme }, attr.Doc{ .text = "The .theme every control is drawn with, under the one it names itself." } },
+        .tooltip_delay = .{ attr.Unit{ .text = "s" }, attr.Range{ .min = 0, .max = 10 }, attr.Doc{ .text = "How long the pointer rests on a control before its tooltip shows." } },
     };
 };
 

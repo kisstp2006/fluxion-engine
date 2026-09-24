@@ -70,6 +70,7 @@ const data_mod = @import("data.zig");
 const audio_mod = @import("audio.zig");
 const property_mod = @import("property.zig");
 const tween_mod = @import("tween.zig");
+const texts_mod = @import("texts.zig");
 const animation_mod = @import("animation.zig");
 const sprite_frames_mod = @import("sprite_frames.zig");
 const exports_mod = @import("exports.zig");
@@ -436,6 +437,8 @@ data_files: data_mod.DataFiles = .{},
 audio: audio_mod.Audio,
 /// Each tween's steps: see `tween.zig` and `tween`.
 tweens: tween_mod.Tweens = .{},
+/// The words components keep beside them: see `texts.zig` and `textOf`.
+texts: texts_mod.Texts = .{},
 /// Every `.anim` file read: see `animation.zig` and `loadAnimations`.
 animation_libraries: animation_mod.Libraries = .{},
 /// What each `AnimationPlayer`'s tracks are bound to.
@@ -822,6 +825,10 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         control.LineEdit,
         control.Slider,
         control.ProgressBar,
+        control.Focus,
+        control.ColorRect,
+        control.RichText,
+        control.Popup,
         control.TabContainer,
         control.TextureRect,
         control.NinePatchRect,
@@ -937,6 +944,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 
     self.sprites = try .init(gpa, &self.device);
     errdefer self.sprites.deinit(gpa);
+    self.sprites.texts = &self.texts;
 
     self.debug_renderer = try .init(gpa, &self.device, .{});
     errdefer self.debug_renderer.deinit();
@@ -1018,6 +1026,7 @@ pub fn destroy(self: *App) void {
     self.data_files.deinit(gpa);
     self.audio.deinit();
     self.tweens.deinit(gpa);
+    self.texts.deinit(gpa);
     self.animation_players.deinit(gpa);
     self.animation_libraries.deinit(gpa);
     self.sprite_frames.deinit(gpa);
@@ -1480,6 +1489,7 @@ pub fn step(self: *App) anyerror!bool {
     self.unknown_components.forgetDead(self.gpa, &self.world);
     self.exports.forgetDead(&self.world);
     self.tweens.forgetDead(self.gpa, &self.world);
+    self.texts.forgetDead(self.gpa, &self.world);
     self.animation_players.forgetDead(self.gpa, &self.world);
     self.signals.forgetDead(&self.world);
     try self.animate();
@@ -3656,6 +3666,7 @@ pub fn clearWorld(self: *App) void {
     self.signals.clear();
     self.audio.clear();
     self.tweens.clear(self.gpa);
+    self.texts.clear(self.gpa);
     self.animation_players.clear(self.gpa);
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
@@ -4040,6 +4051,10 @@ pub const reflect_methods = .{
     .tweenInterval,
     .tweenParallel,
     .tweenEase,
+    .grabFocus,
+    .hasFocus,
+    .releaseFocus,
+    .setAnchorsPreset,
     .audioLength,
     .setBusVolumeDb,
     .busVolumeDb,
@@ -4732,7 +4747,92 @@ pub fn textCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     const label = (self.world.get(entity, components.Text2D) orelse return null).*;
     const placed = self.drawnTransform(entity) orelse return null;
     const face = self.assets.fontOf(label.font) orelse return null;
-    return sprite.labelCornersOf(label, placed, face);
+    return sprite.labelCornersOf(label, self.textOf(entity, components.Text2D, "text"), placed, face);
+}
+
+// -------------------------------------------------------------------------
+// Texts
+// -------------------------------------------------------------------------
+
+/// What `C`'s text `property` says on `entity`: empty for nothing, or for an
+/// entity without it. A component keeps its words beside it, as long as
+/// they are - see `texts.zig`. The text lasts until it is set again.
+///
+/// ```zig
+/// const said = app.textOf(label, fx.Label, "text");
+/// ```
+pub fn textOf(self: *const App, entity: ecs.Entity, comptime C: type, comptime property: []const u8) []const u8 {
+    return self.texts.get(entity, comptime texts_mod.keyFor(C, property));
+}
+
+/// Say `text` in `C`'s text `property` on `entity`. `C` has to keep a text of
+/// that name - the build says so - and the entity has to be alive.
+///
+/// ```zig
+/// try app.setText(title, fx.Label, "text", "Paused");
+/// ```
+pub fn setText(self: *App, entity: ecs.Entity, comptime C: type, comptime property: []const u8, text: []const u8) !void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    try self.texts.set(self.gpa, entity, comptime texts_mod.keyFor(C, property), text);
+}
+
+/// `setText` with the words formatted: a score, a time.
+///
+/// ```zig
+/// try app.printText(score, fx.Text2D, "text", "{d} points", .{points});
+/// ```
+pub fn printText(self: *App, entity: ecs.Entity, comptime C: type, comptime property: []const u8, comptime format: []const u8, args: anytype) !void {
+    const made = try std.fmt.allocPrint(self.gpa, format, args);
+    defer self.gpa.free(made);
+    try self.setText(entity, C, property, made);
+}
+
+/// Give the keyboard's and a pad's focus to a control: a menu's first
+/// button as it opens. From Flux too.
+pub fn grabFocus(self: *App, entity: ecs.Entity) void {
+    var buffer: [48]u8 = undefined;
+    self.ui.setFocus(control.focusIdOf(self, &buffer, entity));
+}
+
+/// Whether a control has the focus.
+pub fn hasFocus(self: *App, entity: ecs.Entity) bool {
+    var buffer: [48]u8 = undefined;
+    return self.ui.isFocused(control.focusIdOf(self, &buffer, entity));
+}
+
+/// Take the focus from whatever has it.
+pub fn releaseFocus(self: *App) void {
+    self.ui.clearFocus();
+}
+
+/// Anchor a control where `preset` says: see `Control.setAnchorsPreset`.
+pub fn setAnchorsPreset(self: *App, entity: ecs.Entity, preset: control.Control.AnchorsPreset) !void {
+    const held = self.world.get(entity, control.Control) orelse return error.NoSuchComponent;
+    held.setAnchorsPreset(preset);
+}
+
+/// `textOf` by names, for what knows a component only by the name a scene
+/// gives it: an editor, a script.
+pub fn textNamed(self: *const App, entity: ecs.Entity, component: []const u8, property: []const u8) []const u8 {
+    return self.texts.get(entity, texts_mod.keyOf(component, property));
+}
+
+/// `setText` by names. The component has to be registered and keep a text
+/// of that name.
+pub fn setTextNamed(self: *App, entity: ecs.Entity, component: []const u8, property: []const u8, text: []const u8) !void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    const entry = self.scene_components.find(component) orelse return error.NoSuchComponent;
+    if (textAttributeOf(entry.type, property) == null) return error.NoSuchText;
+    try self.texts.set(self.gpa, entity, texts_mod.keyOf(component, property), text);
+}
+
+/// The text `property` a component's type keeps beside it, if it keeps one.
+pub fn textAttributeOf(owner: *const reflect.Type, property: []const u8) ?*const attr.Text {
+    for (owner.attributes.slice()) |*attribute| {
+        const text = attribute.as(attr.Text) orelse continue;
+        if (std.mem.eql(u8, text.name, property)) return text;
+    }
+    return null;
 }
 
 /// The box a map's painted tiles fill, in the map's own pixels: left, top,
@@ -5740,10 +5840,11 @@ test "a label with no font loaded draws nothing and does not fall over" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();
 
-    _ = try app.world.spawnWith(.{
+    const label = try app.world.spawnWith(.{
         components.Transform2D.at(10, 10),
-        components.Text2D.of("nobody can read this"),
+        components.Text2D{},
     });
+    try app.setText(label, components.Text2D, "text", "nobody can read this");
 
     try app.run();
     try testing.expectEqual(@as(u32, 0), app.sprites.drawn);
@@ -5767,10 +5868,11 @@ test "a label becomes one quad per letter" {
     _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch
         return error.SkipZigTest;
 
-    _ = try app.world.spawnWith(.{
+    const label = try app.world.spawnWith(.{
         components.Transform2D.at(20, 20),
-        components.Text2D.of("Hi!"),
+        components.Text2D{},
     });
+    try app.setText(label, components.Text2D, "text", "Hi!");
 
     try app.run();
 
@@ -6647,7 +6749,8 @@ test "anything hangs in the one tree, and goes with what it hangs from" {
     defer app.destroy();
 
     const panel = try app.world.spawnWith(.{control.Control{}});
-    const button = try app.world.spawnWith(.{ control.Control{}, components.Parent.of(panel), control.Button.of("OK") });
+    const button = try app.world.spawnWith(.{ control.Control{}, components.Parent.of(panel), control.Button{} });
+    try app.setText(button, control.Button, "text", "OK");
     const clock = try app.world.spawnWith(.{ timer.Timer{}, components.Parent.of(button) });
     try testing.expect(app.hangsFrom(clock, panel));
     try testing.expect(!app.hangsFrom(panel, clock));
@@ -7208,8 +7311,9 @@ test "a button answers while it runs: not while the game is paused, unless it as
     const button = try app.world.spawnWith(.{
         control.Control{ .width = .{ .mode = .fixed, .value = 100 }, .height = .{ .mode = .fixed, .value = 40 } },
         components.Parent.of(root),
-        control.Button.of("Go"),
+        control.Button{},
     });
+    try app.setText(button, control.Button, "text", "Go");
     try app.signal(button, control.Button, .pressed).connectFn(Paused.press, .{});
     try app.startup();
     _ = try app.step();
@@ -7468,7 +7572,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 36), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 40), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);
@@ -7477,7 +7581,7 @@ test "every engine component is described under the name a scene gives it" {
     const drawn = app.types.find("Sprite").?;
     try testing.expectEqual(@as(f64, 1), drawn.field("pivot_x").?.attribute(reflect.attr.Range).?.max);
     try testing.expect(drawn.field("tint").?.type == app.types.find("Color").?);
-    try testing.expect(app.types.find("Text2D").?.field("bytes").?.attribute(reflect.attr.Hidden) != null);
+    try testing.expect(app.types.find("Text2D").?.attribute(attr.Text) != null);
     try testing.expect(app.types.find("DebugViews").?.field("colliders") != null);
 
     // Described, and left out until asked for: see `types`.
@@ -7509,22 +7613,20 @@ test "a component is found by its name, and read and written where it is" {
     try testing.expect(app.componentOf(thing, "Transform2D") == null);
 }
 
-test "a label's words are a property, written and read through its methods, not its buffer" {
+test "a label's words are a text it keeps beside it, found and written by names" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
-    const label = try app.world.spawnWith(.{ components.Transform2D{}, components.Text2D.of("Score") });
+    const label = try app.world.spawnWith(.{ components.Transform2D{}, components.Text2D{} });
+    try app.setText(label, components.Text2D, "text", "Score");
 
     // As an inspector that has never heard of `Text2D` finds them.
     const words = app.componentOf(label, "Text2D").?;
-    const property = words.type.attribute(attr.Property).?;
-    try testing.expectEqualStrings("text", property.name);
-    var over: []const u8 = "Game over";
-    try words.call(property.set, &.{.of(&over)}, null);
-    var shown: []const u8 = "";
-    try words.call(property.get, &.{}, .of(&shown));
-    try testing.expectEqualStrings("Game over", shown);
-    try testing.expectEqualStrings("Game over", app.world.get(label, components.Text2D).?.slice());
-    try testing.expect(words.type.method(property.set).?.attribute(attr.Multiline) != null);
+    const text = words.type.attribute(attr.Text).?;
+    try testing.expectEqualStrings("text", text.name);
+    try testing.expect(text.multiline);
+    try app.setTextNamed(label, "Text2D", text.name, "Game over");
+    try testing.expectEqualStrings("Game over", app.textNamed(label, "Text2D", "text"));
+    try testing.expectEqualStrings("Game over", app.textOf(label, components.Text2D, "text"));
 }
 
 /// A game's component with a field that declares no default.
@@ -8202,8 +8304,9 @@ test "a label's corners are the box its lines are laid out in" {
 
     const one = try app.world.spawnWith(.{
         components.Transform2D.at(100, 50),
-        components.Text2D.of("Hello"),
+        components.Text2D{},
     });
+    try app.setText(one, components.Text2D, "text", "Hello");
     const corners = app.textCorners(one).?;
     // The transform is the top left of the first line, and the box goes
     // right and down from it.
@@ -8218,8 +8321,9 @@ test "a label's corners are the box its lines are laid out in" {
     // words.
     const two = try app.world.spawnWith(.{
         components.Transform2D.at(100, 50),
-        components.Text2D.of("Hello\nHello"),
+        components.Text2D{},
     });
+    try app.setText(two, components.Text2D, "text", "Hello\nHello");
     const taller = app.textCorners(two).?;
     try testing.expectApproxEqAbs(width, taller[2].x - taller[0].x, 0.001);
     try testing.expectApproxEqAbs(height * 2, taller[2].y - taller[0].y, 0.01);
@@ -8229,7 +8333,7 @@ test "a label's corners are the box its lines are laid out in" {
         components.Transform2D.at(100, 50),
         components.Text2D{ .alignment = .center },
     });
-    app.world.get(middle, components.Text2D).?.set("Hello");
+    try app.setText(middle, components.Text2D, "text", "Hello");
     const centred = app.textCorners(middle).?;
     try testing.expectApproxEqAbs(100 - width / 2, centred[0].x, 0.001);
     try testing.expectApproxEqAbs(100 + width / 2, centred[2].x, 0.001);
@@ -8238,7 +8342,7 @@ test "a label's corners are the box its lines are laid out in" {
     // not words either, which the renderer passes over as well.
     const empty = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Text2D{} });
     try testing.expect(app.textCorners(empty) == null);
-    app.world.get(empty, components.Text2D).?.set(&.{ 0xff, 0xfe });
+    try app.setText(empty, components.Text2D, "text", &.{ 0xff, 0xfe });
     try testing.expect(app.textCorners(empty) == null);
     try testing.expect(app.textCorners(.none) == null);
 }
@@ -8254,8 +8358,9 @@ test "an entity is outlined by whichever of the two it is drawn as" {
     });
     const written = try app.world.spawnWith(.{
         components.Transform2D.at(0, 0),
-        components.Text2D.of("Hello"),
+        components.Text2D{},
     });
+    try app.setText(written, components.Text2D, "text", "Hello");
     const neither = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
 
     const box = app.drawnCorners(drawn).?;

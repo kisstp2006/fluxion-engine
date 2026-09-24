@@ -8,7 +8,7 @@
 //! const slide = try app.tween(menu);                  // hangs from `menu`, and goes with it
 //! try app.tweenParallel(slide, true);                 // the steps after this start together
 //! try app.tweenProperty(slide, overlay, "Appearance.modulate.a", .{ .number = 1 }, 0.2);
-//! try app.tweenProperty(slide, overlay, "Control.offset_x,offset_y", .{ .vec2 = .{ 0, 0 } }, 0.26);
+//! try app.tweenProperty(slide, overlay, "Control.offset_left,offset_top", .{ .vec2 = .{ 0, 0 } }, 0.26);
 //! try app.signal(slide, fx.Tween, .finished).connectFn(shown, .{});
 //! app.world.despawn(slide);                           // stops it where it is
 //! ```

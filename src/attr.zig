@@ -150,6 +150,20 @@ pub const Property = struct {
     set: []const u8,
 };
 
+/// Words a component keeps beside it rather than in a field, as long as
+/// they need to be: kept by the app under its entity - see `texts.zig`. A
+/// scene writes them among the component's fields, an editor shows them as
+/// one, and a script reads and writes them as one: `label.text`.
+///
+/// ```zig
+/// pub const reflect_attributes = .{fx.attr.Text{ .name = "text", .multiline = true }};
+/// ```
+pub const Text = struct {
+    name: []const u8,
+    /// Whether it may run over several lines.
+    multiline: bool = false,
+};
+
 /// Stop the build at a property of `T`'s that names a method `T` does not
 /// list in `reflect_methods`, or a getter and a setter that do not agree -
 /// and at a placement naming fields `T` does not have, or of other types.

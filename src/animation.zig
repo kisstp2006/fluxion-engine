@@ -11,7 +11,7 @@
 //!       "tracks": [
 //!         { "target": "Panel", "property": "Appearance.modulate.a",
 //!           "keys": [ { "time": 0, "value": 0 }, { "time": 0.3, "value": 1, "ease": "quad_out" } ] },
-//!         { "target": "Panel", "property": "Control.offset_x,offset_y",
+//!         { "target": "Panel", "property": "Control.offset_left,offset_top",
 //!           "keys": [ { "time": 0, "value": [-400, 0] }, { "time": 0.3, "value": [0, 0] } ] } ] } ] }
 //! ```
 //!

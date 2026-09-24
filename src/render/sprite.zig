@@ -35,6 +35,9 @@ const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
 const Color = components.Color;
 const Text2D = components.Text2D;
+const texts_mod = @import("../texts.zig");
+/// What a label says, among the app's texts.
+const text_key = texts_mod.keyFor(Text2D, "text");
 const View = view_mod.View;
 const Bounds = view_mod.Bounds;
 
@@ -118,6 +121,8 @@ const quad_corners = [8]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
 
 pub const Renderer = struct {
     device: *rhi.Device,
+    /// What each `Text2D` says: the app's. Nothing is drawn of one without.
+    texts: ?*const texts_mod.Texts = null,
 
     /// Kept, because the pipeline was described with names inside it.
     module: shader.Module,
@@ -522,13 +527,14 @@ pub const Renderer = struct {
             const labels = chunk.slice(Text2D);
 
             for (transforms, labels, chunk.entities) |local, label, entity| {
-                if (!label.visible or label.len == 0 or label.color.a <= 0) continue;
+                const run = (self.texts orelse return).get(entity, text_key);
+                if (!label.visible or run.len == 0 or label.color.a <= 0) continue;
                 const looks = inherited.of(gpa, world, entity);
                 if (!looks.visible or looks.modulate.a <= 0) continue;
                 // A scene's words are UTF-8 by the time they are read, but a
                 // label's bytes can be written by hand, and the walk through
                 // its characters below takes them on trust.
-                if (!std.unicode.utf8ValidateSlice(label.slice())) continue;
+                if (!std.unicode.utf8ValidateSlice(run)) continue;
 
                 // Not drawn when it cannot be placed, as with a sprite.
                 const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse continue;
@@ -537,7 +543,7 @@ pub const Renderer = struct {
                 var shown = label;
                 shown.color = looks.tint(label.color);
                 shown.layer = looks.layer(label.layer);
-                try self.layOut(gpa, assets, face, shown, transform, bounds, sequence);
+                try self.layOut(gpa, assets, face, shown, run, transform, bounds, sequence);
             }
         }
     }
@@ -549,6 +555,7 @@ pub const Renderer = struct {
         assets: *Assets,
         face: *Assets.Font,
         label: Text2D,
+        run: []const u8,
         transform: Transform2D,
         bounds: Bounds,
         sequence: *u32,
@@ -569,7 +576,7 @@ pub const Renderer = struct {
 
         // The whole label against the camera, boxed generously: one test, not
         // one per letter.
-        const measured = measure(&face.face, scaled, label.slice());
+        const measured = measure(&face.face, scaled, run);
         const reach = spriteRadius(
             measured.width * @abs(transform.scale_x),
             (measured.lines * line_height) * @abs(transform.scale_y),
@@ -588,7 +595,6 @@ pub const Renderer = struct {
 
         var line_start: usize = 0;
         var line_index: f32 = 0;
-        const run = label.slice();
 
         while (line_start <= run.len) {
             const end = std.mem.indexOfScalarPos(u8, run, line_start, '\n') orelse run.len;
@@ -744,8 +750,7 @@ pub fn cornersOf(sprite: Sprite, placed: Transform2D, texture: *const Assets.Tex
 /// Null for a label with nothing drawn: no words, a size that measures
 /// nothing, or bytes that are not UTF-8. What an editor outlines, frames and
 /// tests a click against, as `cornersOf` is for a sprite.
-pub fn labelCornersOf(label: Text2D, placed: Transform2D, face: *Assets.Font) ?[4]math.Vec2 {
-    const run = label.slice();
+pub fn labelCornersOf(label: Text2D, run: []const u8, placed: Transform2D, face: *Assets.Font) ?[4]math.Vec2 {
     if (run.len == 0 or !std.unicode.utf8ValidateSlice(run)) return null;
 
     // The size the renderer rounds to, and the lines it lays out.

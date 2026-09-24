@@ -13,9 +13,9 @@
 //!
 //! **The text** is the component's scene name, a dot, and the field's path
 //! in it as Zig spells it: `Transform2D.rotation`, `Sprite.tint`,
-//! `Appearance.modulate.a`, `Control.offset_x`. Two paths after the dot,
+//! `Appearance.modulate.a`, `Control.offset_left`. Two paths after the dot,
 //! with a comma between, are one vector: `Transform2D.x,y`,
-//! `Transform2D.scale_x,scale_y`, `Control.offset_x,offset_y`.
+//! `Transform2D.scale_x,scale_y`, `Control.offset_left,offset_top`.
 //!
 //! **What moves**: a number - any float or integer, an integer rounded -, a
 //! `Vec2`, a `Color`, and a `bool`, which does not go between two values

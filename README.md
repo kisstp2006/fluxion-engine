@@ -742,7 +742,7 @@ _ = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Sprite{}, fx.Animated
 ```
 
 - **A property is a path**: a component's scene name and a field in it -
-  `Transform2D.rotation`, `Appearance.modulate`, `Control.offset_x` - or two
+  `Transform2D.rotation`, `Appearance.modulate`, `Control.offset_left` - or two
   number fields with a comma between, `Transform2D.x,y`, moved as one pair.
   `fx.Property.compile` finds it once, and `read` and `write` go straight to
   the component's bytes. A number, an integer, a flag, a vector and a colour
@@ -934,8 +934,10 @@ _ = try world.spawnWith(.{
 - **A `Text2D` is words at a transform**, drawn through the same pass as
   everything else: each glyph is a quad out of a glyph atlas, so a label sorts
   against sprites by the same `layer` and `order` and all the text in one font
-  is one draw call. The text lives *in* the component, in a fixed buffer, and
-  `label.print("{d} points", .{score})` is what a game actually does with it.
+  is one draw call. The words are the app's, kept beside the component as
+  long as they are - `app.setText(label, fx.Text2D, "text", "Score")` - and
+  `app.printText(label, fx.Text2D, "text", "{d} points", .{score})` is what a
+  game actually does with them. See [Controls and themes](#-controls-and-themes).
 - **A font is a file, or one font of a collection.** `app.assets.loadFont`
   opens a `.ttf` or an `.otf`, and `.member = n` the nth font of a `.ttc`,
   which is what Windows ships its Chinese, Japanese and Korean fonts in.
@@ -1130,19 +1132,59 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
 try app.useControlNodes();
 const ui_theme = try app.loadTheme("res://ui/game.theme");
 const root = try app.world.spawnWith(.{ fx.Control{ .theme = ui_theme, .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, fx.CanvasLayer{} });
-const play = try app.world.spawnWith(.{ fx.Control{}, fx.Parent.of(root), fx.Button.of("Play") });
+const play = try app.world.spawnWith(.{ fx.Control{}, fx.Parent.of(root), fx.Button{} });
+try app.setText(play, fx.Button, "text", "Play");
 try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{});   // menu: an entity whose script has start()
+app.grabFocus(play);                                                             // a pad can press it at once
 ```
 
 - **Controls are components.** A `Control` is the box - its size as fit,
   fixed, grow, a share or a ratio, and in the flow of the control it hangs
-  from or anchored to one of nine places in it. What it is comes
-  beside it: `Label`, `Button`, `CheckBox`, `LineEdit`, `Slider`,
-  `ProgressBar`, `TabContainer`, `TextureRect`, `NinePatchRect`, and the
+  from or anchored in it. What it is comes beside it: `Label`, `Button`,
+  `CheckBox`, `LineEdit`, `Slider`, `ProgressBar`, `TabContainer`,
+  `TextureRect`, `NinePatchRect`, `ColorRect`, `RichText`, `Popup`, and the
   containers `PanelContainer`, `BoxContainer`, `MarginContainer`,
   `CenterContainer` and `ScrollContainer`. A root is a `Control` with a
   `CanvasLayer` over the screen, or a `Viewport` placed in the world.
   `app.useControlNodes()` lays them out into the interface every frame.
+- **Anchored, a control is held between two points of its parent on each
+  axis**: `anchor_left` and `anchor_right` across, `anchor_top` and
+  `anchor_bottom` down, each a part of the parent from nought to one. Two
+  that differ **stretch** it - its edges are its `offset_*` from them, and it
+  resizes with its parent: a bar along the bottom, a backdrop over it all.
+  Two that are the same **pin** it: it keeps its own size, `offset_left` and
+  `offset_top` from the point, growing away from it the way
+  `grow_horizontal` and `grow_vertical` say. `setAnchorsPreset` - on the
+  control, or `app.setAnchorsPreset(e, .bottom_right)` - puts it in a
+  corner, an edge's middle, the middle, along an edge or over the whole.
+- **Their words are the app's**, kept beside them as long as they are: a
+  label's, a button's, a field's and its placeholder, a rich text's, a
+  control's tooltip. `app.setText(e, fx.Label, "text", "Paused")`,
+  `app.textOf` and `app.printText` from Zig; `label.text = "Paused"` from a
+  script; a field of the component's in a scene and in an editor's
+  inspector. Any component can keep some - an `attr.Text` on its type says
+  which - and they go with the entity. See `texts.zig`.
+- **The focus is the keyboard's and a pad's**: a button, a box and a slider
+  take it from a press, Tab and the arrows, and a field always does. A
+  `Focus` beside a control says otherwise - `none`, `click` for a press and
+  nothing else, `all` - and where the arrows, Tab and Shift+Tab go from it
+  when not to the nearest or the next declared. `app.grabFocus(e)`,
+  `hasFocus` and `releaseFocus`, from Flux too.
+- **A tooltip** is a control's `tooltip_text`, shown by the pointer once it
+  has rested there the project's `gui.tooltip_delay`, in the theme's
+  `Tooltip` style.
+- **A `RichText`** is words with styles written into them - every tag
+  fluxion-ui's markup reads, and `{b|heavy}`, `{size=24|large}` and
+  `{img=res://icons/key.png|}` - wrapping between words, each word in its
+  own size and weight. With `reveal()` its letters show one after another at
+  `reveal_speed` a second, each keeping its room, and `revealed` is said when
+  the last shows: credits, and a line of dialogue.
+- **A `Popup`** is a box over everything while it is `open` - `popup()` and
+  `hide()` - in the middle of the screen or where its place says. Modal,
+  what is under it takes no press, behind a veil; a press outside it or the
+  `ui_cancel` action closes it, and `closed` says so. An editor, which draws
+  it without answering anything, shows it open, to be laid out.
+- **A `ColorRect`** is a box of one colour: a backdrop, a fade to black.
 - **They fade and pop.** A control's `Appearance` - and whatever is above
   its tree, controls or not - fades it and everything in it by its
   `modulate`'s alpha and hides it with `visible`; its `scale` draws it and
@@ -1150,9 +1192,10 @@ try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{}); 
   not move. A paused game's controls do not answer the pointer, unless their
   `Processing` says so. See [Pause](#️-pause).
 - **They say what happened as signals**: `pressed` and
-  `toggled` on a button, `toggled` on a check box, `changed` and `submitted`
-  on a line edit, `changed` on a slider, `tab_changed` on tabs - connected in
-  code or kept in a scene.
+  `toggled` on a button, `toggled` on a check box, `text_changed` and
+  `text_submitted` on a line edit, `value_changed` on a slider,
+  `tab_changed` on tabs, `revealed` on a rich text, `closed` on a popup -
+  connected in code or kept in a scene.
 - **A button is one thing**: its words, its icon, whether it stays down,
   and whether it is down - not a button with a label inside it.
 - **How they look is a file**, `.theme`:
@@ -1181,7 +1224,7 @@ try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{}); 
 
   A type is a kind of control - `Panel`, `Button`, `CheckBox`, `LineEdit`,
   `Slider` and `SliderFill`, `ProgressBar` and `ProgressBarFill`, `Tab` and
-  `TabActive`, `Focus`, `Label` - or a name of the game's own built on one,
+  `TabActive`, `Focus`, `Label`, `Tooltip` - or a name of the game's own built on one,
   which a control asks for with `type_variation`: one `Danger` button among
   many. A style says a background, a border, corners, padding, a texture cut
   in nine with its tint, and the text's colour, font and size; the states
@@ -1204,6 +1247,8 @@ try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{}); 
   theme's normal look and under what they say of hovering and pressing, so a
   button of its own colour still answers the pointer. It changes the part
   the control is - a slider's track, not its fill - and none of its children.
+  A script changes it as one value too: `var box = look.styleBox()`, change
+  its fields, and `look.setStyleBox(box)`, which switches all of them on.
 - **A theme's file can be written back** - `app.themes.textOf` and `save`,
   as a tile set's - and `app.themes.styleOf` is the lookup the game draws
   with, for an editor's preview to draw with too.
@@ -1913,11 +1958,11 @@ as data, and the engine hands its components and its calls out through it.
   `/s`); `Layers` on a collider's layer and mask, a toggle a bit named from
   the project's list; `Extents` and `Radius` on its size and `Placement` on
   the collider itself, for an editor's handles; a `Doc`
-  for a zero that is not zero ("zero is the sprite's width"); `Hidden` on
-  `Text2D`'s buffer, whose words are a `Property` instead - `text`, read
-  with its method `slice` and written with `set`, which keeps the length and
-  the UTF-8 right and is `Multiline`; `ReadOnly` on an animation's
-  `finished`, which only the engine sets. A descriptor is made at compile
+  for a zero that is not zero ("zero is the sprite's width"); a `Text` on
+  a type for the words it keeps beside it - a label's `text`, a field's
+  `placeholder_text`, `multiline` or not - which are the app's and not in
+  the component, read and written by that name; `ReadOnly` on an animation
+  player's `position`, which only the engine sets. A descriptor is made at compile
   time and kept in the binary: nothing is registered or allocated to have
   one.
 - **A component is found by the name a scene gives it**, so a scene, an
@@ -2392,9 +2437,10 @@ Here, and checked by the tests:
   `.frames` files an `AnimatedSprite` shows - all of it moving a component's
   fields by a path, from Zig and from Flux.
 - Text: a shelf-packed glyph atlas per font, kerning, several lines, three
-  alignments, and a label that formats into itself. Not here yet: wrapping, an
-  outline, more than sixty-three bytes in one label, and more than one font in
-  one label.
+  alignments, and words of any length kept beside the component, formatted
+  into from Zig and written from Flux. Not here yet, for a `Text2D`: wrapping,
+  an outline, and more than one font in one label - a `RichText` control has
+  those.
 - Fonts from a `.ttf`, an `.otf`, or one font of a `.ttc` collection, and
   the system's own interface font and its monospaced one, as the system
   names them.
@@ -2406,7 +2452,12 @@ Here, and checked by the tests:
 - Controls as components, laid out into the interface with containers and
   signals, and drawn from `.theme` files: types, variations,
   states, base themes, a project theme under all and a control's own
-  overrides over them.
+  overrides over them, changed from Flux as one style box too. Anchors that
+  stretch or pin, and sixteen presets; focus by press, Tab, arrows and
+  declared neighbours; tooltips; colour boxes, rich text revealed letter by
+  letter, and popups.
+- Words of any length kept beside a component, keyed by entity and name,
+  written in scenes and from Flux as the component's own field.
 - The interface: fluxion-ui laid out by `.ui` systems into one root, drawn
   over the 2D layer, fed from the keyboard, the mouse and the pads before the
   game's systems, keeping the wheel it used, and setting the pointer's shape;

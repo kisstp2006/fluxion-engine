@@ -118,11 +118,7 @@ fn spawn(app: *App) !void {
         std.log.warn("no font ({t}); the count will not draw", .{err});
         break :blk fx.FontHandle.none;
     };
-    var label: Text2D = .of("");
-    label.font = font;
-    label.size = 18;
-    label.color = theme.text;
-    label.alignment = .right;
+    const label: Text2D = .{ .font = font, .size = 18, .color = theme.text, .alignment = .right };
     // The top left is where the stats view writes.
     const counter = try app.world.spawnWith(.{ Transform2D.at(field_width - 34, 30), label });
     try app.setName(counter, "count");
@@ -198,8 +194,7 @@ fn count(app: *App) !void {
     }
 
     const counter = app.find("count") orelse return;
-    const label = app.world.get(counter, Text2D) orelse return;
-    label.print("{d} in the basket, {d} bodies, {d} awake", .{
+    try app.printText(counter, Text2D, "text", "{d} in the basket, {d} bodies, {d} awake", .{
         held.inside,
         app.physics.bodyCount(),
         app.physics.awakeCount(),

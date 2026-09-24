@@ -293,22 +293,17 @@ pub const Sprite = extern struct {
 /// Words drawn at a transform, in a font the assets are holding.
 ///
 /// ```zig
-/// var label: Text2D = .of("Score");
-/// label.size = 24;
-/// _ = try world.spawnWith(.{ Transform2D.at(16, 16), label });
+/// const label = try world.spawnWith(.{ Transform2D.at(16, 16), Text2D{ .size = 24 } });
+/// try app.setText(label, Text2D, "text", "Score");
 ///
 /// // ... and later, from a system:
-/// text.print("{d} points", .{score});
+/// try app.printText(label, Text2D, "text", "{d} points", .{score});
 /// ```
 ///
-/// The text is inside the component, in a fixed buffer: a component may not
-/// own memory, and world text is short - a score, a name plate, "Press E".
-/// The transform is the top left of the first line, not the baseline.
+/// The words are the app's, kept beside the component as long as they are:
+/// see `texts.zig`. The transform is the top left of the first line, not the
+/// baseline.
 pub const Text2D = extern struct {
-    /// UTF-8. Not a slice: see above.
-    bytes: [capacity]u8 = @splat(0),
-    len: u8 = 0,
-
     /// `.none` is the default font, the first one loaded.
     font: assets.FontHandle = .none,
 
@@ -330,59 +325,13 @@ pub const Text2D = extern struct {
 
     visible: bool = true,
 
-    /// Bytes of text that fit: 63 and a length make the component 96 bytes.
-    pub const capacity = 63;
-
     pub const Alignment = enum(u8) { left, center, right };
 
-    /// The buffer is no field to show or to edit: the words are the
-    /// property `text`, read with `slice` and written with `set`, which keep
-    /// the length and the UTF-8 right - and may run over several lines.
     pub const reflect_name = "Text2D";
-    pub const reflect_attributes = .{attr.Property{ .name = "text", .get = "slice", .set = "set" }};
+    pub const reflect_attributes = .{attr.Text{ .name = "text", .multiline = true }};
     pub const reflect_fields = .{
-        .bytes = .{attr.Hidden{}},
-        .len = .{attr.Hidden{}},
         .size = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "Per em, before the transform's scale" } },
     };
-    pub const reflect_methods = .{
-        .set = .{attr.Multiline{}},
-        .slice = .{},
-    };
-
-    /// A label with this text in it, cut on a character boundary if it does
-    /// not fit.
-    pub fn of(run: []const u8) Text2D {
-        var self: Text2D = .{};
-        self.set(run);
-        return self;
-    }
-
-    /// Replace the text.
-    pub fn set(self: *Text2D, run: []const u8) void {
-        const room = @min(run.len, capacity);
-        // Back up to the start of a character rather than cut one in half. A
-        // continuation byte is `10xxxxxx`.
-        var cut = room;
-        while (cut > 0 and cut < run.len and run[cut] & 0xC0 == 0x80) cut -= 1;
-
-        @memcpy(self.bytes[0..cut], run[0..cut]);
-        self.len = @intCast(cut);
-    }
-
-    /// Format into the label. Cut short rather than failing: a number too long
-    /// to fit is no reason to stop the frame.
-    pub fn print(self: *Text2D, comptime format: []const u8, args: anytype) void {
-        var buffer: [capacity]u8 = undefined;
-        const written = std.fmt.bufPrint(&buffer, format, args) catch buffer[0..];
-        self.set(written);
-    }
-
-    /// The text, as a string. A length written by hand past the buffer is
-    /// taken as the whole buffer.
-    pub fn slice(self: *const Text2D) []const u8 {
-        return self.bytes[0..@min(self.len, capacity)];
-    }
 };
 
 /// What the 2D pass looks through. Its position is its entity's
@@ -666,11 +615,11 @@ test "what an inspector shows a field by is on the field" {
     try testing.expectEqualStrings("px", reflect.typeOf(Text2D).field("size").?.attribute(attr.Unit).?.text);
     try testing.expectEqual(@as(f64, 1), reflect.typeOf(Collider2D).field("bounce").?.attribute(attr.Range).?.max);
 
-    // The words of a label are its methods' to read and write, and they may
-    // run over several lines.
-    try testing.expect(reflect.typeOf(Text2D).field("bytes").?.attribute(attr.Hidden) != null);
-    try testing.expect(reflect.typeOf(Text2D).method("set").?.attribute(attr.Multiline) != null);
-    try testing.expect(reflect.typeOf(Text2D).method("slice").?.attribute(attr.Multiline) == null);
+    // The words of a label are kept beside it, and they may run over several
+    // lines.
+    try testing.expect(reflect.typeOf(Text2D).field("text") == null);
+    try testing.expect(reflect.typeOf(Text2D).attribute(attr.Text).?.multiline);
+    try testing.expectEqualStrings("text", reflect.typeOf(Text2D).attribute(attr.Text).?.name);
 }
 
 test "unapply takes a point back to where apply found it" {
@@ -709,24 +658,26 @@ test "scale multiplies down the chain" {
     try testing.expectEqual(@as(f32, 6), Transform2D.compose(parent, local).scale_x);
 }
 
-test "a label carries its own text" {
-    var label: Text2D = .of("Score");
-    try testing.expectEqualStrings("Score", label.slice());
+test "a label's words are the app's, as long as they are, and gone with it" {
+    const App = @import("App.zig");
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const label = try app.world.spawnWith(.{ Transform2D.at(0, 0), Text2D{} });
+    try testing.expectEqualStrings("", app.textOf(label, Text2D, "text"));
+    try app.setText(label, Text2D, "text", "Score");
+    try testing.expectEqualStrings("Score", app.textOf(label, Text2D, "text"));
+    try app.printText(label, Text2D, "text", "{d} points", .{42});
+    try testing.expectEqualStrings("42 points", app.textOf(label, Text2D, "text"));
 
-    label.print("{d} points", .{42});
-    try testing.expectEqualStrings("42 points", label.slice());
-}
+    // Far longer than any buffer a component could hold.
+    const long = "é" ** 400;
+    try app.setText(label, Text2D, "text", long);
+    try testing.expectEqualStrings(long, app.textNamed(label, "Text2D", "text"));
+    try testing.expectError(error.NoSuchText, app.setTextNamed(label, "Text2D", "words", "no"));
 
-test "text too long is cut on a character boundary" {
-    // `é` is two bytes, so byte 63 is the middle of the thirty-second one:
-    // the cut has to back up to 62.
-    var label: Text2D = .of("é" ** 40);
-    try testing.expectEqual(@as(u8, 62), label.len);
-    try testing.expect(std.unicode.utf8ValidateSlice(label.slice()));
-}
-
-test "an empty label is empty rather than sixty-three zeroes" {
-    const label: Text2D = .{};
-    try testing.expectEqual(@as(usize, 0), label.slice().len);
+    app.world.despawn(label);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.texts.map.count());
+    try testing.expectError(error.NoSuchEntity, app.setText(label, Text2D, "text", "late"));
 }
 
