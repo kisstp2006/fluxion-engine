@@ -68,6 +68,10 @@ const scene = @import("scene.zig");
 const scenes_mod = @import("scenes.zig");
 const data_mod = @import("data.zig");
 const audio_mod = @import("audio.zig");
+const property_mod = @import("property.zig");
+const tween_mod = @import("tween.zig");
+const animation_mod = @import("animation.zig");
+const sprite_frames_mod = @import("sprite_frames.zig");
 const exports_mod = @import("exports.zig");
 const background_mod = @import("background.zig");
 const signals_mod = @import("signals.zig");
@@ -430,6 +434,14 @@ data_files: data_mod.DataFiles = .{},
 /// The sound device, the clips read, the project's buses and what the
 /// players play: see `audio.zig` and `loadAudio`.
 audio: audio_mod.Audio,
+/// Each tween's steps: see `tween.zig` and `tween`.
+tweens: tween_mod.Tweens = .{},
+/// Every `.anim` file read: see `animation.zig` and `loadAnimations`.
+animation_libraries: animation_mod.Libraries = .{},
+/// What each `AnimationPlayer`'s tracks are bound to.
+animation_players: animation_mod.Players = .{},
+/// Every `.frames` file read: see `sprite_frames.zig` and `loadSpriteFrames`.
+sprite_frames: sprite_frames_mod.AllFrames = .{},
 /// The theme the project file names for every control, and the path it was
 /// read by: see `projectTheme`.
 project_theme: ProjectTheme = .{},
@@ -780,7 +792,6 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Transform2D,
         components.Sprite,
         components.Text2D,
-        components.Animation,
         components.Camera2D,
         components.RigidBody2D,
         components.Collider2D,
@@ -789,6 +800,9 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         audio_mod.AudioPlayer,
         audio_mod.AudioSpatial2D,
         audio_mod.AudioListener2D,
+        tween_mod.Tween,
+        animation_mod.AnimationPlayer,
+        sprite_frames_mod.AnimatedSprite,
         inherited_mod.Processing,
         inherited_mod.Appearance,
         tilemap.TileMap,
@@ -815,7 +829,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
+    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, animation_mod.AnimationLibraryHandle, sprite_frames_mod.SpriteFramesHandle, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -1003,6 +1017,10 @@ pub fn destroy(self: *App) void {
     self.scenes.deinit(gpa);
     self.data_files.deinit(gpa);
     self.audio.deinit();
+    self.tweens.deinit(gpa);
+    self.animation_players.deinit(gpa);
+    self.animation_libraries.deinit(gpa);
+    self.sprite_frames.deinit(gpa);
     self.uuids.deinit(gpa);
     self.by_uuid.deinit(gpa);
     self.sibling_ranks.deinit(gpa);
@@ -1416,6 +1434,8 @@ pub fn step(self: *App) anyerror!bool {
 
     self.inherited.forget();
     try timer.count(self, .update, self.time.delta);
+    try tween_mod.update(self, self.time.delta);
+    try animation_mod.update(self, self.time.delta);
     try self.signals.drain(self);
     if (self.scripts) |scripts| {
         try scripts.calls.pass(scripts, .{ .update = self.time.delta });
@@ -1459,6 +1479,8 @@ pub fn step(self: *App) anyerror!bool {
     self.forgetDeadInstances();
     self.unknown_components.forgetDead(self.gpa, &self.world);
     self.exports.forgetDead(&self.world);
+    self.tweens.forgetDead(self.gpa, &self.world);
+    self.animation_players.forgetDead(self.gpa, &self.world);
     self.signals.forgetDead(&self.world);
     try self.animate();
     if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
@@ -1614,19 +1636,10 @@ pub fn quit(self: *App) void {
     if (self.window) |*w| w.requestClose();
 }
 
-/// Step every `Animation` and write the cell it landed on into its `Sprite`.
+/// Step every `AnimatedSprite` and write the frame it landed on into its `Sprite`.
 /// On the frame's delta: an animation is seen, not simulated.
 fn animate(self: *App) !void {
-    const delta = self.time.delta;
-
-    var it = try ecs.Query(.{ components.Sprite, components.Animation }).over(&self.world);
-    while (it.next()) |chunk| {
-        for (chunk.entities, chunk.slice(components.Sprite), chunk.slice(components.Animation)) |entity, *drawn, *animation| {
-            // One that does not run now keeps its cell.
-            if (!self.isProcessing(entity)) continue;
-            drawn.region = animation.advance(delta);
-        }
-    }
+    try sprite_frames_mod.animate(self, self.time.delta);
 }
 
 /// Despawn everything whose parent has died, and what hangs from that in
@@ -2565,6 +2578,8 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .scene => self.sceneSource(handle),
         .data => self.dataSource(handle),
         .audio => self.audioSource(handle),
+        .animation => self.animation_libraries.sourceOf(handle),
+        .frames => self.sprite_frames.sourceOf(handle),
     };
 }
 
@@ -2581,6 +2596,8 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .scene => self.loadScene(path),
         .data => self.loadData(path),
         .audio => self.loadAudio(path),
+        .animation => self.loadAnimations(path),
+        .frames => self.loadSpriteFrames(path),
     };
 }
 
@@ -2596,6 +2613,8 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .scene => self.findScene(path),
         .data => self.findData(path),
         .audio => self.findAudio(path),
+        .animation => self.findAnimations(path),
+        .frames => self.findSpriteFrames(path),
     };
 }
 
@@ -2989,6 +3008,112 @@ pub fn reloadScene(self: *App, handle: scenes_mod.SceneHandle) !bool {
 
 pub fn unloadScene(self: *App, handle: scenes_mod.SceneHandle) void {
     self.scenes.unload(self.gpa, handle);
+}
+
+/// A tween: an entity of its own, hanging from `owner` - `.none` for the
+/// top of the tree - whose steps move properties over time, and which goes
+/// once it is done. See `tween.zig`.
+pub fn tween(self: *App, owner: ecs.Entity) !ecs.Entity {
+    const made = try self.spawn(owner);
+    errdefer self.world.despawn(made);
+    try self.world.add(made, tween_mod.Tween{});
+    return made;
+}
+
+/// A step of `tween_entity`: the property `path` of `moved` - see
+/// `property.zig` - moved from what it holds when the step starts to `to`,
+/// over `seconds`.
+pub fn tweenProperty(self: *App, tween_entity: ecs.Entity, moved: ecs.Entity, path: []const u8, to: property_mod.Value, seconds: f32) !void {
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return error.NotATween;
+    const compiled = try property_mod.Property.compile(self, path);
+    if (to.as(compiled.kind) == null) return error.WrongKindOfValue;
+    const plan = try self.tweens.planOf(self.gpa, tween_entity);
+    try plan.steps.append(self.gpa, .{
+        .target = moved,
+        .property = compiled,
+        .to = to,
+        .seconds = @max(seconds, 0),
+        .ease = plan.ease,
+        .with_before = plan.parallel and plan.steps.items.len > 0,
+    });
+}
+
+/// A step that waits `seconds`.
+pub fn tweenInterval(self: *App, tween_entity: ecs.Entity, seconds: f32) !void {
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return error.NotATween;
+    const plan = try self.tweens.planOf(self.gpa, tween_entity);
+    try plan.steps.append(self.gpa, .{ .seconds = @max(seconds, 0), .with_before = plan.parallel and plan.steps.items.len > 0 });
+}
+
+/// The steps added after this start together with the one before them,
+/// rather than after it.
+pub fn tweenParallel(self: *App, tween_entity: ecs.Entity, together: bool) !void {
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return error.NotATween;
+    (try self.tweens.planOf(self.gpa, tween_entity)).parallel = together;
+}
+
+/// The curve the steps added after this move by: `linear`, `quad_out`,
+/// `back_in`, `elastic_out`, ... False for a name that is none.
+pub fn tweenEase(self: *App, tween_entity: ecs.Entity, name: []const u8) bool {
+    const kind = std.meta.stringToEnum(math.ease.Kind, name) orelse return false;
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return false;
+    const plan = self.tweens.planOf(self.gpa, tween_entity) catch return false;
+    plan.ease = kind;
+    return true;
+}
+
+/// Read a `.anim` file - an animation library - or find the one read from
+/// there already. What an `AnimationPlayer` plays; see `animation.zig`.
+pub fn loadAnimations(self: *App, path: []const u8) !animation_mod.AnimationLibraryHandle {
+    return self.animation_libraries.load(self, path);
+}
+
+/// An animation library from text rather than a file: a test's, or a
+/// tool's. A name given before gets the new text.
+pub fn addAnimations(self: *App, name: []const u8, text: []const u8) !animation_mod.AnimationLibraryHandle {
+    return self.animation_libraries.add(self.gpa, name, text);
+}
+
+pub fn findAnimations(self: *App, path: []const u8) ?animation_mod.AnimationLibraryHandle {
+    if (self.animation_libraries.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.animation_libraries.find(named);
+}
+
+/// Read a `.anim` file again, for an editor that has just saved it.
+pub fn reloadAnimations(self: *App, handle: animation_mod.AnimationLibraryHandle) !bool {
+    return self.animation_libraries.reload(self, handle);
+}
+
+/// Read a `.frames` file - animations of pictures - or find the one read
+/// from there already. What an `AnimatedSprite` shows; see
+/// `sprite_frames.zig`.
+pub fn loadSpriteFrames(self: *App, path: []const u8) !sprite_frames_mod.SpriteFramesHandle {
+    return self.sprite_frames.load(self, path);
+}
+
+/// Sprite frames from text rather than a file. A name given before gets the
+/// new text.
+pub fn addSpriteFrames(self: *App, name: []const u8, text: []const u8) !sprite_frames_mod.SpriteFramesHandle {
+    return self.sprite_frames.add(self, name, text);
+}
+
+/// Sprite frames made in code: `clips` over a `columns` by `rows` grid of
+/// `texture`, found by `name`.
+pub fn addGridFrames(self: *App, name: []const u8, texture: Assets.TextureHandle, columns: u16, rows: u16, clips: []const sprite_frames_mod.GridClip) !sprite_frames_mod.SpriteFramesHandle {
+    return self.sprite_frames.addGrid(self, name, texture, columns, rows, clips);
+}
+
+pub fn findSpriteFrames(self: *App, path: []const u8) ?sprite_frames_mod.SpriteFramesHandle {
+    if (self.sprite_frames.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.sprite_frames.find(named);
+}
+
+pub fn reloadSpriteFrames(self: *App, handle: sprite_frames_mod.SpriteFramesHandle) !bool {
+    return self.sprite_frames.reload(self, handle);
 }
 
 /// Read a sound's file - `.wav`, `.ogg` or `.mp3` - or find the one read
@@ -3530,6 +3655,8 @@ pub fn clearWorld(self: *App) void {
     self.scene_now = .none;
     self.signals.clear();
     self.audio.clear();
+    self.tweens.clear(self.gpa);
+    self.animation_players.clear(self.gpa);
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
 }
@@ -3674,6 +3801,8 @@ pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
     try self.scenes.renamed(self.gpa, old, new);
     try self.data_files.renamed(self.gpa, old, new);
     try self.audio.renamed(old, new);
+    try self.animation_libraries.renamed(self.gpa, old, new);
+    try self.sprite_frames.renamed(self.gpa, old, new);
     try self.themes.renamed(self.gpa, old, new);
     if (self.scripts) |scripts| try scripts.renamed(old, new);
 }
@@ -3906,6 +4035,11 @@ pub const reflect_methods = .{
     .instantiate,
     .changeScene,
     .readData,
+    .tween,
+    .tweenProperty,
+    .tweenInterval,
+    .tweenParallel,
+    .tweenEase,
     .audioLength,
     .setBusVolumeDb,
     .busVolumeDb,
@@ -5922,10 +6056,11 @@ test "an animation moves the sprite's region on" {
     defer app.destroy();
     app.time.source = .{ .fixed = 0.1 };
 
+    const strip = try app.addGridFrames("strip", .none, 4, 1, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .fps = 10 }});
     const walker = try app.world.spawnWith(.{
         components.Transform2D{},
         components.Sprite.solid(.white, 8, 8),
-        components.Animation.strip(4, 10),
+        sprite_frames_mod.AnimatedSprite.of(strip, "walk"),
     });
 
     try app.run();
@@ -7029,14 +7164,15 @@ test "an animation waits while its entity does not run" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     app.time.source = .{ .fixed = 0.25 };
-    const strip: components.Animation = .{ .columns = 4, .length = 4, .fps = 4 };
+    const frames = try app.addGridFrames("strip", .none, 4, 1, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .fps = 4 }});
+    const strip: sprite_frames_mod.AnimatedSprite = .of(frames, "walk");
     const walker = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip });
     const menu = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip, inherited_mod.Processing{ .mode = .always } });
 
     app.setPaused(true);
     for (0..2) |_| _ = try app.step();
-    try testing.expectEqual(@as(f32, 0), app.world.get(walker, components.Animation).?.time);
-    try testing.expect(app.world.get(menu, components.Animation).?.time > 0);
+    try testing.expectEqual(@as(f32, 0), app.world.get(walker, sprite_frames_mod.AnimatedSprite).?.time);
+    try testing.expect(app.world.get(menu, sprite_frames_mod.AnimatedSprite).?.time > 0);
 }
 
 test "an Appearance hides, fades and raises what hangs from it" {
@@ -7332,7 +7468,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 34), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 36), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

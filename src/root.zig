@@ -172,7 +172,6 @@ pub const Text2D = components.Text2D;
 pub const FontHandle = assets.FontHandle;
 
 /// A sprite that walks through the cells of its own texture.
-pub const Animation = components.Animation;
 
 /// What the 2D pass looks through.
 pub const Camera2D = components.Camera2D;
@@ -293,6 +292,21 @@ pub const Timer = @import("timer.zig").Timer;
 /// Sound: clips, the players that play them, and the project's buses. See
 /// `audio.zig`.
 pub const audio = @import("audio.zig");
+/// A property of an entity named by text - `Appearance.modulate.a` - which
+/// tweens and animations move. See `property.zig`.
+pub const property = @import("property.zig");
+pub const Property = property.Property;
+pub const Tween = @import("tween.zig").Tween;
+/// Animation libraries - `.anim` - and the players that play them. See
+/// `animation.zig`.
+pub const animation = @import("animation.zig");
+pub const AnimationPlayer = animation.AnimationPlayer;
+pub const AnimationLibraryHandle = animation.AnimationLibraryHandle;
+/// Animations of pictures - `.frames` - and the sprites that show them. See
+/// `sprite_frames.zig`.
+pub const sprite_frames = @import("sprite_frames.zig");
+pub const AnimatedSprite = sprite_frames.AnimatedSprite;
+pub const SpriteFramesHandle = sprite_frames.SpriteFramesHandle;
 pub const AudioPlayer = audio.AudioPlayer;
 pub const AudioSpatial2D = audio.AudioSpatial2D;
 pub const AudioListener2D = audio.AudioListener2D;
@@ -412,6 +426,11 @@ test {
     _ = @import("file_table.zig");
     _ = @import("data.zig");
     _ = @import("audio.zig");
+    _ = @import("property.zig");
+    _ = @import("tween.zig");
+    _ = @import("animation.zig");
+    _ = @import("sprite_frames.zig");
+    _ = @import("animation_test.zig");
     _ = @import("audio_test.zig");
     _ = @import("background.zig");
     _ = @import("scenes_test.zig");

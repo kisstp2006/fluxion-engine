@@ -720,6 +720,61 @@ _ = app.setBusVolumeDb("Music", app.linearToDb(0.5));            // a settings s
   `finished` and `position` are the same everywhere and a test can listen to
   how loud a frame was; `Options.audio = .silent` asks for that on purpose.
 
+## 🎞️ Tweens and animations
+
+```zig
+// A tween: steps one after another, or together once tweenParallel says so.
+const fade = try app.tween(panel);
+try app.tweenProperty(fade, panel, "Appearance.modulate.a", .{ .number = 0 }, 0.3);
+_ = app.tweenEase(fade, "quad_out");
+try app.tweenParallel(fade, true);
+try app.tweenProperty(fade, panel, "Transform2D.x,y", .{ .vec2 = .{ 0, -40 } }, 0.3);
+try app.signal(fade, fx.Tween, .finished).connectFn(closed, .{});
+
+// Keyed animations, made in the editor's Animation panel.
+const menu = try app.loadAnimations("res://ui/menu.anim");
+const ui = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.AnimationPlayer{ .library = menu } });
+app.world.get(ui, fx.AnimationPlayer).?.play("open");
+
+// Pictures in turn.
+const hero = try app.loadSpriteFrames("res://art/hero.frames");
+_ = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Sprite{}, fx.AnimatedSprite.of(hero, "walk") });
+```
+
+- **A property is a path**: a component's scene name and a field in it -
+  `Transform2D.rotation`, `Appearance.modulate`, `Control.offset_x` - or two
+  number fields with a comma between, `Transform2D.x,y`, moved as one pair.
+  `fx.Property.compile` finds it once, and `read` and `write` go straight to
+  the component's bytes. A number, an integer, a flag, a vector and a colour
+  can be moved: numbers and vectors and colours slide, flags jump.
+- **A tween is an entity** with a `Tween` component, made with
+  `app.tween(owner)` under its owner, and its steps are the app's:
+  `tweenProperty(tween, entity, path, to, seconds)` from wherever the field
+  is when the step starts, `tweenInterval` a wait, `tweenParallel(tween,
+  true)` the steps after it each with the one before, and `tweenEase` the
+  curve of the step before - any of `fx.math.ease`'s thirty-one. `speed`,
+  `loops` - nought is for ever - and `paused` are its own; it says `finished` and goes when it is done, and
+  despawning it is killing it. It runs while its entity runs, so a pause
+  holds it, and Flux calls all of it by the same names.
+- **An animation library is a `.anim` file** of named animations: a length,
+  a loop - once, round again, or back and forth - and tracks. A track moves
+  one property of the player's own entity, or of one under it by name or by
+  path (`Panel/Title`), from key to key; each key says the curve it is got to
+  by, and a `discrete` track jumps to each key as it comes.
+- **An `AnimationPlayer` plays one**, and is data as an `AudioPlayer` is:
+  `library`, `autoplay`, `speed` and `paused`; `play(name)`, `stop()`,
+  `seek(to)` and `queue(name)` - the one after this - ask the engine's pass,
+  once a frame before the `.update` systems; `current`, `playing` and
+  `position` say what it found. `animation_started` and
+  `animation_finished` say so with the animation's name. A frame with no
+  time moves nothing: an editor poses a scene with `fx.animation.pose`.
+- **Sprite frames are a `.frames` file**: a sheet, the grid it is cut on,
+  and animations of its cells at a rate, each frame as many frames of that
+  rate as it says. `app.addGridFrames` makes them in code, as the
+  `creatures` example does. An `AnimatedSprite` - `frames`, `animation`,
+  `playing`, `speed`, `time` - loops or stops on its last frame and says
+  `animation_finished`.
+
 ## 📱 In the background
 
 ```zig
@@ -871,9 +926,11 @@ _ = try world.spawnWith(.{
   - `moveLocalX`/`moveLocalY`, `rotate` and `applyScale` change its own numbers along its own axes.
   - `getRelativeTransformToParent` says where it is in an ancestor's space.
   - These are where the entity is. What an entity that `interpolate`s is drawn at between two steps is `drawnTransform`.
-- **An `Animation` is a sheet and a rate**, and the engine writes the cell it
-  lands on into `Sprite.region` once a frame. One sheet holds a walk, an idle
-  and an attack; swapping between them is writing two numbers.
+- **An `AnimatedSprite` shows sprite frames**: a `.frames` file of named
+  animations, each a run of cells of a sheet - or pieces of textures - at a
+  rate. The engine writes the frame it is on into `Sprite.region` and
+  `Sprite.texture` once a frame; `play("attack")` swaps one for another. See
+  [Tweens and animations](#%EF%B8%8F-tweens-and-animations).
 - **A `Text2D` is words at a transform**, drawn through the same pass as
   everything else: each glyph is a quad out of a glyph atlas, so a label sorts
   against sprites by the same `layer` and `order` and all the text in one font
@@ -1797,8 +1854,8 @@ app.changeScene(try app.loadScene("res://levels/two.json"));          // at the 
 
 - **A scene that is wrong is an error, never a crash**, so an editor shows it
   and goes on. Numbers no hand would give still load - JSON5 keeps NaN and the
-  infinities - and the frames after them do not stop either: an animation of
-  no columns or an endless rate shows its first cell, a collider with a NaN in
+  infinities - and the frames after them do not stop either: an animated
+  sprite at an endless speed starts again, a collider with a NaN in
   its shape gets no shape, a label's size is held to what its atlas can keep.
 
 - **A load goes beside what is there.** A level over another is
@@ -2218,8 +2275,8 @@ zig build example-creatures
 zig build example-creatures -- --frames 300 --capture creatures.png
 ```
 
-**`creatures`** is the renderer's half: one sprite sheet, an `Animation` over
-its cells, and fourteen creatures each made of five entities - a body, two
+**`creatures`** is the renderer's half: one sprite sheet, a walk of four of
+its cells as sprite frames, and fourteen creatures each made of five entities - a body, two
 eyes, a shadow and a name - where only the body is ever moved. Arrows, WASD
 or a controller's left stick steer the one with the ring, and so does holding
 the left mouse button where it should go: that is `app.pointerInWorld()` at
@@ -2330,7 +2387,10 @@ Here, and checked by the tests:
   resolved where it is needed rather than cached into a second component, the
   families in an index built again when the world changes shape, and what
   hangs from something taken down with it.
-- Sprite animation over a sheet, looping or one-shot.
+- Tweens as entities, keyed animations in `.anim` files played by an
+  `AnimationPlayer` on its entity and those under it, and sprite frames in
+  `.frames` files an `AnimatedSprite` shows - all of it moving a component's
+  fields by a path, from Zig and from Flux.
 - Text: a shelf-packed glyph atlas per font, kerning, several lines, three
   alignments, and a label that formats into itself. Not here yet: wrapping, an
   outline, more than sixty-three bytes in one label, and more than one font in
@@ -2446,8 +2506,9 @@ before this package existed - the seam was cut for it deliberately.
 ## 🧩 What counts as a component
 
 `Parent`, `Processing` and `Appearance`, which every entity may have. In 2D: `Transform2D`, `Sprite`,
-`Text2D`, `Animation`, `Camera2D`, `RigidBody2D`, `Collider2D`, `Area2D` and
-`TileMap`; `Timer`; and the interface's `Control` with what goes beside it -
+`Text2D`, `AnimatedSprite`, `Camera2D`, `RigidBody2D`, `Collider2D`, `Area2D`
+and `TileMap`; `Timer`, `Tween` and `AnimationPlayer`; `AudioPlayer`,
+`AudioSpatial2D` and `AudioListener2D`; and the interface's `Control` with what goes beside it -
 see [Controls and themes](#-controls-and-themes). Each one is something a
 person making a game would name, which is the test. A map's chunks are
 entities of the engine's own, which a scene never writes.

@@ -21,6 +21,8 @@ const testing = std.testing;
 const Assets = @import("assets.zig");
 const data = @import("data.zig");
 const audio = @import("audio.zig");
+const animation = @import("animation.zig");
+const sprite_frames = @import("sprite_frames.zig");
 const scenes = @import("scenes.zig");
 const script = @import("script.zig");
 const theme = @import("theme.zig");
@@ -35,6 +37,8 @@ pub const AssetKind = enum {
     theme,
     data,
     audio,
+    animation,
+    frames,
 
     /// What a person calls one.
     pub fn label(self: AssetKind) []const u8 {
@@ -47,6 +51,8 @@ pub const AssetKind = enum {
             .theme => "theme",
             .data => "data file",
             .audio => "sound",
+            .animation => "animation library",
+            .frames => "sprite frames",
         };
     }
 
@@ -61,6 +67,8 @@ pub const AssetKind = enum {
             .theme => "A theme",
             .data => "Values for a Flux struct",
             .audio => "A WAV, Ogg Vorbis or MP3 file",
+            .animation => "Animations an AnimationPlayer plays",
+            .frames => "Animations of pictures an AnimatedSprite shows",
         };
     }
 
@@ -75,6 +83,8 @@ pub const AssetKind = enum {
             .theme => "res://ui/game.theme",
             .data => "res://dialogue/intro.data",
             .audio => "res://sounds/door.ogg",
+            .animation => "res://ui/menu.anim",
+            .frames => "res://art/hero.frames",
         };
     }
 
@@ -89,6 +99,8 @@ pub const AssetKind = enum {
             .theme => &.{".theme"},
             .data => &.{data.extension},
             .audio => &audio.extensions,
+            .animation => &.{animation.extension},
+            .frames => &.{sprite_frames.extension},
         };
     }
 
@@ -117,6 +129,8 @@ pub const AssetKind = enum {
             .theme => theme.ThemeHandle,
             .data => data.DataHandle,
             .audio => audio.AudioClipHandle,
+            .animation => animation.AnimationLibraryHandle,
+            .frames => sprite_frames.SpriteFramesHandle,
         };
     }
 
@@ -129,7 +143,7 @@ pub const AssetKind = enum {
     }
 
     /// Every kind a component can hold a file of: the ones with a handle.
-    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio };
+    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio, .animation, .frames };
 };
 
 test "a file's kind is its ending's, whatever its case, and a scene's JSON is not said by its name" {

@@ -23,8 +23,10 @@
 //! frame is one draw call however many of them there are. `Region.cell`
 //! turns "the third picture along" into the four numbers the shader wants.
 //!
-//! **An `Animation` is the sheet and a rate.** The engine steps it and writes
-//! the cell into the sprite; nothing in this file touches `Sprite.region`
+//! **An `AnimatedSprite` shows a set of sprite frames.** The frames are cells
+//! of the sheet, named and timed - `app.addGridFrames` makes them in code, a
+//! `.frames` file is the same thing on disc. The engine steps each sprite and
+//! writes the cell into it; nothing in this file touches `Sprite.region`
 //! after the creature is spawned.
 //!
 //! **A transform's `parent` is how one thing rides on another.** Each creature
@@ -82,7 +84,7 @@ const Transform2D = fx.Transform2D;
 const Parent = fx.Parent;
 const Sprite = fx.Sprite;
 const Camera2D = fx.Camera2D;
-const Animation = fx.Animation;
+const AnimatedSprite = fx.AnimatedSprite;
 const Text2D = fx.Text2D;
 const Color = fx.Color;
 const App = fx.App;
@@ -120,7 +122,6 @@ const cell_size = 32;
 /// animation; the second row is the pieces that do not move.
 const cell = struct {
     const body_first = 0;
-    const body_frames = 4;
     const eye = 4;
     const shadow = 5;
     const ring = 6;
@@ -183,9 +184,16 @@ const peek_reach: f32 = 180;
 // Setting the table
 // -------------------------------------------------------------------------
 
-fn spawn(app: *App) !void {
-    const world = &app.world;
+/// The walk, `time` seconds in.
+fn walking(frames: fx.SpriteFramesHandle, time: f32) AnimatedSprite {
+    var sprite: AnimatedSprite = .of(frames, "walk");
+    sprite.time = time;
+    return sprite;
+}
 
+/// The sheet, and the walk made of its first row. A scene read with
+/// `--scene` names both, so they are made before it is read as well.
+fn sheetAndFrames(app: *App) !struct { sheet: fx.TextureHandle, frames: fx.SpriteFramesHandle } {
     const sheet = app.assets.loadTexture(atlas_path, .{ .filter = .nearest }) catch |err| blk: {
         // A fresh checkout has no PNG in it until somebody writes one, and a
         // missing file should not be the difference between a program that
@@ -199,6 +207,20 @@ fn spawn(app: *App) !void {
             .{ .filter = .nearest, .label = "atlas" },
         );
     };
+
+    // Four cells of the first row, at eight a second: the walk every
+    // creature shows.
+    const frames = try app.addGridFrames("examples/creature.frames", sheet, atlas_columns, atlas_rows, &.{
+        .{ .name = "walk", .cells = &.{ cell.body_first, cell.body_first + 1, cell.body_first + 2, cell.body_first + 3 }, .fps = 8 },
+    });
+    return .{ .sheet = sheet, .frames = frames };
+}
+
+fn spawn(app: *App) !void {
+    const world = &app.world;
+    const made = try sheetAndFrames(app);
+    const sheet = made.sheet;
+    const frames = made.frames;
 
     openFont(app);
 
@@ -264,16 +286,8 @@ fn spawn(app: *App) !void {
                 .height = 34,
                 .layer = 0,
             },
-            // Four cells of the first row, at eight a second, each creature
-            // starting somewhere else in the loop.
-            Animation{
-                .first = cell.body_first,
-                .length = cell.body_frames,
-                .columns = atlas_columns,
-                .rows = atlas_rows,
-                .fps = 8,
-                .time = rand.float(f32),
-            },
+            // Each creature starting somewhere else in the walk.
+            walking(frames, rand.float(f32)),
             Wander{
                 .dx = @cos(angle),
                 .dy = @sin(angle),
@@ -744,6 +758,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (flags.scene) |path| {
         openFont(app);
+        _ = try sheetAndFrames(app);
         var diagnostics: fx.json.Diagnostics = .{};
         const loaded = app.readScene(path, .{ .diagnostics = &diagnostics }) catch |err| {
             try out.print("{f}\n", .{diagnostics});

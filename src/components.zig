@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! The components the engine itself reads: `Transform2D`, `Sprite`,
-//! `Text2D`, `Animation`, `Camera2D`, `RigidBody2D` and `Collider2D`. A game
+//! `Text2D`, `Camera2D`, `RigidBody2D` and `Collider2D`. A game
 //! declares its own beside them.
 //!
 //! ```zig
@@ -287,100 +287,6 @@ pub const Sprite = extern struct {
     /// A rectangle of solid colour, with no texture at all.
     pub fn solid(color: Color, width: f32, height: f32) Sprite {
         return .{ .tint = color, .width = width, .height = height };
-    }
-};
-
-/// A sprite that walks through the cells of its own texture.
-///
-/// ```zig
-/// _ = try world.spawnWith(.{
-///     Transform2D.at(64, 64),
-///     Sprite.of(hero),
-///     Animation{ .length = 6, .columns = 6, .fps = 10 },
-/// });
-/// ```
-///
-/// The engine advances it once a frame and writes the cell into
-/// `Sprite.region`. The sheet is a grid counted left to right and then down,
-/// and `first` is where this animation starts, so one sheet can hold several.
-pub const Animation = extern struct {
-    /// The cell it starts at, counting across the whole sheet.
-    first: u16 = 0,
-    /// How many cells it runs for. One is a still picture.
-    length: u16 = 1,
-
-    /// The shape of the whole sheet, in cells.
-    columns: u16 = 1,
-    rows: u16 = 1,
-
-    /// Cells a second. Twelve is the usual hand-drawn rate.
-    fps: f32 = 12,
-
-    /// Seconds into the animation, rather than a frame number, so changing
-    /// `fps` part way through does not jump.
-    time: f32 = 0,
-
-    playing: bool = true,
-
-    /// Whether it starts again at the end. A one-shot stops on its last cell
-    /// and sets `finished`.
-    looping: bool = true,
-
-    /// Set when a one-shot reaches its end. Cleared by writing a new
-    /// animation over the component.
-    finished: bool = false,
-
-    pub const reflect_name = "Animation";
-    pub const reflect_fields = .{
-        .fps = .{ attr.Unit{ .text = "/s" }, attr.Doc{ .text = "Cells a second" } },
-        .time = .{ attr.Unit{ .text = "s" }, attr.Doc{ .text = "Into the animation" } },
-        .finished = .{attr.ReadOnly{}},
-    };
-    pub const reflect_methods = .{.frame};
-
-    /// The first `length` cells of a single row.
-    pub fn strip(length: u16, fps: f32) Animation {
-        return .{ .length = length, .columns = length, .rows = 1, .fps = fps };
-    }
-
-    /// Which cell of the sheet is showing. A time or a rate no clock reaches -
-    /// NaN, an infinity, more cells than a `u32` counts - shows the first.
-    pub fn frame(self: Animation) u32 {
-        if (self.length <= 1 or !(self.fps > 0)) return self.first;
-        const cells = @max(self.time, 0) * self.fps;
-        // Two to the 32nd, which an `f32` holds exactly; everything below it
-        // a `u32` holds.
-        if (!(cells < 4294967296.0)) return self.first;
-        const step: u32 = @intFromFloat(cells);
-        const within = if (self.looping)
-            step % self.length
-        else
-            @min(step, self.length - 1);
-        return self.first + within;
-    }
-
-    /// Move it on by `delta` seconds, and say which cell to show. The clock is
-    /// wound back by whole loops, so it stays precise however long it runs.
-    ///
-    /// Numbers no time passing could give - a clock of NaN or an infinity, a
-    /// rate so high a loop takes no time at all - come from a file, and start
-    /// the animation again rather than spinning here.
-    pub fn advance(self: *Animation, delta: f32) Region {
-        if (self.playing and self.length > 1 and self.fps > 0) {
-            self.time += delta;
-
-            const loop = @as(f32, @floatFromInt(self.length)) / self.fps;
-            if (!std.math.isFinite(self.time) or !(loop > 0)) {
-                self.time = 0;
-            } else if (self.looping) {
-                if (self.time >= loop) self.time = @mod(self.time, loop);
-            } else if (self.time >= loop) {
-                self.time = loop;
-                self.finished = true;
-                self.playing = false;
-            }
-        }
-        return .cell(self.frame(), self.columns, self.rows);
     }
 };
 
@@ -743,7 +649,6 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Transform2D);
     ecs.component.check(Sprite);
     ecs.component.check(Camera2D);
-    ecs.component.check(Animation);
     ecs.component.check(Text2D);
     ecs.component.check(RigidBody2D);
     ecs.component.check(Collider2D);
@@ -825,55 +730,3 @@ test "an empty label is empty rather than sixty-three zeroes" {
     try testing.expectEqual(@as(usize, 0), label.slice().len);
 }
 
-test "an animation walks its cells and comes back round" {
-    var animation: Animation = .strip(4, 10);
-
-    try testing.expectEqual(@as(u32, 0), animation.frame());
-    _ = animation.advance(0.1);
-    try testing.expectEqual(@as(u32, 1), animation.frame());
-    _ = animation.advance(0.2);
-    try testing.expectEqual(@as(u32, 3), animation.frame());
-
-    // A whole loop is 0.4 seconds, so this is back at the start.
-    _ = animation.advance(0.1);
-    try testing.expectEqual(@as(u32, 0), animation.frame());
-}
-
-test "a one-shot stops on its last cell and says so" {
-    var animation: Animation = .strip(3, 10);
-    animation.looping = false;
-
-    _ = animation.advance(1);
-    try testing.expectEqual(@as(u32, 2), animation.frame());
-    try testing.expect(animation.finished);
-    try testing.expect(!animation.playing);
-}
-
-test "an animation whose numbers no clock could give neither stops the frame nor spins" {
-    // No cells to count, and a rate past what an `f32` holds.
-    var odd: Animation = .{ .length = 0, .columns = 0, .rows = 0, .fps = std.math.inf(f32) };
-    try testing.expectEqual(Region.cell(0, 1, 1), odd.advance(0.1));
-
-    var endless: Animation = .{ .length = 4, .columns = 4, .fps = std.math.inf(f32), .time = std.math.nan(f32) };
-    _ = endless.advance(0.1);
-    try testing.expectEqual(@as(u32, 0), endless.frame());
-    try testing.expectEqual(@as(f32, 0), endless.time);
-
-    // A clock a year of frames could not wind back one loop at a time.
-    var old: Animation = .{ .length = 4, .columns = 4, .fps = 10, .time = 1e30 };
-    const region = old.advance(0.1);
-    try testing.expect(old.time >= 0 and old.time < 0.4);
-    try testing.expect(std.math.isFinite(region.u0) and std.math.isFinite(region.u1));
-
-    // And one that is not playing, so nothing winds it back at all.
-    var stopped: Animation = .{ .first = 2, .length = 4, .columns = 4, .fps = 10, .time = 1e30, .playing = false };
-    _ = stopped.advance(0.1);
-    try testing.expectEqual(@as(u32, 2), stopped.frame());
-}
-
-test "an animation with one cell never moves" {
-    var animation: Animation = .{ .first = 5, .length = 1 };
-    const region = animation.advance(10);
-    try testing.expectEqual(@as(u32, 5), animation.frame());
-    try testing.expectEqual(Region.cell(5, 1, 1).u0, region.u0);
-}

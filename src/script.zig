@@ -135,6 +135,7 @@ const App = @import("App.zig");
 const actions = @import("actions.zig");
 const AssetKind = @import("asset_kind.zig").AssetKind;
 const data_file = @import("data.zig");
+const property = @import("property.zig");
 const attr = @import("attr.zig");
 const Project = @import("Project.zig");
 const signals = @import("signals.zig");
@@ -1944,7 +1945,7 @@ fn entityHandle(scripts: *Scripts, entity: Entity) flux.Vm.Error!flux.Value {
 }
 
 /// Every type of the engine's that a script sees as something else.
-const host_types = [_]flux.HostType{ entity_type, tile_value_type } ++ asset_types;
+const host_types = [_]flux.HostType{ entity_type, tile_value_type, animated_value_type } ++ asset_types;
 
 /// A file a component holds - a texture, a scene - as its path, and given
 /// as one: `sprite.texture = "res://art/hero.png"`, `app.instantiate("res://
@@ -2047,6 +2048,37 @@ fn tileValueFromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flu
         else => return vm.fail("a tile's data is a number, true or false, not {s}", .{typeName(value)}),
     };
     const place = into.as(tileset.Value) orelse return vm.fail("this tile's data can only be read", .{});
+    place.* = given;
+}
+
+/// What a tween moves a property to, as a script gives it: a number, a
+/// `vec2`, a `color`, true or false - `app.tweenProperty(t, e, "Transform2D.x",
+/// 300.0, 1.0)`.
+const animated_value_type: flux.HostType = .{
+    .type = reflect.typeOf(property.Value),
+    .to_script = animatedToScript,
+    .from_script = animatedFromScript,
+};
+
+fn animatedToScript(vm: *flux.Vm, value: reflect.Value) flux.Vm.Error!flux.Value {
+    return switch (value.asConst(property.Value).?.*) {
+        .number => |n| .float(n),
+        .vec2 => |xy| .vec2(xy[0], xy[1]),
+        .color => |rgba| try vm.newColor(rgba),
+        .flag => |on| .boolean(on),
+    };
+}
+
+fn animatedFromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flux.Vm.Error!void {
+    const given: property.Value = switch (value.tag) {
+        .int => .{ .number = @floatFromInt(value.asInt()) },
+        .float => .{ .number = value.asFloat() },
+        .bool => .{ .flag = value.asBool() },
+        .vec2 => .{ .vec2 = value.asVec2() },
+        .color => .{ .color = value.as(flux.object.Color).rgba },
+        else => return vm.fail("a property moves to a number, a vec2, a color, true or false, not {s}", .{typeName(value)}),
+    };
+    const place = into.as(property.Value) orelse return vm.fail("this value can only be read", .{});
     place.* = given;
 }
 

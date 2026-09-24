@@ -2326,7 +2326,7 @@ const image = @import("fluxion_image");
 const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
 const Camera2D = components.Camera2D;
-const Animation = components.Animation;
+const AnimatedSprite = @import("sprite_frames.zig").AnimatedSprite;
 
 /// A game's own component, holding the kinds of thing a component can.
 const Wander = extern struct {
@@ -2525,10 +2525,11 @@ test "a scene comes back as it went, from JSON and from CBOR" {
     const hero = try source.assets.loadTexture(png, .{ .filter = .linear });
     const typeface = source.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 }) catch FontHandle.none;
 
+    const strip = try source.addGridFrames("hero.frames", hero, 4, 2, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .fps = 8 }});
     const body = try source.world.spawnWith(.{
         Transform2D.at(10, 20).interpolated(),
         Sprite{ .texture = hero, .tint = .rgba(0.5, 0.25, 1, 0.75), .region = .cell(3, 4, 2), .blend = .additive },
-        Animation.strip(4, 8),
+        AnimatedSprite.of(strip, "walk"),
     });
     try source.setName(body, "hero");
     _ = try source.world.spawnWith(.{ Transform2D.at(-7, -4), components.Parent.of(body), Sprite.solid(.white, 9, 9) });
@@ -2561,6 +2562,8 @@ test "a scene comes back as it went, from JSON and from CBOR" {
         const copy = try headless();
         defer copy.destroy();
         try copy.registerComponents(.{Wander});
+        // Made in code, as the source's were: no file to read them from.
+        _ = try copy.addGridFrames("hero.frames", .none, 4, 2, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .fps = 8 }});
         const loaded = try copy.readScene(path, .{});
         try testing.expectEqual(@as(usize, 4), loaded.entities);
         try testing.expectEqual(@as(usize, 0), loaded.components_unknown);
@@ -2921,8 +2924,8 @@ test "numbers no hand would give load, and the frames after them do not crash" {
     const loaded = try read(app,
         \\{ "fluxion_scene": 3, "entities": [
         \\  { "Transform2D": { "x": NaN, "y": Infinity, "scale_x": 0 }, "Sprite": { "width": NaN },
-        \\    "Animation": { "columns": 0, "rows": 0, "length": 4, "fps": 1e39, "time": NaN } },
-        \\  { "Transform2D": {}, "Sprite": {}, "Animation": { "columns": 0, "rows": 0, "length": 0, "fps": 1e39 } },
+        \\    "AnimatedSprite": { "speed": 1e39, "time": NaN } },
+        \\  { "Transform2D": {}, "Sprite": {}, "AnimatedSprite": { "speed": -1e39, "time": Infinity } },
         \\  { "Transform2D": { "x": 1 }, "Camera2D": { "zoom": 0, "fit_width": NaN, "fit_height": Infinity } },
         \\  { "Transform2D": { "rotation": NaN }, "RigidBody2D": { "velocity": { "x": NaN, "y": 1 } },
         \\    "Collider2D": { "shape": "circle", "radius": -1 } },
