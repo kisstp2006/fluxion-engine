@@ -170,10 +170,7 @@ fn take(self: *Picking, app: *App, id: physics.ShapeId, point: Vec2) !void {
 /// Whether the shape itself holds the point, not only its box.
 fn holds(app: *App, entry: *const physics.World.ShapeEntry, point: Vec2) bool {
     const local = app.physics.shapeTransform(entry).unapply(point);
-    return switch (entry.def.geometry) {
-        .circle => |c| local.distSq(c.center) <= c.radius * c.radius,
-        .polygon => |*p| p.containsLocal(local),
-    };
+    return entry.def.geometry.containsLocal(local);
 }
 
 /// Whether an object takes the pointer at all: its `input_pickable`, true

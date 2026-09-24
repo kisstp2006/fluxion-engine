@@ -259,6 +259,10 @@ pub const Contact = Bodies.Contact;
 
 /// What `App.castRay` hit.
 pub const RayHit = Bodies.RayHit;
+/// Bodies the game moves: see `App.moveAndSlide`.
+pub const character = @import("character.zig");
+pub const CharacterBody2D = components.CharacterBody2D;
+pub const Collision = character.Collision;
 
 /// What a camera sees, as a point, a zoom, a turn and a size: what
 /// `App.drawWorld` draws the world through.
@@ -456,6 +460,7 @@ test {
     _ = @import("render/screen.zig");
     _ = @import("render_test.zig");
     _ = @import("stretch.zig");
+    _ = @import("character_test.zig");
     _ = @import("ui_test.zig");
     _ = @import("animation.zig");
     _ = @import("sprite_frames.zig");

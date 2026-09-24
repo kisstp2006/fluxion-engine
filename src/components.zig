@@ -502,9 +502,11 @@ pub const RigidBody2D = extern struct {
 pub const Collider2D = extern struct {
     shape: Shape = .rectangle,
     /// Half a rectangle's width and height, before the transform's scale.
-    /// Zero takes the sprite's size, and centres the shape on the sprite.
+    /// Zero takes the sprite's size, and centres the shape on the sprite. A
+    /// capsule's `y` is half its whole height, round ends and all.
     extents: math.Vec2 = .zero,
-    /// A circle's. Zero is half the sprite's width, centred on the sprite.
+    /// A circle's, and a capsule's round ends'. Zero is half the sprite's
+    /// width, centred on the sprite.
     radius: f32 = 0,
     /// From the entity's origin, before its scale.
     offset: math.Vec2 = .zero,
@@ -529,7 +531,9 @@ pub const Collider2D = extern struct {
     collision_layer: u32 = 1,
     collision_mask: u32 = 1,
 
-    pub const Shape = enum(u8) { rectangle, circle };
+    /// A capsule stands along the entity's `y`, round at both ends: what a
+    /// character is, sliding over a step's edge rather than catching on it.
+    pub const Shape = enum(u8) { rectangle, circle, capsule };
 
     pub const reflect_name = "Collider2D";
     pub const reflect_attributes = .{attr.Placement{ .offset = "offset", .rotation = "rotation" }};
@@ -554,6 +558,66 @@ pub const Collider2D = extern struct {
     pub fn circle(radius: f32) Collider2D {
         return .{ .shape = .circle, .radius = radius };
     }
+
+    /// A capsule `height` tall, round ends included, and `radius` round.
+    pub fn capsule(radius: f32, height: f32) Collider2D {
+        return .{ .shape = .capsule, .radius = radius, .extents = .init(radius, height / 2) };
+    }
+};
+
+/// A body the game moves rather than the physics: a player, a guard walking
+/// a corridor. Its `velocity` is what `App.moveAndSlide` moves it by, a step
+/// at a time, stopping at what it meets and sliding along it; what it stands
+/// on and what it is against are said after. Its shapes are its
+/// `Collider2D`s, as a rigid body's are, and nothing pushes it. See
+/// `character.zig`.
+pub const CharacterBody2D = extern struct {
+    /// Units a second. What went into a wall or a floor is taken off it by a
+    /// move.
+    velocity: math.Vec2 = .zero,
+    /// Which way is up: a floor faces it, a ceiling faces away. Up the
+    /// screen.
+    up_direction: math.Vec2 = .init(0, -1),
+    motion_mode: MotionMode = .grounded,
+    /// The steepest slope that is still a floor.
+    floor_max_angle: f32 = std.math.pi / 4.0,
+    /// How far below it a floor is kept to, walking off the top of a slope
+    /// or down a step. Nought never keeps to one.
+    floor_snap_length: f32 = 4,
+    /// Standing on a slope, it stays: it slides down only what it walks.
+    floor_stop_on_slope: bool = true,
+    /// How far it keeps from what it touches.
+    safe_margin: f32 = 0.5,
+    /// How many times one move may stop and slide on.
+    max_slides: u32 = 4,
+    /// What the last move found.
+    on_floor: bool = false,
+    on_wall: bool = false,
+    on_ceiling: bool = false,
+    /// Out of the floor it stands on, and the wall it is against, when it
+    /// is.
+    floor_normal: math.Vec2 = .zero,
+    wall_normal: math.Vec2 = .zero,
+
+    /// Grounded: floors, walls and ceilings, for a game seen from the side.
+    /// Floating: everything it meets is a wall, for a game seen from above.
+    pub const MotionMode = enum(u8) { grounded, floating };
+
+    pub const reflect_name = "CharacterBody2D";
+    pub const reflect_fields = .{
+        .velocity = .{ attr.Unit{ .text = "/s" }, attr.Doc{ .text = "World units a second: what moveAndSlide moves it by" } },
+        .up_direction = .{attr.Doc{ .text = "A floor faces it, a ceiling away from it" }},
+        .motion_mode = .{attr.Doc{ .text = "Grounded has floors and ceilings; floating, seen from above, only walls" }},
+        .floor_max_angle = .{ attr.Angle{}, attr.Doc{ .text = "The steepest slope that is still a floor" } },
+        .floor_snap_length = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "How far below it a floor is kept to; nought never" } },
+        .floor_stop_on_slope = .{attr.Doc{ .text = "Standing on a slope, it does not slide down it" }},
+        .safe_margin = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "How far it keeps from what it touches" } },
+        .on_floor = .{attr.ReadOnly{}},
+        .on_wall = .{attr.ReadOnly{}},
+        .on_ceiling = .{attr.ReadOnly{}},
+        .floor_normal = .{attr.ReadOnly{}},
+        .wall_normal = .{attr.ReadOnly{}},
+    };
 };
 
 /// A place that tells what is in it, and pushes nothing. A trigger, a

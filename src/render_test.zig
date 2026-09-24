@@ -284,4 +284,7 @@ test "a stretched game is laid out at its own size, drawn apart and put on the w
     try testing.expectEqual(@as(f32, 4), app.frame.scale);
     try testing.expectEqual(@as(f32, 4), app.currentView().zoom_x);
     try testing.expectEqual(@as(f32, 4), app.interface.scale);
+    // With no camera, the made-at size's top left is the frame's.
+    try testing.expectApproxEqAbs(@as(f32, 0), app.currentView().toScreen(.init(0, 0)).x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 128), app.currentView().toScreen(.init(32, 16)).x, 0.001);
 }

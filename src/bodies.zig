@@ -27,6 +27,7 @@ const Transform2D = components.Transform2D;
 const RigidBody2D = components.RigidBody2D;
 const Collider2D = components.Collider2D;
 const Area2D = components.Area2D;
+const CharacterBody2D = components.CharacterBody2D;
 const Sprite = components.Sprite;
 const BodyId = physics.BodyId;
 const ShapeId = physics.ShapeId;
@@ -205,6 +206,7 @@ pub fn sync(self: *Bodies, app: *App) !void {
     if (self.mark == 0) self.mark = 1;
     self.moving.clearRetainingCapacity();
     try self.syncRigid(app);
+    try self.syncCharacters(app);
     try self.syncAreas(app);
     try self.syncColliders(app);
     try self.syncTiles(app);
@@ -522,7 +524,7 @@ pub fn exceptionsOf(self: *const Bodies, e: Entity, found: []Entity) []Entity {
 /// Whether an entity is a body a collision exception can name: a
 /// `RigidBody2D`, or a collider that is a static body of its own.
 fn isBody(world: *ecs.World, e: Entity) bool {
-    if (world.has(e, RigidBody2D)) return true;
+    if (world.has(e, RigidBody2D) or world.has(e, CharacterBody2D)) return true;
     if (world.has(e, Area2D)) return false;
     if (!world.has(e, Transform2D)) return false;
     if (!world.has(e, Collider2D)) return false;
@@ -537,6 +539,45 @@ fn destroy(self: *Bodies, app: *App, id: BodyId) !void {
         try self.departed.append(app.gpa, .{ .shape = at, .entity = .fromInt(entry.def.user_data) });
     }
     app.physics.destroyBody(id);
+}
+
+/// A `CharacterBody2D` is a kinematic body that goes where its transform
+/// goes: `character.zig` moves both at once. Not written back after a step,
+/// which moves it nowhere.
+fn syncCharacters(self: *Bodies, app: *App) !void {
+    var it = try ecs.Query(.{ Transform2D, CharacterBody2D }).over(&app.world);
+    while (it.next()) |chunk| {
+        if (app.world.has(chunk.entities[0], RigidBody2D)) {
+            for (chunk.entities) |e| if (try self.refused.fetchPut(app.gpa, e, {}) == null) {
+                log.warn("{f} has a CharacterBody2D and a RigidBody2D; it is a rigid body, and the character does nothing", .{e});
+            };
+            continue;
+        }
+        for (chunk.entities, chunk.slice(Transform2D)) |e, place| {
+            const character: RigidBody2D = .{ .type = .kinematic };
+            const link = &self.bodies.items[e.index];
+            if (link.entity.eql(e) and link.rigid != null and link.rigid.?.type == .kinematic) {
+                update(app, link, place, character);
+            } else {
+                const at = placed(app, e, place) orelse continue;
+                try self.make(app, link, e, place, at, character);
+            }
+            self.body_seen.items[e.index] = self.mark;
+        }
+    }
+}
+
+/// A character's body and its entity were moved together, to `position`
+/// in the world: what the next sync would otherwise take for a move.
+pub fn movedTo(self: *Bodies, app: *App, e: Entity, position: Vec2, rotation: f32) void {
+    if (e.index >= self.bodies.items.len) return;
+    const link = &self.bodies.items[e.index];
+    if (!link.entity.eql(e)) return;
+    link.placed.x = position.x;
+    link.placed.y = position.y;
+    link.placed.rotation = rotation;
+    if (app.world.get(e, Transform2D)) |place| link.transform = place.*;
+    link.parent = hierarchy.parentOf(&app.world, e);
 }
 
 /// An `Area2D` is a kinematic body that goes where its transform goes. An
@@ -619,9 +660,10 @@ pub fn isArea(world: *ecs.World, e: Entity) bool {
     return world.has(e, Area2D) and !world.has(e, RigidBody2D);
 }
 
-/// Whether an entity is a collision object of its own: a body, or an area.
+/// Whether an entity is a collision object of its own: a body, a
+/// character, or an area.
 fn owns(world: *ecs.World, e: Entity) bool {
-    return world.has(e, RigidBody2D) or world.has(e, Area2D);
+    return world.has(e, RigidBody2D) or world.has(e, CharacterBody2D) or world.has(e, Area2D);
 }
 
 /// Which collision object a collider belongs to: the body or area that owns
@@ -696,6 +738,7 @@ fn spriteOf(app: *App, e: Entity, collider: Collider2D) [4]f32 {
     const wanted = switch (collider.shape) {
         .rectangle => collider.extents.x == 0 or collider.extents.y == 0,
         .circle => collider.radius == 0,
+        .capsule => collider.radius == 0 or collider.extents.y == 0,
     };
     if (!wanted) return @splat(0);
     const drawn = app.world.get(e, Sprite) orelse return @splat(0);
@@ -742,6 +785,23 @@ fn shapeOf(inputs: Inputs, e: Entity) ?physics.Shape {
             const centre = centreOf(place, offset);
             if (!(radius > least_size) or !finite(&.{ radius, centre.x, centre.y })) return null;
             break :blk .{ .circle = .{ .center = centre, .radius = radius } };
+        },
+        .capsule => blk: {
+            if (c.radius == 0 or c.extents.y == 0) {
+                offset[0] += inputs.sprite[2];
+                offset[1] += inputs.sprite[3];
+            }
+            const radius = @abs(if (c.radius != 0) c.radius else inputs.sprite[0] / 2) * @abs(place.scale_x);
+            const half_height = @abs(if (c.extents.y != 0) c.extents.y else inputs.sprite[1] / 2) * @abs(place.scale_y);
+            const centre = centreOf(place, offset);
+            const turn = place.rotation + c.rotation;
+            if (!(radius > least_size) or !finite(&.{ radius, half_height, centre.x, centre.y, turn })) return null;
+            // From the middle to each end's centre, along the entity's `y`.
+            const reach = half_height - radius;
+            // No longer than it is round: a circle.
+            if (!(reach > least_size)) break :blk .{ .circle = .{ .center = centre, .radius = radius } };
+            const along: Vec2 = .init(-@sin(turn) * reach, @cos(turn) * reach);
+            break :blk .{ .capsule = .{ .center1 = centre.sub(along), .center2 = centre.add(along), .radius = radius } };
         },
     };
     return .{

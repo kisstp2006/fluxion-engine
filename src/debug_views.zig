@@ -99,6 +99,20 @@ fn drawColliders(app: *App) void {
                 // A spoke, so a rolling ball is seen to roll.
                 app.debug.line2d(centre, centre.add(pose.turn(.init(circle.radius, 0))), colour);
             },
+            .capsule => |capsule| {
+                // Its two ends, and its two sides between them.
+                const a = pose.apply(capsule.center1);
+                const b = pose.apply(capsule.center2);
+                app.debug.circle2d(a, capsule.radius, colour);
+                app.debug.circle2d(b, capsule.radius, colour);
+                const along = b.sub(a);
+                const len = along.len();
+                if (len > 0) {
+                    const side = Vec2.init(-along.y, along.x).scale(capsule.radius / len);
+                    app.debug.line2d(a.add(side), b.add(side), colour);
+                    app.debug.line2d(a.sub(side), b.sub(side), colour);
+                }
+            },
         }
     }
 }

@@ -83,6 +83,7 @@ const View = @import("render/view.zig").View;
 const Screen = @import("render/screen.zig").Screen;
 const shaders_mod = @import("shaders.zig");
 const views_mod = @import("views.zig");
+const character = @import("character.zig");
 const stretch_mod = @import("stretch.zig");
 
 const Color = @import("color.zig").Color;
@@ -832,6 +833,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.RenderView,
         components.ViewTexture,
         components.RigidBody2D,
+        components.CharacterBody2D,
         components.Collider2D,
         components.Area2D,
         timer.Timer,
@@ -872,7 +874,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, animation_mod.AnimationLibraryHandle, sprite_frames_mod.SpriteFramesHandle, shaders_mod.ShaderHandle, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
+    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, animation_mod.AnimationLibraryHandle, sprite_frames_mod.SpriteFramesHandle, shaders_mod.ShaderHandle, character.Collision, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -4300,6 +4302,8 @@ pub const reflect_methods = .{
     .saveInputMap,
     .loadInputMap,
     .isOnFloor,
+    .moveAndSlide,
+    .moveAndCollide,
     .cellAt,
     .tileData,
     .tileDataAt,
@@ -4922,6 +4926,20 @@ pub fn loadInputMap(self: *App, path: []const u8) !bool {
     return true;
 }
 
+/// Move a `CharacterBody2D` by its velocity for this step - `time.delta` -
+/// stopping at what it meets and sliding along it, and say what it stands
+/// on and is against in its fields after. Whether anything stopped it. See
+/// `character.zig`.
+pub fn moveAndSlide(self: *App, entity: ecs.Entity) character.Error!bool {
+    return character.moveAndSlide(self, entity);
+}
+
+/// Move a `CharacterBody2D` once, by `motion`, stopping `safe_margin` short
+/// of the first thing in the way: what that was, or null for nothing.
+pub fn moveAndCollide(self: *App, entity: ecs.Entity, motion: math.Vec2) character.Error!?character.Collision {
+    return character.moveAndCollide(self, entity, motion);
+}
+
 /// Whether an entity stands on a floor: something facing up under the bottom
 /// of its collider, no further below it than `distance`. A floor under the
 /// middle of the bottom, or under either end of it, counts, so a body half
@@ -4932,6 +4950,8 @@ pub fn loadInputMap(self: *App, path: []const u8) !bool {
 /// the physics' slop into it, and a ray that starts inside the floor finds
 /// nothing of it.
 pub fn isOnFloor(self: *App, entity: ecs.Entity, distance: f32) bool {
+    // A character knows: its last move said.
+    if (self.world.get(entity, components.CharacterBody2D)) |held| return held.on_floor;
     const collider = self.world.get(entity, components.Collider2D) orelse return false;
     const box = self.bodies.boundsOf(self, entity) orelse return false;
     const settings = self.physics.settings;
@@ -5118,9 +5138,16 @@ pub fn currentView(self: *App) View {
     return self.viewAt(self.frame, @floatFromInt(self.frame.width), @floatFromInt(self.frame.height));
 }
 
-/// What the camera sees in a frame this size, as the stretch scales it.
+/// What the camera sees in a frame this size, as the stretch scales it:
+/// worked out at the size the game is made at - where a world with no
+/// camera has its origin at the top left, and a camera's fit is measured -
+/// and drawn at the frame's pixels.
 fn viewAt(self: *App, frame: stretch_mod.Frame, width: f32, height: f32) View {
-    return View.of(&self.world, &self.snapshots, width, height).zoomed(frame.scale);
+    const scale = if (frame.scale > 0) frame.scale else 1;
+    var view: View = .of(&self.world, &self.snapshots, width / scale, height / scale);
+    view.width = width;
+    view.height = height;
+    return view.zoomed(scale);
 }
 
 // -------------------------------------------------------------------------
@@ -7825,7 +7852,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 43), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 44), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

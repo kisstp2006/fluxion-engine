@@ -1484,7 +1484,10 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   a compound shape is a body and a few children.
 - **A collider with no size is its sprite's**, pivot and all, and the
   transform's scale scales it. `.rectangle(half_width, half_height)` says
-  otherwise, in half sizes, and so does `.circle(r)`.
+  otherwise, in half sizes, and so do `.circle(r)` and `.capsule(r, height)`.
+  A capsule stands along the entity's `y`, round at both ends: what a
+  character is, sliding over a step's edge and the seams of a floor of tiles
+  rather than catching on them.
 - **Names and rules.**
   - Two colliders touch when either one's `collision_mask` has the other's `collision_layer`: 32 bits, one for each layer. The project file names them.
   - A pair's `friction` is the smaller of the two, and its `bounce` the two added, no more than one.
@@ -1525,6 +1528,48 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
 - **Everything else is `app.physics`**: settings, and joints between the
   handles `app.bodyIdOf` gives. `Options.physics` starts at a hundred units a
   metre, which scales the physics' tolerances.
+
+### 🏃 Characters: bodies the game moves
+
+```zig
+fn walk(app: *fx.App) !void {                          // a .fixed system
+    const body = app.world.get(player, fx.CharacterBody2D).?;
+    body.velocity.x = app.input.actionAxis("move_left", "move_right") * 180;
+    body.velocity.y += 900 * app.time.delta;
+    if (body.on_floor and app.input.actionJustPressed("jump")) body.velocity.y = -420;
+    _ = try app.moveAndSlide(player);
+}
+```
+
+- **A `CharacterBody2D` is moved by the game**, never pushed: a player, a
+  guard on a corridor, a mouse in a maze. Its shapes are its colliders, as a
+  rigid body's are, and the physics holds it as a body that goes where its
+  transform goes - what it walks into, it pushes.
+- **`app.moveAndSlide(e)` moves it by its `velocity` for the step**, in as
+  many as `max_slides` pieces: each goes until something is `safe_margin`
+  away, and what is left slides along what it met. What went into a wall or
+  a floor is taken off the velocity, so landing stops the fall and a wall
+  stops the walking into it.
+- **What it met is said after.** Seen from the side (`motion_mode =
+  .grounded`) it is a floor when it faces `up_direction` within
+  `floor_max_angle`, a ceiling when it faces away as nearly, and a wall
+  otherwise: `on_floor`, `on_wall`, `on_ceiling`, `floor_normal` and
+  `wall_normal`, and `app.isOnFloor(e)` for a character is its own word.
+  Seen from above (`.floating`), everything is a wall.
+- **A floor keeps it.** Standing on a slope it stays where it is
+  (`floor_stop_on_slope`); walking off the top of one or down a step no
+  higher than `floor_snap_length`, it goes down with the floor rather than
+  off into the air. A one-way platform holds it from above and lets it jump
+  up through.
+- **Pushed into something, it comes out.** A door that closed on it, a
+  platform that rose into it: before it moves it is put back out,
+  `safe_margin` clear.
+- **`app.moveAndCollide(e, motion)` moves it once**, and says what stopped
+  it - the collider, where, the way out of it, how far it went and what was
+  left - for a game that does its own sliding, or its own bouncing.
+- **From a script** it is the same two calls:
+  `app.moveAndSlide(self.entity)`, with `self.entity.get("CharacterBody2D")`
+  for its velocity and what it stands on.
 
 **When the bodies catch up.** Before every fixed step the engine compares
 each body and collider with what it last made, and on a paused frame - and
@@ -2606,7 +2651,8 @@ Here, and checked by the tests:
   colliders, bodies, transforms, sprites, cameras and frame stats the engine
   draws itself; one switch for all of it, and a key for the switch.
 - Physics: bodies and colliders as components, made, changed and taken away
-  with them; boxes and circles sized by their sprites; compound bodies from
+  with them; capsules; characters moved and slid by the game, with what they
+  stand on; boxes and circles sized by their sprites; compound bodies from
   children; places and speeds written back after each step; contacts once per
   frame or per step; rays, points and boxes asked in entities.
 - Areas: what is in a place - the eight overlap signals,
