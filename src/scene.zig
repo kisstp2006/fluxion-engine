@@ -621,6 +621,8 @@ const Saving = struct {
             for (groups) |group| try w.writeString(group);
             try w.endArray();
         }
+        // What its script's `@export`s are given.
+        if (app.exports.of(e)) |values| try w.field("exports", values);
         // An instance: the scene it is one of, and what differs from it.
         if (!s.every_field) if (app.instances.getPtr(e)) |instance| {
             try w.field("instance", app.sceneSource(instance.scene) orelse "");
@@ -1508,7 +1510,7 @@ const Loading = struct {
                         }
                         if (std.mem.eql(u8, member, "parent")) {
                             parented = true;
-                        } else if (!std.mem.eql(u8, member, "name") and !std.mem.eql(u8, member, "groups") and !std.mem.eql(u8, member, "removed")) {
+                        } else if (!std.mem.eql(u8, member, "name") and !std.mem.eql(u8, member, "groups") and !std.mem.eql(u8, member, "removed") and !std.mem.eql(u8, member, "exports")) {
                             if (app.scene_components.find(member)) |entry| {
                                 if (count == ids.len) return error.TooManyComponents;
                                 ids[count] = try entry.idIn(&app.world);
@@ -1655,6 +1657,12 @@ const Loading = struct {
                         l.path.pop(mark);
                         continue;
                     }
+                    if (std.mem.eql(u8, member, "exports")) {
+                        const mark = l.path.push("exports", .{});
+                        try l.readExports(e);
+                        l.path.pop(mark);
+                        continue;
+                    }
                     if (std.mem.eql(u8, member, "groups")) {
                         const mark = l.path.push("groups", .{});
                         try l.open(.array_begin, "the groups an entity is in, which is a list of names");
@@ -1695,6 +1703,20 @@ const Loading = struct {
 
     /// A component nothing here is registered as, kept with its entity as
     /// the scene has it. See `Unknown`.
+    /// `exports`: what the entity's script's fields are given, an object of
+    /// them. See `exports.zig`.
+    fn readExports(l: *Loading, e: Entity) anyerror!void {
+        const gpa = l.app.gpa;
+        var text: std.Io.Writer.Allocating = .init(gpa);
+        defer text.deinit();
+        var w: json.Writer = .init(&text.writer, .{ .non_finite = .literal });
+        try copyValue(l.reader, &w);
+        var doc = try json.parse(gpa, text.written(), .{ .syntax = .json5 });
+        defer doc.deinit();
+        if (doc.root.asObject() == null) return l.fail(error.WrongType, "what a script's fields are given is an object, by field", .{});
+        try l.app.exports.setAll(gpa, e, doc.root);
+    }
+
     fn keepUnknown(l: *Loading, e: Entity, name: []const u8) anyerror!void {
         const gpa = l.app.gpa;
         // The reader's, until its next token.

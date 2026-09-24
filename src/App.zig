@@ -66,6 +66,8 @@ const theme = @import("theme.zig");
 const tileset = @import("tileset.zig");
 const scene = @import("scene.zig");
 const scenes_mod = @import("scenes.zig");
+const data_mod = @import("data.zig");
+const exports_mod = @import("exports.zig");
 const background_mod = @import("background.zig");
 const signals_mod = @import("signals.zig");
 const events_mod = @import("events.zig");
@@ -417,6 +419,8 @@ tile_sets: tileset.TileSets = .{},
 themes: theme.Themes = .{},
 /// Every scene read as a file to make things of: see `loadScene`.
 scenes: scenes_mod.Scenes = .{},
+/// Every data file read: see `loadData`.
+data_files: data_mod.DataFiles = .{},
 /// The theme the project file names for every control, and the path it was
 /// read by: see `projectTheme`.
 project_theme: ProjectTheme = .{},
@@ -550,6 +554,9 @@ scene_components: scene.Registry = .{},
 /// The components scenes held that nothing here is registered as, each kept
 /// with its entity and written back with it. See `unknownComponentsOf`.
 unknown_components: scene.Unknown = .{},
+/// What each entity's script's `@export`s are given in place of their
+/// defaults. See `exports.zig`.
+exports: exports_mod.Exports = .{},
 
 /// Every signal's connections, the calls waiting for their sync point, and
 /// `dispatch`, the switch that makes none. See `signal`.
@@ -974,11 +981,13 @@ pub fn destroy(self: *App) void {
     for (self.loads.items) |load| self.dropLoad(load);
     self.loads.deinit(gpa);
     self.scenes.deinit(gpa);
+    self.data_files.deinit(gpa);
     self.uuids.deinit(gpa);
     self.by_uuid.deinit(gpa);
     self.sibling_ranks.deinit(gpa);
     self.scene_components.deinit(gpa);
     self.unknown_components.deinit(gpa);
+    self.exports.deinit(gpa);
     self.signals.deinit();
     for (self.event_channels.values()) |channel| channel.deinit(channel.events, gpa);
     self.event_channels.deinit(gpa);
@@ -1332,6 +1341,9 @@ pub fn step(self: *App) anyerror!bool {
     self.bodies.beginFrame();
     if (self.time.delta == 0 or self.paused) try self.bodies.sync(self);
 
+    // The scripts hear the frame's input first: each `input`, and what
+    // none took to each `unhandled_input`.
+    if (self.scripts) |scripts| try scripts.calls.pass(scripts, .input);
     try self.schedule.run(.input, self);
     self.shortcuts();
     // The pointer's speed, from everything this frame has said of it,
@@ -1421,6 +1433,7 @@ pub fn step(self: *App) anyerror!bool {
     self.forgetDeadGroupMembers();
     self.forgetDeadInstances();
     self.unknown_components.forgetDead(self.gpa, &self.world);
+    self.exports.forgetDead(&self.world);
     self.signals.forgetDead(&self.world);
     try self.animate();
     if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
@@ -2525,6 +2538,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .tileset => self.tileSetSource(handle),
         .theme => self.themeSource(handle),
         .scene => self.sceneSource(handle),
+        .data => self.dataSource(handle),
     };
 }
 
@@ -2539,6 +2553,7 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .tileset => self.loadTileSet(path),
         .theme => self.loadTheme(path),
         .scene => self.loadScene(path),
+        .data => self.loadData(path),
     };
 }
 
@@ -2552,6 +2567,7 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .tileset => self.findTileSet(path),
         .theme => self.findTheme(path),
         .scene => self.findScene(path),
+        .data => self.findData(path),
     };
 }
 
@@ -2945,6 +2961,52 @@ pub fn reloadScene(self: *App, handle: scenes_mod.SceneHandle) !bool {
 
 pub fn unloadScene(self: *App, handle: scenes_mod.SceneHandle) void {
     self.scenes.unload(self.gpa, handle);
+}
+
+/// Read a `.data` file, or find the one read from there already: see
+/// `data`. What it says is read when its struct is made, by `readData`.
+pub fn loadData(self: *App, path: []const u8) !data_mod.DataHandle {
+    return self.data_files.load(self, path);
+}
+
+/// A data file from memory rather than a file: a test's, or one a tool
+/// wrote with `data.write`. `name` is what it is found and written by.
+pub fn addData(self: *App, name: []const u8, bytes: []const u8) !data_mod.DataHandle {
+    return self.data_files.add(self.gpa, name, bytes);
+}
+
+/// The data file read from `path` already, if one was, however the path is
+/// spelt.
+pub fn findData(self: *App, path: []const u8) ?data_mod.DataHandle {
+    if (self.data_files.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.data_files.find(named);
+}
+
+pub fn dataSource(self: *App, handle: data_mod.DataHandle) ?[]const u8 {
+    return self.data_files.sourceOf(handle);
+}
+
+/// Read a data file again, for an editor that has just saved it: what
+/// `readData` makes next is what was saved.
+pub fn reloadData(self: *App, handle: data_mod.DataHandle) !bool {
+    return self.data_files.reload(self, handle);
+}
+
+pub fn unloadData(self: *App, handle: data_mod.DataHandle) void {
+    self.data_files.unload(self.gpa, handle);
+}
+
+/// A data file's struct, made anew and given the file's values - from Flux,
+/// `app.readData("res://dialogue/intro.data")`. A value the struct cannot
+/// hold is said and passed over, as a scene's `"exports"` are.
+pub fn readData(self: *App, handle: data_mod.DataHandle) !script_mod.flux.Value {
+    const scripts = self.scripts orelse return error.NoScripts;
+    const held = self.data_files.get(handle) orelse return error.NoSuchData;
+    const contents = try data_mod.read(self.gpa, held.bytes);
+    defer contents.deinit();
+    return scripts.calls.readData(scripts, &contents, held.source);
 }
 
 /// A scene made as a thing in the world: its one root, hanging from
@@ -3366,6 +3428,7 @@ pub fn clearWorld(self: *App) void {
     self.by_uuid.clearRetainingCapacity();
     self.sibling_ranks.clearRetainingCapacity();
     self.unknown_components.clear(self.gpa);
+    self.exports.clear();
     self.freeInstances();
     self.instances.clearRetainingCapacity();
     self.scene_roots.clearRetainingCapacity();
@@ -3461,6 +3524,21 @@ pub fn scriptSource(self: *App, handle: script_mod.ScriptHandle) ?[]const u8 {
     return scripts.sourceOf(handle);
 }
 
+/// The fields the struct of `entity`'s script marks `@export`, made or not,
+/// as many as `found` holds: what an editor shows under the `Script`. None
+/// for an entity with no script, or one whose script does not compile.
+pub fn exportedFields(self: *App, entity: ecs.Entity, found: []script_mod.flux.FieldInfo) []script_mod.flux.FieldInfo {
+    const scripts = self.scripts orelse return found[0..0];
+    return scripts.calls.exportedFields(scripts, entity, found);
+}
+
+/// The same for the struct `struct_name` of `script` - empty for the one
+/// named after its file: what an editor shows of a data file.
+pub fn structFields(self: *App, script: script_mod.ScriptHandle, struct_name: []const u8, found: []script_mod.flux.FieldInfo) []script_mod.flux.FieldInfo {
+    const scripts = self.scripts orelse return found[0..0];
+    return scripts.calls.structFields(scripts, script, struct_name, found);
+}
+
 /// What an editor's language service needs to check and complete a game's
 /// scripts as the game compiles them: `app` and `self.entity`. Hand it to
 /// `flux.service`, with a loader for the files being edited. It needs no
@@ -3498,6 +3576,7 @@ pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
     try self.assets.renamed(old, new);
     try self.tile_sets.renamed(self.gpa, old, new);
     try self.scenes.renamed(self.gpa, old, new);
+    try self.data_files.renamed(self.gpa, old, new);
     try self.themes.renamed(self.gpa, old, new);
     if (self.scripts) |scripts| try scripts.renamed(old, new);
 }
@@ -3723,6 +3802,15 @@ pub const reflect_methods = .{
     .moveLocalY,
     .rotate,
     .applyScale,
+    .setInputAsHandled,
+    .bindAction,
+    .clearAction,
+    .spawn,
+    .instantiate,
+    .changeScene,
+    .readData,
+    .nextFrame,
+    .callDeferred,
     .keyDown,
     .keyAxis,
     .actionDown,
@@ -4229,6 +4317,50 @@ pub fn useControlNodes(self: *App) !void {
 /// Where the pointer is in the world.
 pub fn pointerInWorld(self: *App) math.Vec2 {
     return self.screenToWorld(self.input.pointer.x, self.input.pointer.y);
+}
+
+/// A new entity, with nothing on it, hanging from `parent` - or a root, for
+/// none. What a script makes things with: `app.spawn(self.entity)`, then
+/// `add("Sprite")`.
+pub fn spawn(self: *App, parent: ecs.Entity) !ecs.Entity {
+    const made = try self.world.spawn();
+    errdefer self.world.despawn(made);
+    if (!parent.isNone()) try self.setParent(made, parent, false);
+    return made;
+}
+
+/// Take the event a script's `input` or `unhandled_input` is handling: the
+/// scripts after it do not hear it, nor does any `unhandled_input`.
+pub fn setInputAsHandled(self: *App) void {
+    if (self.scripts) |scripts| scripts.input_handled = true;
+}
+
+/// One more input for an action: the key, mouse button or controller
+/// button an event is - what a settings menu rebinds with, from the
+/// `input` that caught the player's next press. Kept with `saveInputMap`.
+pub fn bindAction(self: *App, name: []const u8, event: script_mod.Event) !void {
+    const binding = event.binding() orelse return error.NotAnInput;
+    try self.input.actions.bind(self.gpa, name, binding);
+}
+
+/// Take every input off an action, to give it new ones with `bindAction`.
+/// Says whether there is one of that name.
+pub fn clearAction(self: *App, name: []const u8) bool {
+    return self.input.actions.unbindAll(name);
+}
+
+/// What a script awaits for the next frame: `await app.nextFrame()`. Null
+/// in a game with no scripts.
+pub fn nextFrame(self: *App) script_mod.flux.Value {
+    const scripts = self.scripts orelse return .null;
+    return scripts.calls.nextFrame(scripts);
+}
+
+/// Call a script's function at the end of this frame, after its systems and
+/// signals: `app.callDeferred(self.respawn)`.
+pub fn callDeferred(self: *App, callable: script_mod.flux.Value) !void {
+    const scripts = self.scripts orelse return error.NoScripts;
+    return scripts.calls.callDeferred(scripts, callable);
 }
 
 pub fn keyDown(self: *const App, name: []const u8) bool {

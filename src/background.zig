@@ -115,7 +115,7 @@ pub const SceneLoad = struct {
     fn readFile(self: *SceneLoad) !void {
         const file = try Project.underRoot(self.gpa, self.root, self.source);
         defer self.gpa.free(file);
-        self.bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, file, self.gpa, .limited(@import("scenes.zig").file_limit));
+        self.bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, file, self.gpa, .limited(@import("file_table.zig").file_limit));
         // The pictures it names, wherever it names them: what takes the
         // longest to make of a file.
         var reader: json.Reader = .init(self.gpa, self.bytes, .{ .syntax = .json5 });

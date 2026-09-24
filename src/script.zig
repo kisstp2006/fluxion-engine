@@ -13,6 +13,11 @@
 //! - `exit(self)` when the entity dies, when its `Script` is taken off or
 //!   turned off, or when the world is cleared.
 //!
+//! - `input(self, event)` for everything the player does - each key, each
+//!   mouse button, the mouse moving, a wheel's notch, a controller's button -
+//!   and `unhandled_input(self, event)` for what no `input` took with
+//!   `app.setInputAsHandled()` and the interface did not have. See `Event`.
+//!
 //! `fixed` and `update` are called while the entity runs: not while the game
 //! is paused, unless its `Processing` - or the nearest one above it - says
 //! otherwise. A task a script starts belongs to the entity whose script
@@ -117,14 +122,19 @@ const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
 const id = @import("fluxion_id");
+const platform = @import("fluxion_platform");
 const reflect = @import("fluxion_reflect");
 /// The language: its VM, its values, its language service.
 pub const flux = @import("fluxion_script");
 
 const math = @import("fluxion_math");
 
+const json = @import("fluxion_json");
+
 const App = @import("App.zig");
 const actions = @import("actions.zig");
+const AssetKind = @import("asset_kind.zig").AssetKind;
+const data_file = @import("data.zig");
 const attr = @import("attr.zig");
 const Project = @import("Project.zig");
 const signals = @import("signals.zig");
@@ -260,7 +270,7 @@ pub const EntityRef = struct {
 
     pub const reflect_name = "Entity";
     pub const reflect_opaque = true;
-    pub const reflect_methods = .{ .alive, .name, .uuid, .has, .get, .add, .remove };
+    pub const reflect_methods = .{ .alive, .name, .uuid, .has, .get, .add, .remove, .despawn };
 
     /// Whether it is still in the world. False in `exit` for a despawned
     /// entity.
@@ -304,6 +314,13 @@ pub const EntityRef = struct {
     /// nothing.
     pub fn remove(self: *EntityRef, vm: *flux.Vm, component: []const u8) flux.Vm.Error!void {
         self.scripts.app.removeComponentNamed(self.entity, component) catch |err| return refused(vm, err, "remove", component);
+    }
+
+    /// Take it out of the world, and everything that hangs from it. Its
+    /// script's `exit` comes at the end of the frame.
+    pub fn despawn(self: *EntityRef) error{OutOfMemory}!void {
+        if (!self.scripts.app.world.isAlive(self.entity)) return;
+        try self.scripts.app.despawnTree(self.entity);
     }
 
     fn refused(vm: *flux.Vm, err: App.ComponentError, comptime what: []const u8, component: []const u8) flux.Vm.Error {
@@ -384,6 +401,123 @@ pub const FileAccess = struct {
     }
 };
 
+/// One thing the player did, as a script's `input(self, event)` and
+/// `unhandled_input(self, event)` are handed it:
+///
+/// ```
+/// fn input(self, event: any) {
+///     if (event.isActionPressed("jump")) self.jump();
+///     if (event.kind == "mouse_button" and event.pressed) print(event.button, event.position);
+/// }
+/// ```
+pub const Event = struct {
+    kind: Kind,
+    /// Went down, rather than came up: a key's, a button's. A repeat is
+    /// down too, with `echo`. Motion and a wheel's notch are neither.
+    pressed: bool = false,
+    /// A key held long enough that the system repeats it.
+    echo: bool = false,
+    /// The key where it sits on a US layout, and the key the player's
+    /// layout names, for `.key`.
+    key: platform.Key = .unknown,
+    virtual_key: platform.Key = .unknown,
+    /// For `.mouse_button`.
+    button: platform.MouseButton = .left,
+    double_click: bool = false,
+    /// For `.pad_button`: which, on which controller.
+    pad_button: platform.GamepadButton = .a,
+    pad: u8 = 0,
+    /// Where the pointer is, in the window's pixels.
+    position: math.Vec2 = .zero,
+    /// How far the pointer moved, for `.mouse_motion`.
+    relative: math.Vec2 = .zero,
+    /// How far the wheel turned, notches up and right positive, for `.wheel`.
+    wheel: math.Vec2 = .zero,
+    shift: bool = false,
+    control: bool = false,
+    alt: bool = false,
+
+    pub const Kind = enum { key, mouse_button, mouse_motion, wheel, pad_button };
+
+    pub const reflect_name = "Event";
+    pub const reflect_methods = .{ .isAction, .isActionPressed, .isActionReleased, .describe };
+
+    /// Whether it is one of the action's inputs.
+    pub fn isAction(self: *const Event, vm: *flux.Vm, action: []const u8) bool {
+        const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
+        const entry = scripts.app.input.actions.findConst(action) orelse return false;
+        for (entry.bindings.items) |each| {
+            if (self.sets(each)) return true;
+        }
+        return false;
+    }
+
+    /// Whether it is one of the action's inputs going down - not a repeat.
+    pub fn isActionPressed(self: *const Event, vm: *flux.Vm, action: []const u8) bool {
+        return self.pressed and !self.echo and self.isAction(vm, action);
+    }
+
+    /// Whether it is one of the action's inputs coming up.
+    pub fn isActionReleased(self: *const Event, vm: *flux.Vm, action: []const u8) bool {
+        return !self.pressed and self.kind != .mouse_motion and self.kind != .wheel and self.isAction(vm, action);
+    }
+
+    /// What the player pressed, in words: `Space`, `Left Mouse`, `Pad A`.
+    /// Empty for motion and the wheel.
+    pub fn describe(self: *const Event, vm: *flux.Vm) []const u8 {
+        const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
+        const pressed_input = self.binding() orelse return "";
+        return std.fmt.bufPrint(&scripts.described, "{f}", .{pressed_input}) catch "";
+    }
+
+    /// The input it is, as an action binds it: what `app.bindAction` gives
+    /// the action. Null for motion and the wheel.
+    pub fn binding(self: *const Event) ?actions.Binding {
+        return switch (self.kind) {
+            .key => .keyOf(self.key),
+            .mouse_button => .mouseButtonOf(self.button),
+            .pad_button => .padButtonOf(self.pad_button),
+            .mouse_motion, .wheel => null,
+        };
+    }
+
+    fn sets(self: *const Event, bound: actions.Binding) bool {
+        return switch (bound) {
+            .key => |held| self.kind == .key and (if (held.physical) held.key == self.key else held.key == self.virtual_key),
+            .mouse_button => |held| self.kind == .mouse_button and held.button == self.button,
+            .pad_button => |held| self.kind == .pad_button and held.button == self.pad_button and (held.pad == null or held.pad.? == self.pad),
+            .pad_axis => false,
+        };
+    }
+};
+
+fn mouseButtonOf(button: @import("pointer.zig").PointerButton) platform.MouseButton {
+    return switch (button) {
+        .left => .left,
+        .right => .right,
+        .middle => .middle,
+        .button_4 => .button_4,
+        .button_5 => .button_5,
+        .button_6 => .button_6,
+        .button_7 => .button_7,
+        .button_8 => .button_8,
+        .wheel_up, .wheel_down, .wheel_left, .wheel_right => .left,
+    };
+}
+
+/// One of the engine's signals as the scripts' own. See `Scripts.bridges`.
+const Bridge = struct {
+    source: Entity,
+    /// `Component.name`: owned.
+    key: []u8,
+    signal: flux.Value,
+};
+
+fn matchesKey(key: []const u8, component: []const u8, name: []const u8) bool {
+    return key.len == component.len + 1 + name.len and std.mem.startsWith(u8, key, component) and
+        key[component.len] == '.' and std.mem.endsWith(u8, key, name);
+}
+
 /// A file, as read and compiled.
 const File = struct {
     /// The path it was read from, as `Project.canonical` spells it, or the
@@ -417,12 +551,23 @@ const Lifecycle = enum {
     fixed,
     update,
     exit,
+    input,
+    unhandled_input,
 
     /// How many parameters it takes besides `self`.
     fn params(self: Lifecycle) u8 {
         return switch (self) {
             .ready, .exit => 0,
-            .fixed, .update => 1,
+            .fixed, .update, .input, .unhandled_input => 1,
+        };
+    }
+
+    /// What the engine passes it besides `self`, as a warning says.
+    fn passes(self: Lifecycle) []const u8 {
+        return switch (self) {
+            .ready, .exit => "none",
+            .fixed, .update => "dt",
+            .input, .unhandled_input => "the event",
         };
     }
 };
@@ -453,10 +598,26 @@ pub const Calls = struct {
     hasMethod: *const fn (self: *Scripts, entity: Entity, name: []const u8) bool,
     /// Call a method of the entity's script with a signal's arguments.
     callMethod: *const fn (self: *Scripts, entity: Entity, name: []const u8, args: []const reflect.Value) anyerror!void,
+    /// Emit the scripts' own signal for an engine's signal, with its
+    /// arguments: see `Callable.script`.
+    bridge: *const fn (self: *Scripts, source: Entity, component: []const u8, name: []const u8, args: []const reflect.Value) anyerror!void,
+    /// Call a script's function at the end of the frame: `app.callDeferred`.
+    callDeferred: *const fn (self: *Scripts, callable: flux.Value) anyerror!void,
+    /// What a script awaits for the next frame: `app.nextFrame()`.
+    nextFrame: *const fn (self: *Scripts) flux.Value,
+    /// The fields the entity's script exports, made or not.
+    exportedFields: *const fn (self: *Scripts, entity: Entity, found: []flux.FieldInfo) []flux.FieldInfo,
+    /// The fields a script's struct exports: a data file's.
+    structFields: *const fn (self: *Scripts, script: ScriptHandle, struct_name: []const u8, found: []flux.FieldInfo) []flux.FieldInfo,
+    /// A data file's struct, made and given its values: `app.readData`.
+    readData: *const fn (self: *Scripts, contents: *const data_file.Contents, source: []const u8) anyerror!flux.Value,
 };
 
 /// Where in the frame `Calls.pass` is called.
 pub const Moment = union(enum) {
+    /// Before the game's `.input` systems: the frame's input, to each
+    /// script's `input` and `unhandled_input`.
+    input,
     /// Before the game's `.fixed` systems, with the step.
     fixed: f32,
     /// Before the game's `.update` systems, with the frame's delta.
@@ -498,6 +659,25 @@ pub const Scripts = struct {
     since_watched: f32 = 0,
     /// Files found saved since they were read, to read after the look.
     changed: std.ArrayList(ScriptHandle) = .empty,
+    /// The engine's signals the scripts have reached - `timer.timeout` - each
+    /// a signal of the scripts' own, emitted as the engine's is.
+    bridges: std.ArrayList(Bridge) = .empty,
+    /// What `app.nextFrame()` gives to await this frame. Once one has been
+    /// given, the end of the frame makes it `frame_due`, and a new one takes
+    /// its place: a wait begun in a frame is over in the next, whatever
+    /// part of the frame began it.
+    frame: flux.Value = .null,
+    frame_given: bool = false,
+    /// Emitted at the top of this frame's update, before the scripts'
+    /// `update`s.
+    frame_due: flux.Value = .null,
+    /// What `app.callDeferred` was given, called at the end of the frame.
+    deferred: std.ArrayList(flux.Value) = .empty,
+    /// Whether the event being handed round was taken: see
+    /// `App.setInputAsHandled`.
+    input_handled: bool = false,
+    /// `Event.describe`'s words, for the call that asked.
+    described: [64]u8 = undefined,
 
     /// The VM, with `app` and `self.entity` in it.
     pub fn create(app: *App, options: Options) (Allocator.Error || flux.Vm.Error)!*Scripts {
@@ -515,6 +695,12 @@ pub const Scripts = struct {
                 .methods = methodsOf,
                 .hasMethod = hasMethod,
                 .callMethod = callMethod,
+                .bridge = bridge,
+                .callDeferred = callDeferred,
+                .nextFrame = nextFrame,
+                .exportedFields = exportedFields,
+                .structFields = structFields,
+                .readData = readData,
             },
             .resolver = .{
                 .context = app,
@@ -529,11 +715,14 @@ pub const Scripts = struct {
             .io = app.io,
             .on_task_panic = sayTaskPanic,
             .on_emit = heardEmit,
-            .host_types = &.{ entity_type, tile_value_type },
+            .host_types = &host_types,
+            .host_member = hostMember,
         });
         errdefer vm.destroy();
         vm.host = self;
         try install(vm, try vm.handle(app), try vm.handle(&self.file_access));
+        self.frame = try vm.newSignal("frame", 0);
+        try vm.hold(self.frame);
         self.vm = vm;
         return self;
     }
@@ -549,6 +738,9 @@ pub const Scripts = struct {
         self.refused.deinit(gpa);
         self.scratch.deinit(gpa);
         self.changed.deinit(gpa);
+        for (self.bridges.items) |held| gpa.free(held.key);
+        self.bridges.deinit(gpa);
+        self.deferred.deinit(gpa);
         var it = self.files.iterator();
         while (it.next()) |entry| {
             gpa.free(entry.value.source);
@@ -802,6 +994,11 @@ pub const Scripts = struct {
         // An editor's scripts are never made, stepped or looked for.
         if (!self.options.run) return;
         switch (moment) {
+            .input => {
+                try self.sync();
+                self.readyTheNew();
+                self.deliverInput();
+            },
             .fixed => |dt| {
                 try self.sync();
                 self.readyTheNew();
@@ -818,6 +1015,17 @@ pub const Scripts = struct {
                 }
                 try self.sync();
                 self.readyTheNew();
+                // What waited for this frame goes on first.
+                if (self.frame_due.tag == .signal) {
+                    const due = self.frame_due;
+                    self.frame_due = .null;
+                    defer self.vm.release(due);
+                    self.vm.setBudget(self.options.budget);
+                    self.vm.emitSignalValue(due, &.{}) catch |err| switch (err) {
+                        error.OutOfMemory => self.outOfMemory(null),
+                        error.Panic => self.sayPanic(null, "the next frame of"),
+                    };
+                }
                 self.callEach(.update, dt);
                 // The scripts' own clock, so `await wait(1.0)` wakes - but
                 // not the waits of the entities that do not run now.
@@ -828,7 +1036,21 @@ pub const Scripts = struct {
                 };
             },
             .end_of_frame => {
+                self.callTheDeferred();
                 try self.letGoOfTheUnwanted();
+                self.forgetDeadBridges();
+                if (self.frame_given) {
+                    // Held already: it goes from one place to the other.
+                    const next = self.vm.newSignal("frame", 0) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        // Making one runs no script.
+                        error.Panic => unreachable,
+                    };
+                    try self.vm.hold(next);
+                    self.frame_due = self.frame;
+                    self.frame = next;
+                    self.frame_given = false;
+                }
                 // A refusal of the dead is forgotten: its slot, given out
                 // again, is another entity. Removing leaves the table where
                 // it is, so the walk goes on.
@@ -922,6 +1144,10 @@ pub const Scripts = struct {
             },
         };
         vm.hold(value) catch return self.outOfMemory(entity);
+        // What the scene gives its `@export`s, before anything of it runs.
+        if (self.app.exports.of(entity)) |values| {
+            self.applyValues(value, class, values, .{ .entity = entity }) catch return self.outOfMemory(entity);
+        }
 
         var inst: Instance = .{ .file = script.source, .struct_name = script.struct_name, .value = value };
         self.lookUp(&inst);
@@ -962,7 +1188,7 @@ pub const Scripts = struct {
                 log.warn("`{s}` takes {d} parameters besides self, and the engine passes {s}: it is not called", .{
                     member.name,
                     member.params,
-                    if (which.params() == 0) "none" else "dt",
+                    which.passes(),
                 });
             }
         }
@@ -1018,6 +1244,12 @@ pub const Scripts = struct {
 
     /// Every instance let go of, each with its `exit`: the world was cleared.
     fn clear(self: *Scripts) void {
+        // The table's connections go with the world; so do their signals.
+        for (self.bridges.items) |held| {
+            self.vm.release(held.signal);
+            self.app.gpa.free(held.key);
+        }
+        self.bridges.clearRetainingCapacity();
         // Taken out first, so an `exit` that clears the world again finds
         // nothing to let go of twice.
         var taken = self.instances;
@@ -1114,6 +1346,391 @@ pub const Scripts = struct {
             }
             return err;
         };
+    }
+
+    // ---------------------------------------------------------------------
+    // Input
+    // ---------------------------------------------------------------------
+
+    /// Every event of the frame, one at a time: to each `input`, in the
+    /// order the instances were made, until one takes it; then, if none did
+    /// and the interface did not have it, to each `unhandled_input`.
+    fn deliverInput(self: *Scripts) void {
+        var any = false;
+        for (self.instances.values()) |inst| {
+            if (inst.methods.get(.input) != null or inst.methods.get(.unhandled_input) != null) any = true;
+        }
+        if (!any) return;
+        const app = self.app;
+        var events: std.ArrayList(Event) = .empty;
+        defer events.deinit(app.gpa);
+        self.gather(&events) catch return self.outOfMemory(null);
+        for (events.items) |event| self.deliver(event);
+    }
+
+    fn gather(self: *Scripts, events: *std.ArrayList(Event)) Allocator.Error!void {
+        const app = self.app;
+        const gpa = app.gpa;
+        for (app.input.keyEvents()) |k| try events.append(gpa, .{
+            .kind = .key,
+            .pressed = k.action.down(),
+            .echo = k.action == .repeat,
+            .key = k.key,
+            .virtual_key = k.virtual,
+            .position = .init(app.input.pointer.x, app.input.pointer.y),
+            .shift = k.mods.shift,
+            .control = k.mods.control,
+            .alt = k.mods.alt,
+        });
+        for (app.input.pointerEvents()) |pointer| switch (pointer) {
+            .mouse_button => |b| {
+                const wheel: ?math.Vec2 = switch (b.button) {
+                    .wheel_up => .init(0, b.factor),
+                    .wheel_down => .init(0, -b.factor),
+                    .wheel_left => .init(-b.factor, 0),
+                    .wheel_right => .init(b.factor, 0),
+                    else => null,
+                };
+                if (wheel) |turned| {
+                    // A notch is a press and a release: it is one wheel event.
+                    if (!b.pressed) continue;
+                    try events.append(gpa, .{ .kind = .wheel, .position = b.position, .wheel = turned, .shift = b.mods.shift, .control = b.mods.control, .alt = b.mods.alt });
+                    continue;
+                }
+                try events.append(gpa, .{
+                    .kind = .mouse_button,
+                    .pressed = b.pressed,
+                    .button = mouseButtonOf(b.button),
+                    .double_click = b.double_click,
+                    .position = b.position,
+                    .shift = b.mods.shift,
+                    .control = b.mods.control,
+                    .alt = b.mods.alt,
+                });
+            },
+            .mouse_motion => |m| try events.append(gpa, .{
+                .kind = .mouse_motion,
+                .position = m.position,
+                .relative = m.relative,
+                .shift = m.mods.shift,
+                .control = m.mods.control,
+                .alt = m.mods.alt,
+            }),
+        };
+        for (app.input.pads, 0..) |state, slot| {
+            for (0..platform.GamepadButton.count) |i| {
+                const went_down = state.pressed.isSet(i);
+                const came_up = state.released.isSet(i);
+                if (went_down) try events.append(gpa, .{ .kind = .pad_button, .pressed = true, .pad_button = @enumFromInt(i), .pad = @intCast(slot) });
+                if (came_up) try events.append(gpa, .{ .kind = .pad_button, .pressed = false, .pad_button = @enumFromInt(i), .pad = @intCast(slot) });
+            }
+        }
+    }
+
+    fn deliver(self: *Scripts, event: Event) void {
+        const vm = self.vm;
+        var held = event;
+        const value = vm.valueOf(reflect.Value.of(&held)) catch return self.outOfMemory(null);
+        vm.hold(value) catch return self.outOfMemory(null);
+        defer vm.release(value);
+        self.input_handled = false;
+        defer self.input_handled = false;
+        for ([_]Lifecycle{ .input, .unhandled_input }) |which| {
+            if (which == .unhandled_input and self.takenByInterface(event)) return;
+            var at: usize = 0;
+            while (at < self.instances.count()) : (at += 1) {
+                const inst = self.instances.values()[at];
+                if (!inst.readied) continue;
+                const method = inst.methods.get(which) orelse continue;
+                const entity = self.instances.keys()[at];
+                if (!self.app.isProcessing(entity)) continue;
+                self.call(entity, method, &.{ inst.value, value }, which);
+                if (self.input_handled) return;
+            }
+        }
+    }
+
+    /// Whether the interface had it: a key while a field has the keys, the
+    /// pointer over what it draws or taken by a system.
+    fn takenByInterface(self: *Scripts, event: Event) bool {
+        const app = self.app;
+        return switch (event.kind) {
+            .key => app.ui.wantsKeyboard(),
+            .mouse_button, .mouse_motion, .wheel => app.input.isHandled() or app.ui.wantsPointer(),
+            .pad_button => false,
+        };
+    }
+
+    // ---------------------------------------------------------------------
+    // `@export`s
+    // ---------------------------------------------------------------------
+
+    fn exportedFields(self: *Scripts, entity: Entity, found: []flux.FieldInfo) []flux.FieldInfo {
+        const class = self.classOfEntity(entity) orelse return found[0..0];
+        return exportsOf(self.vm, class, found);
+    }
+
+    fn structFields(self: *Scripts, script: ScriptHandle, struct_name: []const u8, found: []flux.FieldInfo) []flux.FieldInfo {
+        const file = self.files.get(script.toId()) orelse return found[0..0];
+        const module = file.module orelse return found[0..0];
+        var spelled: [64]u8 = undefined;
+        const class = classAsked(self.vm, module, struct_name, file.source, &spelled) orelse return found[0..0];
+        return exportsOf(self.vm, class, found);
+    }
+
+    fn exportsOf(vm: *flux.Vm, class: flux.Value, found: []flux.FieldInfo) []flux.FieldInfo {
+        var all: [64]flux.FieldInfo = undefined;
+        var count: usize = 0;
+        for (flux.fieldsOf(vm, class, &all)) |field| {
+            if (!field.exported) continue;
+            if (count == found.len) break;
+            found[count] = field;
+            count += 1;
+        }
+        return found[0..count];
+    }
+
+    /// Whose values `applyValues` sets, for what it says of them.
+    const Whose = union(enum) {
+        /// An entity's script's, from `app.exports`.
+        entity: Entity,
+        /// A data file's struct's, from the file.
+        file: []const u8,
+
+        pub fn format(self: Whose, w: *std.Io.Writer) std.Io.Writer.Error!void {
+            switch (self) {
+                .entity => |e| try w.print("the script of {f}", .{e}),
+                .file => |path| try w.writeAll(path),
+            }
+        }
+    };
+
+    /// `values`, an object by field, set on the instance's `@export`s; what
+    /// does not fit is said and passed over.
+    fn applyValues(self: *Scripts, instance: flux.Value, class: flux.Value, values: json.Value, whose: Whose) Allocator.Error!void {
+        const given = values.asObject() orelse return;
+        var buffer: [64]flux.FieldInfo = undefined;
+        const fields = flux.fieldsOf(self.vm, class, &buffer);
+        for (given.keys(), given.values()) |name, value| {
+            const field = for (fields) |f| {
+                if (f.exported and std.mem.eql(u8, f.name, name)) break f;
+            } else {
+                log.warn("{f} exports no {s}: the value given it is passed over", .{ whose, name });
+                continue;
+            };
+            const made = self.fluxOf(field, value) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Panic => {
+                    self.vm.clearPanic();
+                    continue;
+                },
+            } orelse {
+                log.warn("{s} of {f} holds {t}, and is given {f}", .{ name, whose, field.kind, value });
+                continue;
+            };
+            self.vm.setField(instance, name, made) catch |err| {
+                log.warn("{s} of {f} was not given its value: {t}", .{ name, whose, err });
+            };
+        }
+    }
+
+    /// A data file's struct, made anew with the file's values: a struct with
+    /// nothing to give it, as a data file's is.
+    fn readData(self: *Scripts, contents: *const data_file.Contents, source: []const u8) anyerror!flux.Value {
+        const handle = try self.load(contents.script);
+        const file = self.files.get(handle.toId()) orelse return error.NoSuchScript;
+        const module = file.module orelse return error.ScriptDoesNotCompile;
+        var spelled: [64]u8 = undefined;
+        const class = classAsked(self.vm, module, contents.struct_name, file.source, &spelled) orelse return error.NoSuchStruct;
+        const vm = self.vm;
+        const made = vm.instantiate(class, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Panic => {
+                self.sayPanic(null, "making the struct of a data file");
+                return error.DefaultsStopped;
+            },
+        };
+        try vm.pushRoot(made);
+        defer vm.popRoot();
+        try self.applyValues(made, class, contents.values, .{ .file = source });
+        return made;
+    }
+
+    /// A value a scene wrote as the script's own, as a field of `field`'s
+    /// kind holds it; null for one it cannot hold.
+    fn fluxOf(self: *Scripts, field: flux.FieldInfo, value: json.Value) flux.Vm.Error!?flux.Value {
+        if (value == .null) return if (field.nullable or field.kind == .any) .null else null;
+        if (flux.annotationOf(field, "entity") != null) {
+            const text = value.asString() orelse return null;
+            const uuid = id.Uuid.parse(text) catch return null;
+            const entity = self.app.findUuid(uuid) orelse return .null;
+            return try entityHandle(self, entity);
+        }
+        return self.fluxOfKind(field.kind, field, value);
+    }
+
+    fn fluxOfKind(self: *Scripts, kind: flux.FieldKind, field: flux.FieldInfo, value: json.Value) flux.Vm.Error!?flux.Value {
+        const vm = self.vm;
+        switch (kind) {
+            .int => return .int(value.asInt(i64) orelse return null),
+            .float => return .float(value.asFloat(f64) orelse return null),
+            .bool => return .boolean(value.asBool() orelse return null),
+            .string => return try vm.string(value.asString() orelse return null),
+            .vec2, .vec3 => {
+                const n: usize = if (kind == .vec2) 2 else 3;
+                if (value.len() != n or value.asArray() == null) return null;
+                var xyz: [3]f32 = @splat(0);
+                for (0..n) |i| xyz[i] = @floatCast(value.get(i).asFloat(f64) orelse return null);
+                return if (kind == .vec2) .vec2(xyz[0], xyz[1]) else .vec3(xyz[0], xyz[1], xyz[2]);
+            },
+            .color => {
+                if (value.asString()) |text| {
+                    const c = Color.parse(text) orelse return null;
+                    return try vm.newColor(.{ c.r, c.g, c.b, c.a });
+                }
+                if (value.asArray() == null or (value.len() != 3 and value.len() != 4)) return null;
+                var rgba: [4]f32 = .{ 0, 0, 0, 1 };
+                for (0..value.len()) |i| rgba[i] = @floatCast(value.get(i).asFloat(f64) orelse return null);
+                return try vm.newColor(rgba);
+            },
+            .enum_member => {
+                const name = value.asString() orelse return null;
+                const e = field.enum_type orelse return null;
+                for (field.members, 0..) |member, i| {
+                    if (std.mem.eql(u8, member.bytes(), name)) return flux.enumMember(e, @intCast(i));
+                }
+                return null;
+            },
+            .list => {
+                const items = value.asArray() orelse return null;
+                if (items.len() > 1024) return null;
+                var made: std.ArrayList(flux.Value) = .empty;
+                defer made.deinit(self.app.gpa);
+                // Each rooted until the list has it: making the next can
+                // collect.
+                defer for (made.items) |_| vm.popRoot();
+                for (items.items()) |item| {
+                    const one = try self.fluxOfKind(field.element, field, item) orelse return null;
+                    try made.append(self.app.gpa, one);
+                    try vm.pushRoot(one);
+                }
+                return try vm.newList(field.element_check, made.items);
+            },
+            .any => return switch (value) {
+                .int => |n| .int(n),
+                .float => |f| .float(f),
+                .bool => |b| .boolean(b),
+                .string => |text| try vm.string(text),
+                else => null,
+            },
+            else => return null,
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The engine's signals, as the scripts' own
+    // ---------------------------------------------------------------------
+
+    /// The scripts' own signal for `component.name` of `source`, made the
+    /// first time a script reaches it and connected to the engine's.
+    fn bridgeOf(self: *Scripts, source: Entity, component: []const u8, name: []const u8, arity: usize) flux.Vm.Error!flux.Value {
+        const gpa = self.app.gpa;
+        const key = try std.fmt.allocPrint(gpa, "{s}.{s}", .{ component, name });
+        for (self.bridges.items) |held| {
+            if (held.source.eql(source) and std.mem.eql(u8, held.key, key)) {
+                gpa.free(key);
+                return held.signal;
+            }
+        }
+        errdefer gpa.free(key);
+        const signal = try self.vm.newSignal(name, @intCast(@min(arity, max_args)));
+        try self.vm.hold(signal);
+        errdefer self.vm.release(signal);
+        self.app.signals.connect(source, .{ .component = component, .name = name }, .script, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.AlreadyConnected => {},
+            else => return self.vm.fail("{s} of this entity could not be heard: {t}", .{ key, err }),
+        };
+        try self.bridges.append(gpa, .{ .source = source, .key = key, .signal = signal });
+        return signal;
+    }
+
+    fn bridge(self: *Scripts, source: Entity, component: []const u8, name: []const u8, args: []const reflect.Value) anyerror!void {
+        if (!self.options.run) return;
+        const found = for (self.bridges.items) |held| {
+            if (held.source.eql(source) and matchesKey(held.key, component, name)) break held.signal;
+        } else return;
+        if (args.len >= max_args) return error.WrongArguments;
+        const vm = self.vm;
+        var values: [max_args]flux.Value = undefined;
+        var made: usize = 0;
+        // Each held until the emit: making the next can collect.
+        defer for (values[0..made]) |v| vm.release(v);
+        for (args, values[0..args.len]) |arg, *into| {
+            into.* = try vm.valueOf(arg);
+            try vm.hold(into.*);
+            made += 1;
+        }
+        vm.setBudget(self.options.budget);
+        vm.emitSignalValue(found, values[0..args.len]) catch |err| {
+            self.failures += 1;
+            switch (err) {
+                error.Panic => self.writePanic(source, "a signal the scripts heard of"),
+                error.OutOfMemory => {},
+            }
+            return err;
+        };
+    }
+
+    /// The bridges of what has died, let go of: the table let go of their
+    /// connections.
+    fn forgetDeadBridges(self: *Scripts) void {
+        var at: usize = 0;
+        while (at < self.bridges.items.len) {
+            const held = self.bridges.items[at];
+            if (self.app.world.isAlive(held.source)) {
+                at += 1;
+                continue;
+            }
+            self.vm.release(held.signal);
+            self.app.gpa.free(held.key);
+            _ = self.bridges.swapRemove(at);
+        }
+    }
+
+    fn callDeferred(self: *Scripts, callable: flux.Value) anyerror!void {
+        switch (callable.tag) {
+            .function, .method, .native => {},
+            else => return error.NotCallable,
+        }
+        try self.vm.hold(callable);
+        errdefer self.vm.release(callable);
+        try self.deferred.append(self.app.gpa, callable);
+    }
+
+    /// What `app.callDeferred` was given this frame, first given first.
+    /// What they defer waits for the next frame.
+    fn callTheDeferred(self: *Scripts) void {
+        if (self.deferred.items.len == 0) return;
+        var taken = self.deferred;
+        self.deferred = .empty;
+        defer taken.deinit(self.app.gpa);
+        for (taken.items) |callable| {
+            self.vm.setBudget(self.options.budget);
+            _ = self.vm.call(callable, &.{}) catch |err| {
+                self.failures += 1;
+                switch (err) {
+                    error.Panic => self.writePanic(null, "a call deferred by"),
+                    error.OutOfMemory => {},
+                }
+            };
+            self.vm.release(callable);
+        }
+    }
+
+    fn nextFrame(self: *Scripts) flux.Value {
+        self.frame_given = true;
+        return self.frame;
     }
 
     /// Connections kept unknown because the script's signal was not there
@@ -1326,6 +1943,78 @@ fn entityHandle(scripts: *Scripts, entity: Entity) flux.Vm.Error!flux.Value {
     return handle;
 }
 
+/// Every type of the engine's that a script sees as something else.
+const host_types = [_]flux.HostType{ entity_type, tile_value_type } ++ asset_types;
+
+/// A file a component holds - a texture, a scene - as its path, and given
+/// as one: `sprite.texture = "res://art/hero.png"`, `app.instantiate("res://
+/// enemy.json", self.entity)`. None is null.
+const asset_types = blk: {
+    var out: [AssetKind.handled.len]flux.HostType = undefined;
+    for (AssetKind.handled, 0..) |kind, i| out[i] = assetType(kind);
+    break :blk out;
+};
+
+fn assetType(comptime kind: AssetKind) flux.HostType {
+    const H = kind.Handle();
+    const Shim = struct {
+        fn toScript(vm: *flux.Vm, value: reflect.Value) flux.Vm.Error!flux.Value {
+            const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
+            const handle = value.get(H).?;
+            if (std.meta.eql(handle, H.none)) return .null;
+            const path = self.app.assetSource(handle) orelse return .null;
+            return vm.string(path);
+        }
+
+        fn fromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flux.Vm.Error!void {
+            const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
+            const handle: H = switch (value.tag) {
+                .null => H.none,
+                .string => blk2: {
+                    const path = value.as(flux.object.String).bytes();
+                    break :blk2 self.app.loadAsset(H, path) catch |err| return vm.fail("the " ++ comptime kind.label() ++ " {s} did not load: {t}", .{ path, err });
+                },
+                else => return vm.fail("a " ++ comptime kind.label() ++ " is given by its path, as \"res://...\", not {s}", .{typeName(value)}),
+            };
+            into.set(H, handle) catch return vm.fail("this " ++ comptime kind.label() ++ " can only be read", .{});
+        }
+    };
+    return .{ .type = reflect.typeOf(H), .to_script = Shim.toScript, .from_script = Shim.fromScript };
+}
+
+/// A member of an engine's value that is none of its fields: a signal one
+/// of the entity's components declares - `timer.timeout` on the Timer, or
+/// on its entity by the name that finds it - as the scripts' own.
+fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!?flux.Value {
+    const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
+    const h = handle.as(flux.object.Handle);
+    if (h.live != null and h.live.? == &self.resolver) {
+        const source = Entity.fromInt(h.key);
+        for (self.app.scene_components.entries.items) |*entry| {
+            if (!entry.type.same(h.value.type)) continue;
+            for (entry.signals) |decl| {
+                if (std.mem.eql(u8, decl.name, name)) return try self.bridgeOf(source, entry.name, decl.name, decl.args.fields().len);
+            }
+            return null;
+        }
+        return null;
+    }
+    const now = vm.reflectOf(handle) orelse return null;
+    const ref = now.asConst(EntityRef) orelse return null;
+    if (!self.app.world.isAlive(ref.entity)) return null;
+    const found = self.app.signalNamed(ref.entity, name) catch |err| switch (err) {
+        error.AmbiguousSignal => return vm.fail("two of this entity's components say {s}: ask the one, as `entity.get(\"Health\").{s}`", .{ name, name }),
+        else => return null,
+    };
+    // A script's own signal is its instance's: `self.died`.
+    if (std.mem.eql(u8, found.component, component_name)) return null;
+    const entry = self.app.scene_components.find(found.component) orelse return null;
+    for (entry.signals) |decl| {
+        if (std.mem.eql(u8, decl.name, found.name)) return try self.bridgeOf(ref.entity, entry.name, decl.name, decl.args.fields().len);
+    }
+    return null;
+}
+
 /// How a script sees an `Entity`: see "An entity is one handle" above.
 const entity_type: flux.HostType = .{
     .type = reflect.typeOf(Entity),
@@ -1477,7 +2166,12 @@ fn installForAnalysis(context: ?*anyopaque, vm: *flux.Vm) anyerror!void {
 /// The struct a `Script` names: the one it names, or else the one named
 /// after its file, as the file is spelt or in CamelCase.
 fn classFor(vm: *flux.Vm, module: *flux.object.Module, script: *const Script, source: []const u8, spelled: *[64]u8) ?flux.Value {
-    const asked = script.structName();
+    return classAsked(vm, module, script.structName(), source, spelled);
+}
+
+/// The struct called `asked`, or with nothing asked, the one named after the
+/// file.
+fn classAsked(vm: *flux.Vm, module: *flux.object.Module, asked: []const u8, source: []const u8, spelled: *[64]u8) ?flux.Value {
     if (asked.len != 0) return classNamed(vm, module, asked);
     if (classNamed(vm, module, std.fs.path.stem(source))) |found| return found;
     return classNamed(vm, module, expected(source, spelled));
@@ -1565,4 +2259,44 @@ test "what a script prints is said a line at a time" {
     try testing.expectEqualStrings("and ", printed.line[0..printed.len]);
     try printed.writer.splatByteAll('x', 600);
     try testing.expectEqual(@as(usize, 600 + 4 - 512), printed.len);
+}
+
+/// A script's value as a scene writes an `@export`'s: what an editor shows
+/// of a field's default. Null for what a scene cannot say - a function, an
+/// instance.
+pub fn jsonOf(doc: *json.Document, value: flux.Value) json.EditError!json.Value {
+    switch (value.tag) {
+        .int => return .{ .int = value.asInt() },
+        .float => return .{ .float = value.asFloat() },
+        .bool => return .{ .bool = value.asBool() },
+        .string => return doc.string(value.as(flux.object.String).bytes()),
+        .vec2, .vec3 => {
+            const list = try doc.array();
+            if (value.tag == .vec2) {
+                const xy = value.asVec2();
+                try list.append(@as(f64, xy[0]));
+                try list.append(@as(f64, xy[1]));
+            } else {
+                const xyz = value.asVec3();
+                for (xyz) |each| try list.append(@as(f64, each));
+            }
+            return list;
+        },
+        .color => {
+            const rgba = value.as(flux.object.Color).rgba;
+            var text: [9]u8 = undefined;
+            const c: Color = .{ .r = rgba[0], .g = rgba[1], .b = rgba[2], .a = rgba[3] };
+            return doc.string(c.hexText(&text));
+        },
+        .enum_value => {
+            const e = flux.object.EnumType.from(value.obj());
+            return doc.string(e.members[value.extra].bytes());
+        },
+        .list => {
+            const list = try doc.array();
+            for (value.as(flux.object.List).items.items) |item| try list.append(try jsonOf(doc, item));
+            return list;
+        },
+        else => return .null,
+    }
 }

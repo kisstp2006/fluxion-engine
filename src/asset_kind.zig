@@ -19,6 +19,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const Assets = @import("assets.zig");
+const data = @import("data.zig");
 const scenes = @import("scenes.zig");
 const script = @import("script.zig");
 const theme = @import("theme.zig");
@@ -31,6 +32,7 @@ pub const AssetKind = enum {
     script,
     tileset,
     theme,
+    data,
 
     /// What a person calls one.
     pub fn label(self: AssetKind) []const u8 {
@@ -41,6 +43,7 @@ pub const AssetKind = enum {
             .script => "script",
             .tileset => "tile set",
             .theme => "theme",
+            .data => "data file",
         };
     }
 
@@ -53,6 +56,7 @@ pub const AssetKind = enum {
             .script => "A Flux script",
             .tileset => "A tile set",
             .theme => "A theme",
+            .data => "Values for a Flux struct",
         };
     }
 
@@ -65,6 +69,7 @@ pub const AssetKind = enum {
             .script => "res://scripts/door.flux",
             .tileset => "res://tiles/terrain.tileset",
             .theme => "res://ui/game.theme",
+            .data => "res://dialogue/intro.data",
         };
     }
 
@@ -77,6 +82,7 @@ pub const AssetKind = enum {
             .script => &.{".flux"},
             .tileset => &.{".tileset"},
             .theme => &.{".theme"},
+            .data => &.{data.extension},
         };
     }
 
@@ -103,6 +109,7 @@ pub const AssetKind = enum {
             .script => script.ScriptHandle,
             .tileset => tileset.TileSetHandle,
             .theme => theme.ThemeHandle,
+            .data => data.DataHandle,
         };
     }
 
@@ -115,7 +122,7 @@ pub const AssetKind = enum {
     }
 
     /// Every kind a component can hold a file of: the ones with a handle.
-    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme };
+    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data };
 };
 
 test "a file's kind is its ending's, whatever its case, and a scene's JSON is not said by its name" {
@@ -123,6 +130,7 @@ test "a file's kind is its ending's, whatever its case, and a scene's JSON is no
     try testing.expectEqual(AssetKind.tileset, AssetKind.ofPath("res://tiles/terrain" ++ tileset.extension).?);
     try testing.expectEqual(AssetKind.theme, AssetKind.ofPath("game" ++ theme.extension).?);
     try testing.expectEqual(AssetKind.scene, AssetKind.ofPath("res://levels/one.cbor").?);
+    try testing.expectEqual(AssetKind.data, AssetKind.ofPath("res://dialogue/intro.data").?);
     try testing.expect(AssetKind.ofPath("res://levels/one.json") == null);
     try testing.expect(AssetKind.ofPath("notes.md") == null);
 }

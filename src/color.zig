@@ -74,6 +74,19 @@ pub const Color = extern struct {
         return .{ .r = channel(bytes[0]), .g = channel(bytes[1]), .b = channel(bytes[2]), .a = channel(bytes[3]) };
     }
 
+    /// As `parse` reads it back: `#rrggbb`, and `#rrggbbaa` for one that is
+    /// not opaque. In `buffer`.
+    pub fn hexText(self: Color, buffer: *[9]u8) []const u8 {
+        const bytes = [4]u8{ byteOf(self.r), byteOf(self.g), byteOf(self.b), byteOf(self.a) };
+        if (bytes[3] == 255) return std.fmt.bufPrint(buffer, "#{x:0>2}{x:0>2}{x:0>2}", .{ bytes[0], bytes[1], bytes[2] }) catch unreachable;
+        return std.fmt.bufPrint(buffer, "#{x:0>2}{x:0>2}{x:0>2}{x:0>2}", .{ bytes[0], bytes[1], bytes[2], bytes[3] }) catch unreachable;
+    }
+
+    fn byteOf(value: f32) u8 {
+        if (std.math.isNan(value)) return 0;
+        return @intFromFloat(@round(std.math.clamp(value, 0, 1) * 255));
+    }
+
     pub inline fn rgb(r: f32, g: f32, b: f32) Color {
         return .{ .r = r, .g = g, .b = b, .a = 1 };
     }
@@ -172,6 +185,13 @@ test "a colour is read from the ways it is written as text, and nothing else is"
     try testing.expect(Color.parse("#12345") == null);
     try testing.expect(Color.parse("#GG0000") == null);
     try testing.expect(Color.parse("") == null);
+}
+
+test "a colour is written as parse reads it back, its alpha only when it has one" {
+    var buffer: [9]u8 = undefined;
+    try testing.expectEqualStrings("#3aa0ff", Color.hex(0x3AA0FF).hexText(&buffer));
+    try testing.expectEqualStrings("#3aa0ff80", Color.hexa(0x3AA0FF80).hexText(&buffer));
+    try testing.expectEqual(Color.hexa(0x3AA0FF80), Color.parse(Color.hexa(0x3AA0FF80).hexText(&buffer)).?);
 }
 
 test "oklch with no chroma is a grey" {

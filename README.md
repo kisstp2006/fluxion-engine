@@ -1425,7 +1425,7 @@ const path = app.assetSource(sprite.texture) orelse "made in memory";          /
 ```
 
 - **Every kind of file is one entry in `fx.AssetKind`**: textures, fonts,
-  scenes, scripts, tile sets and themes - what each is called, the endings
+  scenes, scripts, tile sets, themes and data files - what each is called, the endings
   of its files, and the handle a component holds one by
   (`AssetKind.Handle(.texture)`, `AssetKind.of(fx.TextureHandle)`).
   `app.assetSource`, `app.loadAsset` and `app.findAsset` take any handle
@@ -1979,6 +1979,90 @@ struct Door {
   - Each file is compiled and never run: not its top level, a default, `ready` or `update`. So a script cannot change the scene being edited.
   - Its structs' signals and methods are still listed and connected to, and the scene still writes the script.
 
+### The engine, from a script
+
+```zig
+fn looked() { print("the guard looks around"); }
+fn reloaded() { print("reloaded"); }
+
+struct Guard {
+    /// How much it takes.
+    @export @range(0, 100) var hp: int = 10;
+    @group("Patrol")
+    @export var path: [vec2];
+    @export @entity var post: any = null;
+
+    fn ready(self) {
+        const timer = app.createTimer(2);
+        timer.timeout.connect(looked);                  // the engine's signal, as the script's own
+        await self.entity.get("Area2D").body_entered;   // or waited for
+        await app.nextFrame();
+        const bolt = app.instantiate("res://bolt.json", self.entity) catch return;
+        app.callDeferred(reloaded) catch {};
+    }
+
+    fn input(self, event: any) {
+        if (event.isActionPressed("jump")) app.setInputAsHandled();
+    }
+}
+```
+
+- **The engine's signals are the script's own.** A component's signal is a
+  member of the component a script reaches - `timer.timeout`,
+  `self.entity.get("Area2D").body_entered` - or of its entity, by name. It
+  is a signal of the script's: `connect`, `once`, `disconnect` and `await`
+  are the language's, and its arguments arrive as the engine's do. The first
+  use connects it to the engine's table with a `Callable.script`, never
+  saved; it goes with its entity, and with `clearWorld`.
+- **`app.nextFrame()`** is a signal emitted once a frame: `await
+  app.nextFrame()` goes on in the next one, even from `ready`.
+- **Making and unmaking.** `app.spawn(parent)` makes an empty entity -
+  `null` for the top of the tree - and `entity.despawn()` takes one away
+  with everything under it, at once. `app.instantiate("res://…", parent)`
+  and `app.changeScene("res://…")` take a scene by its path.
+  `app.callDeferred(fn)` calls a function at the end of the frame, after
+  the systems and the signals.
+- **A file is its path.** Where a call or a field wants a scene, a texture,
+  a font, a tile set, a theme, a script or a data file, a script gives
+  `"res://…"`, and the file is read if nothing has read it yet. The same
+  handle reads back as its path.
+- **`@export` marks what a scene gives a value.** A scene writes an
+  entity's values beside its components, as `"exports": { "hp": 20 }`, and
+  `app.exports` holds them. They are set on the instance when it is made,
+  before its `ready`: a number, a bool and text as themselves, a vector as
+  its numbers, a colour as `"#rrggbbaa"`, an enum's member by its name, an
+  entity by its UUID (`@entity`), a list as a list. A field the struct no
+  longer has, or a value it cannot hold, is said in the log and passed over.
+  - `app.exportedFields(entity, &buffer)` lists the fields, made or not, with their kind, default, doc comment and annotations (`@range`, `@multiline`, `@group`, `@file`, `@entity`, …): what an editor draws.
+  - `script.jsonOf` writes a default as a scene would.
+- **Input, as events.** `input(self, event)` hears each key, mouse button,
+  motion, wheel and pad button of the frame, before the game's `.input`
+  systems; `unhandled_input(self, event)` hears what nothing took - not a
+  script's `app.setInputAsHandled()`, and not the interface, which takes a
+  key while a field has the keys and the pointer over what it draws.
+  - The event has `kind`, `pressed`, `echo`, `key` and `virtual_key`, `button` and `double_click`, `pad_button` and `pad`, `position`, `relative`, `wheel`, and `shift`, `control` and `alt`.
+  - `event.isAction("jump")`, `isActionPressed`, `isActionReleased` and `describe()` say it by the project's actions.
+  - `app.bindAction("jump", event)` binds what was pressed to an action, and `app.clearAction("jump")` unbinds it: a key-remapping screen, saved with `app.saveInputMap()`.
+
+### Data files
+
+A `.data` file holds values for a Flux struct's `@export`s: a line of
+dialogue, an enemy's stats. It is written as a scene writes `"exports"`:
+
+```json
+{ "fluxion_data": 1, "script": "res://dialogue/line.flux", "struct": "Line",
+  "values": { "speaker": "Guard", "text": "Halt!", "mood": "angry" } }
+```
+
+```zig
+const line = app.readData("res://dialogue/intro.data") catch return;
+print(line.speaker, ":", line.text);
+```
+
+- `app.readData(path)` makes the struct anew each time, with the file's values; a field not given one keeps its default. An empty `"struct"` is the one named after the script's file, as a `Script`'s is.
+- From Zig, `loadData`, `findData`, `dataSource`, `reloadData` and `unloadData` keep the file by a `DataHandle`, which a component can hold; `fx.data.read` and `fx.data.write` read and write one.
+- `app.structFields(script, name, &buffer)` lists what an editor shows of one.
+
 ## 🧪 It runs with no window and no GPU
 
 ```zig
@@ -2269,10 +2353,13 @@ Here, and checked by the tests:
   and found on an entity by its scene name, read and written in place, added
   and taken off; the engine's calls and a game's states made by name, errors
   and all.
-- Flux scripts on entities: `ready`, `physics`, `update` and `exit`,
-  `self.entity` and its components found again at each use, a budget and a
-  log for what goes wrong, code read again into running instances, scripts
-  in scenes, and an editor's checking set up as the game's.
+- Flux scripts on entities: `ready`, `fixed`, `update`, `exit`, `input` and
+  `unhandled_input`, `self.entity` and its components found again at each
+  use, a budget and a log for what goes wrong, code read again into running
+  instances, scripts in scenes, and an editor's checking set up as the
+  game's. The engine's signals heard and awaited from a script, entities and
+  scenes made and taken away, `@export`s a scene gives values, and `.data`
+  files made into their struct.
 - The world drawn into a texture through a view of its own, and a window
   that shows only the interface: an editor's scene panel, or a minimap.
 - Headless everything, and `capture` for a picture without a screen.

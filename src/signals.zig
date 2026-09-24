@@ -196,12 +196,15 @@ pub const Options = struct {
     binds: []const Bind = &.{},
 };
 
-/// What a signal calls: a method by name, or a Zig function.
+/// What a signal calls: a method by name, a Zig function, or the scripts.
 pub const Callable = union(enum) {
     /// A method, looked up by name on `target` when it is called.
     named: Named,
     /// A Zig function. Never saved with a scene.
     zig: ZigFn,
+    /// The scripts' own signal for this one - what a script connects to and
+    /// awaits as `timer.timeout` - emitted as this is. Never saved.
+    script,
 
     pub const Named = struct {
         target: Entity,
@@ -244,6 +247,7 @@ pub const Callable = union(enum) {
         return switch (a) {
             .named => |n| b == .named and n.target.eql(b.named.target) and std.mem.eql(u8, n.name, b.named.name),
             .zig => |z| b == .zig and z.id == b.zig.id,
+            .script => b == .script,
         };
     }
 };
@@ -527,7 +531,7 @@ pub const Signals = struct {
     /// heard, or one kept as written, never heard. See `Signal.connect`,
     /// which is how a game does it, and `App.connectNamed`.
     pub fn connect(self: *Signals, source: Entity, key: Key, callable: Callable, options: Options) Error!void {
-        if (callable == .zig and options.flags.persist) return error.NotPersistable;
+        if (callable != .named and options.flags.persist) return error.NotPersistable;
         const known = key.component.len != 0;
         const entry = try self.from.getOrPut(self.gpa, source);
         if (!entry.found_existing) entry.value_ptr.* = .empty;
@@ -753,7 +757,7 @@ pub const Signals = struct {
     fn keepCallable(self: *Signals, callable: Callable) Allocator.Error!Callable {
         return switch (callable) {
             .named => |n| .method(n.target, try self.arena.allocator().dupe(u8, n.name)),
-            .zig => callable,
+            .zig, .script => callable,
         };
     }
 
@@ -809,6 +813,9 @@ pub const Signals = struct {
                 // A call to what has died since the emit is not made.
                 if (!app.world.isAlive(n.target)) return;
                 app.callMethodOn(n.target, n.name, call.args) catch |err| self.failed(call, n.name, err);
+            },
+            .script => if (app.scripts) |scripts| {
+                scripts.calls.bridge(scripts, call.source, call.component, call.signal, call.args) catch |err| self.failed(call, "the scripts", err);
             },
         }
     }

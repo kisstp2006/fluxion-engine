@@ -1270,3 +1270,342 @@ test "an editor's analysis offers the project's actions inside the quotes of a c
         if (jump) |item| try testing.expectEqualStrings("Space", item.detail);
     }
 }
+
+test "a script connects to and awaits the engine's signals: a component's, a timer's, and the next frame" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("watcher.flux",
+        \\var fired = 0;
+        \\var waited = false;
+        \\var frames = 0;
+        \\var hurt = 0.0;
+        \\var by_whom = true;
+        \\fn onTimeout() { fired += 1; }
+        \\fn onHit(damage: float, by: any) {
+        \\    hurt += damage;
+        \\    by_whom = by != null;
+        \\}
+        \\struct Watcher {
+        \\    fn ready(self) {
+        \\        app.createTimer(0.25).timeout.connect(onTimeout);
+        \\        self.entity.get("Health").hit.connect(onHit);
+        \\        self.wait();
+        \\        self.count();
+        \\    }
+        \\    fn wait(self) {
+        \\        await app.createTimer(0.5).timeout;
+        \\        waited = true;
+        \\    }
+        \\    fn count(self) {
+        \\        await app.nextFrame();
+        \\        frames += 1;
+        \\        await app.nextFrame();
+        \\        frames += 1;
+        \\    }
+        \\}
+    );
+    const watcher = try app.world.spawnWith(.{ Health{}, Script.of(file) });
+
+    // A wait begun in a frame is over in the next, however early it began.
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 0), global(app, file, "frames").asInt());
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 1), global(app, file, "frames").asInt());
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 2), global(app, file, "frames").asInt());
+
+    try app.emit(watcher, Health, .hit, .{ .damage = 5, .by = .none });
+    for (0..4) |_| _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqual(@as(i64, 1), global(app, file, "fired").asInt());
+    try testing.expect(global(app, file, "waited").asBool());
+    try testing.expectEqual(@as(f64, 5), global(app, file, "hurt").asFloat());
+    try testing.expect(!global(app, file, "by_whom").asBool());
+    // The timers went with their timeouts, and their signals with them.
+    try testing.expectEqual(@as(usize, 1), app.scripts.?.bridges.items.len);
+}
+
+test "a script makes entities and scenes, takes them out, and calls what it defers at the end of the frame" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "crate.json", .data =
+        \\{ "fluxion_scene": 3, "entities": [ { "uuid": "00000000-0000-4000-8000-00000000000a", "name": "crate", "Counter": { "value": 7 } } ] }
+    });
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    const file = try app.addScript("maker.flux",
+        \\var made_name = "";
+        \\var crate_value = 0;
+        \\var deferred = 0;
+        \\var deferred_then = -1;
+        \\var gone = true;
+        \\fn later() { deferred += 1; }
+        \\struct Maker {
+        \\    fn ready(self) {
+        \\        const child = app.spawn(self.entity) catch return;
+        \\        _ = child.add("Marker");
+        \\        app.setName(child, "made") catch {};
+        \\        made_name = app.nameOf(child);
+        \\        const crate = app.instantiate("res://crate.json", self.entity) catch return;
+        \\        crate_value = crate.get("Counter").value;
+        \\        app.callDeferred(later) catch {};
+        \\        deferred_then = deferred;
+        \\        child.despawn() catch {};
+        \\        gone = !child.alive();
+        \\    }
+        \\}
+    );
+    const maker = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("made", globalText(app, file, "made_name"));
+    try testing.expectEqual(@as(i64, 7), global(app, file, "crate_value").asInt());
+    try testing.expectEqual(@as(i64, 0), global(app, file, "deferred_then").asInt());
+    try testing.expectEqual(@as(i64, 1), global(app, file, "deferred").asInt());
+    try testing.expect(global(app, file, "gone").asBool());
+    try testing.expectEqual(@as(i64, 1), app.childCount(maker));
+}
+
+test "a file a component holds is its path to a script, and a path given loads it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "door.flux", .data = "struct Door {}" });
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    const file = try app.addScript("swap.flux",
+        \\var before: any = 0;
+        \\var after: any = 0;
+        \\var refused = "";
+        \\struct Swap {
+        \\    fn ready(self) {
+        \\        const script = self.entity.get("Script");
+        \\        before = script.source;
+        \\        const other = app.spawn(null) catch return;
+        \\        other.add("Script").source = "res://door.flux";
+        \\        after = other.get("Script").source;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("swap.flux", globalText(app, file, "before"));
+    try testing.expectEqualStrings("res://door.flux", globalText(app, file, "after"));
+}
+
+const guard_script =
+    \\enum Mood { calm, angry }
+    \\var seen_hp = 0;
+    \\var angry = false;
+    \\var steps = 0;
+    \\var alpha = 0.0;
+    \\var aimed = false;
+    \\var motto = "";
+    \\struct Guard {
+    \\    /// What it takes.
+    \\    @export @range(0, 100) var hp: int = 10;
+    \\    @export var mood: Mood = .calm;
+    \\    @export var path: [vec2];
+    \\    @export var tint: color = color(1, 1, 1);
+    \\    @export @entity var target: any = null;
+    \\    @export @multiline var motto: string = "halt";
+    \\    var hidden = 3;
+    \\    fn ready(self) {
+    \\        seen_hp = self.hp;
+    \\        angry = self.mood == Mood.angry;
+    \\        steps = self.path.len;
+    \\        alpha = self.tint.a;
+    \\        aimed = self.target != null;
+    \\        motto = self.motto;
+    \\    }
+    \\}
+;
+
+test "a scene gives a script's @exports their values before its ready, and writes them back" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "guard.flux", .data = guard_script });
+    const app = try scriptedAt(root);
+    defer app.destroy();
+
+    const level =
+        \\{ "fluxion_scene": 3, "entities": [
+        \\  { "uuid": "00000000-0000-4000-8000-00000000000a", "name": "post" },
+        \\  { "uuid": "00000000-0000-4000-8000-00000000000b", "name": "guard", "Script": { "source": "res://guard.flux" },
+        \\    "exports": { "hp": 42, "mood": "angry", "path": [[0, 0], [16, 0]], "tint": "#ff000080",
+        \\                 "target": "00000000-0000-4000-8000-00000000000a", "hidden": 9, "gone": 1 } }
+        \\] }
+    ;
+    _ = try scene.read(app, level, .{});
+    _ = try app.step();
+    const file = app.findScript("res://guard.flux").?;
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqual(@as(i64, 42), global(app, file, "seen_hp").asInt());
+    try testing.expect(global(app, file, "angry").asBool());
+    try testing.expectEqual(@as(i64, 2), global(app, file, "steps").asInt());
+    try testing.expectApproxEqAbs(@as(f64, 0.5), global(app, file, "alpha").asFloat(), 0.01);
+    try testing.expect(global(app, file, "aimed").asBool());
+    // Not given, a field keeps its default.
+    try testing.expectEqualStrings("halt", globalText(app, file, "motto"));
+
+    // An editor lists what the struct exports, with what it says of each.
+    const guard = app.find("guard").?;
+    var fields: [16]flux.FieldInfo = undefined;
+    const listed = app.exportedFields(guard, &fields);
+    try testing.expectEqual(@as(usize, 6), listed.len);
+    try testing.expectEqualStrings("What it takes.", listed[0].doc.?);
+    try testing.expectEqual(@as(i64, 100), flux.annotationOf(listed[0], "range").?[1].asInt());
+
+    const written = try scene.write(app, testing.allocator, .{});
+    defer testing.allocator.free(written);
+    try testing.expect(std.mem.indexOf(u8, written, "\"exports\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"hp\": 42") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"mood\": \"angry\"") != null);
+}
+
+test "a default a script's field has is what a scene would write of it" {
+    var doc: @import("fluxion_json").Document = try .init(testing.allocator);
+    defer doc.deinit();
+    const app = try scripted(.{});
+    defer app.destroy();
+    const vm = app.scripts.?.vm;
+    try testing.expectEqual(@as(i64, 3), (try script.jsonOf(&doc, .int(3))).asInt(i64).?);
+    const pair = try script.jsonOf(&doc, .vec2(1, 2));
+    try testing.expectEqual(@as(f64, 2), pair.get(1).asFloat(f64).?);
+    const red = try vm.newColor(.{ 1, 0, 0, 1 });
+    try testing.expectEqualStrings("#ff0000", (try script.jsonOf(&doc, red)).asString().?);
+}
+
+fn keyed(key: @import("fluxion_platform").Key, action: @import("fluxion_platform").Action) @import("fluxion_platform").Event {
+    return .{ .key = .{ .window = .none, .key = key, .virtual = key, .scancode = @enumFromInt(0), .action = action, .mods = .{} } };
+}
+
+test "a script hears the player's input, takes it from the scripts after it, and rebinds an action from it" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    try app.input.actions.add(testing.allocator, .{ .name = "jump", .bindings = &.{.keyOf(.space)} });
+    const first = try app.addScript("first.flux",
+        \\var jumps = 0;
+        \\var named = "";
+        \\var released = 0;
+        \\struct First {
+        \\    fn input(self, event: any) {
+        \\        if (event.isActionPressed("jump")) {
+        \\            jumps += 1;
+        \\            named = event.describe();
+        \\            app.setInputAsHandled();
+        \\        }
+        \\        if (event.isActionReleased("jump")) released += 1;
+        \\        if (event.kind == "key" and event.key == "j" and event.pressed and !app.actionDown("jump")) {
+        \\            _ = app.clearAction("jump");
+        \\            app.bindAction("jump", event) catch {};
+        \\        }
+        \\    }
+        \\}
+    );
+    const second = try app.addScript("second.flux",
+        \\var heard = 0;
+        \\var unheard = 0;
+        \\struct Second {
+        \\    fn input(self, event: any) {
+        \\        if (event.kind == "key") heard += 1;
+        \\    }
+        \\    fn unhandled_input(self, event: any) {
+        \\        if (event.kind == "mouse_button" and event.pressed and event.button == "left") unheard += 1;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(first)});
+    _ = try app.world.spawnWith(.{Script.of(second)});
+    _ = try app.step();
+
+    // Taken by the first, the press never reaches the second.
+    app.input.apply(keyed(.space, .press));
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 1), global(app, first, "jumps").asInt());
+    try testing.expectEqualStrings("Space", globalText(app, first, "named"));
+    try testing.expectEqual(@as(i64, 0), global(app, second, "heard").asInt());
+
+    // The release is nobody's to take, and a click nothing drew is left over.
+    app.input.apply(keyed(.space, .release));
+    app.input.apply(.{ .mouse_button = .{ .window = .none, .button = .left, .action = .press, .mods = .{}, .x = 10, .y = 10 } });
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 1), global(app, first, "released").asInt());
+    try testing.expectEqual(@as(i64, 1), global(app, second, "heard").asInt());
+    try testing.expectEqual(@as(i64, 1), global(app, second, "unheard").asInt());
+
+    // J, pressed, is jump now, and Space is not.
+    app.input.apply(keyed(.j, .press));
+    _ = try app.step();
+    app.input.apply(keyed(.j, .release));
+    app.input.apply(keyed(.space, .press));
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 1), global(app, first, "jumps").asInt());
+    app.input.apply(keyed(.space, .release));
+    app.input.apply(keyed(.j, .press));
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 2), global(app, first, "jumps").asInt());
+    try testing.expect(app.input.actions.get("jump").?.bindings[0].eql(.keyOf(.j)));
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
+test "a data file is its struct, made anew from Flux with the file's values" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "line.flux", .data =
+        \\enum Mood { calm, angry }
+        \\struct Line {
+        \\    @export var speaker: string = "";
+        \\    @export var text: string = "";
+        \\    @export var mood: Mood = .calm;
+        \\    @export var times: int = 1;
+        \\    fn angry(self) bool { return self.mood == Mood.angry; }
+        \\}
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "intro.data", .data =
+        \\{ "fluxion_data": 1, "script": "res://line.flux", "struct": "Line",
+        \\  "values": { "speaker": "Guard", "text": "Halt!", "mood": "angry", "gone": 3 } }
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "broken.data", .data =
+        \\{ "fluxion_data": 1, "script": "res://line.flux", "struct": "Nope" }
+    });
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    const reader = try app.addScript("reader.flux",
+        \\var said = "";
+        \\var angry = false;
+        \\var times = 0;
+        \\var apart = false;
+        \\var refused: any = null;
+        \\struct Reader {
+        \\    fn ready(self) {
+        \\        const line = app.readData("res://intro.data") catch return;
+        \\        said = line.speaker + ": " + line.text;
+        \\        angry = line.angry();
+        \\        times = line.times;
+        \\        line.text = "changed";
+        \\        const again = app.readData("res://intro.data") catch return;
+        \\        apart = again.text == "Halt!";
+        \\        refused = app.readData("res://broken.data") catch |e| e.name;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(reader)});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("Guard: Halt!", globalText(app, reader, "said"));
+    try testing.expect(global(app, reader, "angry").asBool());
+    // Not given, a field keeps its default; each read is a struct of its own.
+    try testing.expectEqual(@as(i64, 1), global(app, reader, "times").asInt());
+    try testing.expect(global(app, reader, "apart").asBool());
+    try testing.expectEqualStrings("NoSuchStruct", globalText(app, reader, "refused"));
+    try testing.expectEqualStrings("res://intro.data", app.dataSource(app.findData("res://intro.data").?).?);
+}

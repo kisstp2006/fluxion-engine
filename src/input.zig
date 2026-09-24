@@ -125,6 +125,13 @@ pointer_still: f32 = 0,
 typed: [typed_capacity]Typed = undefined,
 typed_len: usize = 0,
 
+/// Every key that went down, came up or repeated this frame, in order: what
+/// a script's `input` is handed. One given between frames is the next
+/// frame's, as a pointer event is.
+key_events: [typed_capacity]platform.event.KeyEvent = undefined,
+key_events_len: usize = 0,
+key_events_seen: usize = 0,
+
 /// Everything the pointer did this frame, in order: what picking hands
 /// to whatever is under it, and what a game reads for itself. See
 /// `pointerEvents`.
@@ -782,6 +789,11 @@ pub fn isHandled(self: *const Input) bool {
 }
 
 /// What was typed this frame, oldest first.
+/// Every key event of this frame, releases and repeats too, oldest first.
+pub fn keyEvents(self: *const Input) []const platform.event.KeyEvent {
+    return self.key_events[0..self.key_events_len];
+}
+
 pub fn typedThisFrame(self: *const Input) []const Typed {
     return self.typed[0..self.typed_len];
 }
@@ -886,6 +898,11 @@ pub fn beginFrame(self: *Input) void {
 
     // The pointer events a whole frame has had go; one given between
     // frames stays for this one, as a dialog's answer does.
+    const keys_unseen = self.key_events_len - self.key_events_seen;
+    std.mem.copyForwards(platform.event.KeyEvent, self.key_events[0..keys_unseen], self.key_events[self.key_events_seen..self.key_events_len]);
+    self.key_events_len = keys_unseen;
+    self.key_events_seen = 0;
+
     const unseen = self.pointer_events_len - self.pointer_events_seen;
     std.mem.copyForwards(pointer_mod.InputEvent, self.pointer_events[0..unseen], self.pointer_events[self.pointer_events_seen..self.pointer_events_len]);
     self.pointer_events_len = unseen;
@@ -915,6 +932,7 @@ pub fn endFrame(self: *Input) void {
     self.answers_seen = self.answers_len;
     self.drops_seen = self.drops_len;
     self.pointer_events_seen = self.pointer_events_len;
+    self.key_events_seen = self.key_events_len;
     self.happened_seen = self.happened;
 }
 
@@ -1022,6 +1040,10 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 .repeat => {},
             };
             if (k.action.down()) self.pushTyped(.{ .key = k });
+            if (self.key_events_len < self.key_events.len) {
+                self.key_events[self.key_events_len] = k;
+                self.key_events_len += 1;
+            }
         },
         .char => |c| {
             self.mods = c.mods;
