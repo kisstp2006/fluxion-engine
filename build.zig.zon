@@ -36,8 +36,8 @@
         // The interface layer: the layout `.ui` systems declare into, and the
         // renderer that draws it over the 2D layer.
         .fluxion_ui = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-ui#f22681152ef461d8b387384dcda79745bbe58cf7",
-            .hash = "fluxion_ui-0.1.0-lw4WsyYQDwB5KFosQc6PtB-U-zGCCUTB4-PPJR-x8S47",
+            .url = "git+https://github.com/kisstp2006/fluxion-ui#d0377892e64230aa395f3a095fe911805370cae9",
+            .hash = "fluxion_ui-0.1.0-lw4Wsy00DwA4T_-0d8RMyPyrcd46RtCipkh_Tt__YOOr",
         },
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.
@@ -50,8 +50,8 @@
         // Without this the same shader would be in this repository twice, in
         // two languages, drifting apart.
         .fluxion_shader = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-shader#136fd7dbe3fcbd1aa669c3123229c5260e3cf592",
-            .hash = "fluxion_shader-0.1.0-FqFMEoI3BwAuAQBSzIJwkCrwrVFRJp5SuxDvzmTcziUF",
+            .url = "git+https://github.com/kisstp2006/fluxion-shader#2f6ebe660304cab735e1c2669663ebd0dd68d40f",
+            .hash = "fluxion_shader-0.1.0-FqFMEvtOBwDYCkbQOVR1PHrJ4A6IVjdh5FDnMNgeOh8f",
         },
 
         // Projections and matrices, and the one type that knows OpenGL's
@@ -80,8 +80,8 @@
         // is doing: `app.debug`. Its renderer is drawn after the 2D pass, and
         // built by `build.zig` from its source with this package's rhi.
         .fluxion_debugdraw = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-debugdraw#55b6024314abebf4105ce235dfdaf4c450e0ac68",
-            .hash = "fluxion_debugdraw-0.1.0--_MjkqYiAgBNK_vouegy9pB9iuqgFbdzyBD_hbnWrwTa",
+            .url = "git+https://github.com/kisstp2006/fluxion-debugdraw#2d250dfea481f2e9e653f19877b72092ff57d3ce",
+            .hash = "fluxion_debugdraw-0.1.0--_MjkqYiAgCif12xVnXSwQ2eLNe8hWCEmlzjFvm73dvX",
         },
 
         // What a scene is written in: JSON to read and diff, or CBOR, the
@@ -111,8 +111,8 @@
         // fluxion-reflect and fluxion-json are pinned where these are, so a
         // `reflect.Value` is one type across the two.
         .fluxion_script = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-script#71e5833489372d86ed3b45f4e6a3c9c8ffde877c",
-            .hash = "fluxion_script-0.1.0-rt2DKsDdEQD-pVXla4G5uJ_Efd4OmbgMFwdQhxXc9JW0",
+            .url = "git+https://github.com/kisstp2006/fluxion-script#20a366d302cc3d3872b937f35dd2e47251120a29",
+            .hash = "fluxion_script-0.1.0-rt2DKsDdEQAAKx0bkOd5OiDZFBwi5750Ejlg_5rxWqI-",
         },
 
         // Generational handles: what the asset tables hand out, and what a
