@@ -281,10 +281,12 @@ pub const GamepadAxis = platform.GamepadAxis;
 /// The keys, stick and d-pad that move one axis, as component data.
 pub const AxisBinding = Input.AxisBinding;
 
-/// A game's named keyboard and controller actions, held as data and rebound
-/// without changing the systems that ask for them.
-pub const ButtonBinding = Input.ButtonBinding;
-pub const ActionMap = Input.ActionMap;
+/// A game's actions - `jump`, `ui_accept` - and the keys, buttons and
+/// sticks that set them off: named in the project, asked for with
+/// `app.input.actionDown`, and rebound as the game runs. See `actions.zig`.
+pub const actions = @import("actions.zig");
+pub const Action = actions.Action;
+pub const Binding = actions.Binding;
 
 /// A component that counts down and says `timeout`. See `timer.zig`.
 pub const Timer = @import("timer.zig").Timer;
@@ -379,6 +381,7 @@ test {
     _ = App;
     _ = Window;
     _ = Input;
+    _ = actions;
     _ = Time;
     _ = Interface;
     _ = Clipboard;

@@ -40,9 +40,6 @@ pub const pixels_per_line: f32 = 40.0 / 3.0;
 /// showing is still showing.
 pub const page_fraction: f32 = 0.875;
 
-/// How far a stick has to lean, past its dead zone, to step the focus.
-pub const stick_step = 0.5;
-
 /// How many fonts the interface can have: `font`, and the ones `addFont`
 /// gives it.
 pub const max_fonts = 16;
@@ -210,11 +207,12 @@ pub fn feed(
         if (layout.scrollHovered(across, -up)) input.wheel = .{};
     }
 
-    const pad = input.anyPad();
-    layout.holdNavigation(if (layout.focus != 0) padDirection(pad) else null);
-
-    const accept = input.isDown(.enter) or input.isDown(.kp_enter) or input.isDown(.space) or pad.down(.a);
-    layout.setActivate(accept and !layout.wantsKeyboard());
+    // The focus moves by the `ui_*` actions, held to repeat, once it is on
+    // something that takes it - until then the arrows are the game's. While
+    // a field has the keys for typing, only a controller moves it.
+    const typing = layout.wantsKeyboard();
+    layout.holdNavigation(if (layout.navigable()) heldDirection(input, typing) else null);
+    layout.setActivate(input.actionDown("ui_accept") and !typing);
 }
 
 /// How far a turn of the wheel scrolls, in pixels, sideways and up: notches
@@ -242,8 +240,6 @@ fn receive(gpa: Allocator, layout: *ui.Ui, clipboard: *Clipboard, typed: Input.T
                 _ = layout.navigate(if (k.mods.shift) .previous else .next);
             } else if (layout.wantsKeyboard()) {
                 try edit(gpa, layout, clipboard, k);
-            } else if (layout.focus != 0) {
-                if (arrow(k.key)) |toward| _ = layout.navigate(toward);
             }
         },
     }
@@ -302,26 +298,26 @@ pub fn command(k: platform.event.KeyEvent) bool {
     return k.mods.control;
 }
 
-fn arrow(key: platform.Key) ?ui.Navigation {
-    return switch (key) {
-        .up => .up,
-        .down => .down,
-        .left => .left,
-        .right => .right,
-        else => null,
+/// The way `ui_left`, `ui_right`, `ui_up` and `ui_down` point, the
+/// strongest of them; `typing` leaves out what the keyboard holds.
+fn heldDirection(input: *const Input, typing: bool) ?ui.Navigation {
+    const names = [_]struct { []const u8, ui.Navigation }{
+        .{ "ui_up", .up },
+        .{ "ui_down", .down },
+        .{ "ui_left", .left },
+        .{ "ui_right", .right },
     };
-}
-
-fn padDirection(pad: Input.Pad) ?ui.Navigation {
-    if (pad.down(.dpad_up)) return .up;
-    if (pad.down(.dpad_down)) return .down;
-    if (pad.down(.dpad_left)) return .left;
-    if (pad.down(.dpad_right)) return .right;
-
-    const stick = pad.stick(.left);
-    if (@abs(stick.x) < stick_step and @abs(stick.y) < stick_step) return null;
-    if (@abs(stick.x) > @abs(stick.y)) return if (stick.x < 0) .left else .right;
-    return if (stick.y < 0) .up else .down;
+    var best: ?ui.Navigation = null;
+    var most: f32 = 0;
+    for (names) |each| {
+        const entry = input.actions.findConst(each[0]) orelse continue;
+        const strength = if (typing) entry.state.strength_off_keys else entry.state.strength;
+        if (strength > most) {
+            most = strength;
+            best = each[1];
+        }
+    }
+    return best;
 }
 
 /// Measure the interface's text the way the renderer draws it: each run in
@@ -465,6 +461,12 @@ fn keyDown(key: platform.Key, mods: platform.Mods) platform.Event {
     return keyOn(key, key, mods);
 }
 
+fn keyUp(key: platform.Key) platform.Event {
+    var event = keyOn(key, key, .{});
+    event.key.action = .release;
+    return event;
+}
+
 fn character(codepoint: u21) platform.Event {
     return .{ .char = .{ .window = .none, .codepoint = codepoint, .mods = .{} } };
 }
@@ -488,16 +490,20 @@ const Fixture = struct {
     fn init() Fixture {
         var layout: ui.Ui = .init(testing.allocator);
         layout.setMeasurer(.monospace(0.5, 1));
-        return .{ .layout = layout };
+        var input: Input = .{};
+        input.actions.reset(testing.allocator, &.{}) catch @panic("out of memory");
+        return .{ .layout = layout, .input = input };
     }
 
     fn deinit(self: *Fixture) void {
+        self.input.deinit(testing.allocator);
         self.interface.deinit();
         self.clipboard.deinit(testing.allocator);
         self.layout.deinit();
     }
 
     fn feed(self: *Fixture, dt: f32) !void {
+        self.input.updateActions();
         try self.interface.feed(testing.allocator, &self.layout, &self.input, &self.clipboard, dt);
     }
 
@@ -602,6 +608,7 @@ test "the arrows are the game's until the interface has the focus" {
     try fixture.frame(twoButtons);
     try testing.expect(!fixture.layout.isFocused("play"));
     try testing.expect(!fixture.layout.isFocused("quit"));
+    fixture.input.apply(keyUp(.down));
 
     fixture.input.apply(keyDown(.tab, .{}));
     try fixture.frame(twoButtons);

@@ -38,7 +38,7 @@
 | `schedule` | When a game's systems run. |
 | `components` | What the renderer knows how to read. |
 | `assets` | What the GPU is holding, and the handles that name it. |
-| `Input` | What the keyboard, the mouse and the controllers did. |
+| `Input` | What the keyboard, the mouse and the controllers did, and the game's actions they set off. |
 | `Time` | How long the last frame took, and the fixed step. |
 | `color` | A colour, and the three ways to write one down. |
 | `Window` | The window and the event queue. |
@@ -393,6 +393,63 @@ editor without the game's components must not lose the game's connections.
   the same way, and heard by neither.
 - **One whose `from` or `to` is nowhere** is passed over, and counted in
   `loaded.connections_skipped`.
+
+## 🕹️ Actions
+
+```zig
+if (app.input.actionJustPressed("jump")) jump();
+const walk = app.input.actionVector("move_left", "move_right", "move_up", "move_down");
+var words: [32]u8 = undefined;
+const key = app.input.describeAction(&words, "interact");   // "E", or "Pad X" on a controller
+
+try app.input.actions.bind(gpa, "jump", .keyOf(.j));         // the player's own keys
+try app.saveInputMap("user://input.json");                   // kept, and read back with loadInputMap
+```
+
+```json
+"input": { "actions": [
+  { "name": "jump", "bindings": [ { "type": "key", "key": "space" }, { "type": "pad_button", "button": "a" } ] },
+  { "name": "move_left", "deadzone": 0.2, "bindings": [ { "type": "key", "key": "a" }, { "type": "pad_axis", "axis": "left_x", "direction": "negative" } ] }
+] }
+```
+
+- **A game asks for what the player means, not for a key.** An action is a
+  name and the inputs that set it off - keys, mouse buttons, a controller's
+  buttons, a way a stick or a trigger is pushed - in the project file's
+  `input` section, which the editor's Input Map tab writes. A key is bound
+  where it sits on a US layout, which is what WASD wants, or with
+  `"physical": false` by the letter the player's layout puts on it; a
+  controller's input on any controller, or with `"pad"` on one.
+- **An action is down while any of its inputs is.** Its edges are its own:
+  a second key pressed while the first is held is no new press, and letting
+  go of one of two is no release. A tap inside one frame is a press and a
+  release, and a `.fixed` system hears each exactly once, as it does a key's.
+- **How far, as well as whether**: `actionStrength` is one for a key, and
+  for a stick or a trigger how far past the action's dead zone it is, from
+  nought to one. `actionAxis` makes two actions an axis, and `actionVector`
+  four of them a direction no longer than one, up negative.
+- **Held from code**: `pressAction("fire", 1)` holds an action down, with its
+  edge, until `releaseAction` - what a button on a touch screen does.
+- **Six are always there**: `ui_accept`, `ui_cancel`, `ui_left`,
+  `ui_right`, `ui_up` and `ui_down`, what the interface moves by. A
+  project's action of the same name takes the place of one.
+- **The player can change them.** `app.input.actions` is where the game's
+  actions stand as it runs - `bind`, `unbind`, `unbindAll`, `setDeadzone`,
+  `add`, `rename` - and `saveInputMap` keeps them in a file of the player's
+  own. `loadInputMap` takes what it says of the actions the game still has,
+  and passes over the rest, so a save from before an update still reads.
+- **Named as the player last used them**: `describeAction` says the input on
+  the keyboard or the controller, whichever was pressed last, for "Press E to
+  open".
+- **From a script**: `app.actionDown`, `actionJustPressed`,
+  `actionJustReleased`, `actionStrength`, `actionAxis`, `actionVector`,
+  `pressAction`, `releaseAction`, `describeAction`, `saveInputMap` and
+  `loadInputMap`. Inside the quotes of any of them, the language service
+  `app.scriptSetup()` sets up offers the project's actions by name, each
+  with its inputs - so an editor completes `app.actionDown("ju` to `jump`.
+- **A program whose keys are its own** - an editor - leaves
+  `Options.project_input` off, and moves round its interface with the six
+  alone.
 
 ## 🎮 Controllers and the pointer
 
@@ -930,11 +987,14 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   system can ask `app.ui.wantsPointer()` and `wantsKeyboard()` about this
   frame. The wheel goes to the list under the pointer first, and only what the
   interface did not use reaches `input.wheel`.
-- **The keys it takes.** Tab always moves the focus. The arrows, a d-pad and
-  the left stick move it only once something has it, so a game keeps them
-  until a menu takes the focus with `app.ui.setFocus`. Enter, Space and a
-  pad's A press what has it, and typing and the editing keys reach a text
-  input that has it. Ctrl+C, Ctrl+X and Ctrl+V go through the system
+- **The keys it takes.** Tab always moves the focus. The `ui_left`,
+  `ui_right`, `ui_up` and `ui_down` actions - the arrows, a d-pad and the
+  left stick, unless the project says otherwise - move it, held to repeat,
+  only once something that takes the focus has it, so a game keeps them
+  until a menu takes the focus with `app.ui.setFocus`. While a text input
+  has it, only a controller moves it on. `ui_accept` - Enter, Space and a
+  pad's A - presses what has it, and typing and the editing keys reach a
+  text input that has it. Ctrl+C, Ctrl+X and Ctrl+V go through the system
   clipboard - see [the clipboard](#-the-clipboard) - so text moves between a
   text input and every other program. AltGr is never Ctrl: AltGr and V types
   `@` on a Hungarian keyboard, and Ctrl+Alt+V still pastes.
@@ -2088,6 +2148,9 @@ Here, and checked by the tests:
   edges that a fixed step hears exactly once.
 - Controls as data: an `AxisBinding` holds two keys, a second two, a stick
   and a d-pad, lives in a component and saves with the world.
+- Actions: named in the project, their edges their own, strengths past a
+  dead zone, held from code, rebound and kept in the player's own file, and
+  the interface moved by six built-in ones.
 - A timer as a component, with `timeout` and `app.createTimer`;
   `app.single` for the component there is
   one of, and engine shortcuts for quitting and fullscreen, off unless asked
@@ -2220,24 +2283,14 @@ In order, and the order is an argument rather than a wish list: each of these
 either unblocks the one after it or is the thing most missed by somebody
 trying to finish a game with what is here.
 
-### 1. Controls a player can change
-
-The keys are written into the game today - `pong` puts them in a component,
-which is better than most and still means the game knows what a key is. What
-belongs in the engine is an action map: a name, the keys and buttons and stick
-axes bound to it, and `input.action("jump")`. The controllers are read
-already, and an `AxisBinding` takes a stick and a d-pad beside its keys; what
-is missing is the name between a control and what it does, and a way for the
-player to change it.
-
-### 2. Interface anchored to the world
+### 1. Interface anchored to the world
 
 The layer is here. What a game's interface still wants from fluxion-ui is
 interface floating over a point in the world - health bars, name plates -
 which needs an id scope so forty of them can share one declaration, state per
 element so a menu can animate, and nine-slice pictures.
 
-### 3. The 3D pass
+### 2. The 3D pass
 
 Meshes, a depth attachment, a `Camera3D`, and the pass drawn before the 2D one
 into the same target. The place it goes is marked in `App.drawLayers`, and

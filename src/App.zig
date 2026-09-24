@@ -174,6 +174,11 @@ pub const Options = struct {
     /// whose window is its own and not the game's, leaves it off.
     project_icon: bool = true,
 
+    /// Take the project file's actions, over the built-in ones. An editor,
+    /// whose keys are its own and not the game's, leaves it off, and moves
+    /// round its interface with the built-in ones alone.
+    project_input: bool = true,
+
     /// What files are read with and the clock is read from. Null means no
     /// files and a fixed step, as in a test.
     io: ?std.Io = null,
@@ -569,6 +574,8 @@ scripts: ?*script_mod.Scripts = null,
 types: reflect.Registry,
 
 input: Input = .{},
+/// `describeAction`'s words, for the call that asked.
+described: [64]u8 = undefined,
 schedule: Schedule = .empty,
 
 /// The game's own states: menu, playing, paused. See `states.zig`.
@@ -722,6 +729,10 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             return err;
         };
     }
+    // The project's actions over the built-in ones.
+    const project_actions: []const Input.Action = if (!options.project_input) &.{} else if (self.project.settings) |held| held.input.actions else &.{};
+    try self.input.actions.reset(gpa, project_actions);
+    errdefer self.input.deinit(gpa);
     // The project's physics, or the game's with no project file.
     if (self.project.settings) |held| self.physics_2d = held.physics_2d;
     self.physics.gravity = self.physics_2d.gravity();
@@ -945,6 +956,7 @@ pub fn destroy(self: *App) void {
 
     // First, while everything a script's handle points at is still there.
     if (self.scripts) |scripts| scripts.calls.destroy(scripts);
+    self.input.deinit(gpa);
     self.schedule.deinit(gpa);
     self.states.deinit(gpa);
     self.snapshots.deinit(gpa);
@@ -1284,6 +1296,9 @@ pub fn step(self: *App) anyerror!bool {
             try self.adoptSize(window.width, window.height);
         }
     }
+    // Every action from this frame's keys, buttons and sticks, for the
+    // interface and the first system alike.
+    self.input.updateActions();
     self.fitInterface();
 
     // In the background - an Android app switched away from, a page hidden -
@@ -3710,6 +3725,17 @@ pub const reflect_methods = .{
     .applyScale,
     .keyDown,
     .keyAxis,
+    .actionDown,
+    .actionJustPressed,
+    .actionJustReleased,
+    .actionStrength,
+    .actionAxis,
+    .actionVector,
+    .pressAction,
+    .releaseAction,
+    .describeAction,
+    .saveInputMap,
+    .loadInputMap,
     .isOnFloor,
     .cellAt,
     .tileData,
@@ -4215,6 +4241,78 @@ pub fn keyAxis(self: *const App, negative: []const u8, positive: []const u8) f32
     if (self.keyDown(negative)) value -= 1;
     if (self.keyDown(positive)) value += 1;
     return value;
+}
+
+/// `input.actionDown`, for a script: whether the action is down.
+pub fn actionDown(self: *const App, name: []const u8) bool {
+    return self.input.actionDown(name);
+}
+
+/// `input.actionJustPressed`: whether it went down this frame, or since the
+/// last fixed step inside `fixed`.
+pub fn actionJustPressed(self: *const App, name: []const u8) bool {
+    return self.input.actionJustPressed(name);
+}
+
+pub fn actionJustReleased(self: *const App, name: []const u8) bool {
+    return self.input.actionJustReleased(name);
+}
+
+/// How far down the action is, from nought to one.
+pub fn actionStrength(self: *const App, name: []const u8) f32 {
+    return self.input.actionStrength(name);
+}
+
+/// Two actions as one axis, from -1 to 1.
+pub fn actionAxis(self: *const App, negative: []const u8, positive: []const u8) f32 {
+    return self.input.actionAxis(negative, positive);
+}
+
+/// Four actions as a direction no longer than one, up negative.
+pub fn actionVector(self: *const App, left: []const u8, right: []const u8, up: []const u8, down: []const u8) math.Vec2 {
+    return self.input.actionVector(left, right, up, down);
+}
+
+/// Hold an action down from code, at `strength` from nought to one, until
+/// `releaseAction`: a button on a touch screen.
+pub fn pressAction(self: *App, name: []const u8, strength: f32) error{NoSuchAction}!void {
+    return self.input.pressAction(name, strength);
+}
+
+pub fn releaseAction(self: *App, name: []const u8) error{NoSuchAction}!void {
+    return self.input.releaseAction(name);
+}
+
+/// What the player presses for an action, in words - `Space`, `Pad A` - on
+/// what they last used. See `Input.describeAction`.
+pub fn describeAction(self: *App, name: []const u8) []const u8 {
+    return self.input.describeAction(&self.described, name);
+}
+
+/// Keep what the player changed of the actions in a file of its own - as
+/// `user://input.json` - to read back with `loadInputMap`. Written whole or
+/// not at all.
+pub fn saveInputMap(self: *App, path: []const u8) !void {
+    const text = try self.input.actions.write(self.gpa);
+    defer self.gpa.free(text);
+    try self.writeText(path, text);
+}
+
+/// Take what a file `saveInputMap` wrote says of the game's actions. False
+/// when there is no file yet - the first run - and the actions stay as the
+/// project has them. An action the game no longer has is passed over.
+pub fn loadInputMap(self: *App, path: []const u8) !bool {
+    const text = self.readText(self.gpa, path) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer self.gpa.free(text);
+    var diagnostics: json.Diagnostics = .{};
+    _ = self.input.actions.read(self.gpa, text, &diagnostics) catch |err| {
+        if (err != error.OutOfMemory) log.warn("{s}: {f}", .{ path, diagnostics });
+        return err;
+    };
+    return true;
 }
 
 /// Whether an entity stands on a floor: something facing up under the bottom
@@ -7573,6 +7671,52 @@ test "a game's files are read, written whole, listed and taken out, under user:/
     const notes = try app.readText(testing.allocator, "res://notes.txt");
     defer testing.allocator.free(notes);
     try testing.expectEqualStrings("hello", notes);
+}
+
+test "a project's actions are the game's, over the built-in ones, and the player's changes are kept apart" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    try files.tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data =
+        \\{ "fluxion_project": 2, "application": { "name": "Keys" },
+        \\  "input": { "actions": [
+        \\    { "name": "jump", "bindings": [ { "type": "key", "key": "space" }, { "type": "pad_button", "button": "a" } ] },
+        \\    { "name": "ui_accept", "bindings": [ { "type": "key", "key": "j" } ] } ] } }
+    });
+    const saves = try std.fs.path.join(testing.allocator, &.{ try files.at(), "saves" });
+    defer testing.allocator.free(saves);
+
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = try files.at(), .user_root = saves });
+    defer app.destroy();
+    try testing.expectEqual(@as(usize, 2), app.input.actions.get("jump").?.bindings.len);
+    try testing.expect(app.input.actions.get("ui_accept").?.bindings[0].eql(.keyOf(.j)));
+
+    app.input.apply(.{ .key = .{ .window = .none, .key = .space, .scancode = @enumFromInt(0), .action = .press, .mods = .{} } });
+    _ = try app.step();
+    try testing.expect(app.actionDown("jump"));
+    try testing.expect(app.actionJustPressed("jump"));
+    try testing.expectEqualStrings("Space", app.describeAction("jump"));
+    _ = try app.step();
+    try testing.expect(app.actionDown("jump"));
+    try testing.expect(!app.actionJustPressed("jump"));
+
+    // The player moves jump to W, and that is kept in a file of its own.
+    try testing.expect(!try app.loadInputMap("user://input.json"));
+    try testing.expect(app.input.actions.unbindAll("jump"));
+    try app.input.actions.bind(testing.allocator, "jump", .keyOf(.w));
+    try app.saveInputMap("user://input.json");
+
+    const again = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = try files.at(), .user_root = saves });
+    defer again.destroy();
+    try testing.expect(again.input.actions.get("jump").?.bindings[0].eql(.keyOf(.space)));
+    try testing.expect(try again.loadInputMap("user://input.json"));
+    try testing.expectEqual(@as(usize, 1), again.input.actions.get("jump").?.bindings.len);
+    try testing.expect(again.input.actions.get("jump").?.bindings[0].eql(.keyOf(.w)));
+
+    // A program whose keys are its own has the built-in actions alone.
+    const editor = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = try files.at(), .project_input = false });
+    defer editor.destroy();
+    try testing.expect(editor.input.actions.get("jump") == null);
+    try testing.expect(editor.input.actions.get("ui_accept").?.bindings[0].eql(.keyOf(.enter)));
 }
 
 test "a config file keeps a game's settings in user://, and is empty until there is one" {

@@ -51,7 +51,8 @@ const log = std.log.scoped(.fluxion_engine);
 pub const file_name = project_file.file_name;
 
 /// What a project file says, a section a field: `application`, `display`,
-/// `rendering`, `physics_2d`, `layer_names`, `gui`. See `project/settings.zig`.
+/// `rendering`, `physics_2d`, `layer_names`, `gui`, `input`. See
+/// `project/settings.zig`.
 pub const Settings = project_file.Settings;
 
 /// The project file's sections.
@@ -62,6 +63,7 @@ pub const Rendering = project_file.Rendering;
 pub const Physics2D = project_file.Physics2D;
 pub const LayerNames = project_file.LayerNames;
 pub const Gui = project_file.Gui;
+pub const InputMap = project_file.InputMap;
 
 /// Which family of graphics APIs a project is drawn with, and its backends
 /// on each system.

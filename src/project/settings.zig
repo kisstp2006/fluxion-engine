@@ -40,6 +40,7 @@ const json = @import("fluxion_json");
 const math = @import("fluxion_math");
 
 const App = @import("../App.zig");
+const actions = @import("../actions.zig");
 const attr = @import("../attr.zig");
 const Color = @import("../color.zig").Color;
 const settings_file = @import("../settings_file.zig");
@@ -219,6 +220,36 @@ pub const Gui = struct {
     };
 };
 
+/// The game's actions and the inputs that set them off - over the built-in
+/// ones, of which one of the same name takes the place. An editor gives
+/// them a tab of their own rather than a page. See `actions.zig`.
+pub const InputMap = struct {
+    actions: []const actions.Action = &.{},
+
+    pub const reflect_attributes = .{ attr.Label{ .text = "Input Map" }, attr.Hidden{} };
+    pub const reflect_fields = .{
+        .actions = .{attr.Doc{ .text = "The game's actions: a name, a dead zone, and the keys, buttons and sticks that set it off." }},
+    };
+};
+
+test "a project's actions are written as the inputs they are, and read back the same" {
+    var settings: Settings = .{ .application = .{ .name = "Keys" } };
+    settings.input.actions = &.{.{ .name = "look", .deadzone = 0.25, .bindings = &.{ .padAxisOf(.right_x, .negative), .{ .key = .{ .key = .q, .physical = false } } } }};
+    const written = try settings_file.stringify(Settings, header, testing.allocator, &settings);
+    defer testing.allocator.free(written);
+    try testing.expect(std.mem.indexOf(u8, written, "\"type\": \"pad_axis\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"direction\": \"negative\"") != null);
+
+    var back = try settings_file.parse(Settings, header, testing.allocator, written, file_name, null);
+    defer back.deinit();
+    try testing.expectEqual(@as(usize, 1), back.input.actions.len);
+    const look = back.input.actions[0];
+    try testing.expectEqualStrings("look", look.name);
+    try testing.expectEqual(@as(f32, 0.25), look.deadzone);
+    try testing.expect(look.bindings[0].eql(.padAxisOf(.right_x, .negative)));
+    try testing.expect(look.bindings[1].eql(.{ .key = .{ .key = .q, .physical = false } }));
+}
+
 /// What a project file says: a section a field.
 pub const Settings = struct {
     application: Application = .{},
@@ -227,6 +258,7 @@ pub const Settings = struct {
     physics_2d: Physics2D = .{},
     layer_names: LayerNames = .{},
     gui: Gui = .{},
+    input: InputMap = .{},
     /// The memory the text above is kept in, and the file's keys this build
     /// has no section for.
     kept: settings_file.Kept = .{},

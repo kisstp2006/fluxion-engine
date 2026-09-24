@@ -124,6 +124,7 @@ pub const flux = @import("fluxion_script");
 const math = @import("fluxion_math");
 
 const App = @import("App.zig");
+const actions = @import("actions.zig");
 const attr = @import("attr.zig");
 const Project = @import("Project.zig");
 const signals = @import("signals.zig");
@@ -1400,9 +1401,72 @@ pub fn install(vm: *flux.Vm, app: flux.Value, files: flux.Value) Allocator.Error
 }
 
 /// For `App.scriptSetup`. An analysis only compiles, so `app` is a name
-/// with nothing behind it there.
+/// with nothing behind it there. Inside the quotes of a call that names an
+/// action, the project's actions are offered.
 pub fn serviceOptions(app: *App) flux.service.Options {
-    return .{ .setup = .{ .context = app, .run = installForAnalysis }, .io = app.io };
+    return .{
+        .setup = .{ .context = app, .run = installForAnalysis },
+        .io = app.io,
+        .strings = .{ .context = app, .values = stringValues },
+    };
+}
+
+/// `app`'s calls whose strings name an action, and whether every one of
+/// their arguments does or only the first.
+const action_calls = [_]struct { []const u8, bool }{
+    .{ "actionDown", false },
+    .{ "actionJustPressed", false },
+    .{ "actionJustReleased", false },
+    .{ "actionStrength", false },
+    .{ "actionAxis", true },
+    .{ "actionVector", true },
+    .{ "pressAction", false },
+    .{ "releaseAction", false },
+    .{ "describeAction", false },
+};
+
+/// What the string a call of `app`'s takes may say: an action's name, for
+/// the calls that take one - each with the inputs that set it off.
+fn stringValues(context: ?*anyopaque, arena: Allocator, argument: flux.service.StringArgument) Allocator.Error![]const flux.service.StringValue {
+    const app: *App = @ptrCast(@alignCast(context.?));
+    const receiver = argument.receiver orelse return &.{};
+    if (!std.mem.eql(u8, receiver, "app")) return &.{};
+    const every = for (action_calls) |each| {
+        if (std.mem.eql(u8, each[0], argument.callee)) break each[1];
+    } else return &.{};
+    if (!every and argument.arg != 0) return &.{};
+
+    // The project file's actions, over the built-in ones: an editor runs
+    // with the built-in ones alone, and a game with both.
+    var list: std.ArrayList(flux.service.StringValue) = .empty;
+    const project: []const actions.Action = if (app.project.settings) |held| held.input.actions else &.{};
+    for (actions.builtin) |builtin| {
+        const chosen = for (project) |action| {
+            if (std.mem.eql(u8, action.name, builtin.name)) break action;
+        } else builtin;
+        try list.append(arena, try actionValue(arena, chosen, "A built-in action, for moving round the interface."));
+    }
+    for (project) |action| {
+        if (actions.builtinNamed(action.name) != null) continue;
+        try list.append(arena, try actionValue(arena, action, null));
+    }
+    for (app.input.actions.list()) |*entry| {
+        const known = for (list.items) |value| {
+            if (std.mem.eql(u8, value.label, entry.name)) break true;
+        } else false;
+        if (!known) try list.append(arena, try actionValue(arena, entry.action(), null));
+    }
+    return list.items;
+}
+
+/// An action as a completion: its name, and its inputs as what it is.
+fn actionValue(arena: Allocator, action: actions.Action, doc: ?[]const u8) Allocator.Error!flux.service.StringValue {
+    var inputs: std.Io.Writer.Allocating = .init(arena);
+    for (action.bindings, 0..) |binding, i| {
+        if (i > 0) inputs.writer.writeAll(", ") catch return error.OutOfMemory;
+        inputs.writer.print("{f}", .{binding}) catch return error.OutOfMemory;
+    }
+    return .{ .label = action.name, .detail = if (action.bindings.len == 0) "no input yet" else inputs.written(), .doc = doc };
 }
 
 fn installForAnalysis(context: ?*anyopaque, vm: *flux.Vm) anyerror!void {

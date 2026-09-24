@@ -1197,3 +1197,76 @@ test "a script reads the game's files and keeps a save in the player's, and reac
     defer testing.allocator.free(kept);
     try testing.expectEqualStrings("meadow", kept);
 }
+
+test "a script asks for the game's actions, and holds one down as a button on the screen does" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    try app.input.actions.add(testing.allocator, .{ .name = "jump", .bindings = &.{.keyOf(.space)} });
+    const file = try app.addScript("jumper.flux",
+        \\var pressed = false;
+        \\var down = false;
+        \\var named = "";
+        \\var across = 0.0;
+        \\struct Jumper {
+        \\    fn ready(self) {
+        \\        app.pressAction("jump", 1.0) catch {};
+        \\    }
+        \\    fn update(self, dt: float) {
+        \\        if (app.actionJustPressed("jump")) pressed = true;
+        \\        down = app.actionDown("jump");
+        \\        named = app.describeAction("jump");
+        \\        across = app.actionVector("ui_left", "ui_right", "ui_up", "ui_down").x;
+        \\        app.releaseAction("jump") catch {};
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    app.input.apply(.{ .key = .{ .window = .none, .key = .right, .scancode = @enumFromInt(0), .action = .press, .mods = .{} } });
+    _ = try app.step();
+
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expect(global(app, file, "pressed").asBool());
+    try testing.expect(global(app, file, "down").asBool());
+    try testing.expectEqualStrings("Space", globalText(app, file, "named"));
+    try testing.expectEqual(@as(f64, 1), global(app, file, "across").asFloat());
+    try testing.expect(!app.actionDown("jump"));
+}
+
+test "an editor's analysis offers the project's actions inside the quotes of a call that names one" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "project.fluxion", .data =
+        \\{ "fluxion_project": 2, "application": { "name": "Keys" },
+        \\  "input": { "actions": [ { "name": "jump", "bindings": [ { "type": "key", "key": "space" } ] } ] } }
+    });
+    // An editor's app: its own actions are the built-in ones alone.
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root, .project_input = false });
+    defer app.destroy();
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const Case = struct { source: []const u8, offered: bool };
+    for ([_]Case{
+        .{ .source = "struct Hero { fn update(self, dt: float) { if (app.actionDown(\"ju$\")) {} } }", .offered = true },
+        .{ .source = "struct Hero { fn update(self, dt: float) { _ = app.actionAxis(\"ui_left\", \"$\"); } }", .offered = true },
+        // A strength is no action's name, nor is what `find` looks for.
+        .{ .source = "struct Hero { fn ready(self) { app.pressAction(\"jump\", \"$\"); } }", .offered = false },
+        .{ .source = "struct Hero { fn ready(self) { _ = app.find(\"$\"); } }", .offered = false },
+    }) |case| {
+        const where = std.mem.indexOfScalar(u8, case.source, '$').?;
+        const source = try std.mem.concat(arena, u8, &.{ case.source[0..where], case.source[where + 1 ..] });
+        const found = try flux.service.complete(testing.allocator, arena, "hero.flux", source, @intCast(where), app.scriptSetup());
+        var jump: ?flux.service.Item = null;
+        var accept = false;
+        for (found.items) |item| {
+            if (std.mem.eql(u8, item.label, "jump")) jump = item;
+            if (std.mem.eql(u8, item.label, "ui_accept")) accept = true;
+        }
+        try testing.expectEqual(case.offered, jump != null);
+        try testing.expectEqual(case.offered, accept);
+        if (jump) |item| try testing.expectEqualStrings("Space", item.detail);
+    }
+}
