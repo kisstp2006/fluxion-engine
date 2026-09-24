@@ -75,6 +75,10 @@ pub const ProjectFile = struct {
     kind: ?AssetKind = null,
 };
 
+/// Text that names one of the project's audio buses - `audio.buses` - which
+/// an editor offers to choose from.
+pub const AudioBus = struct {};
+
 /// A setting that has to say something: a project's name.
 pub const Required = struct {};
 

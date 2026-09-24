@@ -290,6 +290,13 @@ pub const Binding = actions.Binding;
 
 /// A component that counts down and says `timeout`. See `timer.zig`.
 pub const Timer = @import("timer.zig").Timer;
+/// Sound: clips, the players that play them, and the project's buses. See
+/// `audio.zig`.
+pub const audio = @import("audio.zig");
+pub const AudioPlayer = audio.AudioPlayer;
+pub const AudioSpatial2D = audio.AudioSpatial2D;
+pub const AudioListener2D = audio.AudioListener2D;
+pub const AudioClipHandle = audio.AudioClipHandle;
 pub const scenes = @import("scenes.zig");
 pub const SceneHandle = scenes.SceneHandle;
 pub const data = @import("data.zig");
@@ -404,6 +411,8 @@ test {
     _ = @import("exports.zig");
     _ = @import("file_table.zig");
     _ = @import("data.zig");
+    _ = @import("audio.zig");
+    _ = @import("audio_test.zig");
     _ = @import("background.zig");
     _ = @import("scenes_test.zig");
     _ = @import("script.zig");

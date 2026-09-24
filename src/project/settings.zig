@@ -41,6 +41,7 @@ const math = @import("fluxion_math");
 
 const App = @import("../App.zig");
 const actions = @import("../actions.zig");
+const audio = @import("../audio.zig");
 const attr = @import("../attr.zig");
 const Color = @import("../color.zig").Color;
 const settings_file = @import("../settings_file.zig");
@@ -220,6 +221,19 @@ pub const Gui = struct {
     };
 };
 
+/// How the game's sound is mixed. See `audio.zig`.
+pub const Audio = struct {
+    /// The buses sound is mixed on, each into the one it sends to, and all
+    /// at last into `Master`, which is always there: one of that name here
+    /// says its volume.
+    buses: []const audio.Bus = &.{},
+
+    pub const reflect_attributes = .{attr.Label{ .text = "Audio" }};
+    pub const reflect_fields = .{
+        .buses = .{attr.Doc{ .text = "Each with its volume and the bus it goes into; Master is always there." }},
+    };
+};
+
 /// The game's actions and the inputs that set them off - over the built-in
 /// ones, of which one of the same name takes the place. An editor gives
 /// them a tab of their own rather than a page. See `actions.zig`.
@@ -256,6 +270,7 @@ pub const Settings = struct {
     display: Display = .{},
     rendering: Rendering = .{},
     physics_2d: Physics2D = .{},
+    audio: Audio = .{},
     layer_names: LayerNames = .{},
     gui: Gui = .{},
     input: InputMap = .{},

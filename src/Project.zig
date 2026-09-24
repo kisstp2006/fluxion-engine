@@ -61,6 +61,7 @@ pub const Display = project_file.Display;
 pub const Rendering = project_file.Rendering;
 /// How a 2D world moves: `physics_2d` in the project file.
 pub const Physics2D = project_file.Physics2D;
+pub const Audio = project_file.Audio;
 pub const LayerNames = project_file.LayerNames;
 pub const Gui = project_file.Gui;
 pub const InputMap = project_file.InputMap;

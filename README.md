@@ -676,6 +676,50 @@ try app.signal(fuse, fx.Timer, .timeout).connectFn(explode, .{});
 - **`app.createTimer(seconds)`** makes a one-shot timer on an entity of its
   own, which goes once it has said `timeout`.
 
+## 🔊 Sound
+
+```zig
+const door = try app.loadAudio("res://sounds/door.ogg");       // .wav, .ogg or .mp3
+const creak = try app.world.spawnWith(.{ fx.Transform2D.at(400, 300), fx.AudioPlayer{ .clip = door }, fx.AudioSpatial2D{} });
+app.world.get(creak, fx.AudioPlayer).?.play(0);                 // from the start, at the next audio pass
+try app.signal(creak, fx.AudioPlayer, .finished).connect(.method(creak, "_on_creak_finished"), .{});
+_ = app.setBusVolumeDb("Music", app.linearToDb(0.5));            // a settings screen's slider
+```
+
+- **A sound is a file**: `loadAudio` reads a WAV, an Ogg Vorbis or an MP3
+  once and gives an `AudioClipHandle`, which a component holds and a scene
+  writes as its path. Vorbis and MP3 are decoded as they play, so a long piece
+  of music is never all samples at once; an MP3's encoder silence is left
+  out, so one that loops goes round without a gap. `audioLength(clip)` says
+  how long one is.
+- **An `AudioPlayer` plays one**, and is data: `clip`, `volume_db`, `pitch`
+  (faster and higher above 1, as a record sped up - cheap enough for a
+  sound a little different each time), `bus`, `autoplay`, `loop` and
+  `paused`. `play(from)`, `stop()` and `seek(to)` ask the engine's audio
+  pass, once a frame after the game's `.late` systems; `playing` and
+  `position` say what it found; `finished` is said when a sound that does not
+  loop comes to its end.
+- **It plays while its entity runs.** A paused game's sounds are held where
+  they are - but for those whose `Processing` runs while it is paused, a pause
+  menu's music - and a frame with no time starts none: an editor never plays
+  the scene it edits. A player read back from a save made while it played
+  goes on from where it was.
+- **In the world**, with an `AudioSpatial2D` beside it, a player is quieter
+  the farther it is from the listener, to silence at `max_distance`, and
+  panned to its side. The listener is the `AudioListener2D` that is
+  `current`, or the middle of what the camera shows.
+- **Buses** are the project file's `audio.buses`: each with its volume in
+  decibels, muted or not, and the bus it sends into; `Master` is always there
+  and everything ends in it. `setBusVolumeDb`, `busVolumeDb`, `setBusMute`,
+  `isBusMuted`, and `linearToDb` and `dbToLinear` for a slider - from Zig and
+  from Flux.
+- **On the machine's sound card** - WASAPI on Windows, ALSA on Linux,
+  OpenSL ES on Android - through
+  [Fluxion Audio](https://github.com/kisstp2006/fluxion-audio). With none,
+  and always headless, each frame's sound is mixed and heard nowhere, so
+  `finished` and `position` are the same everywhere and a test can listen to
+  how loud a frame was; `Options.audio = .silent` asks for that on purpose.
+
 ## 📱 In the background
 
 ```zig
@@ -1425,7 +1469,7 @@ const path = app.assetSource(sprite.texture) orelse "made in memory";          /
 ```
 
 - **Every kind of file is one entry in `fx.AssetKind`**: textures, fonts,
-  scenes, scripts, tile sets, themes and data files - what each is called, the endings
+  scenes, scripts, tile sets, themes, data files and sounds - what each is called, the endings
   of its files, and the handle a component holds one by
   (`AssetKind.Handle(.texture)`, `AssetKind.of(fx.TextureHandle)`).
   `app.assetSource`, `app.loadAsset` and `app.findAsset` take any handle
@@ -2386,8 +2430,6 @@ before this package existed - the seam was cut for it deliberately.
 
 ## 💭 Not on the list yet
 
-- **Audio.** There is no `fluxion-audio`, and it is a library and a set of
-  platform backends rather than an afternoon in this repository.
 - **Resources** - a typed store for state that is not a component. A singleton
   entity is the answer today - `app.single(Score)` finds it - it saves and
   loads with the world for free, and the case for a second mechanism has not

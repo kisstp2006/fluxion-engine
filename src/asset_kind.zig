@@ -20,6 +20,7 @@ const testing = std.testing;
 
 const Assets = @import("assets.zig");
 const data = @import("data.zig");
+const audio = @import("audio.zig");
 const scenes = @import("scenes.zig");
 const script = @import("script.zig");
 const theme = @import("theme.zig");
@@ -33,6 +34,7 @@ pub const AssetKind = enum {
     tileset,
     theme,
     data,
+    audio,
 
     /// What a person calls one.
     pub fn label(self: AssetKind) []const u8 {
@@ -44,6 +46,7 @@ pub const AssetKind = enum {
             .tileset => "tile set",
             .theme => "theme",
             .data => "data file",
+            .audio => "sound",
         };
     }
 
@@ -57,6 +60,7 @@ pub const AssetKind = enum {
             .tileset => "A tile set",
             .theme => "A theme",
             .data => "Values for a Flux struct",
+            .audio => "A WAV, Ogg Vorbis or MP3 file",
         };
     }
 
@@ -70,6 +74,7 @@ pub const AssetKind = enum {
             .tileset => "res://tiles/terrain.tileset",
             .theme => "res://ui/game.theme",
             .data => "res://dialogue/intro.data",
+            .audio => "res://sounds/door.ogg",
         };
     }
 
@@ -83,6 +88,7 @@ pub const AssetKind = enum {
             .tileset => &.{".tileset"},
             .theme => &.{".theme"},
             .data => &.{data.extension},
+            .audio => &audio.extensions,
         };
     }
 
@@ -110,6 +116,7 @@ pub const AssetKind = enum {
             .tileset => tileset.TileSetHandle,
             .theme => theme.ThemeHandle,
             .data => data.DataHandle,
+            .audio => audio.AudioClipHandle,
         };
     }
 
@@ -122,7 +129,7 @@ pub const AssetKind = enum {
     }
 
     /// Every kind a component can hold a file of: the ones with a handle.
-    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data };
+    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio };
 };
 
 test "a file's kind is its ending's, whatever its case, and a scene's JSON is not said by its name" {
@@ -131,6 +138,7 @@ test "a file's kind is its ending's, whatever its case, and a scene's JSON is no
     try testing.expectEqual(AssetKind.theme, AssetKind.ofPath("game" ++ theme.extension).?);
     try testing.expectEqual(AssetKind.scene, AssetKind.ofPath("res://levels/one.cbor").?);
     try testing.expectEqual(AssetKind.data, AssetKind.ofPath("res://dialogue/intro.data").?);
+    try testing.expectEqual(AssetKind.audio, AssetKind.ofPath("res://music/theme.MP3").?);
     try testing.expect(AssetKind.ofPath("res://levels/one.json") == null);
     try testing.expect(AssetKind.ofPath("notes.md") == null);
 }

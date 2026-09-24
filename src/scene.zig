@@ -938,9 +938,7 @@ fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T
             (if (field.defaultValue()) |default| !s.every_field and std.meta.eql(held.*, default) else false);
         if (!skip) {
             try w.key(field.name);
-            if (comptime T == Script and std.mem.eql(u8, field.name, "struct_name")) {
-                try w.writeString(value.structName());
-            } else try writeValue(s, w, field.type, held);
+            try writeValue(s, w, field.type, held);
         }
     }
     if (T == TileMap) try writeCells(s, w);
@@ -1000,6 +998,12 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
             try w.endObject();
         },
         .array => |info| {
+            // A name kept in the component - a `Script`'s struct, a player's
+            // bus - is the text before its first zero.
+            if (info.child == u8) {
+                const end = std.mem.indexOfScalar(u8, value, 0) orelse value.len;
+                return w.writeString(value[0..end]);
+            }
             try w.beginArray();
             for (value) |*item| try writeValue(s, w, info.child, item);
             try w.endArray();
@@ -2042,9 +2046,7 @@ fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
                 matched = true;
                 seen.set(i);
                 const mark = l.path.push("{s}", .{field.name});
-                if (comptime T == Script and std.mem.eql(u8, field.name, "struct_name")) {
-                    try readStructName(l, out);
-                } else try readValue(l, field.type, &@field(out.*, field.name));
+                try readValue(l, field.type, &@field(out.*, field.name));
                 l.path.pop(mark);
             }
         }
@@ -2065,16 +2067,16 @@ fn defaultTheRest(l: *Loading, comptime T: type, out: *T, seen: anytype) anyerro
     }
 }
 
-/// A `Script`'s struct name, written as the text it is.
-fn readStructName(l: *Loading, out: *Script) anyerror!void {
+/// A name kept in a component, written as the text it is.
+fn readName(l: *Loading, out: []u8) anyerror!void {
     const token = try l.next();
     const text = switch (token) {
         .string => |text| text,
-        else => return l.wrong("the name of a struct in the script", token),
+        else => return l.wrong("a name, as text", token),
     };
-    if (text.len > out.struct_name.len) return l.fail(error.OutOfRange, "a struct name is {d} bytes, and a Script holds {d}", .{ text.len, out.struct_name.len });
-    out.struct_name = @splat(0);
-    @memcpy(out.struct_name[0..text.len], text);
+    if (text.len > out.len) return l.fail(error.OutOfRange, "the name is {d} bytes, and {d} are kept", .{ text.len, out.len });
+    @memset(out, 0);
+    @memcpy(out[0..text.len], text);
 }
 
 fn readText(l: *Loading, out: anytype) anyerror!void {
@@ -2200,7 +2202,7 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
             try readValue(l, info.child, &inner);
             out.* = inner;
         },
-        .array => |info| try readItems(l, info.child, info.len, out),
+        .array => |info| if (info.child == u8) try readName(l, out) else try readItems(l, info.child, info.len, out),
         .vector => |info| {
             var items: [info.len]info.child = undefined;
             try readItems(l, info.child, info.len, &items);

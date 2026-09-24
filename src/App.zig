@@ -67,6 +67,7 @@ const tileset = @import("tileset.zig");
 const scene = @import("scene.zig");
 const scenes_mod = @import("scenes.zig");
 const data_mod = @import("data.zig");
+const audio_mod = @import("audio.zig");
 const exports_mod = @import("exports.zig");
 const background_mod = @import("background.zig");
 const signals_mod = @import("signals.zig");
@@ -250,6 +251,11 @@ pub const Options = struct {
     /// Worker threads for parallel queries. Null is one fewer than the cores.
     workers: ?u32 = null,
 
+    /// Where the game's sound goes: the machine's sound device, or - as
+    /// headless always does - mixed each frame and heard nowhere. See
+    /// `audio.zig`.
+    audio: audio_mod.Output = .auto,
+
     /// A hundred units to the metre, for a world measured in pixels: what
     /// the physics' tolerances are scaled by. The engine keeps its own
     /// rules whatever the rest says: gravity is `physics_2d`'s, two
@@ -421,6 +427,9 @@ themes: theme.Themes = .{},
 scenes: scenes_mod.Scenes = .{},
 /// Every data file read: see `loadData`.
 data_files: data_mod.DataFiles = .{},
+/// The sound device, the clips read, the project's buses and what the
+/// players play: see `audio.zig` and `loadAudio`.
+audio: audio_mod.Audio,
 /// The theme the project file names for every control, and the path it was
 /// read by: see `projectTheme`.
 project_theme: ProjectTheme = .{},
@@ -688,6 +697,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .uuid_source = undefined,
         .random_source = undefined,
         .scene_components = .{},
+        .audio = undefined,
         .signals = .init(gpa),
         .event_channels = .empty,
         .types = .init(gpa),
@@ -740,6 +750,13 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     const project_actions: []const Input.Action = if (!options.project_input) &.{} else if (self.project.settings) |held| held.input.actions else &.{};
     try self.input.actions.reset(gpa, project_actions);
     errdefer self.input.deinit(gpa);
+    // The sound device, and the project's buses on it.
+    self.audio = audio_mod.Audio.init(gpa, options.audio, options.headless, if (self.project.settings) |held| held.audio.buses else &.{}) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        // Nothing but a mixer that did not make itself: no sound at all.
+        else => error.Failed,
+    };
+    errdefer self.audio.deinit();
     // The project's physics, or the game's with no project file.
     if (self.project.settings) |held| self.physics_2d = held.physics_2d;
     self.physics.gravity = self.physics_2d.gravity();
@@ -769,6 +786,9 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Collider2D,
         components.Area2D,
         timer.Timer,
+        audio_mod.AudioPlayer,
+        audio_mod.AudioSpatial2D,
+        audio_mod.AudioListener2D,
         inherited_mod.Processing,
         inherited_mod.Appearance,
         tilemap.TileMap,
@@ -795,7 +815,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
+    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -982,6 +1002,7 @@ pub fn destroy(self: *App) void {
     self.loads.deinit(gpa);
     self.scenes.deinit(gpa);
     self.data_files.deinit(gpa);
+    self.audio.deinit();
     self.uuids.deinit(gpa);
     self.by_uuid.deinit(gpa);
     self.sibling_ranks.deinit(gpa);
@@ -1421,6 +1442,10 @@ pub fn step(self: *App) anyerror!bool {
     // drawing: whatever hung from something despawned goes with it, and then
     // the names of everything that died are given back.
     try self.despawnOrphans();
+    // Every player's sound as its component says, after everything that
+    // could say otherwise, and `finished` heard before the frame is drawn.
+    try self.audio.update(self);
+    try self.signals.drain(self);
     // The scripts of the dead, and of what lost its `Script`, hear `exit`
     // in the frame it happened.
     if (self.scripts) |scripts| {
@@ -2539,6 +2564,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .theme => self.themeSource(handle),
         .scene => self.sceneSource(handle),
         .data => self.dataSource(handle),
+        .audio => self.audioSource(handle),
     };
 }
 
@@ -2554,6 +2580,7 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .theme => self.loadTheme(path),
         .scene => self.loadScene(path),
         .data => self.loadData(path),
+        .audio => self.loadAudio(path),
     };
 }
 
@@ -2568,6 +2595,7 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .theme => self.findTheme(path),
         .scene => self.findScene(path),
         .data => self.findData(path),
+        .audio => self.findAudio(path),
     };
 }
 
@@ -2961,6 +2989,73 @@ pub fn reloadScene(self: *App, handle: scenes_mod.SceneHandle) !bool {
 
 pub fn unloadScene(self: *App, handle: scenes_mod.SceneHandle) void {
     self.scenes.unload(self.gpa, handle);
+}
+
+/// Read a sound's file - `.wav`, `.ogg` or `.mp3` - or find the one read
+/// from there already. What an `AudioPlayer` plays; see `audio.zig`.
+pub fn loadAudio(self: *App, path: []const u8) !audio_mod.AudioClipHandle {
+    return self.audio.load(self, path);
+}
+
+/// A sound from memory rather than a file: a test's, or a tool's. Its
+/// format is what its bytes say, or else its name's ending.
+pub fn addAudio(self: *App, name: []const u8, bytes: []const u8) !audio_mod.AudioClipHandle {
+    return self.audio.add(name, bytes);
+}
+
+/// The sound read from `path` already, if one was, however the path is
+/// spelt.
+pub fn findAudio(self: *App, path: []const u8) ?audio_mod.AudioClipHandle {
+    if (self.audio.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.audio.find(named);
+}
+
+pub fn audioSource(self: *App, handle: audio_mod.AudioClipHandle) ?[]const u8 {
+    return self.audio.sourceOf(handle);
+}
+
+/// Let a sound go, and every player playing it stop.
+pub fn unloadAudio(self: *App, handle: audio_mod.AudioClipHandle) void {
+    self.audio.unload(handle);
+}
+
+/// How long a sound is, in seconds: from Flux, `app.audioLength("res://door.ogg")`.
+pub fn audioLength(self: *App, clip: audio_mod.AudioClipHandle) f32 {
+    const held = self.audio.get(clip) orelse return 0;
+    return @floatCast(held.info.seconds());
+}
+
+/// Turn the bus called `name` up or down, in decibels. False for a bus the
+/// project has not.
+pub fn setBusVolumeDb(self: *App, name: []const u8, db: f32) bool {
+    return self.audio.setBusVolumeDb(name, db);
+}
+
+/// A bus's volume in decibels; `audio.silent_db` for one there is not.
+pub fn busVolumeDb(self: *App, name: []const u8) f32 {
+    return self.audio.busVolumeDb(name) orelse audio_mod.silent_db;
+}
+
+pub fn setBusMute(self: *App, name: []const u8, mute: bool) bool {
+    return self.audio.setBusMute(name, mute);
+}
+
+pub fn isBusMuted(self: *App, name: []const u8) bool {
+    return self.audio.isBusMuted(name);
+}
+
+/// A slider's 0 to 1 as decibels, and back: `app.setBusVolumeDb("Music",
+/// app.linearToDb(slider.value))`.
+pub fn linearToDb(self: *const App, linear: f32) f32 {
+    _ = self;
+    return audio_mod.linearToDb(linear);
+}
+
+pub fn dbToLinear(self: *const App, db: f32) f32 {
+    _ = self;
+    return audio_mod.dbToLinear(db);
 }
 
 /// Read a `.data` file, or find the one read from there already: see
@@ -3434,6 +3529,7 @@ pub fn clearWorld(self: *App) void {
     self.scene_roots.clearRetainingCapacity();
     self.scene_now = .none;
     self.signals.clear();
+    self.audio.clear();
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
 }
@@ -3577,6 +3673,7 @@ pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
     try self.tile_sets.renamed(self.gpa, old, new);
     try self.scenes.renamed(self.gpa, old, new);
     try self.data_files.renamed(self.gpa, old, new);
+    try self.audio.renamed(old, new);
     try self.themes.renamed(self.gpa, old, new);
     if (self.scripts) |scripts| try scripts.renamed(old, new);
 }
@@ -3809,6 +3906,13 @@ pub const reflect_methods = .{
     .instantiate,
     .changeScene,
     .readData,
+    .audioLength,
+    .setBusVolumeDb,
+    .busVolumeDb,
+    .setBusMute,
+    .isBusMuted,
+    .linearToDb,
+    .dbToLinear,
     .nextFrame,
     .callDeferred,
     .keyDown,
@@ -7228,7 +7332,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 31), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 34), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
     const physics = b.dependency("fluxion_physics", .{ .target = target, .optimize = optimize });
     const reflect = b.dependency("fluxion_reflect", .{ .target = target, .optimize = optimize });
     const script = b.dependency("fluxion_script", .{ .target = target, .optimize = optimize });
+    const audio = b.dependency("fluxion_audio", .{ .target = target, .optimize = optimize });
 
     // The two renderers below are built from their packages' source with this
     // package's rhi, font and shader, so that a `Device` stays one type:
@@ -76,6 +77,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "fluxion_physics", .module = physics.module("fluxion_physics") },
             .{ .name = "fluxion_reflect", .module = reflect.module("fluxion_reflect") },
             .{ .name = "fluxion_script", .module = script.module("fluxion_script") },
+            .{ .name = "fluxion_audio", .module = audio.module("fluxion_audio") },
         },
     });
 
