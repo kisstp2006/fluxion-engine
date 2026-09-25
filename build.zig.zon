@@ -50,8 +50,8 @@
         // Without this the same shader would be in this repository twice, in
         // two languages, drifting apart.
         .fluxion_shader = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-shader#44cdfeb8ff465a686648902617cae57945aa4630",
-            .hash = "fluxion_shader-0.1.0-FqFMEmBUBwDhmEqxZlq440f6AK4m9z_sT_A7iZYopwVo",
+            .url = "git+https://github.com/kisstp2006/fluxion-shader#881f930e8ce42470e7a1ebf2f2fe4f1ee31de22c",
+            .hash = "fluxion_shader-0.1.0-FqFMEr_2BwDkyRgbURZ7NmhleGbrBZb8X1jq7VMQ5nTz",
         },
 
         // Projections and matrices, and the one type that knows OpenGL's
