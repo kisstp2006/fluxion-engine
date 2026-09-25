@@ -34,6 +34,12 @@ pub fn idOf(buffer: []u8, entity: Entity) []const u8 {
     return std.fmt.bufPrint(buffer, "control-{d}-{d}", .{ entity.index, entity.generation }) catch "control";
 }
 
+/// Where something sits across the room it has: words in a label, a
+/// button's face, a box container's children.
+pub const AlignX = enum(u8) { left, center, right };
+/// The same, down.
+pub const AlignY = enum(u8) { top, center, bottom };
+
 pub const Size = extern struct {
     mode: Mode = .fit,
     value: f32 = 0,
@@ -265,8 +271,6 @@ pub const BoxContainer = extern struct {
     alignment_y: AlignY = .top,
 
     pub const Direction = enum(u8) { horizontal, vertical };
-    pub const AlignX = enum(u8) { left, center, right };
-    pub const AlignY = enum(u8) { top, center, bottom };
     pub const reflect_name = "BoxContainer";
 };
 
@@ -310,6 +314,8 @@ pub const ThemeOverride = extern struct {
     font_color: Color = .white,
     override_font_size: bool = false,
     font_size: u16 = 16,
+    override_font: bool = false,
+    font: Assets.FontHandle = .none,
     override_background: bool = false,
     background: Color = .black,
     override_border: bool = false,
@@ -358,6 +364,7 @@ pub const ThemeOverride = extern struct {
         var out: theme_file.Style = .{};
         if (self.override_font_color) out.font_color = self.font_color;
         if (self.override_font_size) out.font_size = self.font_size;
+        if (self.override_font) out.font = self.font;
         if (self.override_background) out.background = self.background;
         if (self.override_border) {
             out.border_color = self.border_color;
@@ -377,6 +384,10 @@ pub const Label = extern struct {
     outline_color: Color = .black,
     outline_width: u16 = 0,
     wrap: Wrap = .words,
+    /// Where the words sit in the label's box, and each line among the
+    /// others: a title across the top in the middle, a number on the right.
+    horizontal_alignment: AlignX = .left,
+    vertical_alignment: AlignY = .top,
 
     pub const Wrap = enum(u8) { words, newline, none };
     pub const reflect_name = "Label";
@@ -396,6 +407,9 @@ pub const Button = extern struct {
     button_pressed: bool = false,
     hovered: bool = false,
     held: bool = false,
+    /// Where its picture and words sit across its box. Down, they are in its
+    /// middle.
+    alignment: AlignX = .center,
 
     pub const reflect_name = "Button";
     pub const reflect_attributes = .{attr.Text{ .name = "text" }};
@@ -617,6 +631,12 @@ pub const Nodes = struct {
     /// drawn and tinted with the theme's words.
     check_mark: Assets.TextureHandle = .none,
     preview_ui: ?ui.Ui = null,
+    /// What an editor has picked while it draws a preview: a popup that is
+    /// shut is shown only while it, or something in it, is one of them.
+    preview_editing: []const Entity = &.{},
+    /// Where an editor's preview puts the game's screen: its size in the
+    /// interface's units, and its top left, the world's origin, in the same.
+    preview_canvas: ?struct { width: f32, height: f32, x: f32, y: f32 } = null,
     preview_interface: Interface = .{},
     enabled: bool = false,
 
@@ -691,6 +711,11 @@ pub const Nodes = struct {
                 } else if (app.world.get(entity, Viewport)) |viewport| {
                     if (!viewport.visible) continue;
                     try self.root(context, entity, viewport.space, viewport.width, viewport.height, viewport.layer);
+                } else if (context.view != null) {
+                    // A tree with no root of its own - a scene made to be put
+                    // under another's interface - is shown over the screen
+                    // in an editor, to be laid out.
+                    try self.root(context, entity, .screen, 0, 0, 0);
                 }
             }
         }
@@ -708,7 +733,7 @@ pub const Nodes = struct {
         if (!shown.visible) return;
         const own = context.at(entity);
         var declared = self.declaration(own, entity, control.*);
-        declared.opacity = shown.modulate.a;
+        declared.tint = color(shown.modulate);
         declared.z_index += layer;
         declared.floating = null;
         if (width > 0) declared.width = .fixed(width) else declared.width = .grow;
@@ -725,7 +750,14 @@ pub const Nodes = struct {
             if (space == .world) {
                 const place = app.worldTransform(entity) orelse return;
                 const at = context.view.?.toScreen(.init(place.x, place.y));
-                declared.floating = .{ .attach = .root, .offset = .{ .x = at.x - width / 2, .y = at.y - height / 2 }, .z_index = layer };
+                const scale = @max(self.preview_interface.scale, 0.0001);
+                declared.floating = .{ .attach = .root, .offset = .{ .x = at.x / scale - width / 2, .y = at.y / scale - height / 2 }, .z_index = layer };
+            } else if (self.preview_canvas) |canvas| {
+                // An editor's preview: the game's screen, where the world's
+                // origin is and as big as the view is zoomed.
+                declared.width = .fixed(canvas.width);
+                declared.height = .fixed(canvas.height);
+                declared.floating = .{ .attach = .root, .offset = .{ .x = canvas.x, .y = canvas.y }, .z_index = layer };
             } else declared.floating = .{ .attach = .root, .z_index = layer };
             layout.open(declared);
         }
@@ -755,10 +787,10 @@ pub const Nodes = struct {
     /// its own `Processing`'s, and its children's theirs.
     fn node(self: *Nodes, context: Context, entity: Entity, control: Control, depth: u8) anyerror!void {
         const app = context.app;
-        var opacity: f32 = 1;
+        var tint: Color = .white;
         if (app.world.get(entity, Appearance)) |looks| {
             if (!looks.visible) return;
-            opacity = looks.modulate.a;
+            tint = looks.modulate;
         }
         const own = context.at(entity);
         const popup = app.world.get(entity, Popup);
@@ -769,12 +801,13 @@ pub const Nodes = struct {
                 try app.signal(entity, Popup, .closed).emit(.{});
             }
             // An editor, which draws it without answering anything, shows it
-            // as it would be open, to be laid out.
-            if (!held.open and own.interactive) return;
+            // as it would be open while it or something in it is picked, to
+            // be laid out; the rest of the time as the game would.
+            if (!held.open and (own.interactive or !self.isEditing(app, entity))) return;
             if (own.interactive) held.was_open = true;
         }
         var declared = self.declaration(own, entity, control);
-        declared.opacity = opacity;
+        declared.tint = color(tint);
         if (popup) |held| {
             const z: i16 = 900 +| control.z_index;
             if (held.modal and own.interactive) context.layout.empty(.{
@@ -800,6 +833,19 @@ pub const Nodes = struct {
             const outside = layout.pointer.justPressed() and !layout.isPointerOver(self.idFor(entity));
             if ((held.close_on_click_outside and outside) or app.input.actionJustPressed("ui_cancel")) held.open = false;
         };
+    }
+
+    /// Whether an editor has picked `entity`, or something under it.
+    fn isEditing(self: *const Nodes, app: *App, entity: Entity) bool {
+        for (self.preview_editing) |picked| {
+            var at = picked;
+            for (0..64) |_| {
+                if (at.isNone() or !app.world.isAlive(at)) break;
+                if (at.eql(entity)) return true;
+                at = hierarchy.parentOf(&app.world, at);
+            }
+        }
+        return false;
     }
 
     /// The name a control is declared with, into the first of `names`.
@@ -844,6 +890,14 @@ pub const Nodes = struct {
             out.wrap_gap = box.wrap_separation;
             out.align_x = boxAlignX(box.alignment_x);
             out.align_y = boxAlignY(box.alignment_y);
+        }
+        if (app.world.get(entity, Label)) |label| {
+            out.align_x = boxAlignX(label.horizontal_alignment);
+            out.align_y = boxAlignY(label.vertical_alignment);
+        }
+        if (app.world.get(entity, Button)) |button| {
+            out.align_x = boxAlignX(button.alignment);
+            out.align_y = .center;
         }
         if (app.world.get(entity, MarginContainer)) |margin| out.padding = padding(margin.margin);
         if (app.world.get(entity, CenterContainer)) |center| {
@@ -892,15 +946,28 @@ pub const Nodes = struct {
             out.capture = true;
         }
         const asked: Focus = if (app.world.get(entity, Focus)) |own| own.* else .{ .mode = if (pressable) .all else .none };
-        if (asked.mode != .none and control.mouse_filter != .ignore) out.focus = .{
-            .tab_stop = asked.mode == .all,
-            .left = self.neighbour(app, 1, asked.left),
-            .right = self.neighbour(app, 2, asked.right),
-            .up = self.neighbour(app, 3, asked.up),
-            .down = self.neighbour(app, 4, asked.down),
-            .next = self.neighbour(app, 5, asked.next),
-            .previous = self.neighbour(app, 6, asked.previous),
-        };
+        if (asked.mode != .none and control.mouse_filter != .ignore) {
+            out.focus = .{
+                .tab_stop = asked.mode == .all,
+                .left = self.neighbour(app, 1, asked.left),
+                .right = self.neighbour(app, 2, asked.right),
+                .up = self.neighbour(app, 3, asked.up),
+                .down = self.neighbour(app, 4, asked.down),
+                .next = self.neighbour(app, 5, asked.next),
+                .previous = self.neighbour(app, 6, asked.previous),
+            };
+            // A slider keeps the focus along its own way, and the arrows
+            // and a pad move its value instead: see `sliderContent`.
+            if (app.world.get(entity, Slider)) |slider| {
+                if (slider.vertical) {
+                    out.focus.?.up = name;
+                    out.focus.?.down = name;
+                } else {
+                    out.focus.?.left = name;
+                    out.focus.?.right = name;
+                }
+            }
+        }
         if (roleOf(app, entity)) |role| {
             // A label is words, not a box: it takes the theme's text but none
             // of its background. Nor does a panel told not to draw one.
@@ -1045,11 +1112,21 @@ pub const Nodes = struct {
         }
     }
 
-    pub fn preview(self: *Nodes, app: *App, into: rhi.Texture, view: View, width: f32, height: f32, faces: Interface.Faces) !void {
+    pub fn preview(self: *Nodes, app: *App, into: rhi.Texture, view: View, width: f32, height: f32, faces: Interface.Faces, editing: []const Entity) !void {
+        self.preview_editing = editing;
+        defer self.preview_editing = &.{};
         if (self.preview_ui == null) self.preview_ui = .init(app.gpa);
         const layout = &self.preview_ui.?;
         if (faces.len > 0) layout.setMeasurer(Interface.measurer(&faces));
-        self.preview_interface.scale = app.interface.scale;
+        // The interface is laid out at the game's size and drawn as big as
+        // the world is: a view zoomed in shows it bigger, as it shows a
+        // sprite bigger.
+        const zoom = @max(view.zoom_x, 0.0001);
+        self.preview_interface.scale = zoom;
+        const size = app.gameSize();
+        const origin = view.toScreen(.zero);
+        self.preview_canvas = .{ .width = size[0], .height = size[1], .x = origin.x / zoom, .y = origin.y / zoom };
+        defer self.preview_canvas = null;
         layout.begin(self.preview_interface.surface(width, height));
         layout.open(.{ .width = .grow, .height = .grow });
         try self.drawRoots(.{ .app = app, .layout = layout, .view = view });
@@ -1369,6 +1446,22 @@ fn sliderContent(context: Context, entity: Entity, slider: *Slider, fill_style: 
     const app = context.app;
     const layout = context.layout;
     const span = slider.max - slider.min;
+    // With the focus, the arrows and a pad step it - held, as they repeat.
+    if (context.interactive and !slider.disabled) if (layout.stepped()) |way| {
+        var id: [48]u8 = undefined;
+        if (layout.isFocused(idOf(&id, entity))) {
+            const down = if (slider.vertical) way == .down else way == .left;
+            const up = if (slider.vertical) way == .up else way == .right;
+            if (down or up) {
+                const step = if (slider.step > 0) slider.step else span / 100;
+                const next = std.math.clamp(slider.value + if (up) step else -step, @min(slider.min, slider.max), @max(slider.min, slider.max));
+                if (next != slider.value) {
+                    slider.value = next;
+                    try app.signal(entity, Slider, .value_changed).emit(.{ .value = next });
+                }
+            }
+        }
+    };
     var fraction = if (span > 0) (slider.value - slider.min) / span else 0;
     fraction = std.math.clamp(fraction, 0, 1);
     if (context.interactive and !slider.disabled and app.world.get(entity, Control).?.mouse_filter != .ignore and layout.pressed()) {
@@ -1446,6 +1539,7 @@ fn buttonFace(self: *Nodes, context: Context, entity: Entity, button: *const But
         .font_size = style.font_size,
         .color = color(style.text_color),
         .wrap = .none,
+        .alignment = boxAlignX(button.alignment),
     });
 }
 
@@ -1455,6 +1549,7 @@ fn drawLabel(context: Context, entity: Entity, label: *const Label, style: Resol
         .font_size = style.font_size,
         .color = color(style.text_color),
         .outline = if (label.outline_width > 0) .{ .color = color(label.outline_color), .width = label.outline_width } else null,
+        .alignment = boxAlignX(label.horizontal_alignment),
         .wrap = switch (label.wrap) {
             .words => .words,
             .newline => .newline,
@@ -1538,7 +1633,7 @@ fn color(value: Color) ui.Color {
     return .rgba(value.r, value.g, value.b, value.a);
 }
 
-fn boxAlignX(value: BoxContainer.AlignX) ui.AlignX {
+fn boxAlignX(value: AlignX) ui.AlignX {
     return switch (value) {
         .left => .left,
         .center => .center,
@@ -1546,7 +1641,7 @@ fn boxAlignX(value: BoxContainer.AlignX) ui.AlignX {
     };
 }
 
-fn boxAlignY(value: BoxContainer.AlignY) ui.AlignY {
+fn boxAlignY(value: AlignY) ui.AlignY {
     return switch (value) {
         .top => .top,
         .center => .center,

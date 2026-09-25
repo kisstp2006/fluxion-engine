@@ -6,10 +6,10 @@
 //! thread, when it takes the scene.
 //!
 //! ```zig
-//! const next = try app.loadInBackground("res://levels/two.json");
+//! try app.loadInBackground("res://levels/two.json");
 //! // each frame:
-//! bar.value = next.progress() * 100;
-//! if (next.done()) app.changeScene(try app.takeScene(next));
+//! bar.value = app.loadProgress("res://levels/two.json") * 100;
+//! if (bar.value >= 100) app.changeScene(try app.loadScene("res://levels/two.json"));
 //! ```
 
 const std = @import("std");
@@ -26,8 +26,8 @@ const Project = @import("Project.zig");
 /// Whether a load has a thread of its own, or is worked a piece a frame.
 pub const threaded = !builtin.single_threaded and !builtin.target.cpu.arch.isWasm();
 
-/// One scene on its way. Made by `App.loadInBackground`, and let go of by
-/// `App.takeScene`.
+/// One scene on its way. Made by `App.loadInBackground`, and let go of when
+/// `App.loadScene` takes it.
 pub const SceneLoad = struct {
     /// Everything the thread touches is its own or behind these atomics:
     /// memory from an allocator that takes calls from any thread.
@@ -69,7 +69,7 @@ pub const SceneLoad = struct {
         return @min(1, @as(f32, @floatFromInt(done_steps)) / @as(f32, @floatFromInt(steps)));
     }
 
-    /// Whether it has got as far as it will: `App.takeScene` then waits for
+    /// Whether it has got as far as it will: `App.loadScene` then waits for
     /// nothing.
     pub fn done(self: *const SceneLoad) bool {
         return self.state.load(.acquire) == .done;
@@ -81,7 +81,7 @@ pub const SceneLoad = struct {
     }
 
     /// One step, and whether there is another: read the file, then decode
-    /// one picture. A mistake ends it, kept for `App.takeScene` to say.
+    /// one picture. A mistake ends it, kept for `App.loadScene` to say.
     pub fn work(self: *SceneLoad) bool {
         switch (self.state.load(.acquire)) {
             .reading => {

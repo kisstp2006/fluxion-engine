@@ -523,7 +523,13 @@ if (app.resized) layOutAgain(app.width, app.height);
   the systems hear about it too, instead of keeping last frame's size to
   compare with.
 - **Sizes are the content area, in the units of `Options.width` and
-  `height`**: pixels, on every backend there is today.
+  `height`**: pixels, on every backend there is today. `app.windowSize()` is
+  the size now - what `setWindowSize` asked for, once it has arrived - for a
+  settings menu to show.
+- **`setFullscreen` takes a choice**: `.windowed`, `.borderless` - what a
+  game should use - or a video mode of its own; from a script, a choice
+  with nothing to carry is its name: `app.setFullscreen("borderless")`, and
+  `app.fullscreen()` reads back as one.
 - **A fullscreen, maximised or minimised window is made an ordinary one
   before it is sized or moved**, because none of them has a size of its own.
   `.normal` means the window's own size even for one that was maximised
@@ -667,7 +673,8 @@ if (!app.input.focused) app.setPaused(true);
 ```
 
 - **A project caps its frames with `application.max_fps`** - nought for no
-  cap - and a game's `Options.max_fps` overrules it.
+  cap - and a game's `Options.max_fps` overrules it. A settings menu sets it
+  with `app.setMaxFps(60)` and reads it with `maxFps()`, from a script too.
 
 - **The cap keeps a schedule**, so a late frame is caught up with and the
   average holds; after a stall longer than `time.max_delta` it starts again.
@@ -1011,6 +1018,11 @@ _ = try world.spawnWith(.{
   only the background and the interface, and a texture is the one place the
   world appears. Drawn into on OpenGL, a texture comes out with its bottom row
   first, and `app.drawnUpsideDown()` says when a picture of it wants turning.
+  `app.drawControlPreview(texture, view, picked)` draws the interface over
+  it as the game lays it out: at `gameSize()` - the project's
+  `display.width` and `height` - with the screen's top left at the world's
+  origin, as big as the view shows the world. A tree with no root of its
+  own is shown over that screen too, to be laid out.
 - **The shader is written once**, in
   [Fluxion Shader](https://github.com/kisstp2006/fluxion-shader)'s language,
   and comes out as GLSL and as HLSL. Two hand-written copies would drift, and
@@ -1235,7 +1247,8 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   nothing in it.
 - **It is the size the display asks for.** `app.interface.scale`, what it is
   laid out at, is the game's own `app.interface.zoom` - an interface-size
-  setting - times the scale of the display the window is on: 1.25 or 2 on a
+  setting, `app.setInterfaceZoom(1.25)` and `interfaceZoom()` from a
+  script - times the scale of the display the window is on: 1.25 or 2 on a
   HiDPI screen, followed as the window is dragged to another monitor.
   `follow_display = false` sizes it by the window alone. `safe_area` keeps it
   clear of a television's edges, and a picture on an element names one of
@@ -1311,11 +1324,15 @@ app.grabFocus(play);                                                            
   `hide()` - in the middle of the screen or where its place says. Modal,
   what is under it takes no press, behind a veil; a press outside it or the
   `ui_cancel` action closes it, and `closed` says so. An editor, which draws
-  it without answering anything, shows it open, to be laid out.
+  it without answering anything, shows one that is shut open while it or
+  something in it is picked, to be laid out - `drawControlPreview`'s
+  `editing`.
 - **A `ColorRect`** is a box of one colour: a backdrop, a fade to black.
-- **They fade and pop.** A control's `Appearance` - and whatever is above
-  its tree, controls or not - fades it and everything in it by its
-  `modulate`'s alpha and hides it with `visible`; its `scale` draws it and
+- **They fade, tint and pop.** A control's `Appearance` - and whatever is
+  above its tree, controls or not - colours it and everything in it by its
+  `modulate`, times what is above, and hides it with `visible`: a menu
+  faded out, a title flashed red, a scene dimmed by a gamma setting. Its
+  `scale` draws it and
   everything in it bigger or smaller about its middle, and the layout does
   not move. A paused game's controls do not answer the pointer, unless their
   `Processing` says so. See [Pause](#️-pause).
@@ -1326,6 +1343,15 @@ app.grabFocus(play);                                                            
   connected in code or kept in a scene.
 - **A button is one thing**: its words, its icon, whether it stays down,
   and whether it is down - not a button with a label inside it.
+- **Words sit where they are told.** A label's `horizontal_alignment` -
+  `left`, `center`, `right` - and `vertical_alignment` - `top`, `center`,
+  `bottom` - place its words, and each line among the others, in its box; a
+  button's `alignment` places its face across it.
+- **A slider with the focus steps** by its `step` - a hundredth of its range
+  without one - with the arrows and a pad, held as they repeat, and keeps
+  the focus along its own way: a volume row a pad can play.
+- **Where a control was laid out** is `app.controlRect(e)`, in the units its
+  anchors and offsets are in, from a script too: what a panel slides in by.
 - **How they look is a file**, `.theme`:
 
   ```json
@@ -1369,8 +1395,8 @@ app.grabFocus(play);                                                            
   all of them is the project's: `"gui": { "theme": "res://ui/game.theme" }`
   in `project.fluxion`, which `app.projectTheme()` reads the first time it is
   asked and again when the file names another.
-- **One control's own look is a `ThemeOverride`**: its text's colour and
-  size, its background, border, corners and padding, each with a switch
+- **One control's own look is a `ThemeOverride`**: its text's font, colour
+  and size, its background, border, corners and padding, each with a switch
   beside it - what is switched off stays the theme's. It lies over every
   theme's normal look and under what they say of hovering and pressing, so a
   button of its own colour still answers the pointer. It changes the part
@@ -2001,9 +2027,14 @@ app.changeScene(try app.loadScene("res://levels/two.json"));          // at the 
   `application.main_scene`.
 - **A scene can be read in the background**: `loadInBackground(path)` reads
   its file and decodes the pictures it names on a thread of its own - on a
-  page, which has none, a piece a frame - and says how far it has got with
-  `progress()` and `done()`. `takeScene` makes the pictures textures and
-  gives the scene, ready to change to without a pause.
+  page, which has none, a piece a frame - and `loadProgress(path)` says how
+  far it has got, from nought to one. `loadScene` of the same path - or a
+  script's `changeScene` to it - takes it once it is done, making the
+  pictures textures, without a pause; asked sooner, it waits for it. A
+  loading screen's bar, from a script as from Zig.
+- **What is playing**: `currentScene()` is its file, and
+  `currentSceneRoot()` the first entity at its top - the one root of a scene
+  that has one - where a settings menu's gamma or a fade goes.
 
 ```json
 {
@@ -2234,7 +2265,7 @@ struct Door {
   - `ready(self)` comes first.
   - `fixed(self, dt)` runs every fixed step, before the game's `.fixed` systems.
   - `update(self, dt)` runs every frame, before its `.update` systems.
-  - Both only while the entity runs: see [Pause](#️-pause). A task a script starts - a call of a function that `await`s - is the entity's, and its waits stand still while the entity does not run.
+  - Both only while the entity runs: see [Pause](#️-pause). A task a script starts - a call of a function that `await`s - is the entity's, and its waits stand still while the entity does not run. When the entity dies, or loses its script, its tasks stop where they wait, after its `exit`.
   - `exit(self)` runs at the end of the frame in which the entity dies, or its `Script` is taken off or turned off, and when the world is cleared.
 
   A method the struct does not declare is not called. One with the wrong parameters is said once in the log and not called.
@@ -2343,6 +2374,16 @@ struct Guard {
   and `app.changeScene("res://…")` take a scene by its path.
   `app.callDeferred(fn)` calls a function at the end of the frame, after
   the systems and the signals.
+- **One script asks another.** `entity.script()` is the instance its
+  `Script` made - `app.find("Loader").?.script().open("res://menu.json")` -
+  called and read as any value, and null while there is none. A task of an
+  entity that dies stops where it waits.
+- **A script imports another.** `@import("save.flux")` is the file beside
+  it, `@import("res://lib/save.flux")` one anywhere in the project; the same
+  file is one module however it is spelt.
+- **Colours are the language's own**: a component's colour reads as a
+  `color`, and takes one - `look.modulate = color(1, 0.4, 0.4, 1)` - or
+  `"#ff6666"`.
 - **A file is its path.** Where a call or a field wants a scene, a texture,
   a font, a tile set, a theme, a script or a data file, a script gives
   `"res://…"`, and the file is read if nothing has read it yet. The same

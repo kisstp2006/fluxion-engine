@@ -193,6 +193,31 @@ test "a paused game's scripts wait, and their tasks with them, but a pause menu'
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
 }
 
+test "the tasks of an entity that dies stop where they wait" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("gone.flux",
+        \\var rang = 0;
+        \\struct Bell {
+        \\    fn ready(self) { self.ring(); }
+        \\    fn ring(self) {
+        \\        await wait(0.5);
+        \\        rang += 1;
+        \\        self.entity.get("Counter").value += 1;
+        \\    }
+        \\}
+    );
+    const kept = try app.world.spawnWith(.{ Counter{}, Script.named(file, "Bell") });
+    const doomed = try app.world.spawnWith(.{ Counter{}, Script.named(file, "Bell") });
+    _ = try app.step();
+    app.world.despawn(doomed);
+    for (0..3) |_| _ = try app.step();
+    // Only the one still here rang: the other's wait ended with it.
+    try testing.expectEqual(@as(i64, 1), global(app, file, "rang").asInt());
+    try testing.expectEqual(@as(i64, 1), app.world.get(kept, Counter).?.value);
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
 test "exit comes when the entity dies, loses its script or turns it off, and when the world is cleared" {
     const app = try scripted(.{});
     defer app.destroy();
@@ -461,6 +486,49 @@ test "a script read again runs its new code in the instances it has, which keep 
     try testing.expect(app.findScript("res://mover.flux") == null);
     try testing.expect(try app.reloadScript(file));
     try testing.expect(!try app.reloadScript(.none));
+}
+
+test "a script imports the file beside it, and calls another entity's script" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDirPath(testing.io, "scripts");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "scripts/numbers.flux", .data =
+        \\fn twice(x: int) int { return x * 2; }
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "scripts/bank.flux", .data =
+        \\struct Bank {
+        \\    var held: int = 0;
+        \\    fn put(self, amount: int) int {
+        \\        self.held += amount;
+        \\        return self.held;
+        \\    }
+        \\}
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "scripts/saver.flux", .data =
+        \\const numbers = @import("numbers.flux");
+        \\const same = @import("res://scripts/numbers.flux");
+        \\struct Saver {
+        \\    fn ready(self) {
+        \\        const bank = app.find("Bank").script();
+        \\        self.entity.get("Counter").value = bank.put(numbers.twice(3)) + same.twice(1);
+        \\        print(app.find("Nobody") == null, self.entity.script() != null);
+        \\    }
+        \\}
+    });
+
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    const bank = try app.world.spawnWith(.{Script.of(try app.loadScript("res://scripts/bank.flux"))});
+    try app.setName(bank, "Bank");
+    const saver = try app.world.spawnWith(.{ Counter{}, Script.of(try app.loadScript("res://scripts/saver.flux")) });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    // Six put in, and two beside it.
+    try testing.expectEqual(@as(i64, 8), app.world.get(saver, Counter).?.value);
+    const held = app.scripts.?.vm.getField(app.scripts.?.instanceOf(bank).?, "held").?;
+    try testing.expectEqual(@as(i64, 6), held.asInt());
 }
 
 test "a script saved while the game runs is read again when the watch next looks" {

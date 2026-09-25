@@ -1083,7 +1083,8 @@ pub fn destroy(self: *App) void {
     self.freeInstances();
     self.instances.deinit(gpa);
     self.scene_roots.deinit(gpa);
-    for (self.loads.items) |load| self.dropLoad(load);
+    // Each is taken out of the list as it goes.
+    while (self.loads.items.len > 0) self.dropLoad(self.loads.items[self.loads.items.len - 1]);
     self.loads.deinit(gpa);
     self.scenes.deinit(gpa);
     self.data_files.deinit(gpa);
@@ -3071,7 +3072,15 @@ pub fn readScene(self: *App, path: []const u8, options: scene.LoadOptions) !scen
 /// Read a scene's file to make things of, or find the one read from there
 /// already. Nothing is made of it yet: see `instantiate` and `changeScene`,
 /// and `scenes`.
+///
+/// A file `loadInBackground` is reading is taken from that load - waited
+/// for, if it is not done - rather than read again.
 pub fn loadScene(self: *App, path: []const u8) !scenes_mod.SceneHandle {
+    if (self.loads.items.len > 0) {
+        const named = try self.project.canonical(self.gpa, path);
+        defer self.gpa.free(named);
+        if (self.loadOf(named)) |load| return self.takeLoad(load);
+    }
     return self.scenes.load(self, path);
 }
 
@@ -3625,6 +3634,13 @@ pub fn currentScene(self: *const App) scenes_mod.SceneHandle {
     return self.scene_now;
 }
 
+/// The first entity at the top of the scene the game is playing - the one
+/// root of a scene that has one - or `.none` before a scene is open.
+pub fn currentSceneRoot(self: *const App) ecs.Entity {
+    for (self.scene_roots.items) |root| if (self.world.isAlive(root)) return root;
+    return .none;
+}
+
 /// Open what the project says a game opens with: its boot splash while it
 /// reads, its autoloads - each named after its file and kept when the scene
 /// changes - and then its main scene. What `Options.open_project` does at
@@ -3680,14 +3696,28 @@ fn showBootSplash(self: *App, splash: Project.Application.BootSplash) void {
 }
 
 /// Read a scene beside the game: its file, and the pictures it names
-/// decoded, on a thread of its own - on a page, a piece a frame. Ask the
-/// load how far it has got, and take the scene with `takeScene` when it is
-/// done. See `background`.
-pub fn loadInBackground(self: *App, path: []const u8) !*background_mod.SceneLoad {
+/// decoded, on a thread of its own - on a page, a piece a frame.
+/// `loadProgress` says how far it has got, and `loadScene` of the same file
+/// - or a `changeScene` to it from a script - takes it once it is done,
+/// without a pause. A file on its way already, or read already, is left as
+/// it is. See `background`.
+///
+/// ```zig
+/// try app.loadInBackground("res://levels/two.json");
+/// // each frame:
+/// bar.value = app.loadProgress("res://levels/two.json") * 100;
+/// if (bar.value >= 100) app.changeScene(try app.loadScene("res://levels/two.json"));
+/// ```
+pub fn loadInBackground(self: *App, path: []const u8) !void {
     const io = self.io orelse return error.NoIo;
+    if (self.findScene(path) != null) return;
     // Memory any thread can ask for, since the load's thread does.
     const gpa = std.heap.smp_allocator;
     const source = try self.project.canonical(gpa, path);
+    if (self.loadOf(source) != null) {
+        gpa.free(source);
+        return;
+    }
     errdefer gpa.free(source);
     const root = try gpa.dupe(u8, self.project.root);
     errdefer gpa.free(root);
@@ -3700,13 +3730,30 @@ pub fn loadInBackground(self: *App, path: []const u8) !*background_mod.SceneLoad
         // No thread to be had: a piece a frame, as on a page.
         if (load.thread == null) load.run();
     }
-    return load;
+}
+
+/// How far the scene at `path` has got, from nought to one: one once it is
+/// read, in the background or not, and nought while nothing is reading it.
+pub fn loadProgress(self: *App, path: []const u8) f32 {
+    if (self.findScene(path) != null) return 1;
+    const named = self.project.canonical(self.gpa, path) catch return 0;
+    defer self.gpa.free(named);
+    const load = self.loadOf(named) orelse return 0;
+    // One only once it can be taken without a wait.
+    return if (load.done()) 1 else @min(load.progress(), 0.99);
+}
+
+/// The background load of the file at `source`, as `Project.canonical`
+/// spells it.
+fn loadOf(self: *App, source: []const u8) ?*background_mod.SceneLoad {
+    for (self.loads.items) |load| if (std.mem.eql(u8, load.source, source)) return load;
+    return null;
 }
 
 /// The scene a background load read, once it is done - waited for, if it
 /// is not - with the pictures it decoded made textures. The load is let go
 /// of either way. A scene that did not read is its error.
-pub fn takeScene(self: *App, load: *background_mod.SceneLoad) !scenes_mod.SceneHandle {
+fn takeLoad(self: *App, load: *background_mod.SceneLoad) !scenes_mod.SceneHandle {
     defer self.dropLoad(load);
     load.join();
     while (load.work()) {}
@@ -4237,6 +4284,10 @@ pub const reflect_methods = .{
     .setStateNamed,
     .saveScene,
     .readScene,
+    .loadInBackground,
+    .loadProgress,
+    .currentScene,
+    .currentSceneRoot,
     .createTimer,
     .randomFloat,
     .randomRange,
@@ -4278,6 +4329,7 @@ pub const reflect_methods = .{
     .grabFocus,
     .hasFocus,
     .releaseFocus,
+    .controlRect,
     .setAnchorsPreset,
     .audioLength,
     .setBusVolumeDb,
@@ -4318,12 +4370,17 @@ pub const reflect_methods = .{
     .toggleFullscreen,
     .setWindowTitle,
     .setWindowSize,
+    .windowSize,
     .setWindowPosition,
     .windowPosition,
     .setWindowState,
     .windowState,
     .setVsync,
     .vsync,
+    .setMaxFps,
+    .maxFps,
+    .setInterfaceZoom,
+    .interfaceZoom,
     .setCursor,
     .cursor,
     .setCursorShape,
@@ -5048,6 +5105,17 @@ pub fn releaseFocus(self: *App) void {
     self.ui.clearFocus();
 }
 
+/// Where a control was laid out when the interface was last drawn, in the
+/// units its anchors and offsets are in: its `size` is what a panel slides
+/// in by, from a script as `app.controlRect(panel).size.x`. Null for one not
+/// laid out - not a control, hidden, or not drawn yet.
+pub fn controlRect(self: *App, entity: ecs.Entity) ?geometry.Rect2 {
+    var id: [48]u8 = undefined;
+    const box = self.ui.boxOf(control.idOf(&id, entity)) orelse return null;
+    const scale = if (self.interface.scale > 0) self.interface.scale else 1;
+    return .init(box.x / scale, box.y / scale, box.width / scale, box.height / scale);
+}
+
 /// Anchor a control where `preset` says: see `Control.setAnchorsPreset`.
 pub fn setAnchorsPreset(self: *App, entity: ecs.Entity, preset: control.Control.AnchorsPreset) !void {
     const held = self.world.get(entity, control.Control) orelse return error.NoSuchComponent;
@@ -5317,6 +5385,13 @@ pub fn setWindowSize(self: *App, width: u32, height: u32) Window.Error!void {
     if (self.window) |*window| try window.setSize(width, height);
 }
 
+/// How big the window's content area is, in pixels: what `setWindowSize`
+/// asked for once it has arrived. The size the app was made at when there is
+/// no window.
+pub fn windowSize(self: *const App) geometry.Vec2i {
+    return .init(@intCast(self.width), @intCast(self.height));
+}
+
 /// Put the top left of the window's content area at this point of the
 /// desktop. Nothing without a window.
 pub fn setWindowPosition(self: *App, x: i32, y: i32) Window.Error!void {
@@ -5359,6 +5434,29 @@ pub fn setVsync(self: *App, on: bool) (rhi.Error || Window.Error)!void {
 
 pub fn vsync(self: *const App) bool {
     return self.vsync_on;
+}
+
+/// Hold the frames to at most `fps` a second, nought for no cap: a
+/// settings menu's frame limit. `time.max_fps` from Zig.
+pub fn setMaxFps(self: *App, fps: f32) void {
+    self.time.max_fps = if (fps > 0) fps else null;
+}
+
+/// The cap on frames a second, nought for none.
+pub fn maxFps(self: *const App) f32 {
+    return self.time.max_fps orelse 0;
+}
+
+/// Lay the interface out this many times larger, over what the display and
+/// the stretch ask for: a settings menu's interface size. One is as it is.
+/// `interface.zoom` from Zig.
+pub fn setInterfaceZoom(self: *App, zoom: f32) void {
+    self.interface.zoom = if (zoom > 0) zoom else 1;
+}
+
+/// How much larger the game lays its interface out: see `setInterfaceZoom`.
+pub fn interfaceZoom(self: *const App) f32 {
+    return self.interface.zoom;
 }
 
 /// Lock the pointer, confine it to the window, hide it, or give it back. See
@@ -5648,10 +5746,23 @@ pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
     if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
 }
 
+/// The size the game is made at: the project's `display.width` and
+/// `height`, what its interface is laid out in at its first size - or the
+/// window's, with no project.
+pub fn gameSize(self: *const App) [2]f32 {
+    if (self.project.settings) |settings| return .{ @floatFromInt(settings.display.width), @floatFromInt(settings.display.height) };
+    return .{ @floatFromInt(self.width), @floatFromInt(self.height) };
+}
+
 /// Draw the registered Control trees over an editor's scene texture, using
-/// the same declarations and renderer as the running game.
-pub fn drawControlPreview(self: *App, into: rhi.Texture, view: View) !void {
-    try self.control_nodes.preview(self, into, view, view.width, view.height, self.interface.faces);
+/// the same declarations and renderer as the running game: laid out at
+/// `gameSize`, with the screen's top left at the world's origin, and as big
+/// as `view` shows the world. A tree with no `CanvasLayer` or `Viewport` of
+/// its own is shown over the screen too. A popup that is shut is drawn open
+/// while it, or something in it, is one of `editing`: what the editor has
+/// picked, to lay it out.
+pub fn drawControlPreview(self: *App, into: rhi.Texture, view: View, editing: []const ecs.Entity) !void {
+    try self.control_nodes.preview(self, into, view, view.width, view.height, self.interface.faces, editing);
 }
 
 /// Draw this frame's world-space debug lines over an editor preview.

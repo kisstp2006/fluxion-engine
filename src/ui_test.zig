@@ -239,3 +239,153 @@ test "a script reads and writes a label's words, and a control's box as one valu
     try testing.expect(look.override_corners and look.override_background);
     try testing.expectEqual(@as(f32, 9), look.corner_radius);
 }
+
+test "a control's modulate colours it and everything in it, and its alpha fades them" {
+    const it = try withCanvas();
+    const app = it.app;
+    defer app.destroy();
+    const Appearance = @import("inherited.zig").Appearance;
+    const panel = try app.world.spawnWith(.{ fixed(100, 50), Parent.of(it.root), control.ColorRect{}, Appearance{ .modulate = .rgba(1, 0.5, 0.5, 0.5) } });
+    _ = try app.world.spawnWith(.{ fixed(20, 20), Parent.of(panel), control.ColorRect{ .color = .rgba(0.5, 1, 1, 1) } });
+    _ = try app.step();
+
+    var outer = false;
+    var inner = false;
+    for (app.interface.commands) |command| switch (command.config) {
+        .rectangle => |rect| {
+            const c = rect.color;
+            if (command.bounding_box.width == 100) {
+                try testing.expectEqual(@import("fluxion_ui").Color.rgba(1, 0.5, 0.5, 0.5), c);
+                outer = true;
+            } else if (command.bounding_box.width == 20) {
+                // Its own colour seen through the panel's.
+                try testing.expectEqual(@import("fluxion_ui").Color.rgba(0.5, 0.5, 0.5, 0.5), c);
+                inner = true;
+            }
+        },
+        else => {},
+    };
+    try testing.expect(outer and inner);
+}
+
+test "a label's words sit where its alignment says, and a button's in its middle" {
+    const it = try withCanvas();
+    const app = it.app;
+    defer app.destroy();
+    _ = app.assets.loadFont(@import("assets.zig").systemFontPath(), .{ .atlas = 256 }) catch return error.SkipZigTest;
+    const title = try app.world.spawnWith(.{ fixed(300, 100), Parent.of(it.root), control.Label{ .horizontal_alignment = .center, .vertical_alignment = .bottom } });
+    try app.setText(title, control.Label, "text", "Middle");
+    const right = try app.world.spawnWith(.{ fixed(300, 40), Parent.of(it.root), control.Label{ .horizontal_alignment = .right, .vertical_alignment = .center } });
+    try app.setText(right, control.Label, "text", "Right");
+    const go = try app.world.spawnWith(.{ fixed(300, 60), Parent.of(it.root), Button{} });
+    try app.setText(go, Button, "text", "Go");
+    _ = try app.step();
+
+    const title_box = boxOf(app, title).?;
+    const right_box = boxOf(app, right).?;
+    const go_box = boxOf(app, go).?;
+    var seen: usize = 0;
+    for (app.interface.commands) |command| switch (command.config) {
+        .text => |run| {
+            const box = command.bounding_box;
+            const middle_x = box.x + box.width / 2;
+            const middle_y = box.y + box.height / 2;
+            if (std.mem.eql(u8, run.text, "Middle")) {
+                try testing.expectApproxEqAbs(title_box.x + title_box.width / 2, middle_x, 1);
+                try testing.expectApproxEqAbs(title_box.y + title_box.height, box.y + box.height, 1);
+                seen += 1;
+            } else if (std.mem.eql(u8, run.text, "Right")) {
+                try testing.expectApproxEqAbs(right_box.x + right_box.width, box.x + box.width, 1);
+                try testing.expectApproxEqAbs(right_box.y + right_box.height / 2, middle_y, 1);
+                seen += 1;
+            } else if (std.mem.eql(u8, run.text, "Go")) {
+                try testing.expectApproxEqAbs(go_box.x + go_box.width / 2, middle_x, 1);
+                try testing.expectApproxEqAbs(go_box.y + go_box.height / 2, middle_y, 1);
+                seen += 1;
+            }
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 3), seen);
+}
+
+test "a control's own font is the one its words are drawn in" {
+    const it = try withCanvas();
+    const app = it.app;
+    defer app.destroy();
+    const Assets = @import("assets.zig");
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch return error.SkipZigTest;
+    const other = try app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256, .label = "other" });
+    const plain = try app.world.spawnWith(.{ Control{}, Parent.of(it.root), control.Label{} });
+    try app.setText(plain, control.Label, "text", "Plain");
+    const own = try app.world.spawnWith(.{ Control{}, Parent.of(it.root), control.Label{}, control.ThemeOverride{ .override_font = true, .font = other } });
+    try app.setText(own, control.Label, "text", "Own");
+    _ = try app.step();
+
+    var fonts: [2]u16 = .{ 99, 99 };
+    for (app.interface.commands) |command| switch (command.config) {
+        .text => |run| {
+            if (std.mem.eql(u8, run.text, "Plain")) fonts[0] = run.font;
+            if (std.mem.eql(u8, run.text, "Own")) fonts[1] = run.font;
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(u16, 0), fonts[0]);
+    try testing.expect(fonts[1] != 0 and fonts[1] != 99);
+}
+
+test "a script sets the window's fill, the frame cap and the interface's size, and loads in the background" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    try app.useScripts(.{});
+    const handle = try app.addScript("settings.flux",
+        \\struct Settings {
+        \\    fn ready(self) {
+        \\        app.setFullscreen("borderless");
+        \\        print(app.fullscreen());
+        \\        app.setMaxFps(30.0);
+        \\        app.setInterfaceZoom(1.5);
+        \\        print(app.maxFps(), app.interfaceZoom(), app.loadProgress("res://nowhere.json"), app.currentScene());
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{script.Script.of(handle)});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqual(@as(?f32, 30), app.time.max_fps);
+    try testing.expectEqual(@as(f32, 1.5), app.interface.zoom);
+    app.setMaxFps(0);
+    try testing.expect(app.time.max_fps == null);
+}
+
+test "a focused slider keeps the focus along its way, and the arrows and a pad step it" {
+    const it = try withCanvas();
+    const app = it.app;
+    defer app.destroy();
+    const column = try app.world.spawnWith(.{ fixed(300, 200), Parent.of(it.root), BoxContainer{ .separation = 10 } });
+    const slider = try app.world.spawnWith(.{ fixed(200, 20), Parent.of(column), control.Slider{ .min = 0, .max = 10, .value = 5, .step = 1 } });
+    const below = try app.world.spawnWith(.{ fixed(200, 30), Parent.of(column), Button{} });
+    _ = try app.step();
+    app.grabFocus(slider);
+    _ = try app.step();
+
+    try app.pressAction("ui_right", 1);
+    _ = try app.step();
+    try testing.expectEqual(@as(f32, 6), app.world.get(slider, control.Slider).?.value);
+    try testing.expect(app.hasFocus(slider));
+    try app.releaseAction("ui_right");
+    _ = try app.step();
+    try app.pressAction("ui_left", 1);
+    _ = try app.step();
+    try app.releaseAction("ui_left");
+    _ = try app.step();
+    try testing.expectEqual(@as(f32, 5), app.world.get(slider, control.Slider).?.value);
+
+    // Across its way, the focus goes on as ever.
+    try app.pressAction("ui_down", 1);
+    _ = try app.step();
+    try app.releaseAction("ui_down");
+    _ = try app.step();
+    try testing.expect(app.hasFocus(below));
+    try testing.expectEqual(@as(f32, 5), app.world.get(slider, control.Slider).?.value);
+}

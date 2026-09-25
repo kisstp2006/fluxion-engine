@@ -272,7 +272,7 @@ pub const EntityRef = struct {
 
     pub const reflect_name = "Entity";
     pub const reflect_opaque = true;
-    pub const reflect_methods = .{ .alive, .name, .uuid, .has, .get, .add, .remove, .despawn };
+    pub const reflect_methods = .{ .alive, .name, .uuid, .has, .get, .add, .remove, .despawn, .script };
 
     /// Whether it is still in the world. False in `exit` for a despawned
     /// entity.
@@ -316,6 +316,14 @@ pub const EntityRef = struct {
     /// nothing.
     pub fn remove(self: *EntityRef, vm: *flux.Vm, component: []const u8) flux.Vm.Error!void {
         self.scripts.app.removeComponentNamed(self.entity, component) catch |err| return refused(vm, err, "remove", component);
+    }
+
+    /// The instance its `Script` made, to call and to read as any value:
+    /// `app.find("Loader").script().open("res://menu.json")`, one script
+    /// asking another. Null while it has none - no `Script`, one that did
+    /// not compile, or one whose `ready` has not come yet.
+    pub fn script(self: *EntityRef) flux.Value {
+        return self.scripts.instanceOf(self.entity) orelse .null;
     }
 
     /// Take it out of the world, and everything that hangs from it. Its
@@ -720,6 +728,7 @@ pub const Scripts = struct {
             .host_types = &host_types,
             .host_member = hostMember,
             .host_set_member = hostSetMember,
+            .loader = .{ .context = app, .load = loadImport },
         });
         errdefer vm.destroy();
         vm.host = self;
@@ -1241,6 +1250,9 @@ pub const Scripts = struct {
         if (inst.readied) {
             if (inst.methods.get(.exit)) |method| self.call(entity, method, &.{inst.value}, .exit);
         }
+        // What it was waiting for goes with it: a task of an entity that is
+        // gone would wake to find nothing where it was.
+        _ = self.vm.stopTasks(entity.toInt()) catch |err| log.warn("the tasks of {f} were not stopped: {t}", .{ entity, err });
         _ = self.entity_of.remove(inst.value.obj());
         self.vm.release(inst.value);
     }
@@ -1947,7 +1959,7 @@ fn entityHandle(scripts: *Scripts, entity: Entity) flux.Vm.Error!flux.Value {
 }
 
 /// Every type of the engine's that a script sees as something else.
-const host_types = [_]flux.HostType{ entity_type, tile_value_type, animated_value_type } ++ asset_types;
+const host_types = [_]flux.HostType{ entity_type, tile_value_type, animated_value_type, color_type } ++ asset_types;
 
 /// A file a component holds - a texture, a scene - as its path, and given
 /// as one: `sprite.texture = "res://art/hero.png"`, `app.instantiate("res://
@@ -2134,6 +2146,32 @@ fn tileValueFromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flu
     place.* = given;
 }
 
+/// The engine's colours are the language's own: `look.modulate = color(1, 0.5,
+/// 0.5)`, or `"#ff8080"`, and read back as colours.
+const color_type: flux.HostType = .{
+    .type = reflect.typeOf(Color),
+    .to_script = colorToScript,
+    .from_script = colorFromScript,
+};
+
+fn colorToScript(vm: *flux.Vm, value: reflect.Value) flux.Vm.Error!flux.Value {
+    const held = value.asConst(Color).?.*;
+    return vm.newColor(.{ held.r, held.g, held.b, held.a });
+}
+
+fn colorFromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flux.Vm.Error!void {
+    const given: Color = switch (value.tag) {
+        .color => blk: {
+            const rgba = value.as(flux.object.Color).rgba;
+            break :blk .rgba(rgba[0], rgba[1], rgba[2], rgba[3]);
+        },
+        .string => Color.parse(value.as(flux.object.String).bytes()) orelse
+            return vm.fail("\"{s}\" is not a colour: \"#rrggbb\" or \"#rrggbbaa\"", .{value.as(flux.object.String).bytes()}),
+        else => return vm.fail("a colour is wanted here, as color(r, g, b, a) or \"#rrggbb\", not {s}", .{typeName(value)}),
+    };
+    into.set(Color, given) catch return vm.fail("this colour can only be read", .{});
+}
+
 /// What a tween moves a property to, as a script gives it: a number, a
 /// `vec2`, a `color`, true or false - `app.tweenProperty(t, e, "Transform2D.x",
 /// 300.0, 1.0)`.
@@ -2210,9 +2248,32 @@ pub fn install(vm: *flux.Vm, app: flux.Value, files: flux.Value) Allocator.Error
 pub fn serviceOptions(app: *App) flux.service.Options {
     return .{
         .setup = .{ .context = app, .run = installForAnalysis },
+        .loader = .{ .context = app, .load = loadImport },
         .io = app.io,
         .strings = .{ .context = app, .values = stringValues },
     };
+}
+
+/// A script's `@import("save.flux")`: the file beside the one importing it,
+/// or at a `res://` path, read from the project. The same file is the same
+/// module name however it is spelt.
+fn loadImport(context: ?*anyopaque, gpa: Allocator, from: []const u8, path: []const u8) anyerror!flux.Vm.Loader.Loaded {
+    const app: *App = @ptrCast(@alignCast(context.?));
+    const io = app.io orelse return error.NoIo;
+    const wanted = if (std.mem.indexOf(u8, path, "://") != null)
+        try gpa.dupe(u8, path)
+    else if (std.mem.lastIndexOfScalar(u8, from, '/')) |cut|
+        // "res://Scripts/menu.flux" and "save.flux" are "res://Scripts/save.flux".
+        try std.mem.concat(gpa, u8, &.{ from[0 .. cut + 1], path })
+    else
+        try gpa.dupe(u8, path);
+    defer gpa.free(wanted);
+    const name = try app.project.canonical(gpa, wanted);
+    errdefer gpa.free(name);
+    const file = try app.project.osPath(gpa, name);
+    defer gpa.free(file);
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(16 << 20));
+    return .{ .name = name, .source = source };
 }
 
 /// `app`'s calls whose strings name an action, and whether every one of
