@@ -101,7 +101,8 @@ pub const plain =
 
 /// The attributes, in the order an `Instance` holds them after the corner:
 /// the quad's corner, its place and size, its pivot and turn, its colour and
-/// its part of the picture.
+/// its part of the picture. What a file reads has its doc above it, which an
+/// editor shows.
 const engine_head =
     \\attribute vec2 CORNER : 0;
     \\attribute vec4 PLACEMENT : 1;
@@ -109,18 +110,28 @@ const engine_head =
     \\attribute vec4 TINT : 3;
     \\attribute vec4 REGION : 4;
     \\
+    \\// Where on the picture this pixel is: from nought to one across and down.
     \\varying vec2 UV;
+    \\// The sprite's tint, or the control's colour, with its fade.
     \\varying vec4 COLOR;
+    \\// Where on the screen this pixel is: from nought to one across and down.
     \\varying vec2 SCREEN_UV;
     \\
     \\uniform Frame : 0 {
     \\    mat4 PROJECTION;
+    \\    // How big a pixel of the screen is in SCREEN_UV: one over its width and height.
     \\    vec2 SCREEN_PIXEL_SIZE;
+    \\    // Seconds since the game started.
     \\    float TIME;
     \\    float SCREEN_FLIP;
     \\}
     \\
 ;
+
+/// The engine's two textures, and what each is: declared only in a file
+/// that names it.
+pub const texture_doc = "The picture it is drawn with: the sprite's, or the rect's.";
+pub const screen_texture_doc = "What is drawn under it so far this frame.";
 
 /// `CORNER` is a unit square: the pivot taken off it, scaled to the quad's
 /// size, turned, and put where the quad is.
@@ -164,6 +175,57 @@ fn vertexFormat(ty: shader.Type) ?rhi.VertexFormat {
 /// device says what it draws is stored bottom row first.
 pub fn screenFlip(device: *const rhi.Device) f32 {
     return if (device.caps().features.render_target_origin_bottom_left) 1 else -1;
+}
+
+/// A `.shader` file's text with the engine's part after it: what `compile`
+/// compiles, and what an editor's analysis reads.
+pub const Whole = struct {
+    source: []u8,
+    /// The line of the whole the engine's part starts on, from one.
+    engine_line: usize,
+    texture_slot: ?u32 = null,
+    screen_slot: ?u32 = null,
+    /// How many textures the engine declared for it.
+    textures: u32 = 0,
+    /// Where the file declares something that is the engine's, if it does.
+    trespass: ?Trespass = null,
+
+    pub const Trespass = struct { offset: u32, what: []const u8 };
+
+    /// What a trespass is said as, at the file's own line and column.
+    pub fn trespassMessage(self: Whole, gpa: Allocator, text: []const u8) Allocator.Error!?[]u8 {
+        const where = self.trespass orelse return null;
+        const at = lineAndColumn(text, where.offset);
+        return try std.fmt.allocPrint(gpa, "{d}:{d}: {s} is the engine's: a material's shader is its fragment stage, and what that reads", .{ at.line, at.column, where.what });
+    }
+};
+
+/// The file's text, then the engine's part: its attributes, varyings and
+/// `Frame`, the textures the file names, and the vertex stage. The caller
+/// owns `source`.
+pub fn whole(gpa: Allocator, text: []const u8) Allocator.Error!Whole {
+    const found = try scan(gpa, text);
+    var full: std.Io.Writer.Allocating = .init(gpa);
+    errdefer full.deinit();
+    const w = &full.writer;
+    w.writeAll(text) catch return error.OutOfMemory;
+    w.writeAll("\n") catch return error.OutOfMemory;
+    var out: Whole = .{ .source = &.{}, .engine_line = std.mem.count(u8, full.written(), "\n") + 1 };
+    if (found.trespass) |t| out.trespass = .{ .offset = t.offset, .what = t.what };
+    w.writeAll(engine_head) catch return error.OutOfMemory;
+    if (found.texture) {
+        out.texture_slot = out.textures;
+        w.print("// {s}\ntexture2d TEXTURE : {d};\n", .{ texture_doc, out.textures }) catch return error.OutOfMemory;
+        out.textures += 1;
+    }
+    if (found.screen) {
+        out.screen_slot = out.textures;
+        w.print("// {s}\ntexture2d SCREEN_TEXTURE : {d};\n", .{ screen_texture_doc, out.textures }) catch return error.OutOfMemory;
+        out.textures += 1;
+    }
+    w.writeAll(engine_vertex) catch return error.OutOfMemory;
+    out.source = full.toOwnedSlice() catch return error.OutOfMemory;
+    return out;
 }
 
 /// What `compile` finds in a file before compiling it.
@@ -216,41 +278,23 @@ pub fn compile(
     label: []const u8,
     problems: *std.Io.Writer,
 ) (error{ShaderFailed} || Allocator.Error || rhi.Error)!Compiled {
-    const found = try scan(gpa, text);
-    if (found.trespass) |where| {
-        const at = lineAndColumn(text, where.offset);
-        problems.print("{d}:{d}: {s} is the engine's: a material's shader is its fragment stage, and what that reads\n", .{ at.line, at.column, where.what }) catch {};
+    const built = try whole(gpa, text);
+    defer gpa.free(built.source);
+    if (try built.trespassMessage(gpa, text)) |message| {
+        defer gpa.free(message);
+        problems.print("{s}\n", .{message}) catch {};
         return error.ShaderFailed;
     }
-
-    var full: std.Io.Writer.Allocating = .init(gpa);
-    defer full.deinit();
-    full.writer.writeAll(text) catch return error.OutOfMemory;
-    full.writer.writeAll("\n") catch return error.OutOfMemory;
-    // The engine's part starts on this line of the whole.
-    const engine_line = std.mem.count(u8, full.written(), "\n") + 1;
-    full.writer.writeAll(engine_head) catch return error.OutOfMemory;
-    var slot: u32 = 0;
-    var texture_slot: ?u32 = null;
-    var screen_slot: ?u32 = null;
-    if (found.texture) {
-        texture_slot = slot;
-        full.writer.print("texture2d TEXTURE : {d};\n", .{slot}) catch return error.OutOfMemory;
-        slot += 1;
-    }
-    if (found.screen) {
-        screen_slot = slot;
-        full.writer.print("texture2d SCREEN_TEXTURE : {d};\n", .{slot}) catch return error.OutOfMemory;
-        slot += 1;
-    }
-    full.writer.writeAll(engine_vertex) catch return error.OutOfMemory;
+    const slot = built.textures;
+    const texture_slot = built.texture_slot;
+    const screen_slot = built.screen_slot;
 
     var log: std.Io.Writer.Allocating = .init(gpa);
     defer log.deinit();
-    var module = shader.compile(gpa, full.written(), &log.writer) catch |err| switch (err) {
+    var module = shader.compile(gpa, built.source, &log.writer) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.CompileFailed => {
-            tellOfLines(log.written(), engine_line, problems);
+            tellOfLines(log.written(), built.engine_line, problems);
             return error.ShaderFailed;
         },
     };
@@ -350,7 +394,7 @@ fn tellOfLines(said: []const u8, engine_line: usize, out: *std.Io.Writer) void {
 }
 
 /// `12:5:` at the start of a message: its line, its column, and how long it is.
-fn headOf(line: []const u8) ?struct { line: usize, column: usize, len: usize } {
+pub fn headOf(line: []const u8) ?struct { line: usize, column: usize, len: usize } {
     const first = std.mem.indexOfScalar(u8, line, ':') orelse return null;
     const number = std.fmt.parseInt(usize, line[0..first], 10) catch return null;
     const rest = line[first + 1 ..];

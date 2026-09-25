@@ -40,6 +40,8 @@ const Project = @import("Project.zig");
 const attr = @import("attr.zig");
 const file_table = @import("file_table.zig");
 pub const material = @import("render/material.zig");
+/// What an editor asks about a `.shader` file being written.
+pub const edit = @import("shader_edit.zig");
 
 const Entity = ecs.Entity;
 const log = std.log.scoped(.fluxion_engine);
@@ -148,7 +150,7 @@ pub const Shaders = struct {
         const name = try app.gpa.dupe(u8, source);
         errdefer app.gpa.free(name);
         var made: Shader = .{ .source = name, .on_disc = on_disc };
-        try build(app, &made, text);
+        try build(app, &made, text, .say);
         errdefer made.deinitContent(app.gpa, &app.device);
         return fromId(try self.table.add(app.gpa, made));
     }
@@ -158,7 +160,24 @@ pub const Shaders = struct {
     pub fn setText(self: *Shaders, app: *App, handle: ShaderHandle, text: []const u8) !void {
         const held = self.table.get(toId(handle)) orelse return error.NoSuchShader;
         var fresh: Shader = .{ .source = held.source, .on_disc = held.on_disc, .revision = held.revision +% 1 };
-        try build(app, &fresh, text);
+        try build(app, &fresh, text, .say);
+        held.deinitContent(app.gpa, &app.device);
+        held.* = fresh;
+    }
+
+    /// Text an editor has open and not saved, as it is typed: compiled
+    /// again, and when it does not compile, what did last keeps drawing -
+    /// a scene does not flash plain at every half-typed word - and the log
+    /// is not told. `problems` says why all the same. `reload` goes back to
+    /// the file.
+    pub fn preview(self: *Shaders, app: *App, handle: ShaderHandle, text: []const u8) !void {
+        const held = self.table.get(toId(handle)) orelse return error.NoSuchShader;
+        var fresh: Shader = .{ .source = held.source, .on_disc = held.on_disc, .revision = held.revision +% 1 };
+        try build(app, &fresh, text, .quiet);
+        if (fresh.compiled == null) {
+            fresh.compiled = held.compiled;
+            held.compiled = null;
+        }
         held.deinitContent(app.gpa, &app.device);
         held.* = fresh;
     }
@@ -222,8 +241,9 @@ pub const Shaders = struct {
     }
 };
 
-/// Keep `text` and compile it: what fails is said, and kept to be asked for.
-fn build(app: *App, into: *Shader, text: []const u8) !void {
+/// Keep `text` and compile it: what fails is kept to be asked for, and
+/// said in the log unless `quiet`.
+fn build(app: *App, into: *Shader, text: []const u8, tell: enum { say, quiet }) !void {
     const gpa = app.gpa;
     into.text = try gpa.dupe(u8, text);
     errdefer gpa.free(into.text);
@@ -232,11 +252,39 @@ fn build(app: *App, into: *Shader, text: []const u8) !void {
     into.compiled = material.compile(gpa, &app.device, text, into.source, &problems.writer) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => blk: {
-            log.warn("{s} did not compile:\n{s}", .{ into.source, problems.written() });
+            if (tell == .say) {
+                const placed = try withPlaces(gpa, into.source, problems.written());
+                defer gpa.free(placed);
+                log.warn("{s} did not compile:\n{s}", .{ into.source, placed });
+            }
             break :blk null;
         },
     };
     into.problems = try gpa.dupe(u8, problems.written());
+}
+
+/// A compiler's messages with where each is under it, `--> path:line:column`,
+/// as a script's are, for an editor to take a click on it there.
+fn withPlaces(gpa: Allocator, source: []const u8, said: []const u8) Allocator.Error![]u8 {
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    var place: ?[2]usize = null;
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, said, "\n"), '\n');
+    while (lines.next()) |line| {
+        if (material.headOf(line)) |head| {
+            if (place) |at| out.writer.print("  --> {s}:{d}:{d}\n", .{ source, at[0], at[1] }) catch return error.OutOfMemory;
+            place = .{ head.line, head.column };
+        }
+        out.writer.print("{s}\n", .{line}) catch return error.OutOfMemory;
+    }
+    if (place) |at| out.writer.print("  --> {s}:{d}:{d}\n", .{ source, at[0], at[1] }) catch return error.OutOfMemory;
+    return out.toOwnedSlice() catch error.OutOfMemory;
+}
+
+test "a compiler's messages are told with where each is, as a script's" {
+    const placed = try withPlaces(testing.allocator, "res://a.shader", "2:5: wrong\n    x\n    ^\n3:1: also\n");
+    defer testing.allocator.free(placed);
+    try testing.expectEqualStrings("2:5: wrong\n    x\n    ^\n  --> res://a.shader:2:5\n3:1: also\n  --> res://a.shader:3:1\n", placed);
 }
 
 /// A number a material gives its shader, by the name of the field it fills.

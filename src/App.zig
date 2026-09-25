@@ -3258,6 +3258,13 @@ pub fn findShader(self: *App, path: []const u8) ?shaders_mod.ShaderHandle {
     return self.shaders.find(named);
 }
 
+/// Text an editor has open for a shader and has not saved, as it is typed:
+/// what names it draws with it from the next frame, or - while it does not
+/// compile - with what last did. `reloadShader` goes back to the file.
+pub fn previewShader(self: *App, handle: shaders_mod.ShaderHandle, text: []const u8) !void {
+    return self.shaders.preview(self, handle, text);
+}
+
 /// Read a shader's file again, for an editor that has just saved it: what
 /// names it draws with the new one from the next frame.
 pub fn reloadShader(self: *App, handle: shaders_mod.ShaderHandle) !bool {

@@ -1085,7 +1085,16 @@ try app.setShaderParam(screen, "darkness", &.{0.6});
   as though it named none. `app.shaderOf(handle).problems` keeps the words,
   and `app.reloadShader` reads the file again. A name the engine's part
   declares, written again in the file, is said to clash with "the engine's
-  part".
+  part". Each message has where it is under it, `--> res://crt.shader:3:14`,
+  as a script's does.
+- **An editor asks `fx.shaders.edit`** about a file being written, as it is
+  compiled - its text, then the engine's part: `analyze` gives its colours,
+  every name coloured by what it names, and what is wrong at the file's own
+  places; `complete`, `signature` and `hover` know the engine's names too,
+  `UV` to `TIME`, with the doc written above each, and leave out what the
+  file never reads. `app.previewShader(handle, text)` draws with text not yet
+  saved, as it is typed: one that does not compile keeps what last did
+  drawing, and `reloadShader` goes back to the file.
 - **Not here yet**: textures of a material's own besides its picture and the
   screen's, a vertex stage of the file's, and materials on tile maps and on
   a `Text2D`.

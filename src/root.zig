@@ -456,6 +456,7 @@ test {
     _ = @import("tween.zig");
     _ = @import("texts.zig");
     _ = @import("shaders.zig");
+    _ = @import("shader_edit.zig");
     _ = @import("render/material.zig");
     _ = @import("render/screen.zig");
     _ = @import("render_test.zig");
