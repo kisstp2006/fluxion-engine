@@ -2550,7 +2550,18 @@ struct Door {
     `isValidName(name)`, `validName(name)` - what the player typed made a
     name a file can have - `globalPath` (where `user://` is on this
     computer, to tell the player) and `localPath` (back);
-  - `open(path)` and `showInFolder(path)`, and `app.openUrl(url)`.
+  - `open(path)` and `showInFolder(path)`, and `app.openUrl(url)`;
+  - the player's own files: `choose(title, extensions, many = false)` opens
+    the system's file dialog and gives a signal said once with the paths
+    chosen - empty for a cancel - and `dropped()` the signal said with the
+    paths of the files let go over the window. A file the player chose or
+    dropped is one `files` and `images` read, wherever it is, and one a
+    sprite or an audio player can be given: an avatar, a song of theirs.
+
+    ```zig
+    const chosen = await files.choose("A picture of you", ["png", "jpg"]);
+    if (chosen.len > 0) { avatar.texture = chosen[0]; }
+    ```
 
   ```zig
   const slot = files.join("user://saves", files.validName(name) + ".json");

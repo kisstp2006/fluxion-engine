@@ -148,6 +148,7 @@ const Color = @import("color.zig").Color;
 const datetime = @import("datetime.zig");
 const clocks_mod = @import("clocks.zig");
 const ConfigFile = @import("config.zig").ConfigFile;
+const dialog = @import("dialog.zig");
 const Image = @import("images.zig").Image;
 
 const Entity = ecs.Entity;
@@ -403,12 +404,14 @@ pub const FileAccess = struct {
         .localPath = .{attr.Params{ .names = &.{ "vm", "path" } }},
         .open = .{attr.Params{ .names = &.{"path"} }},
         .showInFolder = .{attr.Params{ .names = &.{"path"} }},
+        .choose = .{ attr.Params{ .names = &.{ "vm", "title", "extensions", "many" } }, attr.defaults(.{ "", flux.Value.null, false }) },
+        .dropped = .{attr.Params{ .names = &.{"vm"} }},
     };
 
     /// The text of a file: the game's (`res://`) or the player's
     /// (`user://`).
     pub fn readText(self: *FileAccess, vm: *flux.Vm, path: []const u8) anyerror!flux.Value {
-        try readable(path);
+        try mayRead(self.app, path);
         const text = try self.app.readText(self.app.gpa, path);
         defer self.app.gpa.free(text);
         return flux.bind.toValue(vm, text);
@@ -431,13 +434,13 @@ pub const FileAccess = struct {
     /// Whether there is a file or a folder there - false for a path a
     /// script may not read.
     pub fn exists(self: *FileAccess, path: []const u8) bool {
-        readable(path) catch return false;
+        mayRead(self.app, path) catch return false;
         return self.app.fileExists(path);
     }
 
     /// Whether there is a folder there.
     pub fn isDir(self: *FileAccess, path: []const u8) bool {
-        readable(path) catch return false;
+        mayRead(self.app, path) catch return false;
         return self.app.isDir(path);
     }
 
@@ -449,7 +452,7 @@ pub const FileAccess = struct {
 
     /// The names in a folder, sorted; a folder's end with `/`.
     pub fn list(self: *FileAccess, vm: *flux.Vm, path: []const u8) anyerror!flux.Value {
-        try readable(path);
+        try mayRead(self.app, path);
         const listed = try self.app.listDir(self.app.gpa, path);
         defer listed.deinit(self.app.gpa);
         return flux.bind.toValue(vm, listed.names);
@@ -465,7 +468,7 @@ pub const FileAccess = struct {
     /// making the folders it goes in. Never over what is there, unless
     /// `replace` says so: `error.PathAlreadyExists`.
     pub fn copy(self: *FileAccess, from: []const u8, to: []const u8, replace: bool) anyerror!void {
-        try readable(from);
+        try mayRead(self.app, from);
         try self.makeRoomFor(to, replace);
         try self.app.copyFile(from, to);
     }
@@ -486,20 +489,20 @@ pub const FileAccess = struct {
 
     /// A file's size in bytes; nought for a folder.
     pub fn size(self: *FileAccess, path: []const u8) anyerror!i64 {
-        try readable(path);
+        try mayRead(self.app, path);
         return @intCast((try self.app.fileInfo(path)).size);
     }
 
     /// When a file was last written, in the player's time: what a save slot
     /// shows as `modifiedTime(slot).relative()`.
     pub fn modifiedTime(self: *FileAccess, path: []const u8) anyerror!datetime.DateTime {
-        try readable(path);
+        try mayRead(self.app, path);
         return (try self.app.fileInfo(path)).modified.in(.local);
     }
 
     /// A file's SHA-256, as 64 hexadecimal digits.
     pub fn sha256(self: *FileAccess, vm: *flux.Vm, path: []const u8) anyerror!flux.Value {
-        try readable(path);
+        try mayRead(self.app, path);
         const digest = try self.app.fileSha256(path);
         const hex = std.fmt.bytesToHex(digest, .lower);
         return vm.string(&hex);
@@ -513,7 +516,7 @@ pub const FileAccess = struct {
 
     /// The text of a file `writeCompressed` wrote.
     pub fn readCompressed(self: *FileAccess, vm: *flux.Vm, path: []const u8) anyerror!flux.Value {
-        try readable(path);
+        try mayRead(self.app, path);
         const text = try self.app.readCompressed(self.app.gpa, path);
         defer self.app.gpa.free(text);
         return flux.bind.toValue(vm, text);
@@ -530,7 +533,7 @@ pub const FileAccess = struct {
     /// The text of a file `writeSecret` wrote: `error.CannotOpen` with
     /// another password, or once it was changed.
     pub fn readSecret(self: *FileAccess, vm: *flux.Vm, path: []const u8, password: []const u8) anyerror!flux.Value {
-        try readable(path);
+        try mayRead(self.app, path);
         const text = try self.app.readSecret(self.app.gpa, path, password);
         defer self.app.gpa.free(text);
         return flux.bind.toValue(vm, text);
@@ -539,7 +542,7 @@ pub const FileAccess = struct {
     /// The settings file at `path` - see `Config` - empty when there is no
     /// file yet. With a password, it is read and saved sealed.
     pub fn config(self: *FileAccess, vm: *flux.Vm, path: []const u8, password: []const u8) anyerror!flux.Value {
-        try readable(path);
+        try mayRead(self.app, path);
         var held = if (password.len == 0)
             try ConfigFile.load(self.app, path)
         else blk: {
@@ -572,7 +575,7 @@ pub const FileAccess = struct {
     /// A data file's struct, made anew with the file's values: the game's
     /// (`res://`) or one `writeData` wrote. The same as `app.readData`.
     pub fn readData(self: *FileAccess, path: []const u8) anyerror!flux.Value {
-        try readable(path);
+        try mayRead(self.app, path);
         return self.app.readData(try self.app.loadData(path));
     }
 
@@ -647,7 +650,7 @@ pub const FileAccess = struct {
     /// Where a `res://` or `user://` path is on this computer: to tell the
     /// player where the saves are.
     pub fn globalPath(self: *FileAccess, vm: *flux.Vm, path: []const u8) anyerror!flux.Value {
-        try readable(path);
+        try mayRead(self.app, path);
         const global = try self.app.project.osPath(vm.gpa, path);
         defer vm.gpa.free(global);
         return vm.string(global);
@@ -665,14 +668,69 @@ pub const FileAccess = struct {
     /// Open a file in the program the player opens its kind with, or a
     /// folder in the file manager.
     pub fn open(self: *FileAccess, path: []const u8) anyerror!void {
-        try readable(path);
+        try mayRead(self.app, path);
         try self.app.openPath(path);
     }
 
     /// Show a file picked out in its folder's window: a Saves button.
     pub fn showInFolder(self: *FileAccess, path: []const u8) anyerror!void {
-        try readable(path);
+        try mayRead(self.app, path);
         try self.app.showInFolder(path);
+    }
+
+    /// Ask the player for a file of theirs with the system's dialog: a
+    /// signal said once, with a list of the paths chosen - empty when the
+    /// dialog is cancelled. A file chosen is one `files` reads, wherever it
+    /// is, and one a sprite or a player can be given. `extensions` lists the
+    /// kinds shown, without their dots.
+    ///
+    /// ```
+    /// const chosen = await files.choose("A picture of you", ["png", "jpg"]);
+    /// if (chosen.len > 0) { avatar.texture = chosen[0]; }
+    /// ```
+    pub fn choose(self: *FileAccess, vm: *flux.Vm, title: []const u8, extensions: flux.Value, many: bool) anyerror!flux.Value {
+        const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
+        const gpa = self.app.gpa;
+        var kinds: std.ArrayList([]const u8) = .empty;
+        defer kinds.deinit(gpa);
+        if (extensions.tag == .list) {
+            for (extensions.as(flux.object.List).items.items) |item| {
+                if (item.tag != .string) return error.NotAnExtension;
+                const text = item.as(flux.object.String).bytes();
+                try kinds.append(gpa, if (std.mem.startsWith(u8, text, ".")) text[1..] else text);
+            }
+        } else if (extensions.tag != .null) return error.NotAnExtension;
+        const label = try std.mem.join(gpa, ", ", kinds.items);
+        defer gpa.free(label);
+        const one = [_]dialog.Filter{.{ .name = label, .extensions = kinds.items }};
+        const asked = try self.app.openFileDialog(.{
+            .title = if (title.len == 0) null else title,
+            .multiple = many,
+            .filters = if (kinds.items.len == 0) &.{} else &one,
+        });
+
+        const signal = try vm.newSignal("chosen", 1);
+        try vm.hold(signal);
+        errdefer vm.release(signal);
+        try scripts.dialogs.append(gpa, .{ .id = asked, .signal = signal });
+        return signal;
+    }
+
+    /// The signal said with a list of the paths of the files the player lets
+    /// go over the window, each time they do: files `files` reads then.
+    ///
+    /// ```
+    /// files.dropped().connect(fn(paths: any) { print(paths); });
+    /// ```
+    pub fn dropped(self: *FileAccess, vm: *flux.Vm) anyerror!flux.Value {
+        _ = self;
+        const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
+        if (scripts.drop_signal.tag != .signal) {
+            const signal = try vm.newSignal("dropped", 1);
+            try vm.hold(signal);
+            scripts.drop_signal = signal;
+        }
+        return scripts.drop_signal;
     }
 
     fn readable(path: []const u8) error{NotAllowed}!void {
@@ -686,6 +744,16 @@ pub const FileAccess = struct {
         if (!std.mem.startsWith(u8, path, Project.user_scheme)) return error.NotAllowed;
     }
 };
+
+/// Whether a script may read `path`: the game's, the player's under
+/// `user://`, or a file of theirs they chose in a dialog or let go over the
+/// window.
+fn mayRead(app: *App, path: []const u8) error{NotAllowed}!void {
+    FileAccess.readable(path) catch {
+        const scripts = app.scripts orelse return error.NotAllowed;
+        if (!scripts.granted.contains(path)) return error.NotAllowed;
+    };
+}
 
 /// What no file's name may hold on some system.
 const forbidden_in_names = "/\\:*?\"<>|";
@@ -904,7 +972,7 @@ pub const ImagesAccess = struct {
     /// A picture's file, a PNG or a JPEG: the game's (`res://`) or the
     /// player's (`user://`).
     pub fn read(self: *ImagesAccess, vm: *flux.Vm, path: []const u8) anyerror!flux.Value {
-        try FileAccess.readable(path);
+        try mayRead(self.app, path);
         return imageValue(vm, self.app, try self.app.readImage(vm.gpa, path));
     }
 
@@ -1718,6 +1786,14 @@ pub const Scripts = struct {
     /// Emitted at the top of this frame's update, before the scripts'
     /// `update`s.
     frame_due: flux.Value = .null,
+    /// The file dialogs scripts asked for, each with the signal its answer
+    /// is said on: `files.choose`.
+    dialogs: std.ArrayList(Waiting) = .empty,
+    /// What `files.dropped()` gives, made the first time.
+    drop_signal: flux.Value = .null,
+    /// Files outside the game and `user://` a script may read: the player
+    /// chose them, or let them go over the window.
+    granted: std.StringHashMapUnmanaged(void) = .empty,
     /// What `app.callDeferred` was given, called at the end of the frame.
     deferred: std.ArrayList(flux.Value) = .empty,
     /// Whether the event being handed round was taken: see
@@ -1811,6 +1887,10 @@ pub const Scripts = struct {
             gpa.free(entry.value.text);
         }
         self.files.deinit(gpa);
+        self.dialogs.deinit(gpa);
+        var given = self.granted.keyIterator();
+        while (given.next()) |path| gpa.free(path.*);
+        self.granted.deinit(gpa);
         gpa.destroy(self);
     }
 
@@ -2062,6 +2142,8 @@ pub const Scripts = struct {
                 try self.sync();
                 self.readyTheNew();
                 self.deliverInput();
+                self.answerDialogs();
+                self.hearDrops();
             },
             .fixed => |dt| {
                 try self.sync();
@@ -2929,6 +3011,53 @@ pub const Scripts = struct {
         } else log.warn("the scripts ran out of memory", .{});
     }
 
+    /// A file dialog a script asked for, and the signal its answer is said
+    /// on.
+    const Waiting = struct { id: dialog.Id, signal: flux.Value };
+
+    /// The dialogs that came back this frame, their paths said.
+    fn answerDialogs(self: *Scripts) void {
+        var at: usize = 0;
+        while (at < self.dialogs.items.len) {
+            const waiting = self.dialogs.items[at];
+            const paths = self.app.input.dialogAnswer(waiting.id) orelse {
+                at += 1;
+                continue;
+            };
+            _ = self.dialogs.orderedRemove(at);
+            defer self.vm.release(waiting.signal);
+            self.tellPaths(waiting.signal, paths, "a script given the files a dialog chose");
+        }
+    }
+
+    /// The files let go over the window this frame, said.
+    fn hearDrops(self: *Scripts) void {
+        if (self.drop_signal.tag != .signal) return;
+        for (self.app.input.dropped()) |drop| self.tellPaths(self.drop_signal, drop.paths, "a script given the files dropped");
+    }
+
+    /// `paths` said on `signal` as a list, once they are files the scripts
+    /// may read.
+    fn tellPaths(self: *Scripts, signal: flux.Value, paths: []const []const u8, comptime who: []const u8) void {
+        const gpa = self.app.gpa;
+        for (paths) |path| {
+            if (self.granted.contains(path)) continue;
+            const kept = gpa.dupe(u8, path) catch return self.outOfMemory(null);
+            self.granted.put(gpa, kept, {}) catch {
+                gpa.free(kept);
+                return self.outOfMemory(null);
+            };
+        }
+        const list = flux.bind.toValue(self.vm, paths) catch return self.outOfMemory(null);
+        self.vm.pushRoot(list) catch return self.outOfMemory(null);
+        defer self.vm.popRoot();
+        self.vm.setBudget(self.options.budget);
+        self.vm.emitSignalValue(signal, &.{list}) catch |err| switch (err) {
+            error.OutOfMemory => self.outOfMemory(null),
+            error.Panic => self.sayPanic(null, who),
+        };
+    }
+
     /// A panic counted, said and cleared.
     fn sayPanic(self: *Scripts, entity: ?Entity, comptime where: []const u8) void {
         self.failures += 1;
@@ -3423,7 +3552,7 @@ pub fn install(vm: *flux.Vm, app: flux.Value, files: flux.Value, time: flux.Valu
 
 const entity_doc = "The entity this script is on: `alive()`, `name()`, `uuid()`, `has(name)`, `get(name)`, `add(name)`, `remove(name)`.";
 const app_doc = "The engine: the calls `App.reflect_methods` lists.";
-const files_doc = "The game's files to read (`res://`) and the player's to read and write (`user://`): `readText(path)`, `writeText(path, text)`, `appendText`, `exists`, `isDir`, `list`, `copy`, `move`, `remove`, `size`, `modifiedTime`, `sha256`; kept sealed with `writeSecret(path, text, password)` or small with `writeCompressed`; `config(path)` for settings and `writeData(value, path)` for a struct; paths with `join`, `dirName`, `fileName`, `stem`, `extension`, `validName`.";
+const files_doc = "The game's files to read (`res://`) and the player's to read and write (`user://`): `readText(path)`, `writeText(path, text)`, `appendText`, `exists`, `isDir`, `list`, `copy`, `move`, `remove`, `size`, `modifiedTime`, `sha256`; kept sealed with `writeSecret(path, text, password)` or small with `writeCompressed`; `config(path)` for settings and `writeData(value, path)` for a struct; paths with `join`, `dirName`, `fileName`, `stem`, `extension`, `validName`; the player's own with `choose(title, extensions)` and `dropped()`.";
 const time_doc = "Dates, times and spans, written in the game's culture: `now()`, `date(year, month, day)`, `parse(text)`, `minutes(n)`, `locale()`, `setLocale(tag)`, and `clock(start, rate)` for a clock of the game's own.";
 const images_doc = "Pictures in memory: `new(width, height, color)`, `read(path)`, `capture()` of the frame, `fromTexture(texture)`; an image's `getPixel`, `setPixel`, `fill`, `fillRect`, `region`, `blit`, `blend`, `resize`, `flipX`, `flipY`, `savePng`, `saveJpg`; `toTexture(image)` draws it.";
 

@@ -2030,3 +2030,63 @@ test "a script makes, changes and saves a picture, and draws it as a texture" {
     try testing.expectEqualStrings("image://1", globalText(app, file, "named"));
     try testing.expectEqualStrings("image://1", globalText(app, file, "drawn"));
 }
+
+test "a script asks the player for a file of theirs, hears the files let go over the window, and reads them" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDirPath(testing.io, "elsewhere");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "elsewhere/note.txt", .data = "hello" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "elsewhere/other.txt", .data = "dropped" });
+    // The player's files are outside the project.
+    const project = try std.fs.path.join(testing.allocator, &.{ root, "game" });
+    defer testing.allocator.free(project);
+    try tmp.dir.createDirPath(testing.io, "game");
+    const note = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}/elsewhere/note.txt", .{tmp.sub_path}), testing.allocator);
+    defer testing.allocator.free(note);
+    var other_buffer: [128]u8 = undefined;
+    const other = try std.Io.Dir.cwd().realPathFileAlloc(testing.io, try std.fmt.bufPrint(&other_buffer, ".zig-cache/tmp/{s}/elsewhere/other.txt", .{tmp.sub_path}), testing.allocator);
+    defer testing.allocator.free(other);
+    // Spelt with forward slashes, so the script can write it in a string.
+    std.mem.replaceScalar(u8, note, '\\', '/');
+    std.mem.replaceScalar(u8, other, '\\', '/');
+
+    const app = try scriptedAt(project);
+    defer app.destroy();
+    const source = try std.fmt.allocPrint(testing.allocator,
+        \\var before = "";
+        \\var chosen = 0;
+        \\var text = "";
+        \\var heard = "";
+        \\struct Picker {{
+        \\    fn ready(self) {{
+        \\        before = files.readText("{s}") catch |e| e.name;
+        \\        files.dropped().connect(fn(paths: any) {{ heard = files.readText(paths[0]) catch |e| e.name; }});
+        \\        const paths = await files.choose("A note", ["txt", ".md"]);
+        \\        chosen = paths.len;
+        \\        text = files.readText(paths[0]) catch |e| e.name;
+        \\    }}
+        \\}}
+    , .{note});
+    defer testing.allocator.free(source);
+    const file = try app.addScript("picker.flux", source);
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("NotAllowed", globalText(app, file, "before"));
+    try testing.expectEqual(@as(usize, 1), app.scripts.?.dialogs.items.len);
+
+    // Answered, the script goes on, and reads what was chosen.
+    app.input.answerDialog(.{ .id = app.scripts.?.dialogs.items[0].id, .paths = &.{note} });
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 1), global(app, file, "chosen").asInt());
+    try testing.expectEqualStrings("hello", globalText(app, file, "text"));
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.dialogs.items.len);
+
+    // A file let go over the window is heard, and read.
+    app.input.dropFiles(.{ .paths = &.{other}, .x = 0, .y = 0 });
+    _ = try app.step();
+    try testing.expectEqualStrings("dropped", globalText(app, file, "heard"));
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
