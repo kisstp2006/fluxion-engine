@@ -75,7 +75,7 @@ pub const Timer = extern struct {
         .counted = .{attr.Hidden{}},
         .free_when_stopped = .{attr.Hidden{}},
     };
-    pub const reflect_methods = .{ .start, .stop, .isStopped };
+    pub const reflect_methods = .{ .start = .{attr.Params{ .names = &.{"seconds"} }}, .stop = .{}, .isStopped = .{} };
 
     /// Start counting from the top: from `seconds`, which becomes
     /// `wait_time`, or with nought or less from `wait_time` as it is.

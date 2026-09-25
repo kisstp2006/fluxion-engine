@@ -152,7 +152,13 @@ pub const AudioPlayer = extern struct {
         .from = .{attr.Hidden{}},
         .started = .{attr.Hidden{}},
     };
-    pub const reflect_methods = .{ .play, .stop, .seek, .busName, .setBus };
+    pub const reflect_methods = .{
+        .play = .{attr.Params{ .names = &.{"from"} }},
+        .stop = .{},
+        .seek = .{attr.Params{ .names = &.{"position"} }},
+        .busName = .{},
+        .setBus = .{attr.Params{ .names = &.{"name"} }},
+    };
 
     /// Play from `from` seconds in - from the start of the sound it plays
     /// already, too.

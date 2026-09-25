@@ -2138,3 +2138,64 @@ test "every call a script can make takes arguments and gives back a result a scr
     }
     for (app.scene_components.entries.items) |entry| try Check.methods(entry.type);
 }
+
+test "every call a script can make names what it takes" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const gpa = testing.allocator;
+    const Walk = struct {
+        seen: std.ArrayList(*const reflect.Type) = .empty,
+
+        /// A type a script reaches, through what it is wrapped in: a
+        /// pointer, an optional, an error union.
+        fn reach(self: *@This(), t: *const reflect.Type) !void {
+            const inner = switch (t.kind) {
+                .pointer => return self.reach(t.info.pointer.child),
+                .optional => return self.reach(t.info.optional.child),
+                .error_union => return self.reach(t.info.error_union.payload),
+                .@"struct", .@"union" => t,
+                else => return,
+            };
+            if (inner.methods.slice().len == 0) return;
+            for (self.seen.items) |held| if (held.same(inner)) return;
+            try self.seen.append(testing.allocator, inner);
+        }
+    };
+    var walk: Walk = .{};
+    defer walk.seen.deinit(gpa);
+    inline for (.{ App, script.FileAccess, script.TimeAccess, script.ImagesAccess, script.ImageRef, script.ConfigRef, script.FramesRef, script.ClockRef, script.EntityRef, script.Event }) |T| {
+        try walk.reach(reflect.typeOf(T));
+    }
+    for (app.scene_components.entries.items) |entry| try walk.reach(entry.type);
+
+    var unnamed: std.ArrayList(u8) = .empty;
+    defer unnamed.deinit(gpa);
+    var i: usize = 0;
+    while (i < walk.seen.items.len) : (i += 1) {
+        const t = walk.seen.items[i];
+        if (t.kind == .@"struct") for (t.fields()) |f| try walk.reach(f.type);
+        for (t.methods.slice()) |m| {
+            const f = m.type.info.function;
+            const all = if (m.takesSelf(t)) f.params.slice()[1..] else f.params.slice();
+            try walk.reach(f.return_type);
+            var visible: usize = 0;
+            for (all) |p| {
+                try walk.reach(p.type);
+                if (!p.type.is(*flux.Vm)) visible += 1;
+            }
+            if (visible == 0) continue;
+            // Every parameter a script gives has a name of its own: `arg1`
+            // says nothing of what goes there.
+            const named = if (m.paramNames()) |names| named: {
+                if (names.len != all.len and names.len != visible) break :named false;
+                for (names) |name| if (name.len == 0) break :named false;
+                break :named true;
+            } else false;
+            if (!named) try unnamed.print(gpa, "{s}.{s}\n", .{ t.name.slice(), m.name.slice() });
+        }
+    }
+    if (unnamed.items.len > 0) {
+        std.debug.print("these do not name what they take:\n{s}", .{unnamed.items});
+        return error.UnnamedParameters;
+    }
+}

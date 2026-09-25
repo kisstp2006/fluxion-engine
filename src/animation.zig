@@ -576,7 +576,13 @@ pub const AnimationPlayer = extern struct {
         .next = .{attr.Hidden{}},
         .started = .{attr.Hidden{}},
     };
-    pub const reflect_methods = .{ .play, .stop, .seek, .queue, .currentName };
+    pub const reflect_methods = .{
+        .play = .{attr.Params{ .names = &.{"name"} }},
+        .stop = .{},
+        .seek = .{attr.Params{ .names = &.{"position"} }},
+        .queue = .{attr.Params{ .names = &.{"name"} }},
+        .currentName = .{},
+    };
 
     /// Play `name` from its start, at the next pass.
     pub fn play(self: *AnimationPlayer, name: []const u8) void {

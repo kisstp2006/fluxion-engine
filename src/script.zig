@@ -1546,7 +1546,12 @@ pub const Event = struct {
     pub const Kind = enum { key, mouse_button, mouse_motion, wheel, pad_button };
 
     pub const reflect_name = "Event";
-    pub const reflect_methods = .{ .isAction, .isActionPressed, .isActionReleased, .describe };
+    pub const reflect_methods = .{
+        .isAction = .{attr.Params{ .names = &.{ "vm", "action" } }},
+        .isActionPressed = .{attr.Params{ .names = &.{ "vm", "action" } }},
+        .isActionReleased = .{attr.Params{ .names = &.{ "vm", "action" } }},
+        .describe = .{},
+    };
 
     /// Whether it is one of the action's inputs.
     pub fn isAction(self: *const Event, vm: *flux.Vm, action: []const u8) bool {

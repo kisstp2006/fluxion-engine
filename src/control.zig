@@ -175,7 +175,11 @@ pub const Control = extern struct {
         .offset_right = .{attr.Unit{ .text = "px" }},
         .offset_bottom = .{attr.Unit{ .text = "px" }},
     };
-    pub const reflect_methods = .{ .setVariation = .{}, .variationSlice = .{}, .setAnchorsPreset = .{} };
+    pub const reflect_methods = .{
+        .setVariation = .{attr.Params{ .names = &.{"name"} }},
+        .variationSlice = .{},
+        .setAnchorsPreset = .{attr.Params{ .names = &.{"preset"} }},
+    };
 
     /// Anchored where `preset` says, flush with its parent's edges or on its
     /// points: its offsets are nought, and a pinned axis grows away from the
@@ -340,7 +344,7 @@ pub const ThemeOverride = extern struct {
         .border_width = .{ attr.Range{ .min = 0, .max = 64 }, attr.Unit{ .text = "px" } },
         .corner_radius = .{ attr.Range{ .min = 0, .max = 128 }, attr.Unit{ .text = "px" } },
     };
-    pub const reflect_methods = .{ .styleBox = .{}, .setStyleBox = .{} };
+    pub const reflect_methods = .{ .styleBox = .{}, .setStyleBox = .{attr.Params{ .names = &.{"box"} }} };
 
     /// Its box as one value: what it says of the background, the border, the
     /// corners and the padding.

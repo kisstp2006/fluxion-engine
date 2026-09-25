@@ -100,7 +100,7 @@ pub const Transform2D = extern struct {
     pub const reflect_fields = .{
         .rotation = .{ attr.Angle{}, attr.Doc{ .text = "Clockwise on screen" } },
     };
-    pub const reflect_methods = .{.translate};
+    pub const reflect_methods = .{ .translate = .{attr.Params{ .names = &.{ "dx", "dy" } }} };
 
     /// A transform at a point, unrotated and unscaled.
     pub fn at(x: f32, y: f32) Transform2D {
