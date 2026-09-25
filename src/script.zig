@@ -141,6 +141,9 @@ const Project = @import("Project.zig");
 const signals = @import("signals.zig");
 const tileset = @import("tileset.zig");
 const shaders_mod = @import("shaders.zig");
+const sprite_frames = @import("sprite_frames.zig");
+const Assets = @import("assets.zig");
+const geometry = @import("geometry.zig");
 const Color = @import("color.zig").Color;
 
 const Entity = ecs.Entity;
@@ -411,6 +414,163 @@ pub const FileAccess = struct {
     }
 };
 
+/// A set of sprite frames as a script holds it: what `sprite.sprite_frames`,
+/// `app.newSpriteFrames()` and `app.loadSpriteFrames(path)` give. The calls
+/// are `SpriteFrames`'s, by the same names, a texture given by its path:
+///
+/// ```
+/// let frames = app.newSpriteFrames();
+/// frames.addAnimation("walk");
+/// frames.setAnimationSpeed("walk", 8);
+/// frames.addFrameRegion("walk", "res://art/hero.png", 0, 0, 32, 32);
+/// print(frames.getAnimationNames(), frames.resource_path);
+/// ```
+///
+/// `resource_path` is the file it is, empty for new frames not saved yet. One
+/// set of frames is one value: two sprites playing it hand back the same.
+/// A call that cannot be done - an animation it has not, a name it has - says
+/// why in the log and gives an error.
+pub const FramesRef = struct {
+    scripts: *Scripts,
+    handle: sprite_frames.SpriteFramesHandle,
+
+    pub const reflect_name = "SpriteFrames";
+    pub const reflect_opaque = true;
+    pub const reflect_methods = .{
+        .addAnimation = .{attr.Params{ .names = &.{"name"} }},
+        .addFrame = .{ attr.Params{ .names = &.{ "name", "texture", "duration", "at_position" } }, attr.defaults(.{ 1.0, -1 }) },
+        .addFrameRegion = .{ attr.Params{ .names = &.{ "name", "texture", "x", "y", "width", "height", "duration", "at_position" } }, attr.defaults(.{ 1.0, -1 }) },
+        .clear = .{attr.Params{ .names = &.{"name"} }},
+        .clearAll = .{},
+        .duplicateAnimation = .{attr.Params{ .names = &.{ "from", "to" } }},
+        .getAnimationLoopMode = .{attr.Params{ .names = &.{"name"} }},
+        .setAnimationLoopMode = .{attr.Params{ .names = &.{ "name", "mode" } }},
+        .getAnimationNames = .{},
+        .getAnimationSpeed = .{attr.Params{ .names = &.{"name"} }},
+        .setAnimationSpeed = .{attr.Params{ .names = &.{ "name", "fps" } }},
+        .getFrameCount = .{attr.Params{ .names = &.{"name"} }},
+        .getFrameDuration = .{attr.Params{ .names = &.{ "name", "index" } }},
+        .getFrameTexture = .{attr.Params{ .names = &.{ "name", "index" } }},
+        .getFrameRegion = .{attr.Params{ .names = &.{ "name", "index" } }},
+        .hasAnimation = .{attr.Params{ .names = &.{"name"} }},
+        .removeAnimation = .{attr.Params{ .names = &.{"name"} }},
+        .removeFrame = .{attr.Params{ .names = &.{ "name", "index" } }},
+        .renameAnimation = .{attr.Params{ .names = &.{ "name", "new_name" } }},
+        .setFrame = .{ attr.Params{ .names = &.{ "name", "index", "texture", "duration" } }, attr.defaults(.{1.0}) },
+        .setFrameRegion = .{ attr.Params{ .names = &.{ "name", "index", "texture", "x", "y", "width", "height", "duration" } }, attr.defaults(.{1.0}) },
+    };
+
+    const Failed = sprite_frames.Error || error{NoSuchFrames};
+
+    fn held(self: *FramesRef) error{NoSuchFrames}!*sprite_frames.SpriteFrames {
+        return self.scripts.app.sprite_frames.edit(self.handle) orelse error.NoSuchFrames;
+    }
+
+    fn gpa(self: *FramesRef) Allocator {
+        return self.scripts.app.gpa;
+    }
+
+    /// `err`, said in the log as the call that met it.
+    fn refused(self: *FramesRef, comptime call: []const u8, name: []const u8, err: Failed) Failed {
+        const source = self.scripts.app.sprite_frames.sourceOf(self.handle) orelse "sprite frames";
+        log.warn("{s}: {s}(\"{s}\"): {t}", .{ source, call, name, err });
+        return err;
+    }
+
+    pub fn addAnimation(self: *FramesRef, name: []const u8) Failed!void {
+        (try self.held()).addAnimation(self.gpa(), name) catch |err| return self.refused("addAnimation", name, err);
+    }
+
+    pub fn addFrame(self: *FramesRef, name: []const u8, texture: Assets.TextureHandle, duration: f32, at_position: i32) Failed!void {
+        (try self.held()).addFrame(self.gpa(), name, texture, duration, at_position) catch |err| return self.refused("addFrame", name, err);
+    }
+
+    pub fn addFrameRegion(self: *FramesRef, name: []const u8, texture: Assets.TextureHandle, x: f32, y: f32, width: f32, height: f32, duration: f32, at_position: i32) Failed!void {
+        (try self.held()).addFrameRegion(self.gpa(), name, texture, .init(x, y, width, height), duration, at_position) catch |err| return self.refused("addFrameRegion", name, err);
+    }
+
+    pub fn clear(self: *FramesRef, name: []const u8) Failed!void {
+        (try self.held()).clear(name) catch |err| return self.refused("clear", name, err);
+    }
+
+    pub fn clearAll(self: *FramesRef) Failed!void {
+        try (try self.held()).clearAll(self.gpa());
+    }
+
+    pub fn duplicateAnimation(self: *FramesRef, from: []const u8, to: []const u8) Failed!void {
+        (try self.held()).duplicateAnimation(self.gpa(), from, to) catch |err| return self.refused("duplicateAnimation", from, err);
+    }
+
+    pub fn getAnimationLoopMode(self: *FramesRef, name: []const u8) Failed!sprite_frames.LoopMode {
+        return (try self.held()).getAnimationLoopMode(name);
+    }
+
+    pub fn setAnimationLoopMode(self: *FramesRef, name: []const u8, mode: sprite_frames.LoopMode) Failed!void {
+        (try self.held()).setAnimationLoopMode(name, mode) catch |err| return self.refused("setAnimationLoopMode", name, err);
+    }
+
+    /// Their names, in the order of the alphabet.
+    pub fn getAnimationNames(self: *FramesRef, vm: *flux.Vm) anyerror!flux.Value {
+        const names = try (try self.held()).getAnimationNames(self.gpa());
+        defer self.gpa().free(names);
+        return flux.bind.toValue(vm, names);
+    }
+
+    pub fn getAnimationSpeed(self: *FramesRef, name: []const u8) Failed!f32 {
+        return (try self.held()).getAnimationSpeed(name);
+    }
+
+    pub fn setAnimationSpeed(self: *FramesRef, name: []const u8, fps: f32) Failed!void {
+        (try self.held()).setAnimationSpeed(name, fps) catch |err| return self.refused("setAnimationSpeed", name, err);
+    }
+
+    pub fn getFrameCount(self: *FramesRef, name: []const u8) Failed!i32 {
+        return (try self.held()).getFrameCount(name);
+    }
+
+    pub fn getFrameDuration(self: *FramesRef, name: []const u8, index: i32) Failed!f32 {
+        return (try self.held()).getFrameDuration(name, index);
+    }
+
+    pub fn getFrameTexture(self: *FramesRef, name: []const u8, index: i32) Failed!Assets.TextureHandle {
+        return (try self.held()).getFrameTexture(name, index);
+    }
+
+    pub fn getFrameRegion(self: *FramesRef, name: []const u8, index: i32) Failed!geometry.Rect2 {
+        return (try self.held()).getFrameRegion(name, index);
+    }
+
+    pub fn hasAnimation(self: *FramesRef, name: []const u8) Failed!bool {
+        return (try self.held()).hasAnimation(name);
+    }
+
+    pub fn removeAnimation(self: *FramesRef, name: []const u8) Failed!void {
+        (try self.held()).removeAnimation(self.gpa(), name) catch |err| return self.refused("removeAnimation", name, err);
+    }
+
+    pub fn removeFrame(self: *FramesRef, name: []const u8, index: i32) Failed!void {
+        (try self.held()).removeFrame(name, index) catch |err| return self.refused("removeFrame", name, err);
+    }
+
+    pub fn renameAnimation(self: *FramesRef, name: []const u8, new_name: []const u8) Failed!void {
+        (try self.held()).renameAnimation(self.gpa(), name, new_name) catch |err| return self.refused("renameAnimation", name, err);
+    }
+
+    pub fn setFrame(self: *FramesRef, name: []const u8, index: i32, texture: Assets.TextureHandle, duration: f32) Failed!void {
+        (try self.held()).setFrame(name, index, texture, duration) catch |err| return self.refused("setFrame", name, err);
+    }
+
+    pub fn setFrameRegion(self: *FramesRef, name: []const u8, index: i32, texture: Assets.TextureHandle, x: f32, y: f32, width: f32, height: f32, duration: f32) Failed!void {
+        (try self.held()).setFrameRegion(name, index, texture, .init(x, y, width, height), duration) catch |err| return self.refused("setFrameRegion", name, err);
+    }
+
+    /// The file it is: empty for frames not saved yet.
+    fn resourcePath(self: *FramesRef) []const u8 {
+        const frames = self.scripts.app.sprite_frames.get(self.handle) orelse return "";
+        return if (frames.on_disc) frames.source else "";
+    }
+};
+
 /// One thing the player did, as a script's `input(self, event)` and
 /// `unhandled_input(self, event)` are handed it:
 ///
@@ -655,6 +815,9 @@ pub const Scripts = struct {
     /// The handle each entity is to the scripts, held from the first time
     /// one is handed to them until the end of the frame it dies in.
     handles: std.AutoHashMapUnmanaged(Entity, flux.Value) = .empty,
+    /// The value each set of sprite frames is to the scripts, once handed to
+    /// them: one set, one value.
+    frames_handles: std.AutoHashMapUnmanaged(sprite_frames.SpriteFramesHandle, flux.Value) = .empty,
     /// Entities whose script could not be made, with the `Script` that
     /// asked. It is not tried again until the `Script` or its file changes.
     refused: std.AutoHashMapUnmanaged(Entity, Script) = .empty,
@@ -747,6 +910,7 @@ pub const Scripts = struct {
         self.instances.deinit(gpa);
         self.entity_of.deinit(gpa);
         self.handles.deinit(gpa);
+        self.frames_handles.deinit(gpa);
         self.refused.deinit(gpa);
         self.scratch.deinit(gpa);
         self.changed.deinit(gpa);
@@ -1977,6 +2141,8 @@ fn assetType(comptime kind: AssetKind) flux.HostType {
             const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
             const handle = value.get(H).?;
             if (std.meta.eql(handle, H.none)) return .null;
+            // Sprite frames are a value with calls of their own.
+            if (comptime kind == .frames) return framesHandle(self, handle);
             const path = self.app.assetSource(handle) orelse return .null;
             return vm.string(path);
         }
@@ -1989,12 +2155,33 @@ fn assetType(comptime kind: AssetKind) flux.HostType {
                     const path = value.as(flux.object.String).bytes();
                     break :blk2 self.app.loadAsset(H, path) catch |err| return vm.fail("the " ++ comptime kind.label() ++ " {s} did not load: {t}", .{ path, err });
                 },
+                .handle => blk2: {
+                    if (comptime kind == .frames) if (vm.reflectOf(value)) |now| if (now.asConst(FramesRef)) |ref| break :blk2 ref.handle;
+                    return vm.fail("a " ++ comptime kind.label() ++ " is given by its path, as \"res://...\", not a {s}", .{value.as(flux.object.Handle).value.type.name.slice()});
+                },
                 else => return vm.fail("a " ++ comptime kind.label() ++ " is given by its path, as \"res://...\", not {s}", .{typeName(value)}),
             };
             into.set(H, handle) catch return vm.fail("this " ++ comptime kind.label() ++ " can only be read", .{});
         }
     };
     return .{ .type = reflect.typeOf(H), .to_script = Shim.toScript, .from_script = Shim.fromScript };
+}
+
+/// The value a set of sprite frames is to the scripts: made the first time,
+/// the same one after.
+fn framesHandle(scripts: *Scripts, handle: sprite_frames.SpriteFramesHandle) flux.Vm.Error!flux.Value {
+    if (scripts.frames_handles.get(handle)) |known| return known;
+    const vm = scripts.vm;
+    try scripts.frames_handles.ensureUnusedCapacity(scripts.app.gpa, 1);
+    const ref = try vm.gpa.create(FramesRef);
+    ref.* = .{ .scripts = scripts, .handle = handle };
+    const made = vm.adoptHandle(ref) catch |err| {
+        vm.gpa.destroy(ref);
+        return err;
+    };
+    try vm.hold(made);
+    scripts.frames_handles.putAssumeCapacityNoClobber(handle, made);
+    return made;
 }
 
 /// A member of an engine's value that is none of its fields: a signal one
@@ -2019,6 +2206,10 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
         return null;
     }
     const now = vm.reflectOf(handle) orelse return null;
+    if (now.as(FramesRef)) |frames| {
+        if (std.mem.eql(u8, name, "resource_path")) return try vm.string(frames.resourcePath());
+        return null;
+    }
     const ref = now.asConst(EntityRef) orelse return null;
     if (!self.app.world.isAlive(ref.entity)) return null;
     const found = self.app.signalNamed(ref.entity, name) catch |err| switch (err) {
@@ -2187,6 +2378,7 @@ fn animatedToScript(vm: *flux.Vm, value: reflect.Value) flux.Vm.Error!flux.Value
         .vec2 => |xy| .vec2(xy[0], xy[1]),
         .color => |rgba| try vm.newColor(rgba),
         .flag => |on| .boolean(on),
+        .name => |*held| try vm.string(std.mem.sliceTo(held, 0)),
     };
 }
 
@@ -2197,7 +2389,8 @@ fn animatedFromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flux
         .bool => .{ .flag = value.asBool() },
         .vec2 => .{ .vec2 = value.asVec2() },
         .color => .{ .color = value.as(flux.object.Color).rgba },
-        else => return vm.fail("a property moves to a number, a vec2, a color, true or false, not {s}", .{typeName(value)}),
+        .string => .nameOf(value.as(flux.object.String).bytes()),
+        else => return vm.fail("a property moves to a number, a vec2, a color, true or false, or a name, not {s}", .{typeName(value)}),
     };
     const place = into.as(property.Value) orelse return vm.fail("this value can only be read", .{});
     place.* = given;
@@ -2295,7 +2488,7 @@ const action_calls = [_]struct { []const u8, bool }{
 fn stringValues(context: ?*anyopaque, arena: Allocator, argument: flux.service.StringArgument) Allocator.Error![]const flux.service.StringValue {
     const app: *App = @ptrCast(@alignCast(context.?));
     const receiver = argument.receiver orelse return &.{};
-    if (!std.mem.eql(u8, receiver, "app")) return &.{};
+    if (!std.mem.eql(u8, receiver, "app")) return animationNames(app, arena, argument);
     const every = for (action_calls) |each| {
         if (std.mem.eql(u8, each[0], argument.callee)) break each[1];
     } else return &.{};
@@ -2320,6 +2513,31 @@ fn stringValues(context: ?*anyopaque, arena: Allocator, argument: flux.service.S
             if (std.mem.eql(u8, value.label, entry.name)) break true;
         } else false;
         if (!known) try list.append(arena, try actionValue(arena, entry.action(), null));
+    }
+    return list.items;
+}
+
+/// The first string of a sprite's `play` and `playBackwards` and a player's
+/// `play` and `queue`: the name of an animation of the sprite frames and
+/// the animation libraries read, each with the file it is in. What the call
+/// is on is not known to a completion, so both kinds are offered.
+fn animationNames(app: *App, arena: Allocator, argument: flux.service.StringArgument) Allocator.Error![]const flux.service.StringValue {
+    if (argument.arg != 0) return &.{};
+    const callee = argument.callee;
+    const of_sprites = std.mem.eql(u8, callee, "play") or std.mem.eql(u8, callee, "playBackwards");
+    const of_players = std.mem.eql(u8, callee, "play") or std.mem.eql(u8, callee, "queue");
+    var list: std.ArrayList(flux.service.StringValue) = .empty;
+    if (of_sprites) {
+        var it = app.sprite_frames.table.iterator();
+        while (it.next()) |entry| for (entry.value.animations.items) |clip| {
+            try list.append(arena, .{ .label = clip.name, .detail = entry.value.source });
+        };
+    }
+    if (of_players) {
+        var it = app.animation_libraries.table.iterator();
+        while (it.next()) |entry| for (entry.value.animations.items) |held| {
+            try list.append(arena, .{ .label = held.name, .detail = entry.value.source });
+        };
     }
     return list.items;
 }

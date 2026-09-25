@@ -19,7 +19,8 @@
 //!
 //! **What moves**: a number - any float or integer, an integer rounded -, a
 //! `Vec2`, a `Color`, and a `bool`, which does not go between two values
-//! but jumps from one to the other at the end.
+//! but jumps from one to the other at the end. So does a name kept in a
+//! `[N]u8` - an animated sprite's `animation` -, cut to fit the field.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -38,6 +39,24 @@ pub const Value = union(enum) {
     vec2: [2]f32,
     color: [4]f32,
     flag: bool,
+    /// Text in a `[N]u8`, padded with zeros: see `nameOf` and `text`.
+    name: [name_len]u8,
+
+    /// The longest name a value holds.
+    pub const name_len = 64;
+
+    /// `text` as a name, cut to `name_len` bytes.
+    pub fn nameOf(said: []const u8) Value {
+        var out: [name_len]u8 = @splat(0);
+        const kept = @min(said.len, name_len);
+        @memcpy(out[0..kept], said[0..kept]);
+        return .{ .name = out };
+    }
+
+    /// A name's text, without the zeros after it.
+    pub fn text(self: *const Value) []const u8 {
+        return std.mem.sliceTo(&self.name, 0);
+    }
 
     pub const reflect_name = "AnimatedValue";
 
@@ -54,7 +73,7 @@ pub const Value = union(enum) {
                 for (&out, from, b.color) |*into, x, y| into.* = x + (y - x) * t;
                 break :blk .{ .color = out };
             },
-            .flag => if (t >= 1) b else a,
+            .flag, .name => if (t >= 1) b else a,
         };
     }
 
@@ -65,7 +84,7 @@ pub const Value = union(enum) {
             .number => |x| .{ .number = x + b.number },
             .vec2 => |x| .{ .vec2 = .{ x[0] + b.vec2[0], x[1] + b.vec2[1] } },
             .color => |x| .{ .color = .{ x[0] + b.color[0], x[1] + b.color[1], x[2] + b.color[2], x[3] + b.color[3] } },
-            .flag => b,
+            .flag, .name => b,
         };
     }
 
@@ -101,7 +120,7 @@ pub const Error = error{
     NoSuchComponent,
     /// The component has no field on that path.
     NoSuchField,
-    /// A field of a kind nothing moves: text, a list, a handle.
+    /// A field of a kind nothing moves: a slice, a list, a handle.
     NotAnimatable,
     /// Two paths that are not both numbers.
     NotAVector,
@@ -111,9 +130,11 @@ pub const Error = error{
 const Leaf = struct {
     offset: usize,
     scalar: Scalar,
+    /// How many bytes a name's field holds.
+    len: usize = 0,
 };
 
-const Scalar = enum { f32, f64, i8, i16, i32, i64, u8, u16, u32, u64, bool, vec2, color };
+const Scalar = enum { f32, f64, i8, i16, i32, i64, u8, u16, u32, u64, bool, vec2, color, name };
 
 pub const Property = struct {
     /// The component, by its place among `app.scene_components`.
@@ -145,6 +166,7 @@ pub const Property = struct {
             .vec2 => .vec2,
             .color => .color,
             .bool => .flag,
+            .name => .name,
             else => .number,
         };
         return .{ .component = component, .kind = kind, .leaves = .{ leaf, leaf }, .count = 1 };
@@ -164,6 +186,7 @@ pub const Property = struct {
             .bool => .{ .flag = @as(*const bool, @ptrCast(at)).* },
             .vec2 => .{ .vec2 = @as(*align(1) const [2]f32, @ptrCast(at)).* },
             .color => .{ .color = @as(*align(1) const [4]f32, @ptrCast(at)).* },
+            .name => Value.nameOf(std.mem.sliceTo(at[0..leaf.len], 0)),
             else => .{ .number = numberAt(at, leaf.scalar) },
         };
     }
@@ -185,6 +208,13 @@ pub const Property = struct {
             .bool => @as(*bool, @ptrCast(at)).* = given.flag,
             .vec2 => @as(*align(1) [2]f32, @ptrCast(at)).* = given.vec2,
             .color => @as(*align(1) [4]f32, @ptrCast(at)).* = given.color,
+            .name => {
+                const into = at[0..leaf.len];
+                const said = given.text();
+                const kept = @min(said.len, into.len);
+                @memset(into, 0);
+                @memcpy(into[0..kept], said[0..kept]);
+            },
             else => setNumber(at, leaf.scalar, given.number),
         }
         return true;
@@ -210,13 +240,14 @@ fn leafAt(owner: *const reflect.Type, path: []const u8) Error!Leaf {
         offset += field.offset;
         kind = field.type;
     }
-    return .{ .offset = offset, .scalar = try scalarOf(kind) };
+    return .{ .offset = offset, .scalar = try scalarOf(kind), .len = kind.size };
 }
 
 fn scalarOf(kind: *const reflect.Type) Error!Scalar {
     if (kind.is(math.Vec2)) return .vec2;
     if (kind.is(Color)) return .color;
     return switch (kind.kind) {
+        .array => if (kind.isString()) .name else error.NotAnimatable,
         .bool => .bool,
         .float => switch (kind.size) {
             4 => .f32,
@@ -239,7 +270,7 @@ fn scalarOf(kind: *const reflect.Type) Error!Scalar {
 
 fn isNumber(scalar: Scalar) bool {
     return switch (scalar) {
-        .bool, .vec2, .color => false,
+        .bool, .vec2, .color, .name => false,
         else => true,
     };
 }
@@ -249,7 +280,7 @@ fn numberAt(at: [*]u8, scalar: Scalar) f64 {
         .f32 => @as(*align(1) const f32, @ptrCast(at)).*,
         .f64 => @as(*align(1) const f64, @ptrCast(at)).*,
         inline .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => |which| @floatFromInt(@as(*align(1) const IntOf(which), @ptrCast(at)).*),
-        .bool, .vec2, .color => 0,
+        .bool, .vec2, .color, .name => 0,
     };
 }
 
@@ -263,7 +294,7 @@ fn setNumber(at: [*]u8, scalar: Scalar, value: f64) void {
             const kept = std.math.clamp(rounded, @as(f64, @floatFromInt(std.math.minInt(T))), @as(f64, @floatFromInt(std.math.maxInt(T))));
             @as(*align(1) T, @ptrCast(at)).* = @intFromFloat(kept);
         },
-        .bool, .vec2, .color => {},
+        .bool, .vec2, .color, .name => {},
     }
 }
 
@@ -289,4 +320,9 @@ test "a value goes part of the way to another, a flag at the end" {
     try testing.expect(Value.lerp(.{ .flag = false }, .{ .flag = true }, 1).flag);
     try testing.expectEqual(@as(f64, 1), (Value{ .flag = true }).as(.number).?.number);
     try testing.expect((Value{ .vec2 = .{ 1, 2 } }).as(.color) == null);
+    const run = Value.nameOf("run");
+    try testing.expectEqualStrings("run", run.text());
+    try testing.expectEqualStrings("idle", Value.lerp(.nameOf("idle"), run, 0.99).text());
+    try testing.expectEqualStrings("run", Value.lerp(.nameOf("idle"), run, 1).text());
+    try testing.expect(run.as(.number) == null);
 }

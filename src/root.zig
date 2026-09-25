@@ -315,10 +315,11 @@ pub const Tween = @import("tween.zig").Tween;
 pub const animation = @import("animation.zig");
 pub const AnimationPlayer = animation.AnimationPlayer;
 pub const AnimationLibraryHandle = animation.AnimationLibraryHandle;
-/// Animations of pictures - `.frames` - and the sprites that show them. See
+/// Animations of pictures - `.frames` - and the sprites that play them. See
 /// `sprite_frames.zig`.
 pub const sprite_frames = @import("sprite_frames.zig");
-pub const AnimatedSprite = sprite_frames.AnimatedSprite;
+pub const AnimatedSprite2D = sprite_frames.AnimatedSprite2D;
+pub const SpriteFrames = sprite_frames.SpriteFrames;
 pub const SpriteFramesHandle = sprite_frames.SpriteFramesHandle;
 pub const AudioPlayer = audio.AudioPlayer;
 pub const AudioSpatial2D = audio.AudioSpatial2D;
@@ -465,6 +466,7 @@ test {
     _ = @import("ui_test.zig");
     _ = @import("animation.zig");
     _ = @import("sprite_frames.zig");
+    _ = @import("sprite_frames_test.zig");
     _ = @import("animation_test.zig");
     _ = @import("audio_test.zig");
     _ = @import("background.zig");

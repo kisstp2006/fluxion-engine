@@ -23,11 +23,12 @@
 //! frame is one draw call however many of them there are. `Region.cell`
 //! turns "the third picture along" into the four numbers the shader wants.
 //!
-//! **An `AnimatedSprite` shows a set of sprite frames.** The frames are cells
-//! of the sheet, named and timed - `app.addGridFrames` makes them in code, a
-//! `.frames` file is the same thing on disc. The engine steps each sprite and
-//! writes the cell into it; nothing in this file touches `Sprite.region`
-//! after the creature is spawned.
+//! **An `AnimatedSprite2D` plays a set of sprite frames.** The frames are
+//! cells of the sheet, named and timed - `app.addGridFrames` makes them in
+//! code, a `.frames` file is the same thing on disc. The engine steps each
+//! sprite and puts the cell in the `Sprite` beside it, at the cell's size;
+//! nothing in this file touches `Sprite.region` after the creature is
+//! spawned.
 //!
 //! **A transform's `parent` is how one thing rides on another.** Each creature
 //! is five entities - a body, two eyes, a shadow and a name - and only the
@@ -86,7 +87,7 @@ const Transform2D = fx.Transform2D;
 const Parent = fx.Parent;
 const Sprite = fx.Sprite;
 const Camera2D = fx.Camera2D;
-const AnimatedSprite = fx.AnimatedSprite;
+const AnimatedSprite2D = fx.AnimatedSprite2D;
 const Text2D = fx.Text2D;
 const Color = fx.Color;
 const App = fx.App;
@@ -186,10 +187,12 @@ const peek_reach: f32 = 180;
 // Setting the table
 // -------------------------------------------------------------------------
 
-/// The walk, `time` seconds in.
-fn walking(frames: fx.SpriteFramesHandle, time: f32) AnimatedSprite {
-    var sprite: AnimatedSprite = .of(frames, "walk");
-    sprite.time = time;
+/// The walk, played from `at` of the way through it: from nought to one.
+fn walking(frames: fx.SpriteFramesHandle, at: f32) AnimatedSprite2D {
+    var sprite: AnimatedSprite2D = .autoplaying(frames, "walk");
+    const into = at * 4;
+    sprite.frame = @intFromFloat(@min(@floor(into), 3));
+    sprite.frame_progress = into - @floor(into);
     return sprite;
 }
 
@@ -213,7 +216,7 @@ fn sheetAndFrames(app: *App) !struct { sheet: fx.TextureHandle, frames: fx.Sprit
     // Four cells of the first row, at eight a second: the walk every
     // creature shows.
     const frames = try app.addGridFrames("examples/creature.frames", sheet, atlas_columns, atlas_rows, &.{
-        .{ .name = "walk", .cells = &.{ cell.body_first, cell.body_first + 1, cell.body_first + 2, cell.body_first + 3 }, .fps = 8 },
+        .{ .name = "walk", .cells = &.{ cell.body_first, cell.body_first + 1, cell.body_first + 2, cell.body_first + 3 }, .speed = 8 },
     });
     return .{ .sheet = sheet, .frames = frames };
 }
@@ -278,13 +281,8 @@ fn spawn(app: *App) !void {
                 40 + rand.float(f32) * (field_width - 80),
                 40 + rand.float(f32) * (field_height - 80),
             ).interpolated(),
-            Sprite{
-                .texture = sheet,
-                .tint = tint,
-                .width = 34,
-                .height = 34,
-                .layer = 0,
-            },
+            // Its picture, size and pivot are the walk's to say.
+            Sprite{ .tint = tint, .layer = 0 },
             // Each creature starting somewhere else in the walk.
             walking(frames, rand.float(f32)),
             Wander{

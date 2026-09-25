@@ -775,17 +775,21 @@ const menu = try app.loadAnimations("res://ui/menu.anim");
 const ui = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.AnimationPlayer{ .library = menu } });
 app.world.get(ui, fx.AnimationPlayer).?.play("open");
 
-// Pictures in turn.
+// Pictures in turn, in the Sprite beside it.
 const hero = try app.loadSpriteFrames("res://art/hero.frames");
-_ = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Sprite{}, fx.AnimatedSprite.of(hero, "walk") });
+const walker = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Sprite{}, fx.AnimatedSprite2D.autoplaying(hero, "walk") });
+app.world.get(walker, fx.AnimatedSprite2D).?.play("run", 1, false);
 ```
 
 - **A property is a path**: a component's scene name and a field in it -
   `Transform2D.rotation`, `Appearance.modulate`, `Control.offset_left` - or two
   number fields with a comma between, `Transform2D.x,y`, moved as one pair.
   `fx.Property.compile` finds it once, and `read` and `write` go straight to
-  the component's bytes. A number, an integer, a flag, a vector and a colour
-  can be moved: numbers and vectors and colours slide, flags jump.
+  the component's bytes. A number, an integer, a flag, a vector, a colour and
+  a name kept in a `[N]u8` - `AnimatedSprite2D.animation` - can be moved:
+  numbers and vectors and colours slide, flags and names jump. In a `.anim`
+  file a name is a string, and a string that reads as a colour, `"#ff8800"`,
+  is a colour.
 - **A tween is an entity** with a `Tween` component, made with
   `app.tween(owner)` under its owner, and its steps are the app's:
   `tweenProperty(tween, entity, path, to, seconds)` from wherever the field
@@ -807,12 +811,48 @@ _ = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Sprite{}, fx.Animated
   `position` say what it found. `animation_started` and
   `animation_finished` say so with the animation's name. A frame with no
   time moves nothing: an editor poses a scene with `fx.animation.pose`.
-- **Sprite frames are a `.frames` file**: a sheet, the grid it is cut on,
-  and animations of its cells at a rate, each frame as many frames of that
-  rate as it says. `app.addGridFrames` makes them in code, as the
-  `creatures` example does. An `AnimatedSprite` - `frames`, `animation`,
-  `playing`, `speed`, `time` - loops or stops on its last frame and says
-  `animation_finished`.
+- **Sprite frames are a `.frames` file** of named animations, each a
+  `speed` in frames a second - 5 unless it says -, a `loop` - `linear`,
+  round again; `pingpong`, back and forth; `none`, once - and its frames: a
+  texture, or a `region` of one in texels, shown for as many of the
+  animation's frames as its `duration` says. A frame with no texture shows
+  nothing. `SpriteFrames` answers `addAnimation`, `addFrame`,
+  `addFrameRegion`, `clear`, `clearAll`, `duplicateAnimation`,
+  `getAnimationNames` (in the order of the alphabet), `getAnimationSpeed`,
+  `getFrameCount`, `getFrameDuration`, `getFrameTexture`, `getFrameRegion`,
+  `hasAnimation`, `removeAnimation`, `removeFrame`, `renameAnimation`,
+  `setFrame` and the loop and speed setters; `app.newSpriteFrames()` makes a
+  set with one animation, `"default"`, and `app.saveSpriteFrames(frames,
+  path)` writes it. `app.addGridFrames` makes them from the cells of a sheet,
+  as the `creatures` example does.
+- **An `AnimatedSprite2D` plays them in the `Sprite` beside it**: the
+  Sprite's texture, region - mirrored by `flip_h` and `flip_v` -, size, which
+  is the frame's in texels, and pivot, which `centered` and `offset` say, are
+  its to write; the Sprite's tint, layer and blend stay the Sprite's.
+  - `play(name, custom_speed, from_end)` plays an animation - with no name
+    the one it has, on from where `pause()` held it - at `speed_scale` times
+    `custom_speed` its own speed, backwards below nought; `playBackwards(name)`
+    is `play(name, -1, true)`, `stop()` holds it on its first frame, and
+    `isPlaying`, `getPlayingSpeed` and `setFrameAndProgress` say and set the
+    rest. Flux leaves the last arguments out: `sprite.play("run")`.
+  - A frame shows while `frame_progress` goes from 0 to 1, and every new
+    frame says `frame_changed`. At the end a loop goes round and says
+    `animation_looped`, a ping-pong turns round and says the same, and a
+    one-shot stays on its last frame, paused, and says `animation_finished`.
+  - Writing `animation` starts it from its first frame (its last, backwards)
+    and says `animation_changed`; writing `frame` shows that frame from its
+    beginning and says `frame_changed`; other `sprite_frames` stop it and say
+    `sprite_frames_changed`. A script's write goes through the setter at once,
+    and any other write - an inspector's, a track's - is made the same at the
+    engine's next pass, where the signals are said.
+  - `autoplay` starts by itself the first time the game runs its entity; an
+    editor's frames, which have no time, show the frame and play nothing.
+  - What it works out while it plays - whether it plays, `play`'s own speed -
+    is `attr.Unsaved`: never written to a scene.
+  - In Flux, `sprite.sprite_frames` is a `SpriteFrames` value with the calls
+    above by the same names and `resource_path`; a path is taken as well:
+    `sprite.sprite_frames = "res://art/hero.frames"`. Inside `play("` the
+    code editor offers the names of the animations read.
 
 ## 📱 In the background
 
@@ -967,10 +1007,10 @@ _ = try world.spawnWith(.{
   - `moveLocalX`/`moveLocalY`, `rotate` and `applyScale` change its own numbers along its own axes.
   - `getRelativeTransformToParent` says where it is in an ancestor's space.
   - These are where the entity is. What an entity that `interpolate`s is drawn at between two steps is `drawnTransform`.
-- **An `AnimatedSprite` shows sprite frames**: a `.frames` file of named
-  animations, each a run of cells of a sheet - or pieces of textures - at a
-  rate. The engine writes the frame it is on into `Sprite.region` and
-  `Sprite.texture` once a frame; `play("attack")` swaps one for another. See
+- **An `AnimatedSprite2D` plays sprite frames**: a `.frames` file of named
+  animations, each a run of textures or pieces of them at a speed. The
+  engine puts the frame it is on in the `Sprite` beside it - texture, region,
+  size and pivot - once a frame; `play("attack")` swaps one for another. See
   [Tweens and animations](#%EF%B8%8F-tweens-and-animations).
 - **A `Text2D` is words at a transform**, drawn through the same pass as
   everything else: each glyph is a quad out of a glyph atlas, so a label sorts
@@ -2677,7 +2717,7 @@ Here, and checked by the tests:
   hangs from something taken down with it.
 - Tweens as entities, keyed animations in `.anim` files played by an
   `AnimationPlayer` on its entity and those under it, and sprite frames in
-  `.frames` files an `AnimatedSprite` shows - all of it moving a component's
+  `.frames` files an `AnimatedSprite2D` plays - all of it moving a component's
   fields by a path, from Zig and from Flux.
 - Text: a shelf-packed glyph atlas per font, kerning, several lines, three
   alignments, and words of any length kept beside the component, formatted
@@ -2811,7 +2851,7 @@ before this package existed - the seam was cut for it deliberately.
 ## 🧩 What counts as a component
 
 `Parent`, `Processing` and `Appearance`, which every entity may have. In 2D: `Transform2D`, `Sprite`,
-`Text2D`, `AnimatedSprite`, `Camera2D`, `RigidBody2D`, `Collider2D`, `Area2D`
+`Text2D`, `AnimatedSprite2D`, `Camera2D`, `RigidBody2D`, `Collider2D`, `Area2D`
 and `TileMap`; `Timer`, `Tween` and `AnimationPlayer`; `AudioPlayer`,
 `AudioSpatial2D` and `AudioListener2D`; and the interface's `Control` with what goes beside it -
 see [Controls and themes](#-controls-and-themes). Each one is something a

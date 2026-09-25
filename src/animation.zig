@@ -295,14 +295,15 @@ pub fn read(gpa: Allocator, into: *Library, text: []const u8) ReadError!void {
     }
 }
 
-/// A key's value as a file writes it.
+/// A key's value as a file writes it. A string is a colour when it reads
+/// as one, `"#ff8800"`, and a name otherwise.
 pub fn valueOf(given: json.Value) ?Value {
     switch (given) {
         .int => |n| return .{ .number = @floatFromInt(n) },
         .float => |f| return .{ .number = f },
         .bool => |b| return .{ .flag = b },
         .string => |text| {
-            const c = Color.parse(text) orelse return null;
+            const c = Color.parse(text) orelse return .nameOf(text);
             return .{ .color = .{ c.r, c.g, c.b, c.a } };
         },
         .array => {
@@ -323,6 +324,7 @@ fn writeValue(w: *json.Writer, value: Value) json.Writer.Error!void {
         .flag => |on| try w.write(on),
         .vec2 => |xy| try w.write(xy),
         .color => |rgba| try w.write(rgba),
+        .name => try w.write(value.text()),
     }
 }
 

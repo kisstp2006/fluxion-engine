@@ -854,7 +854,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         audio_mod.AudioListener2D,
         tween_mod.Tween,
         animation_mod.AnimationPlayer,
-        sprite_frames_mod.AnimatedSprite,
+        sprite_frames_mod.AnimatedSprite2D,
         shaders_mod.Material,
         inherited_mod.Processing,
         inherited_mod.Appearance,
@@ -886,7 +886,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, animation_mod.AnimationLibraryHandle, sprite_frames_mod.SpriteFramesHandle, shaders_mod.ShaderHandle, character.Collision, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
+    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, animation_mod.AnimationLibraryHandle, sprite_frames_mod.SpriteFramesHandle, sprite_frames_mod.LoopMode, shaders_mod.ShaderHandle, character.Collision, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
@@ -1532,6 +1532,7 @@ pub fn step(self: *App) anyerror!bool {
     try timer.count(self, .update, self.time.delta);
     try tween_mod.update(self, self.time.delta);
     try animation_mod.update(self, self.time.delta);
+    try sprite_frames_mod.update(self, self.time.delta);
     try self.signals.drain(self);
     if (self.scripts) |scripts| {
         try scripts.calls.pass(scripts, .{ .update = self.time.delta });
@@ -1581,7 +1582,9 @@ pub fn step(self: *App) anyerror!bool {
     self.views.forgetDead(self.gpa, &self.world, &self.assets, components.RenderView);
     self.animation_players.forgetDead(self.gpa, &self.world);
     self.signals.forgetDead(&self.world);
-    try self.animate();
+    // Every animated sprite's frame in its Sprite, after all that could
+    // change it.
+    try sprite_frames_mod.show(self);
     if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
 
     // What the systems changed of how things show is seen by the drawing.
@@ -1745,12 +1748,6 @@ pub fn stop(self: *App) anyerror!void {
 pub fn quit(self: *App) void {
     self.running = false;
     if (self.window) |*w| w.requestClose();
-}
-
-/// Step every `AnimatedSprite` and write the frame it landed on into its `Sprite`.
-/// On the frame's delta: an animation is seen, not simulated.
-fn animate(self: *App) !void {
-    try sprite_frames_mod.animate(self, self.time.delta);
 }
 
 /// Despawn everything whose parent has died, and what hangs from that in
@@ -3209,10 +3206,22 @@ pub fn reloadAnimations(self: *App, handle: animation_mod.AnimationLibraryHandle
 }
 
 /// Read a `.frames` file - animations of pictures - or find the one read
-/// from there already. What an `AnimatedSprite` shows; see
+/// from there already. What an `AnimatedSprite2D` plays; see
 /// `sprite_frames.zig`.
 pub fn loadSpriteFrames(self: *App, path: []const u8) !sprite_frames_mod.SpriteFramesHandle {
     return self.sprite_frames.load(self, path);
+}
+
+/// New sprite frames, of no file until `saveSpriteFrames` writes them: one
+/// animation, `"default"`, at 5 frames a second.
+pub fn newSpriteFrames(self: *App) !sprite_frames_mod.SpriteFramesHandle {
+    return self.sprite_frames.addNew(self);
+}
+
+/// `frames` written to `path`. New ones become that file's; a file's are
+/// written there as a copy.
+pub fn saveSpriteFrames(self: *App, frames: sprite_frames_mod.SpriteFramesHandle, path: []const u8) !void {
+    return self.sprite_frames.saveAs(self, frames, path);
 }
 
 /// Sprite frames from text rather than a file. A name given before gets the
@@ -4346,6 +4355,9 @@ pub const reflect_methods = .{
     .instantiate,
     .changeScene,
     .readData,
+    .newSpriteFrames,
+    .loadSpriteFrames,
+    .saveSpriteFrames,
     .tween,
     .tweenProperty,
     .tweenInterval,
@@ -6559,30 +6571,6 @@ test "a parent with no transform places nothing and still owns what hangs from i
     try testing.expect(!app.world.isAlive(spark));
 }
 
-test "an animation moves the sprite's region on" {
-    const app = try App.create(testing.allocator, .{
-        .headless = true,
-        .frames = 6,
-        // Six frames of a tenth of a second, at ten cells a second: once
-        // round a four-cell strip, and two more.
-        .fixed_delta = 0.1,
-    });
-    defer app.destroy();
-    app.time.source = .{ .fixed = 0.1 };
-
-    const strip = try app.addGridFrames("strip", .none, 4, 1, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .fps = 10 }});
-    const walker = try app.world.spawnWith(.{
-        components.Transform2D{},
-        components.Sprite.solid(.white, 8, 8),
-        sprite_frames_mod.AnimatedSprite.of(strip, "walk"),
-    });
-
-    try app.run();
-
-    const showing = app.world.get(walker, components.Sprite).?.region;
-    try testing.expectApproxEqAbs(Region.cell(2, 4, 1).u0, showing.u0, 0.0001);
-}
-
 test "a fixed step runs as many times as the frame is worth" {
     const counter = struct {
         var steps: u32 = 0;
@@ -7679,15 +7667,16 @@ test "an animation waits while its entity does not run" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     app.time.source = .{ .fixed = 0.25 };
-    const frames = try app.addGridFrames("strip", .none, 4, 1, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .fps = 4 }});
-    const strip: sprite_frames_mod.AnimatedSprite = .of(frames, "walk");
+    const frames = try app.addGridFrames("strip", .none, 4, 1, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .speed = 4 }});
+    const strip: sprite_frames_mod.AnimatedSprite2D = .autoplaying(frames, "walk");
     const walker = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip });
     const menu = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip, inherited_mod.Processing{ .mode = .always } });
 
     app.setPaused(true);
     for (0..2) |_| _ = try app.step();
-    try testing.expectEqual(@as(f32, 0), app.world.get(walker, sprite_frames_mod.AnimatedSprite).?.time);
-    try testing.expect(app.world.get(menu, sprite_frames_mod.AnimatedSprite).?.time > 0);
+    try testing.expectEqual(@as(f32, 0), app.world.get(walker, sprite_frames_mod.AnimatedSprite2D).?.frame_progress);
+    try testing.expectEqual(@as(i32, 0), app.world.get(walker, sprite_frames_mod.AnimatedSprite2D).?.frame);
+    try testing.expectEqual(@as(i32, 1), app.world.get(menu, sprite_frames_mod.AnimatedSprite2D).?.frame);
 }
 
 test "an Appearance hides, fades and raises what hangs from it" {

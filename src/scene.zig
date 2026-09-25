@@ -86,6 +86,7 @@ const signals = @import("signals.zig");
 const Assets = @import("assets.zig");
 const Project = @import("Project.zig");
 const components = @import("components.zig");
+const attr = @import("attr.zig");
 
 const Entity = ecs.Entity;
 const World = ecs.World;
@@ -939,6 +940,7 @@ fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const held = &@field(value.*, field.name);
         const skip = (comptime T == Control and isVariationBuffer(field.name)) or
+            (comptime isUnsaved(T, field.name)) or
             (if (field.defaultValue()) |default| !s.every_field and std.meta.eql(held.*, default) else false);
         if (!skip) {
             try w.key(field.name);
@@ -948,6 +950,15 @@ fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T
     if (T == TileMap) try writeCells(s, w);
     if (T == Material) try writeParams(s, w);
     try w.endObject();
+}
+
+/// Whether `T` keeps its field `name` out of every scene: `attr.Unsaved`.
+fn isUnsaved(comptime T: type, comptime name: []const u8) bool {
+    if (!@hasDecl(T, "reflect_fields") or !@hasField(@TypeOf(T.reflect_fields), name)) return false;
+    for (@field(T.reflect_fields, name)) |entry| {
+        if (@TypeOf(entry) == attr.Unsaved) return true;
+    }
+    return false;
 }
 
 /// A material's numbers, as an object by field: one number, or a list of
@@ -2364,7 +2375,7 @@ const image = @import("fluxion_image");
 const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
 const Camera2D = components.Camera2D;
-const AnimatedSprite = @import("sprite_frames.zig").AnimatedSprite;
+const AnimatedSprite2D = @import("sprite_frames.zig").AnimatedSprite2D;
 
 /// A game's own component, holding the kinds of thing a component can.
 const Wander = extern struct {
@@ -2564,11 +2575,17 @@ test "a scene comes back as it went, from JSON and from CBOR" {
     const hero = try source.assets.loadTexture(png, .{ .filter = .linear });
     const typeface = source.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 }) catch FontHandle.none;
 
-    const strip = try source.addGridFrames("hero.frames", hero, 4, 2, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .fps = 8 }});
+    const strip = try source.addGridFrames("hero.frames", hero, 4, 2, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .speed = 8 }});
+    var walking: AnimatedSprite2D = .autoplaying(strip, "walk");
+    walking.frame = 2;
+    walking.flip_h = true;
+    // What the engine keeps while it plays is not saved.
+    walking.playing = true;
+    walking.frame_count = 4;
     const body = try source.world.spawnWith(.{
         Transform2D.at(10, 20).interpolated(),
         Sprite{ .texture = hero, .tint = .rgba(0.5, 0.25, 1, 0.75), .region = .cell(3, 4, 2), .blend = .additive },
-        AnimatedSprite.of(strip, "walk"),
+        walking,
     });
     try source.setName(body, "hero");
     _ = try source.world.spawnWith(.{ Transform2D.at(-7, -4), components.Parent.of(body), Sprite.solid(.white, 9, 9) });
@@ -2590,6 +2607,9 @@ test "a scene comes back as it went, from JSON and from CBOR" {
     const expected = try write(source, testing.allocator, .{});
     defer testing.allocator.free(expected);
     try testing.expect(std.mem.indexOf(u8, expected, "\"filter\": \"linear\"") != null);
+    try testing.expect(std.mem.indexOf(u8, expected, "\"autoplay\": \"walk\"") != null);
+    try testing.expect(std.mem.indexOf(u8, expected, "playing") == null);
+    try testing.expect(std.mem.indexOf(u8, expected, "frame_count") == null);
     try testing.expect(std.mem.indexOf(u8, expected, "\"uid\": \"uid://") != null);
 
     for ([_]json.Format{ .json, .cbor }) |format| {
@@ -2601,7 +2621,7 @@ test "a scene comes back as it went, from JSON and from CBOR" {
         defer copy.destroy();
         try copy.registerComponents(.{Wander});
         // Made in code, as the source's were: no file to read them from.
-        _ = try copy.addGridFrames("hero.frames", .none, 4, 2, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .fps = 8 }});
+        _ = try copy.addGridFrames("hero.frames", .none, 4, 2, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .speed = 8 }});
         const loaded = try copy.readScene(path, .{});
         try testing.expectEqual(@as(usize, 4), loaded.entities);
         try testing.expectEqual(@as(usize, 0), loaded.components_unknown);
@@ -2959,11 +2979,12 @@ test "numbers no hand would give load, and the frames after them do not crash" {
     const app = try headless();
     defer app.destroy();
     _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 }) catch {};
+    _ = try app.addGridFrames("strip.frames", .none, 4, 1, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .speed = 4 }});
     const loaded = try read(app,
         \\{ "fluxion_scene": 3, "entities": [
         \\  { "Transform2D": { "x": NaN, "y": Infinity, "scale_x": 0 }, "Sprite": { "width": NaN },
-        \\    "AnimatedSprite": { "speed": 1e39, "time": NaN } },
-        \\  { "Transform2D": {}, "Sprite": {}, "AnimatedSprite": { "speed": -1e39, "time": Infinity } },
+        \\    "AnimatedSprite2D": { "speed_scale": 1e39, "frame_progress": NaN, "sprite_frames": "strip.frames", "autoplay": "walk" } },
+        \\  { "Transform2D": {}, "Sprite": {}, "AnimatedSprite2D": { "speed_scale": -1e39, "frame_progress": Infinity, "frame": -7, "sprite_frames": "strip.frames", "autoplay": "walk" } },
         \\  { "Transform2D": { "x": 1 }, "Camera2D": { "zoom": 0, "fit_width": NaN, "fit_height": Infinity } },
         \\  { "Transform2D": { "rotation": NaN }, "RigidBody2D": { "velocity": { "x": NaN, "y": 1 } },
         \\    "Collider2D": { "shape": "circle", "radius": -1 } },

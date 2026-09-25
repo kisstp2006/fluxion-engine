@@ -71,7 +71,7 @@ pub const AssetKind = enum {
             .data => "Values for a Flux struct",
             .audio => "A WAV, Ogg Vorbis or MP3 file",
             .animation => "Animations an AnimationPlayer plays",
-            .frames => "Animations of pictures an AnimatedSprite shows",
+            .frames => "Animations of pictures an AnimatedSprite2D plays",
             .shader => "What a Material draws with",
         };
     }

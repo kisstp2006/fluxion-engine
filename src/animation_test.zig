@@ -7,18 +7,15 @@ const std = @import("std");
 const testing = std.testing;
 
 const ecs = @import("fluxion_ecs");
-const image = @import("fluxion_image");
 
 const App = @import("App.zig");
 const animation = @import("animation.zig");
-const sprite_frames = @import("sprite_frames.zig");
 const components = @import("components.zig");
 const inherited = @import("inherited.zig");
 const scene = @import("scene.zig");
 const script = @import("script.zig");
 
 const AnimationPlayer = animation.AnimationPlayer;
-const AnimatedSprite = sprite_frames.AnimatedSprite;
 const Transform2D = components.Transform2D;
 const Appearance = inherited.Appearance;
 
@@ -185,54 +182,6 @@ test "a scene writes a player's library as its file, and an animation from Flux"
     try testing.expectEqual(@as(usize, 0), scripts.failures);
     const said = scripts.vm.get(scripts.moduleOf(handle).?, "finished").?;
     try testing.expectEqualStrings("fade", said.as(@import("fluxion_script").object.String).bytes());
-}
-
-test "an animated sprite shows a .frames file's frames, and a one-shot stops on its last and says so" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var buffer: [128]u8 = undefined;
-    const root_dir = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    var png_buffer: [192]u8 = undefined;
-    try image.png.writeFile(testing.allocator, testing.io, try std.fmt.bufPrint(&png_buffer, "{s}/sheet.png", .{root_dir}), .{ .width = 4, .height = 2, .pixels = &(.{255} ** 32), .row_pitch = 16 }, .{});
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "hero.frames", .data =
-        \\{ "fluxion_frames": 1, "texture": "res://sheet.png", "grid": [4, 2],
-        \\  "animations": [
-        \\    { "name": "walk", "fps": 4, "frames": [0, 1, 2, 3] },
-        \\    { "name": "hit", "fps": 4, "loop": false, "frames": [4, { "cell": 5, "duration": 2 }, { "region": [0, 0, 0.5, 0.5] }] } ] }
-    });
-    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root_dir, .fixed_delta = 0.25 });
-    defer app.destroy();
-    app.time.source = .{ .fixed = 0.25 };
-
-    const frames = try app.loadSpriteFrames("res://hero.frames");
-    const held = app.sprite_frames.get(frames).?;
-    try testing.expectEqual(@as(u16, 4), held.columns);
-    try testing.expectEqual(@as(usize, 3), held.find("hit").?.frames.items.len);
-    const hero = try app.world.spawnWith(.{ Transform2D.at(0, 0), components.Sprite{ .width = 8, .height = 8 }, AnimatedSprite.of(frames, "") });
-    _ = try app.step();
-    // The first animation, a frame in.
-    try testing.expectEqual(@as(u16, 1), app.world.get(hero, AnimatedSprite).?.frame);
-    try testing.expectEqual(components.Region.cell(1, 4, 2).u0, app.world.get(hero, components.Sprite).?.region.u0);
-    try testing.expect(app.world.get(hero, components.Sprite).?.texture.eql(held.texture));
-
-    Heard.reset();
-    try app.signal(hero, AnimatedSprite, .animation_finished).connectFn(struct {
-        fn done(_: *App, _: struct {}) !void {
-            Heard.finished += 1;
-        }
-    }.done, .{});
-    app.world.get(hero, AnimatedSprite).?.play("hit");
-    for (0..6) |_| _ = try app.step();
-    try testing.expectEqual(@as(u16, 2), app.world.get(hero, AnimatedSprite).?.frame);
-    try testing.expect(!app.world.get(hero, AnimatedSprite).?.playing);
-    try testing.expectEqual(@as(f32, 0.5), app.world.get(hero, components.Sprite).?.region.u1);
-    try testing.expectEqual(@as(usize, 1), Heard.finished);
-
-    // Written back as it was read: cells as cells.
-    const text = try app.sprite_frames.textOf(app, testing.allocator, frames);
-    defer testing.allocator.free(text);
-    try testing.expect(std.mem.indexOf(u8, text, "\"duration\": 2") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\"grid\"") != null);
 }
 
 test "an editor adds animations, tracks and keys, and a track names what it moves by its path" {

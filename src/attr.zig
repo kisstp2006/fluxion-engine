@@ -37,6 +37,23 @@ pub const Hidden = reflect.attr.Hidden;
 /// Shown, and not to be changed by hand.
 pub const ReadOnly = reflect.attr.ReadOnly;
 
+/// The names of a method's parameters, `self` not among them: what a
+/// script's completion shows.
+pub const Params = reflect.attr.Params;
+
+/// What a method's last parameters are when a call leaves them out:
+/// `attr.defaults(.{ "", 1.0, false })`.
+pub const defaults = reflect.attr.defaults;
+
+/// A field written through a method of its type's that takes the new value:
+/// a change with more to do than be stored. A script's write goes through it.
+pub const Setter = reflect.attr.Setter;
+
+/// State the engine works out while the game runs - whether a sprite plays,
+/// what its pass saw last - never written to a scene, and so never an
+/// instance's difference from its scene either.
+pub const Unsaved = struct {};
+
 /// An angle, kept in radians and shown in degrees. With a `Unit`, the unit
 /// comes after the degrees: an angle a second.
 pub const Angle = struct {};
