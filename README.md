@@ -1327,6 +1327,13 @@ app.grabFocus(play);                                                            
   it without answering anything, shows one that is shut open while it or
   something in it is picked, to be laid out - `drawControlPreview`'s
   `editing`.
+- **The pointer** is a control's as its `mouse_filter` says: `stop` takes it
+  there, and what the control is in hears nothing; `pass`, the default, is
+  heard there and by what it is in, and not by what is behind; `ignore` goes
+  through to what is behind, as if the control were not there - a fade to
+  black over the buttons - while what is inside it still answers. A layer's
+  root covers the screen whatever is on it, so it passes the pointer on to
+  the layers under it unless it is `stop`.
 - **A `ColorRect`** is a box of one colour: a backdrop, a fade to black.
 - **They fade, tint and pop.** A control's `Appearance` - and whatever is
   above its tree, controls or not - colours it and everything in it by its

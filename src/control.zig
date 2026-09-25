@@ -126,6 +126,14 @@ pub const Control = extern struct {
     /// Which way a pinned control grows from its anchor: right or down from
     /// it, `end`; left or up, `begin`; or both, with its middle on it.
     pub const Grow = enum(u8) { begin, end, both };
+    /// What the pointer does at a control. `stop`: it is taken here, and what
+    /// the control is inside hears nothing of it. `pass`: it is found here and
+    /// by what the control is inside, and not by what is behind it. `ignore`:
+    /// it goes through to what is behind, as if the control were not there -
+    /// a veil that fades in and out, a picture laid over buttons - and the
+    /// control answers nothing; what is inside it still does. The root of a
+    /// tree, which is inside nothing and is a whole layer, passes it on to the
+    /// layers under it unless it stops it.
     pub const MouseFilter = enum(u8) { stop, pass, ignore };
 
     /// Where an anchored control goes, in one word.
@@ -734,6 +742,9 @@ pub const Nodes = struct {
         const own = context.at(entity);
         var declared = self.declaration(own, entity, control.*);
         declared.tint = color(shown.modulate);
+        // A layer covers the screen whatever is in it: what is not on it
+        // reaches the layers under it, unless the layer stops everything.
+        declared.passthrough = control.mouse_filter != .stop;
         declared.z_index += layer;
         declared.floating = null;
         if (width > 0) declared.width = .fixed(width) else declared.width = .grow;
@@ -863,6 +874,7 @@ pub const Nodes = struct {
             .clip = if (control.clip) .both else .none,
             .z_index = control.z_index,
             .capture = control.mouse_filter == .stop,
+            .passthrough = control.mouse_filter == .ignore,
             .scale = if (control.scale != 1) .by(control.scale) else null,
         };
         if (control.position == .anchored) {

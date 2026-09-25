@@ -175,6 +175,55 @@ test "an open popup is over everything in the middle, what is under it takes no 
     try testing.expectEqual(@as(usize, 1), Heard.pressed);
 }
 
+/// A press and a release at a point of the window, a frame each, after a
+/// frame that lays out what changed: the pointer finds what the last frame
+/// drew.
+fn click(app: *App, x: f32, y: f32) !void {
+    _ = try app.step();
+    pointAt(app, x, y);
+    press(app, x, y, true);
+    _ = try app.step();
+    press(app, x, y, false);
+    _ = try app.step();
+}
+
+test "a layer over another lets the pointer through to what is under it, and so does a veil that ignores it" {
+    const it = try withCanvas();
+    const app = it.app;
+    defer app.destroy();
+    Heard.reset();
+    var under = fixed(400, 200);
+    under.position = .anchored;
+    const button = try app.world.spawnWith(.{ under, Parent.of(it.root), Button{} });
+    try app.signal(button, Button, .pressed).connectFn(Heard.press, .{});
+    // A layer over the whole window, and a veil over the whole of it: what a
+    // fade to black is, clear while nothing loads.
+    const upper = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{ .layer = 10 } });
+    var covering = fixed(400, 200);
+    covering.position = .anchored;
+    covering.mouse_filter = .ignore;
+    const veil = try app.world.spawnWith(.{ covering, Parent.of(upper), control.ColorRect{} });
+    for (0..2) |_| _ = try app.step();
+
+    try click(app, 10, 10);
+    try testing.expectEqual(@as(usize, 1), Heard.pressed);
+
+    // A veil that answers the pointer keeps it from the button.
+    app.world.get(veil, Control).?.mouse_filter = .pass;
+    try click(app, 10, 10);
+    try testing.expectEqual(@as(usize, 1), Heard.pressed);
+
+    // And so does a layer that stops it.
+    app.world.get(veil, Control).?.mouse_filter = .ignore;
+    app.world.get(upper, Control).?.mouse_filter = .stop;
+    try click(app, 10, 10);
+    try testing.expectEqual(@as(usize, 1), Heard.pressed);
+
+    app.world.get(upper, Control).?.mouse_filter = .pass;
+    try click(app, 10, 10);
+    try testing.expectEqual(@as(usize, 2), Heard.pressed);
+}
+
 test "rich text shows its letters one after another, and says when the last shows" {
     const it = try withCanvas();
     const app = it.app;
