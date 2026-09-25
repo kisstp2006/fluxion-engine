@@ -1339,6 +1339,56 @@ test "an editor's analysis offers the project's actions inside the quotes of a c
     }
 }
 
+test "an editor's analysis knows the engine's calls: app's, an entity's, and a component's got by its name" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Checked as the game would compile them.
+    const source =
+        \\struct Hero {
+        \\    fn ready(self) {
+        \\        const sprite = self.entity.get("AnimatedSprite2D");
+        \\        sprite.play("run");
+        \\        sprite.play("run", 2.0, false, 1);
+        \\        self.entity.get("Timer").start(1.0, 2);
+        \\        app.moveAndSlide();
+        \\        app.find("Door").get("AnimatedSprite2D").playBackwards(3);
+        \\    }
+        \\}
+    ;
+    const a = try flux.service.Analysis.init(testing.allocator, "hero.flux", source, app.scriptSetup());
+    defer a.deinit();
+    var said: std.ArrayList([]const u8) = .empty;
+    for (a.diagnostics.items.items) |d| try said.append(arena, try arena.dupe(u8, d.message));
+    try testing.expectEqual(@as(usize, 4), said.items.len);
+    try testing.expectEqualStrings("`play` takes 0 to 3 arguments, and is given 4", said.items[0]);
+    try testing.expectEqualStrings("`moveAndSlide` takes 1 argument, and is given 0", said.items[2]);
+    try testing.expectEqualStrings("`name` is string, and is given int", said.items[3]);
+
+    // Offered after the dot, with their signatures.
+    const Case = struct { []const u8, []const u8 };
+    for ([_]Case{
+        .{ "fn f() { app.$ }", "moveAndSlide" },
+        .{ "struct H { fn ready(self) { self.entity.$ } }", "get" },
+        .{ "struct H { fn ready(self) { self.entity.get(\"AnimatedSprite2D\").$ } }", "playBackwards" },
+        .{ "struct H { fn ready(self) { self.entity.get(\"AnimatedSprite2D\").sprite_frames.$ } }", "addAnimation" },
+    }) |case| {
+        const where = std.mem.indexOfScalar(u8, case[0], '$').?;
+        const text = try std.mem.concat(arena, u8, &.{ case[0][0..where], case[0][where + 1 ..] });
+        const found = try flux.service.complete(testing.allocator, arena, "hero.flux", text, @intCast(where), app.scriptSetup());
+        const item = for (found.items) |item| {
+            if (std.mem.eql(u8, item.label, case[1])) break item;
+        } else {
+            std.debug.print("{s} is not offered in `{s}`\n", .{ case[1], case[0] });
+            return error.NotOffered;
+        };
+        try testing.expect(std.mem.startsWith(u8, item.detail, "fn "));
+    }
+}
+
 test "a script connects to and awaits the engine's signals: a component's, a timer's, and the next frame" {
     const app = try scripted(.{});
     defer app.destroy();

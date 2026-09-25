@@ -2393,6 +2393,15 @@ struct Door {
   `app.scriptSetup()` gives the language service's `flux.service.Options`
   with `app` and `self.entity` declared. This is for completions and
   diagnostics, and it needs no `useScripts`.
+- **The engine's calls are known as a script is compiled.** `app`,
+  `self.entity`, an entity a call gives, a component got by its name -
+  `self.entity.get("AnimatedSprite2D")` - and a sprite's `sprite_frames` are
+  known by their types: a call of their methods is checked for how many
+  arguments it has, the last ones left out where the method has defaults,
+  and for a number, a string or a flag where nothing else will do; an
+  editor offers their fields and methods after the dot, with signatures and
+  docs. A `var` holding one is offered and not checked, since it may be
+  given another value.
 - **An editor has the scripts and runs none of them**, with
   `useScripts(.{ .run = false })`.
   - Each file is compiled and never run: not its top level, a default, `ready` or `update`. So a script cannot change the scene being edited.

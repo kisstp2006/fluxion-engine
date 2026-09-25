@@ -891,6 +891,7 @@ pub const Scripts = struct {
             .host_types = &host_types,
             .host_member = hostMember,
             .host_set_member = hostSetMember,
+            .host_result = .{ .context = app, .run = componentResult },
             .loader = .{ .context = app, .load = loadImport },
         });
         errdefer vm.destroy();
@@ -2164,7 +2165,14 @@ fn assetType(comptime kind: AssetKind) flux.HostType {
             into.set(H, handle) catch return vm.fail("this " ++ comptime kind.label() ++ " can only be read", .{});
         }
     };
-    return .{ .type = reflect.typeOf(H), .to_script = Shim.toScript, .from_script = Shim.fromScript };
+    return .{
+        .type = reflect.typeOf(H),
+        // Sprite frames are a value of their own to a script; the other
+        // files are their paths.
+        .script = if (kind == .frames) reflect.typeOf(FramesRef) else null,
+        .to_script = Shim.toScript,
+        .from_script = Shim.fromScript,
+    };
 }
 
 /// The value a set of sprite frames is to the scripts: made the first time,
@@ -2305,6 +2313,7 @@ fn setShaderParamOf(self: *Scripts, entity: Entity, name: []const u8, value: flu
 /// How a script sees an `Entity`: see "An entity is one handle" above.
 const entity_type: flux.HostType = .{
     .type = reflect.typeOf(Entity),
+    .script = reflect.typeOf(EntityRef),
     .to_script = entityToScript,
     .from_script = entityFromScript,
 };
@@ -2430,9 +2439,26 @@ fn notAnEntity(vm: *flux.Vm, value: flux.Value) flux.Vm.Error {
 /// own, and each of an editor's analyses - so the two agree on what a
 /// script may name.
 pub fn install(vm: *flux.Vm, app: flux.Value, files: flux.Value) Allocator.Error!void {
-    try vm.declareHostMember("entity", "The entity this script is on: `alive()`, `name()`, `uuid()`, `has(name)`, `get(name)`, `add(name)`, `remove(name)`.");
-    try vm.defineGlobal("app", app, "The engine: the calls `App.reflect_methods` lists.");
-    try vm.defineGlobal("files", files, "The game's files to read (`res://`) and the player's to read and write (`user://`): `readText(path)`, `writeText(path, text)`, `exists(path)`, `makeDir(path)`, `list(path)`, `remove(path)`.");
+    try vm.declareHostMemberOf("entity", reflect.typeOf(EntityRef), entity_doc);
+    try vm.defineGlobal("app", app, app_doc);
+    try vm.defineGlobal("files", files, files_doc);
+}
+
+const entity_doc = "The entity this script is on: `alive()`, `name()`, `uuid()`, `has(name)`, `get(name)`, `add(name)`, `remove(name)`.";
+const app_doc = "The engine: the calls `App.reflect_methods` lists.";
+const files_doc = "The game's files to read (`res://`) and the player's to read and write (`user://`): `readText(path)`, `writeText(path, text)`, `exists(path)`, `makeDir(path)`, `list(path)`, `remove(path)`.";
+
+/// What `entity.get("Timer")` and `entity.add("Timer")` give, for the
+/// compiler to know its fields and calls by: the component registered under
+/// that name.
+fn componentResult(context: ?*anyopaque, receiver: *const reflect.Type, method: []const u8, strings: []const ?[]const u8) ?*const reflect.Type {
+    const app: *App = @ptrCast(@alignCast(context.?));
+    if (!receiver.is(EntityRef)) return null;
+    if (!std.mem.eql(u8, method, "get") and !std.mem.eql(u8, method, "add")) return null;
+    if (strings.len == 0) return null;
+    const name = strings[0] orelse return null;
+    const entry = app.scene_components.find(name) orelse return null;
+    return entry.type;
 }
 
 /// For `App.scriptSetup`. An analysis only compiles, so `app` is a name
@@ -2552,9 +2578,15 @@ fn actionValue(arena: Allocator, action: actions.Action, doc: ?[]const u8) Alloc
     return .{ .label = action.name, .detail = if (action.bindings.len == 0) "no input yet" else inputs.written(), .doc = doc };
 }
 
+/// What the game's VM is given, with nothing behind `app` and `files`: their
+/// types, and those of the rest of the engine's values, for the compiler to
+/// check the calls of and an editor to offer.
 fn installForAnalysis(context: ?*anyopaque, vm: *flux.Vm) anyerror!void {
-    _ = context;
-    try install(vm, .null, .null);
+    try vm.declareHostMemberOf("entity", reflect.typeOf(EntityRef), entity_doc);
+    try vm.declareGlobal("app", reflect.typeOf(App), app_doc);
+    try vm.declareGlobal("files", reflect.typeOf(FileAccess), files_doc);
+    vm.options.host_types = &host_types;
+    vm.options.host_result = .{ .context = context, .run = componentResult };
 }
 
 /// The struct a `Script` names: the one it names, or else the one named
