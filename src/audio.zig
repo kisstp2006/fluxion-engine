@@ -382,6 +382,16 @@ pub const Audio = struct {
         return self.keep(source, bytes, true);
     }
 
+    /// A clip of a file read already - by a background load - kept by the
+    /// path it was read from, as `load` keeps it.
+    pub fn adopt(self: *Audio, app: *App, source: []const u8, bytes: []const u8) !AudioClipHandle {
+        if (Project.isProjectPath(source)) {
+            _ = app.project.uidOf(source) catch |err|
+                log.warn("the {s} file beside {s} does not read: {t}", .{ Project.uid_extension, source, err });
+        }
+        return self.keep(source, bytes, true);
+    }
+
     /// A clip from memory rather than a file: a test's, or a tool's. Its
     /// format is what its bytes say, or else its name's ending.
     pub fn add(self: *Audio, name: []const u8, bytes: []const u8) !AudioClipHandle {

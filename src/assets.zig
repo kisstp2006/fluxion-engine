@@ -498,6 +498,19 @@ pub fn loadFont(self: *Assets, path: []const u8, options: FontOptions) !FontHand
     }, source);
 }
 
+/// A font of a file read already - by a background load - kept by `path`,
+/// as `loadFont` keeps it.
+pub fn adoptFont(self: *Assets, path: []const u8, bytes: []const u8, options: FontOptions) !FontHandle {
+    const source = try self.project.canonical(self.gpa, path);
+    errdefer self.gpa.free(source);
+    self.learnUid(source);
+    return self.addFont(bytes, .{
+        .atlas = options.atlas,
+        .label = if (options.label.len == 0) source else options.label,
+        .member = options.member,
+    }, source);
+}
+
 /// The font already read from `path`, if one was: the first font of the
 /// file, as `loadFont` opens one by default. See `findTexture`, and
 /// `findFontMember` for another font of a collection.

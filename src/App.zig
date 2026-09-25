@@ -631,7 +631,7 @@ scene_roots: std.ArrayListUnmanaged(ecs.Entity) = .empty,
 /// The scene `changeScene` asked for, opened at the end of the frame.
 scene_next: ?scenes_mod.SceneHandle = null,
 /// Scenes reading in the background: see `loadInBackground`.
-loads: std.ArrayListUnmanaged(*background_mod.SceneLoad) = .empty,
+loads: std.ArrayListUnmanaged(*background_mod.Load) = .empty,
 /// What `newUuid` draws from: seeded by the operating system, or with no
 /// `Io` by a constant, so a test makes the same ones every run.
 uuid_source: std.Random.DefaultCsprng,
@@ -2728,6 +2728,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
 /// texture sampled as textures are by default, the first font of a file.
 pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
     const kind = comptime AssetKind.of(H) orelse @compileError(@typeName(H) ++ " holds no file");
+    try self.finishLoad(path);
     return switch (kind) {
         .texture => self.assets.findTexture(path) orelse try self.assets.loadTexture(path, .{}),
         .font => self.assets.findFont(path) orelse try self.assets.loadFont(path, .{}),
@@ -3123,11 +3124,7 @@ pub fn readScene(self: *App, path: []const u8, options: scene.LoadOptions) !scen
 /// A file `loadInBackground` is reading is taken from that load - waited
 /// for, if it is not done - rather than read again.
 pub fn loadScene(self: *App, path: []const u8) !scenes_mod.SceneHandle {
-    if (self.loads.items.len > 0) {
-        const named = try self.project.canonical(self.gpa, path);
-        defer self.gpa.free(named);
-        if (self.loadOf(named)) |load| return self.takeLoad(load);
-    }
+    try self.finishLoad(path);
     return self.scenes.load(self, path);
 }
 
@@ -3425,6 +3422,7 @@ fn drawControlBox(context: ?*anyopaque, command: ui_lib.RenderCommand, scissor: 
 /// Read a sound's file - `.wav`, `.ogg` or `.mp3` - or find the one read
 /// from there already. What an `AudioPlayer` plays; see `audio.zig`.
 pub fn loadAudio(self: *App, path: []const u8) !audio_mod.AudioClipHandle {
+    try self.finishLoad(path);
     return self.audio.load(self, path);
 }
 
@@ -3761,65 +3759,112 @@ fn showBootSplash(self: *App, splash: Project.Application.BootSplash) void {
     self.render() catch |err| log.warn("the boot splash was not drawn: {t}", .{err});
 }
 
-/// Read a scene beside the game: its file, and the pictures it names
-/// decoded, on a thread of its own - on a page, a piece a frame.
-/// `loadProgress` says how far it has got, and `loadScene` of the same file
-/// - or a `changeScene` to it from a script - takes it once it is done,
-/// without a pause. A file on its way already, or read already, is left as
-/// it is. See `background`.
+/// Read a file beside the game - any the engine reads: a scene, a picture, a
+/// sound, a font, a tile set… - on a thread of its own, or on a page a piece
+/// a frame. A picture is decoded there, and a scene brings the pictures and
+/// sounds it names with it. `loadProgress` and `loadStatus` say how far it
+/// has got, and the next load of the file - `loadScene`, `loadAsset`, a
+/// script giving a sprite the path - takes it once it is done, without a
+/// pause; `finishLoad` waits for it. A file on its way already, or read
+/// already, is left as it is. See `background`.
 ///
 /// ```zig
 /// try app.loadInBackground("res://levels/two.json");
+/// try app.loadInBackground("res://music/night.ogg");
 /// // each frame:
 /// bar.value = app.loadProgress("res://levels/two.json") * 100;
 /// if (bar.value >= 100) app.changeScene(try app.loadScene("res://levels/two.json"));
 /// ```
+///
+/// `error.NotAnAsset` for a file the engine does not read by its ending.
 pub fn loadInBackground(self: *App, path: []const u8) !void {
     const io = self.io orelse return error.NoIo;
-    if (self.findScene(path) != null) return;
     // Memory any thread can ask for, since the load's thread does.
     const gpa = std.heap.smp_allocator;
     const source = try self.project.canonical(gpa, path);
-    if (self.loadOf(source) != null) {
+    errdefer gpa.free(source);
+    const kind = loadedKind(source) orelse return error.NotAnAsset;
+    if (self.isRead(kind, source) or self.loadOf(source) != null) {
         gpa.free(source);
         return;
     }
-    errdefer gpa.free(source);
+    const file = try self.project.osPath(gpa, source);
+    errdefer gpa.free(file);
     const root = try gpa.dupe(u8, self.project.root);
     errdefer gpa.free(root);
-    const load = try gpa.create(background_mod.SceneLoad);
+    const load = try gpa.create(background_mod.Load);
     errdefer gpa.destroy(load);
-    load.* = .{ .gpa = gpa, .io = io, .source = source, .root = root };
+    load.* = .{ .gpa = gpa, .io = io, .kind = kind, .source = source, .file = file, .root = root };
     try self.loads.append(self.gpa, load);
     if (background_mod.threaded) {
-        load.thread = std.Thread.spawn(.{}, background_mod.SceneLoad.run, .{load}) catch null;
+        load.thread = std.Thread.spawn(.{}, background_mod.Load.run, .{load}) catch null;
         // No thread to be had: a piece a frame, as on a page.
         if (load.thread == null) load.run();
     }
 }
 
-/// How far the scene at `path` has got, from nought to one: one once it is
+/// How far the file at `path` has got, from nought to one: one once it is
 /// read, in the background or not, and nought while nothing is reading it.
 pub fn loadProgress(self: *App, path: []const u8) f32 {
-    if (self.findScene(path) != null) return 1;
     const named = self.project.canonical(self.gpa, path) catch return 0;
     defer self.gpa.free(named);
+    if (loadedKind(named)) |kind| if (self.isRead(kind, named)) return 1;
     const load = self.loadOf(named) orelse return 0;
     // One only once it can be taken without a wait.
     return if (load.done()) 1 else @min(load.progress(), 0.99);
 }
 
+/// Where a file is in `loadInBackground`: `done` once it is read - in the
+/// background or not - `failed` for a load that did not read, which says
+/// why when it is taken, and `none` when nothing is reading it.
+pub const LoadStatus = enum { none, loading, done, failed };
+
+pub fn loadStatus(self: *App, path: []const u8) LoadStatus {
+    const named = self.project.canonical(self.gpa, path) catch return .none;
+    defer self.gpa.free(named);
+    if (loadedKind(named)) |kind| if (self.isRead(kind, named)) return .done;
+    const load = self.loadOf(named) orelse return .none;
+    if (!load.done()) return .loading;
+    return if (load.failure != null) .failed else .done;
+}
+
+/// Wait for the background load of `path`, if there is one, and make what
+/// it read what it is: the next load of the file finds it. What went wrong
+/// is its error. Nothing when nothing is reading it.
+pub fn finishLoad(self: *App, path: []const u8) !void {
+    if (self.loads.items.len == 0) return;
+    const named = try self.project.canonical(self.gpa, path);
+    defer self.gpa.free(named);
+    if (self.loadOf(named)) |load| try self.takeLoad(load);
+}
+
+/// What a file is to `loadInBackground`: what its ending says, and a scene
+/// for a `.json`, which is the one a game loads.
+fn loadedKind(path: []const u8) ?AssetKind {
+    if (AssetKind.ofPath(path)) |kind| return kind;
+    return if (std.ascii.endsWithIgnoreCase(path, ".json")) .scene else null;
+}
+
+/// Whether the file at `path`, of `kind`, is read into its table.
+fn isRead(self: *App, kind: AssetKind, path: []const u8) bool {
+    return switch (kind) {
+        inline else => |k| self.findAsset(k.Handle(), path) != null,
+    };
+}
+
 /// The background load of the file at `source`, as `Project.canonical`
 /// spells it.
-fn loadOf(self: *App, source: []const u8) ?*background_mod.SceneLoad {
+fn loadOf(self: *App, source: []const u8) ?*background_mod.Load {
     for (self.loads.items) |load| if (std.mem.eql(u8, load.source, source)) return load;
     return null;
 }
 
-/// The scene a background load read, once it is done - waited for, if it
-/// is not - with the pictures it decoded made textures. The load is let go
-/// of either way. A scene that did not read is its error.
-fn takeLoad(self: *App, load: *background_mod.SceneLoad) !scenes_mod.SceneHandle {
+/// What a background load read, once it is done - waited for, if it is not
+/// - made what it is: the pictures textures, the sounds clips, the scene a
+/// scene. The engine's other files are read again by their own loads, which
+/// is quick. The load is let go of either way. A file that did not read is
+/// its error.
+fn takeLoad(self: *App, load: *background_mod.Load) !void {
     defer self.dropLoad(load);
     load.join();
     while (load.work()) {}
@@ -3829,15 +3874,27 @@ fn takeLoad(self: *App, load: *background_mod.SceneLoad) !scenes_mod.SceneHandle
         _ = self.assets.adoptTexture(picture.source, picture.width, picture.height, picture.pixels, .{}) catch |err|
             log.warn("the picture {s} did not reach the GPU: {t}", .{ picture.source, err });
     }
-    if (self.scenes.find(load.source)) |known| {
-        _ = try self.scenes.add(self.gpa, load.source, load.bytes);
-        return known;
+    for (load.heard.items) |sound| {
+        if (self.audio.find(sound.source) != null) continue;
+        _ = self.audio.adopt(self, sound.source, sound.bytes) catch |err|
+            log.warn("the sound {s} was not taken: {t}", .{ sound.source, err });
     }
-    return self.scenes.add(self.gpa, load.source, load.bytes);
+    switch (load.kind) {
+        .scene => if (self.scenes.find(load.source) == null) {
+            _ = try self.scenes.add(self.gpa, load.source, load.bytes);
+        },
+        .audio => if (self.audio.find(load.source) == null) {
+            _ = try self.audio.adopt(self, load.source, load.bytes);
+        },
+        .font => if (self.assets.findFont(load.source) == null) {
+            _ = try self.assets.adoptFont(load.source, load.bytes, .{});
+        },
+        else => {},
+    }
 }
 
 /// A load let go of, whether it was taken or not.
-fn dropLoad(self: *App, load: *background_mod.SceneLoad) void {
+fn dropLoad(self: *App, load: *background_mod.Load) void {
     for (self.loads.items, 0..) |held, at| {
         if (held != load) continue;
         _ = self.loads.swapRemove(at);
@@ -4607,6 +4664,8 @@ pub const reflect_methods = .{
     .readScene = .{},
     .loadInBackground = .{},
     .loadProgress = .{},
+    .loadStatus = .{},
+    .finishLoad = .{},
     .currentScene = .{},
     .currentSceneRoot = .{},
     .createTimer = .{},

@@ -1959,6 +1959,9 @@ const Loading = struct {
         const seen = try std.fmt.allocPrint(l.arena, "{t}\x00{s}", .{ kind, path });
         if (l.handles.get(seen)) |known| return @bitCast(known);
         const where, const info = try l.file(path);
+        // A picture read in the background is taken; what went wrong there
+        // is found again below.
+        if (kind == .texture) l.app.finishLoad(where) catch {};
         const handle: H = switch (kind) {
             .texture => l.app.assets.findTexture(where) orelse l.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap }) catch |err|
                 return l.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err }),

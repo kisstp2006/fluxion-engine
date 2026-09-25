@@ -301,3 +301,73 @@ test "a scene read in the background has its pictures made when it is taken" {
     try testing.expectError(error.FileNotFound, app.loadScene("res://nowhere.json"));
     try testing.expectEqual(@as(usize, 0), app.loads.items.len);
 }
+
+/// A short WAV of silence: sixteen bits, one channel, 8 kHz.
+fn silence() [44 + 32]u8 {
+    var out: [44 + 32]u8 = @splat(0);
+    @memcpy(out[0..4], "RIFF");
+    std.mem.writeInt(u32, out[4..8], 36 + 32, .little);
+    @memcpy(out[8..16], "WAVEfmt ");
+    std.mem.writeInt(u32, out[16..20], 16, .little);
+    std.mem.writeInt(u16, out[20..22], 1, .little);
+    std.mem.writeInt(u16, out[22..24], 1, .little);
+    std.mem.writeInt(u32, out[24..28], 8000, .little);
+    std.mem.writeInt(u32, out[28..32], 16000, .little);
+    std.mem.writeInt(u16, out[32..34], 2, .little);
+    std.mem.writeInt(u16, out[34..36], 16, .little);
+    @memcpy(out[36..40], "data");
+    std.mem.writeInt(u32, out[40..44], 32, .little);
+    return out;
+}
+
+test "a picture, a sound, and a scene's sounds are read in the background, and taken when they are asked for" {
+    var folder: Folder = .init();
+    defer folder.tmp.cleanup();
+    const root = try folder.at();
+    try Project.writeSettings(testing.allocator, testing.io, root, .{ .application = .{ .name = "Loading" } });
+    var pixels: [4 * 4 * 4]u8 = @splat(90);
+    var path_buffer: [200]u8 = undefined;
+    const picture_path = try std.fmt.bufPrint(&path_buffer, "{s}/hero.png", .{root});
+    try image.png.writeFile(testing.allocator, testing.io, picture_path, .{ .width = 4, .height = 4, .pixels = &pixels, .row_pitch = 16 }, .{});
+    const wav = silence();
+    try folder.put("step.wav", &wav);
+    try folder.put("door.wav", &wav);
+    try folder.put("notes.txt", "not an asset");
+    try folder.put("room.json", "{ \"fluxion_scene\": 3, \"entities\": [ { \"name\": \"Door\", \"AudioPlayer\": { \"clip\": \"res://door.wav\" } } ] }");
+
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+    defer app.destroy();
+    try testing.expectEqual(App.LoadStatus.none, app.loadStatus("res://hero.png"));
+    try app.loadInBackground("res://hero.png");
+    try app.loadInBackground("res://step.wav");
+    try testing.expectError(error.NotAnAsset, app.loadInBackground("res://notes.txt"));
+    try testing.expectEqual(@as(usize, 2), app.loads.items.len);
+
+    // Waited for, the picture is a texture.
+    try app.finishLoad("res://hero.png");
+    try testing.expect(app.assets.findTexture("res://hero.png") != null);
+    try testing.expectEqual(App.LoadStatus.done, app.loadStatus("res://hero.png"));
+    try testing.expectEqual(@as(f32, 1), app.loadProgress("res://hero.png"));
+
+    // The sound is taken by the load that asks for it.
+    var frames: usize = 0;
+    while (app.loadStatus("res://step.wav") == .loading and frames < 1000) : (frames += 1) _ = try app.step();
+    const step = try app.loadAudio("res://step.wav");
+    try testing.expectEqual(@as(usize, 0), app.loads.items.len);
+    try testing.expectEqual(step, app.findAudio("res://step.wav").?);
+
+    // A scene brings the sounds it names along.
+    try app.loadInBackground("res://room.json");
+    const room = try app.loadScene("res://room.json");
+    try testing.expect(app.findAudio("res://door.wav") != null);
+    try app.openScene(room);
+    try testing.expect(app.find("Door") != null);
+
+    // One that is not there fails, and says why when it is taken.
+    try app.loadInBackground("res://gone.png");
+    frames = 0;
+    while (app.loadStatus("res://gone.png") == .loading and frames < 1000) : (frames += 1) _ = try app.step();
+    try testing.expectEqual(App.LoadStatus.failed, app.loadStatus("res://gone.png"));
+    try testing.expectError(error.FileNotFound, app.finishLoad("res://gone.png"));
+    try testing.expectEqual(App.LoadStatus.none, app.loadStatus("res://gone.png"));
+}

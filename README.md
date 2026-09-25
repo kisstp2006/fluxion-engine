@@ -2192,13 +2192,23 @@ app.changeScene(try app.loadScene("res://levels/two.json"));          // at the 
   `application.autoload` list - scenes and scripts, each an entity named
   after its file that a scene change leaves - and opens its
   `application.main_scene`.
-- **A scene can be read in the background**: `loadInBackground(path)` reads
-  its file and decodes the pictures it names on a thread of its own - on a
-  page, which has none, a piece a frame - and `loadProgress(path)` says how
-  far it has got, from nought to one. `loadScene` of the same path - or a
-  script's `changeScene` to it - takes it once it is done, making the
-  pictures textures, without a pause; asked sooner, it waits for it. A
-  loading screen's bar, from a script as from Zig.
+- **Any file can be read in the background**: `loadInBackground(path)`
+  reads it on a thread of its own - on a page, which has none, a piece a
+  frame. A picture is decoded there; a sound and a font are read there; a
+  scene is read with the pictures it names decoded and the sounds it names
+  read; the engine's other files are read there and understood when taken.
+  `loadProgress(path)` says how far it has got, from nought to one, and
+  `loadStatus(path)` whether it is `none`, `loading`, `done` or `failed`.
+  The next load of the same file - `loadScene`, `loadAsset`, `loadAudio`, a
+  script's `changeScene` or a path given to a sprite - takes it once it is
+  done, making what it read what it is, without a pause; asked sooner, it
+  waits for it, as `finishLoad(path)` does. A file that did not read says
+  why when it is taken. A loading screen's bar, from a script as from Zig:
+
+  ```zig
+  for (level_files) |file| try app.loadInBackground(file);   // the level, its music, its tiles
+  bar.value = app.loadProgress("res://levels/two.json") * 100;
+  ```
 - **What is playing**: `currentScene()` is its file, and
   `currentSceneRoot()` the first entity at its top - the one root of a scene
   that has one - where a settings menu's gamma or a fade goes.
