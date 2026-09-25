@@ -55,6 +55,7 @@
 | `States` | A game's own states, each an enum with one value at a time, and the systems that run in them. |
 | `Project` | Where a game's files are: `res://` paths from the project's root, the UUIDs in the `.uid` files beside them, the player's own under `user://`, and `project.fluxion`, whose renderer chooses the backend. |
 | `ConfigFile` | Settings a game keeps for itself, in sections of keys: the player's volume in `user://settings.cfg`. |
+| `Image` | A picture in memory, a pixel at a time: captured from the frame, read or written as a PNG or a JPEG, made a texture. |
 | `DebugViews` | What the engine draws into `app.debug` by itself: colliders, bodies, transforms, sprites, cameras, stats. |
 | `attr` | What a component's field means, for an inspector to show it by: a range, an angle, a unit, layers, several lines, a value behind a getter and a setter. |
 
@@ -2087,6 +2088,52 @@ try app.openUrl("https://example.com/our-next-game");             // http, https
   `fx.settings_file` instead, as the project file is read.
 - **A script saves the same way**, with `files` and the language's `json`
   module: see [Scripts](#️-scripts).
+
+## 🖼️ Images
+
+```zig
+var shot = try app.captureImage(gpa);                      // the frame, drawn again, the window's size
+defer shot.deinit(gpa);
+var thumb = try shot.resized(gpa, 320, 180, true);
+defer thumb.deinit(gpa);
+try app.saveImage(thumb, "user://saves/one.jpg", .{ .quality = 85 });   // .png or .jpg by the ending
+
+var map = try fx.Image.init(gpa, 64, 64, .black);
+_ = map.setPixel(10, 12, .white);
+const texture = try app.newTexture(map, .{});               // found as "image://1"
+try app.updateTexture(texture, map);                       // after the next change
+```
+
+- **`fx.Image` is a picture in memory**: RGBA, eight bits a channel, top row
+  first. `getPixel`, `setPixel`, `fill`, `fillRect`, `region`, `blit` (copied
+  in, alpha and all), `blend` (drawn over), `resized` (nearest, or the four
+  nearest mixed), `flipX`, `flipY`, `clone`, `encodePng`, `encodeJpg`. A
+  pixel outside it is nothing: read, null; written, left alone; a rectangle
+  is cut to what is inside.
+- **From and to files**: `app.readImage(gpa, path)` reads a PNG or a JPEG
+  from anywhere the engine reads; `app.saveImage(image, path, .{ .quality })`
+  writes a PNG or a JPEG by the path's ending.
+- **From and to the GPU**: `captureImage` draws the frame again into an
+  image, `textureImage` reads a texture back - a render view's picture, one
+  a shader drew in. `newTexture` makes an image a texture, named
+  `image://1`, `image://2`… - the name a script hands a sprite, which finds
+  it; `updateTexture` gives it new pixels, the same size or another, under
+  the same handle.
+- **From a script, `images`**: `images.new(width, height, color)`,
+  `images.read(path)`, `images.capture()`, `images.fromTexture(texture)`,
+  `images.toTexture(image)`, `images.updateTexture(texture, image)`; an
+  image's `width()`, `height()`, `getPixel`, `setPixel`, `fill`, `fillRect`,
+  `region`, `blit`, `blend`, `resize(width, height, smooth = true)`,
+  `flipX`, `flipY`, `copy`, `savePng(path)` and `saveJpg(path, quality =
+  0.9)` - saved under `user://` only. A pixel outside is
+  `error.OutsideImage`; the pixels are let go of with the image.
+
+  ```zig
+  const shot = images.capture() catch return;
+  shot.resize(320, 180) catch {};
+  shot.saveJpg("user://saves/one.jpg", 0.85) catch {};
+  sprite.texture = images.toTexture(shot) catch return;
+  ```
 
 ## 🆔 UUIDs
 

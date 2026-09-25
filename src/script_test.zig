@@ -1977,3 +1977,56 @@ test "a script keeps its saves in the player's files: added to, copied, told of,
     try testing.expect(std.mem.indexOf(u8, data, "\"script\": \"res://save.flux\"") != null);
     try testing.expect(std.mem.indexOf(u8, data, "scratch") == null);
 }
+
+test "a script makes, changes and saves a picture, and draws it as a texture" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    app.project.user_root = try std.fs.path.join(testing.allocator, &.{ root, "saves" });
+    const file = try app.addScript("painter.flux",
+        \\var white = 0.0;
+        \\var outside = "";
+        \\var part = 0;
+        \\var grown = 0;
+        \\var saved = false;
+        \\var refused = "";
+        \\var named = "";
+        \\var drawn = "";
+        \\struct Painter {
+        \\    fn ready(self) {
+        \\        const picture = images.new(4, 3, color(0, 0, 0, 1)) catch return;
+        \\        picture.setPixel(1, 2, color(1, 1, 1)) catch return;
+        \\        white = (picture.getPixel(1, 2) catch return).r;
+        \\        outside = picture.setPixel(9, 9, color(1, 1, 1)) catch |e| e.name;
+        \\        const corner = picture.region(0, 1, 2, 5) catch return;
+        \\        part = corner.width() * 10 + corner.height();
+        \\        picture.blend(corner, 2, 0) catch return;
+        \\        picture.resize(8, 6, false) catch return;
+        \\        grown = picture.width();
+        \\        picture.savePng("user://picture.png") catch return;
+        \\        const again = images.read("user://picture.png") catch return;
+        \\        saved = again.width() == 8 and (again.getPixel(3, 5) catch return).g == 1.0;
+        \\        refused = picture.savePng("res://picture.png") catch |e| e.name;
+        \\        named = images.toTexture(picture) catch return;
+        \\        const sprite = self.entity.add("Sprite");
+        \\        sprite.texture = named;
+        \\        drawn = sprite.texture;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqual(@as(f64, 1), global(app, file, "white").asFloat());
+    try testing.expectEqualStrings("OutsideImage", globalText(app, file, "outside"));
+    try testing.expectEqual(@as(i64, 22), global(app, file, "part").asInt());
+    try testing.expectEqual(@as(i64, 8), global(app, file, "grown").asInt());
+    try testing.expect(global(app, file, "saved").asBool());
+    try testing.expectEqualStrings("NotAllowed", globalText(app, file, "refused"));
+    try testing.expectEqualStrings("image://1", globalText(app, file, "named"));
+    try testing.expectEqualStrings("image://1", globalText(app, file, "drawn"));
+}

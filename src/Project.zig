@@ -252,6 +252,9 @@ pub fn canonical(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
     if (std.mem.startsWith(u8, path, uid_scheme)) {
         return gpa.dupe(u8, try self.pathOfUidPath(path));
     }
+    // An address of a scheme the project does not know - a texture made
+    // from an image, `image://3` - is a name, kept as it is.
+    if (std.mem.indexOf(u8, path, "://") != null) return gpa.dupe(u8, path);
     if (self.io == null) return gpa.dupe(u8, path);
 
     const absolute = try std.fs.path.resolve(gpa, &.{ self.cwd, path });

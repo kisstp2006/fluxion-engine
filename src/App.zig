@@ -91,6 +91,7 @@ const stretch_mod = @import("stretch.zig");
 const Color = @import("color.zig").Color;
 const ConfigFile = @import("config.zig").ConfigFile;
 const sealed = @import("sealed.zig");
+const Image = @import("images.zig").Image;
 const Schedule = schedule_mod.Schedule;
 const Stage = schedule_mod.Stage;
 const System = schedule_mod.System;
@@ -430,6 +431,8 @@ gpa: Allocator,
 io: ?std.Io,
 /// How hard `writeSecret`'s password is made to guess. See `sealed.Cost`.
 secret_cost: sealed.Cost = .default,
+/// How many textures `newTexture` has named.
+image_textures: u32 = 0,
 
 /// Null when headless.
 window: ?Window = null,
@@ -6336,6 +6339,73 @@ pub fn readFrame(self: *App, gpa: Allocator) ![]u8 {
 }
 
 // -------------------------------------------------------------------------
+// Images
+// -------------------------------------------------------------------------
+
+/// A picture's file - a PNG or a JPEG, `res://`, `user://` or the system's -
+/// as an image to read and change, in `gpa`'s memory. See `images`.
+pub fn readImage(self: *App, gpa: Allocator, path: []const u8) !Image {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    const decoded = try image.readFile(gpa, io, file, .{});
+    return .{ .width = decoded.width, .height = decoded.height, .pixels = decoded.pixels };
+}
+
+pub const SaveImageOptions = struct {
+    /// A JPEG's, from 1 to 100.
+    quality: u8 = 90,
+};
+
+/// Write an image to `path`: a JPEG for a `.jpg` or a `.jpeg`, a PNG for a
+/// `.png`, and `error.UnknownImageFormat` for any other ending. Written
+/// beside the old and put in its place, as `writeText` does.
+pub fn saveImage(self: *App, picture: Image, path: []const u8, options: SaveImageOptions) !void {
+    const ending = std.fs.path.extension(path);
+    const bytes = if (std.ascii.eqlIgnoreCase(ending, ".png"))
+        try picture.encodePng(self.gpa)
+    else if (std.ascii.eqlIgnoreCase(ending, ".jpg") or std.ascii.eqlIgnoreCase(ending, ".jpeg"))
+        try picture.encodeJpg(self.gpa, options.quality)
+    else
+        return error.UnknownImageFormat;
+    defer self.gpa.free(bytes);
+    try self.writeText(path, bytes);
+}
+
+/// The frame drawn again into an image the window's size: a save's
+/// thumbnail, a photo mode's picture.
+pub fn captureImage(self: *App, gpa: Allocator) !Image {
+    const pixels = try self.capture(gpa, self.width, self.height);
+    return .{ .width = self.width, .height = self.height, .pixels = pixels };
+}
+
+/// What a texture holds, read back from the GPU: a render view's picture, a
+/// texture made from an image and changed since.
+pub fn textureImage(self: *App, gpa: Allocator, texture: Assets.TextureHandle) !Image {
+    const held = self.assets.get(texture) orelse return error.NoSuchTexture;
+    const pixels = try self.device.readTexture(held.gpu, gpa);
+    const out: Image = .{ .width = held.width, .height = held.height, .pixels = pixels };
+    if (held.upside_down) out.flipY();
+    return out;
+}
+
+/// An image made a texture to draw, found by the name it is given -
+/// `image://1`, `image://2`... - which is what a script hands a sprite. See
+/// `updateTexture`.
+pub fn newTexture(self: *App, picture: Image, options: Assets.LoadOptions) !Assets.TextureHandle {
+    self.image_textures +%= 1;
+    var name: [32]u8 = undefined;
+    const source = try std.fmt.bufPrint(&name, "image://{d}", .{self.image_textures});
+    return self.assets.adoptTexture(source, picture.width, picture.height, picture.pixels, options);
+}
+
+/// Give a texture an image's pixels: in place for the same size, made anew
+/// for another, the handle the same either way.
+pub fn updateTexture(self: *App, texture: Assets.TextureHandle, picture: Image) !void {
+    try self.assets.setTexturePixels(texture, picture.width, picture.height, picture.pixels);
+}
+
+// -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
 
@@ -9190,6 +9260,54 @@ test "a file is added to, told of, hashed, and kept compressed or sealed" {
     // An address a browser opens, and nothing else.
     try testing.expectError(error.NotAllowed, app.openUrl("file:///C:/Windows/notepad.exe"));
     try testing.expectError(error.NotAllowed, app.openUrl("calc.exe"));
+}
+
+test "an image is saved and read, made a texture found by its name, changed, and read back from the GPU" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    const app = try files.app();
+    defer app.destroy();
+    app.project.user_root = try std.fs.path.join(testing.allocator, &.{ try files.at(), "saves" });
+    const gpa = testing.allocator;
+
+    var picture = try Image.init(gpa, 3, 2, .black);
+    defer picture.deinit(gpa);
+    _ = picture.setPixel(2, 1, .white);
+    try app.saveImage(picture, "user://pictures/one.png", .{});
+    try app.saveImage(picture, "user://pictures/one.jpg", .{ .quality = 95 });
+    try testing.expectError(error.UnknownImageFormat, app.saveImage(picture, "user://pictures/one.bmp", .{}));
+    var back = try app.readImage(gpa, "user://pictures/one.png");
+    defer back.deinit(gpa);
+    try testing.expectEqualSlices(u8, picture.pixels, back.pixels);
+    var photo = try app.readImage(gpa, "user://pictures/one.jpg");
+    defer photo.deinit(gpa);
+    try testing.expectEqual(@as(u32, 3), photo.width);
+
+    // A texture of it, found by the name it was given, as a script names it.
+    const texture = try app.newTexture(picture, .{});
+    try testing.expectEqualStrings("image://1", app.assets.textureSource(texture).?);
+    try testing.expect(app.assets.findTexture("image://1").?.eql(texture));
+    try testing.expect((try app.loadAsset(Assets.TextureHandle, "image://1")).eql(texture));
+    // Read back, it is its size: the headless device keeps no pixels, and
+    // answers black ones.
+    var read_back = try app.textureImage(gpa, texture);
+    defer read_back.deinit(gpa);
+    try testing.expectEqual(@as(u32, 3), read_back.width);
+    try testing.expectEqual(@as(u32, 2), read_back.height);
+
+    // Changed to another size, it is still the one texture.
+    var bigger = try picture.resized(gpa, 6, 4, false);
+    defer bigger.deinit(gpa);
+    try app.updateTexture(texture, bigger);
+    try testing.expectEqual(@as(f32, 6), app.assets.sizeOf(texture).?.width);
+    var changed = try app.textureImage(gpa, texture);
+    defer changed.deinit(gpa);
+    try testing.expectEqual(@as(u32, 4), changed.height);
+
+    _ = try app.step();
+    var shot = try app.captureImage(gpa);
+    defer shot.deinit(gpa);
+    try testing.expectEqual(app.width, shot.width);
 }
 
 test "user:// is the folder the project names, a step or more, each a name any system keeps" {

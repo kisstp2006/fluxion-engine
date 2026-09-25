@@ -369,6 +369,22 @@ pub fn adoptTexture(self: *Assets, path: []const u8, width: u32, height: u32, rg
     }, source);
 }
 
+/// Give a texture new pixels, `width` by `height`, top row first: written in
+/// place for the same size, made anew under the same handle for another.
+pub fn setTexturePixels(self: *Assets, handle: TextureHandle, width: u32, height: u32, rgba: []const u8) !void {
+    const held = self.get(handle) orelse return error.NoSuchTexture;
+    if (held.width == width and held.height == height and !held.upside_down) {
+        try self.device.updateTexture(held.gpu, rgba, 0);
+        return;
+    }
+    const gpu = try self.device.createTexture(.{ .width = width, .height = height, .data = rgba, .label = held.source });
+    self.device.destroyTexture(held.gpu);
+    held.gpu = gpu;
+    held.width = width;
+    held.height = height;
+    held.upside_down = false;
+}
+
 /// The texture already read from `path`, if one was: the same file, however
 /// either was spelt - `res://art/a.png`, `art/a.png` from the root, its
 /// absolute path.

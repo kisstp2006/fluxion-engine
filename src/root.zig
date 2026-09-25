@@ -113,6 +113,8 @@ pub const Project = @import("Project.zig");
 /// Settings a game keeps for itself, in sections of keys that need no
 /// declaring: the player's volume, in `user://settings.cfg`.
 pub const ConfigFile = @import("config.zig").ConfigFile;
+/// A picture in memory, a pixel at a time: see `images`.
+pub const Image = @import("images.zig").Image;
 /// A file of settings in sections, read and written from the struct that
 /// describes it: what `project.fluxion` is, and what an editor keeps its own
 /// settings with.
