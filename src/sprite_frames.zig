@@ -995,6 +995,17 @@ pub fn show(app: *App) !void {
     try said.emit(app);
 }
 
+/// `sprite` moved on by `delta` seconds whether or not the game's time goes
+/// by, its frames counted and nothing said: an editor playing it - in the
+/// scene, or a copy of its own that is in no world - with the time of the
+/// editor's frames.
+pub fn preview(app: *App, sprite: *AnimatedSprite2D, delta: f32) !void {
+    var said: Said = .{};
+    defer said.deinit(app.gpa);
+    fit(app, .none, sprite);
+    if (sprite.playing and delta > 0) try advance(app, .none, sprite, delta, &said);
+}
+
 /// What was written to `sprite` since the last pass, made what its setters
 /// would have made it, and what the setters left to the pass done: the name
 /// fitted to the frames, the frames counted, the frame kept to them.
@@ -1148,6 +1159,11 @@ fn advance(app: *App, e: Entity, sprite: *AnimatedSprite2D, delta: f32, said: *S
         }
     }
 }
+
+/// The fields of the `Sprite` beside an `AnimatedSprite2D` that it writes
+/// every frame, and not the Sprite's to say: an editor shows them as the
+/// animated sprite's.
+pub const driven_sprite_fields = [_][]const u8{ "texture", "region", "width", "height", "pivot_x", "pivot_y" };
 
 /// The frame `sprite` is on, in `drawn`: nothing drawn when there is none.
 pub fn drawInto(app: *App, sprite: *const AnimatedSprite2D, drawn: *Sprite) void {
