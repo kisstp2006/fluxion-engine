@@ -1843,3 +1843,137 @@ test "a script gives the pointer a picture and a default shape" {
     try testing.expectEqual(@as(u32, 2), hand.hot_x);
     try testing.expect(app.custom_cursors[@intFromEnum(App.CursorShape.arrow)] != null);
 }
+
+test "a script keeps its saves in the player's files: added to, copied, told of, sealed, and as settings and data" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "save.flux", .data =
+        \\struct Save {
+        \\    @export var name: string = "";
+        \\    @export var gold: int = 0;
+        \\    @export var at: vec2 = vec2(0, 0);
+        \\    @export var tint: color = color(1, 1, 1);
+        \\    var scratch: int = 7;
+        \\}
+    });
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    app.project.user_root = try std.fs.path.join(testing.allocator, &.{ root, "saves" });
+    app.secret_cost = .cheapest;
+    const file = try app.addScript("keeper.flux",
+        \\const saves = @import("res://save.flux");
+        \\var log = "";
+        \\var folder = false;
+        \\var size = 0;
+        \\var recent = false;
+        \\var hash = "";
+        \\var paths = "";
+        \\var names = "";
+        \\var copied = "";
+        \\var taken: any = null;
+        \\var secret = "";
+        \\var wrong = "";
+        \\var packed = "";
+        \\var volume = 0.0;
+        \\var window = vec2(0, 0);
+        \\var shade = "";
+        \\var fresh = 0.0;
+        \\var sections = 0;
+        \\var kept = "";
+        \\var refused = "";
+        \\var local = "";
+        \\struct Keeper {
+        \\    fn ready(self) {
+        \\        files.appendText("user://logs/run.txt", "one\n") catch return;
+        \\        files.appendText("user://logs/run.txt", "two\n") catch return;
+        \\        log = files.readText("user://logs/run.txt") catch "";
+        \\        folder = files.isDir("user://logs") and !files.isDir("user://logs/run.txt");
+        \\        size = files.size("user://logs/run.txt") catch -1;
+        \\        const written = files.modifiedTime("user://logs/run.txt") catch return;
+        \\        recent = written.year >= 2026;
+        \\        hash = files.sha256("user://logs/run.txt") catch "";
+        \\
+        \\        const slot = files.join("user://saves", files.validName("Anna: the <best>") + ".json");
+        \\        paths = slot + "|" + files.dirName(slot) + "|" + files.fileName(slot) + "|" + files.stem(slot) + "|" + files.extension(slot);
+        \\        names = str(files.isValidName("one.json")) + str(files.isValidName("con.txt")) + str(files.isValidName("a/b")) + files.validName("nul");
+        \\
+        \\        files.writeText(slot, "{}") catch return;
+        \\        files.copy(slot, "user://backup/slot.json") catch return;
+        \\        copied = files.copy(slot, "user://backup/slot.json") catch |e| e.name;
+        \\        files.copy(slot, "user://backup/slot.json", true) catch return;
+        \\        files.move("user://backup/slot.json", "user://backup/old.json") catch return;
+        \\        taken = files.list("user://backup") catch [];
+        \\
+        \\        files.writeSecret("user://progress.sav", "gold 9", "pass") catch return;
+        \\        secret = files.readSecret("user://progress.sav", "pass") catch "";
+        \\        wrong = files.readSecret("user://progress.sav", "other") catch |e| e.name;
+        \\        files.writeCompressed("user://big.gz", "abc") catch return;
+        \\        packed = files.readCompressed("user://big.gz") catch "";
+        \\
+        \\        const settings = files.config("user://settings.cfg") catch return;
+        \\        fresh = settings.get("audio", "music", 0.8);
+        \\        settings.set("audio", "music", 0.25) catch return;
+        \\        settings.set("display", "window", vec2(1280, 720)) catch return;
+        \\        settings.set("display", "tint", color(1, 0, 0)) catch return;
+        \\        settings.save() catch return;
+        \\        const again = files.config("user://settings.cfg") catch return;
+        \\        volume = again.get("audio", "music", 1.0);
+        \\        window = again.get("display", "window", vec2(0, 0));
+        \\        const tint = again.get("display", "tint", color(0, 0, 0));
+        \\        shade = str(tint.r) + " " + str(tint.g);
+        \\        sections = again.sections().len;
+        \\
+        \\        var save = saves.Save{};
+        \\        save.name = "Anna";
+        \\        save.gold = 120;
+        \\        save.at = vec2(3, 4);
+        \\        save.scratch = 99;
+        \\        files.writeData(save, "user://slot.data") catch |e| { kept = "write " + e.name; return; };
+        \\        const back = files.readData("user://slot.data") catch |e| { kept = "read " + e.name; return; };
+        \\        kept = back.name + " " + str(back.gold) + " " + str(back.at.x) + " " + str(back.scratch);
+        \\        save.gold = 5;
+        \\        files.writeData(save, "user://slot.data") catch return;
+        \\        const later = app.readData("user://slot.data") catch return;
+        \\        kept = kept + " " + str(later.gold);
+        \\
+        \\        refused = files.writeData(save, "res://slot.data") catch |e| e.name;
+        \\        local = files.localPath(files.globalPath("user://slot.data") catch "") catch "";
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("one\ntwo\n", globalText(app, file, "log"));
+    try testing.expect(global(app, file, "folder").asBool());
+    try testing.expectEqual(@as(i64, 8), global(app, file, "size").asInt());
+    try testing.expect(global(app, file, "recent").asBool());
+    try testing.expectEqualStrings("c3f9c8c283a2b1f2f1896f27a01cbe3cddc0c9d93f752e4639035a0f5b36f6e8", globalText(app, file, "hash"));
+    try testing.expectEqualStrings("user://saves/Anna_ the _best_.json|user://saves|Anna_ the _best_.json|Anna_ the _best_|json", globalText(app, file, "paths"));
+    try testing.expectEqualStrings("truefalsefalse_nul", globalText(app, file, "names"));
+    try testing.expectEqualStrings("PathAlreadyExists", globalText(app, file, "copied"));
+    try testing.expectEqualStrings("gold 9", globalText(app, file, "secret"));
+    try testing.expectEqualStrings("CannotOpen", globalText(app, file, "wrong"));
+    try testing.expectEqualStrings("abc", globalText(app, file, "packed"));
+    try testing.expectEqual(@as(f64, 0.8), global(app, file, "fresh").asFloat());
+    try testing.expectEqual(@as(f64, 0.25), global(app, file, "volume").asFloat());
+    try testing.expectEqual(@as(f32, 1280), global(app, file, "window").asVec2()[0]);
+    try testing.expectEqualStrings("1.0 0.0", globalText(app, file, "shade"));
+    try testing.expectEqual(@as(i64, 2), global(app, file, "sections").asInt());
+    try testing.expectEqualStrings("Anna 120 3.0 7 5", globalText(app, file, "kept"));
+    try testing.expectEqualStrings("NotAllowed", globalText(app, file, "refused"));
+    try testing.expectEqualStrings("user://slot.data", globalText(app, file, "local"));
+
+    const taken = global(app, file, "taken").as(flux.object.List).items.items;
+    try testing.expectEqual(@as(usize, 1), taken.len);
+    try testing.expectEqualStrings("old.json", taken[0].as(flux.object.String).bytes());
+
+    // The data file names its script and the struct by the file's name.
+    const data = try app.readText(testing.allocator, "user://slot.data");
+    defer testing.allocator.free(data);
+    try testing.expect(std.mem.indexOf(u8, data, "\"script\": \"res://save.flux\"") != null);
+    try testing.expect(std.mem.indexOf(u8, data, "scratch") == null);
+}

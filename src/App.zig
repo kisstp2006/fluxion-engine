@@ -90,6 +90,7 @@ const stretch_mod = @import("stretch.zig");
 
 const Color = @import("color.zig").Color;
 const ConfigFile = @import("config.zig").ConfigFile;
+const sealed = @import("sealed.zig");
 const Schedule = schedule_mod.Schedule;
 const Stage = schedule_mod.Stage;
 const System = schedule_mod.System;
@@ -427,6 +428,8 @@ fn flagValue(comptime V: type, text: []const u8) FlagError!V {
 
 gpa: Allocator,
 io: ?std.Io,
+/// How hard `writeSecret`'s password is made to guess. See `sealed.Cost`.
+secret_cost: sealed.Cost = .default,
 
 /// Null when headless.
 window: ?Window = null,
@@ -3966,6 +3969,153 @@ pub fn listDir(self: *App, gpa: Allocator, path: []const u8) !Listing {
     return .{ .names = try names.toOwnedSlice(gpa) };
 }
 
+/// Add `text` to the end of the file at `path`, making it - and the folders
+/// it is in - when there is none: a log, a line at a time.
+pub fn appendText(self: *App, path: []const u8, text: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    if (std.fs.path.dirname(file)) |folder| try std.Io.Dir.cwd().createDirPath(io, folder);
+    var handle = try std.Io.Dir.cwd().createFile(io, file, .{ .truncate = false, .read = true });
+    defer handle.close(io);
+    const end = (try handle.stat(io)).size;
+    var buffer: [4096]u8 = undefined;
+    var out = handle.writer(io, &buffer);
+    try out.seekTo(end);
+    try out.interface.writeAll(text);
+    try out.interface.flush();
+}
+
+/// What is known of a file without reading it. See `fileInfo`.
+pub const FileInfo = struct {
+    /// Bytes; nought for a folder.
+    size: u64,
+    /// When it was last written.
+    modified: datetime.Instant,
+    folder: bool,
+};
+
+/// The size of the file at `path`, when it was last written, and whether it
+/// is a folder. `error.FileNotFound` where there is none.
+pub fn fileInfo(self: *App, path: []const u8) !FileInfo {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    const stat = try std.Io.Dir.cwd().statFile(io, file, .{});
+    const folder = stat.kind == .directory;
+    return .{
+        .size = if (folder) 0 else stat.size,
+        .modified = .{ .us = @intCast(@divFloor(stat.mtime.nanoseconds, 1000)) },
+        .folder = folder,
+    };
+}
+
+/// Whether there is a folder at `path`.
+pub fn isDir(self: *App, path: []const u8) bool {
+    const info = self.fileInfo(path) catch return false;
+    return info.folder;
+}
+
+/// The SHA-256 of the file at `path`: the same file, the same 32 bytes -
+/// whether a download finished whole, or a save is the one the game wrote.
+pub fn fileSha256(self: *App, path: []const u8) ![32]u8 {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    var handle = try std.Io.Dir.cwd().openFile(io, file, .{});
+    defer handle.close(io);
+    var in = handle.reader(io, &.{});
+    var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
+    var chunk: [16 * 1024]u8 = undefined;
+    while (true) {
+        const got = in.interface.readSliceShort(&chunk) catch return in.err orelse error.ReadFailed;
+        if (got == 0) break;
+        hash.update(chunk[0..got]);
+    }
+    return hash.finalResult();
+}
+
+/// `text` written to `path` as gzip, which any tool opens: a big save in a
+/// tenth of the room. `readCompressed` reads it.
+pub fn writeCompressed(self: *App, path: []const u8, text: []const u8) !void {
+    const bytes = try sealed.compress(self.gpa, text);
+    defer self.gpa.free(bytes);
+    try self.writeText(path, bytes);
+}
+
+/// The text of a file `writeCompressed` wrote. `error.NotCompressed` for a
+/// file that is not gzip.
+pub fn readCompressed(self: *App, gpa: Allocator, path: []const u8) ![]u8 {
+    const bytes = try self.readText(self.gpa, path);
+    defer self.gpa.free(bytes);
+    return sealed.decompress(gpa, bytes, text_limit);
+}
+
+/// `text` written to `path` compressed and sealed with `password`: nobody
+/// reads it, and a file changed by hand is refused rather than taken. See
+/// `sealed`. `secret_cost` is how hard the password is made to guess.
+pub fn writeSecret(self: *App, path: []const u8, text: []const u8, password: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const bytes = try sealed.seal(self.gpa, io, text, password, self.secret_cost);
+    defer self.gpa.free(bytes);
+    try self.writeText(path, bytes);
+}
+
+/// The text of a file `writeSecret` wrote with `password`.
+/// `error.CannotOpen` for another password or a file changed since;
+/// `error.NotSealed` for a file that was never sealed.
+pub fn readSecret(self: *App, gpa: Allocator, path: []const u8, password: []const u8) ![]u8 {
+    const io = self.io orelse return error.NoIo;
+    const bytes = try self.readText(self.gpa, path);
+    defer self.gpa.free(bytes);
+    return sealed.open(gpa, io, bytes, password, text_limit);
+}
+
+/// Open a web or mail address in the player's browser or mail program: a
+/// game's page, its store, an address to write to. Only `http://`,
+/// `https://` and `mailto:` - anything else is `error.NotAllowed`, so a
+/// script cannot start a program with it.
+pub fn openUrl(self: *App, url: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    inline for (.{ "http://", "https://", "mailto:" }) |allowed| {
+        if (std.ascii.startsWithIgnoreCase(url, allowed)) return platform.shell.openUrl(self.gpa, io, url);
+    }
+    return error.NotAllowed;
+}
+
+/// Open the file at `path` in the program the player opens its kind with,
+/// or a folder in the file manager. `error.Unsupported` where there is none
+/// to ask: a page, a phone.
+pub fn openPath(self: *App, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try platform.shell.openPath(self.gpa, io, file);
+}
+
+/// Show the file at `path` picked out in the file manager's window of its
+/// folder: a Saves folder button's `showInFolder("user://saves/slot1.json")`.
+pub fn showInFolder(self: *App, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try platform.shell.showInFolder(self.gpa, io, file);
+}
+
+/// Write a data file of a script's struct: the values of its `@export`
+/// fields, as `readData` gives them back - the struct as a save. From Flux,
+/// `app.writeData(save, "user://saves/one.data")`. A data file read from
+/// there already is read again, so the next `readData` gives what was
+/// written. A field whose value a file cannot say - an entity, a function -
+/// is passed over with a warning.
+pub fn writeData(self: *App, value: script_mod.flux.Value, path: []const u8) !void {
+    const scripts = self.scripts orelse return error.NoScripts;
+    const text = try scripts.calls.writeData(scripts, value);
+    defer self.gpa.free(text);
+    try self.writeText(path, text);
+    if (self.findData(path)) |known| _ = try self.reloadData(known);
+}
+
 /// Everything out of the world at once - every entity, name and UUID - and
 /// an empty world in its place: a level loaded over another is this and then
 /// `loadScene`. Not from inside a query, which is walking the world it
@@ -4564,6 +4714,7 @@ pub const reflect_methods = .{
     .setClipboardText = .{},
     .clipboardText = .{},
     .hasClipboardText = .{},
+    .openUrl = .{attr.Params{ .names = &.{"url"} }},
 };
 
 /// Call one of the calls `reflect_methods` lists, by name, with values for
@@ -8917,6 +9068,85 @@ test "a config file keeps a game's settings in user://, and is empty until there
     var again = try ConfigFile.load(app, "user://settings.cfg");
     defer again.deinit();
     try testing.expectEqual(@as(f64, 0.5), again.getFloat("audio", "music", 1));
+}
+
+test "a file is added to, told of, hashed, and kept compressed or sealed" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    const app = try files.app();
+    defer app.destroy();
+    app.project.user_root = try std.fs.path.join(testing.allocator, &.{ try files.at(), "saves" });
+    app.secret_cost = .cheapest;
+
+    try app.appendText("user://logs/run.txt", "one\n");
+    try app.appendText("user://logs/run.txt", "two\n");
+    const written = try app.readText(testing.allocator, "user://logs/run.txt");
+    defer testing.allocator.free(written);
+    try testing.expectEqualStrings("one\ntwo\n", written);
+
+    const info = try app.fileInfo("user://logs/run.txt");
+    try testing.expectEqual(@as(u64, 8), info.size);
+    try testing.expect(!info.folder);
+    // Written a moment ago, by the clock the game tells the time with.
+    try testing.expect(@abs(app.now().since(info.modified).us) < 60 * std.time.us_per_s);
+    try testing.expect(app.isDir("user://logs"));
+    try testing.expect(!app.isDir("user://logs/run.txt"));
+    try testing.expect(!app.isDir("user://none"));
+    try testing.expectError(error.FileNotFound, app.fileInfo("user://none"));
+
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("one\ntwo\n", &expected, .{});
+    try testing.expectEqualSlices(u8, &expected, &(try app.fileSha256("user://logs/run.txt")));
+
+    const big = "a line of a save\n" ** 300;
+    try app.writeCompressed("user://big.gz", big);
+    try testing.expect((try app.fileInfo("user://big.gz")).size < big.len / 10);
+    const unpacked = try app.readCompressed(testing.allocator, "user://big.gz");
+    defer testing.allocator.free(unpacked);
+    try testing.expectEqualStrings(big, unpacked);
+    try testing.expectError(error.NotCompressed, app.readCompressed(testing.allocator, "user://logs/run.txt"));
+
+    try app.writeSecret("user://progress.sav", "{\"gold\": 9}", "a password");
+    const on_disc = try app.readText(testing.allocator, "user://progress.sav");
+    defer testing.allocator.free(on_disc);
+    try testing.expect(std.mem.indexOf(u8, on_disc, "gold") == null);
+    const opened = try app.readSecret(testing.allocator, "user://progress.sav", "a password");
+    defer testing.allocator.free(opened);
+    try testing.expectEqualStrings("{\"gold\": 9}", opened);
+    try testing.expectError(error.CannotOpen, app.readSecret(testing.allocator, "user://progress.sav", "another"));
+    try testing.expectError(error.NotSealed, app.readSecret(testing.allocator, "user://logs/run.txt", "a password"));
+
+    // Where a file is on this computer, and the name the game gives it back.
+    const global = try app.project.osPath(testing.allocator, "user://logs/run.txt");
+    defer testing.allocator.free(global);
+    const local = try app.project.localPath(testing.allocator, global);
+    defer testing.allocator.free(local);
+    try testing.expectEqualStrings("user://logs/run.txt", local);
+    const art = try app.project.osPath(testing.allocator, "res://art");
+    defer testing.allocator.free(art);
+    const named = try app.project.localPath(testing.allocator, art);
+    defer testing.allocator.free(named);
+    try testing.expectEqualStrings("res://art", named);
+
+    // An address a browser opens, and nothing else.
+    try testing.expectError(error.NotAllowed, app.openUrl("file:///C:/Windows/notepad.exe"));
+    try testing.expectError(error.NotAllowed, app.openUrl("calc.exe"));
+}
+
+test "user:// is the folder the project names, a step or more, each a name any system keeps" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    try files.tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data =
+        \\{ "fluxion_project": 2, "application": { "name": "Night", "user_folder": "Tiny Studio/Night: Two" } }
+    });
+    const app = try files.app();
+    defer app.destroy();
+    const where = app.project.userRoot() catch |err| switch (err) {
+        // A machine with no folder for programs' data.
+        error.NoUserFolder => return error.SkipZigTest,
+        else => return err,
+    };
+    try testing.expect(std.mem.endsWith(u8, where, "Tiny Studio" ++ std.fs.path.sep_str ++ "Night_ Two"));
 }
 
 test "a program in the background runs no systems until it is back, but for the frame it left in" {

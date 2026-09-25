@@ -296,8 +296,10 @@ fn joinUnder(gpa: Allocator, base: []const u8, inside_given: []const u8) Error![
 /// Where `user://` is: a folder of the game's own under the one the system
 /// keeps for programs' data - `%APPDATA%` on Windows, `~/.local/share` on
 /// Linux, `~/Library/Application Support` on a Mac - named after the game:
-/// the project file's `application.name`, or what the game called itself.
-/// Worked out once; the folder is made when something is written in it.
+/// the project file's `application.name`, or what the game called itself -
+/// or where its `application.user_folder` says, a step or more:
+/// `Studio/Game`. Worked out once; the folder is made when something is
+/// written in it.
 pub fn userRoot(self: *Project) Error![]const u8 {
     if (self.user_root) |held| return held;
     const io = self.io orelse return error.NoUserFolder;
@@ -306,10 +308,51 @@ pub fn userRoot(self: *Project) Error![]const u8 {
         else => error.NoUserFolder,
     };
     defer self.gpa.free(data);
-    var buffer: [128]u8 = undefined;
-    const name = folderName(&buffer, self.gameName());
-    self.user_root = try std.fs.path.join(self.gpa, &.{ data, name });
+
+    const asked = if (self.settings) |held| held.application.user_folder else "";
+    var names: [8][128]u8 = undefined;
+    var steps: [9][]const u8 = undefined;
+    steps[0] = data;
+    var count: usize = 1;
+    var given = std.mem.tokenizeAny(u8, asked, "/\\");
+    while (given.next()) |step| {
+        if (count == steps.len) break;
+        steps[count] = folderName(&names[count - 1], step);
+        count += 1;
+    }
+    if (count == 1) {
+        steps[1] = folderName(&names[0], self.gameName());
+        count = 2;
+    }
+    self.user_root = try std.fs.path.join(self.gpa, steps[0..count]);
     return self.user_root.?;
+}
+
+/// The name a game gives the file at `path`: `user://` inside the player's
+/// folder, `res://` inside the project, and the system's own path for
+/// anything else - what `osPath` turns back into it. The player's folder is
+/// the nearer where it is inside the project. The caller frees it.
+pub fn localPath(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
+    const named = try self.canonical(gpa, path);
+    if (std.mem.startsWith(u8, named, user_scheme) or self.io == null) return named;
+    const given = self.userRoot() catch return named;
+    const user = try std.fs.path.resolve(gpa, &.{ self.cwd, given });
+    defer gpa.free(user);
+    const file = try self.osPath(gpa, named);
+    defer gpa.free(file);
+    const absolute = try std.fs.path.resolve(gpa, &.{ self.cwd, file });
+    defer gpa.free(absolute);
+
+    const same = if (builtin.os.tag == .windows) std.ascii.eqlIgnoreCase(absolute, user) else std.mem.eql(u8, absolute, user);
+    if (same) {
+        gpa.free(named);
+        return gpa.dupe(u8, user_scheme);
+    }
+    const inside = below(user, absolute) orelse return named;
+    defer gpa.free(named);
+    const out = try std.mem.concat(gpa, u8, &.{ user_scheme, inside });
+    if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, out, std.fs.path.sep, '/');
+    return out;
 }
 
 /// What the game is called, for its folder.
@@ -338,7 +381,11 @@ pub fn folderName(buffer: []u8, name: []const u8) []const u8 {
 /// below it. Letter case is the file system's business on Windows, so it is
 /// not compared there.
 fn within(self: *const Project, absolute: []const u8) ?[]const u8 {
-    const root = self.root;
+    return below(self.root, absolute);
+}
+
+/// The part of an absolute path below `root`, as `within` finds it.
+fn below(root: []const u8, absolute: []const u8) ?[]const u8 {
     if (absolute.len <= root.len) return null;
     const head = absolute[0..root.len];
     const same = if (builtin.os.tag == .windows) std.ascii.eqlIgnoreCase(head, root) else std.mem.eql(u8, head, root);

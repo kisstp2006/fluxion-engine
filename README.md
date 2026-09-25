@@ -2035,13 +2035,23 @@ defer config.deinit();
 const music = config.getFloat("audio", "music", 0.8);
 try config.set("display", "fullscreen", true);
 try config.save(app, "user://settings.cfg");
+
+try app.appendText("user://logs/run.txt", "level 2 opened\n");     // a log, a line at a time
+const info = try app.fileInfo("user://slots/one.json");           // size, modified (an Instant), folder
+try app.writeSecret("user://progress.sav", text, "a password");   // compressed, sealed, checked
+try app.writeCompressed("user://replay.gz", replay);              // gzip: any tool opens it
+try app.showInFolder("user://slots/one.json");                    // the Saves button
+try app.openUrl("https://example.com/our-next-game");             // http, https and mailto only
 ```
 
 - **`user://` is the player's folder**, one of the game's own under the one
   the system keeps for programs' data: `%APPDATA%` on Windows,
   `~/.local/share` on Linux, `~/Library/Application Support` on a Mac. It is
   named after the project's `application.name`, or the title a game gives
-  with no project, and made when the first file is written in it.
+  with no project - or where `application.user_folder` says, a step or
+  more: `Studio/Game` keeps a studio's games together - and made when the
+  first file is written in it. `project.localPath` turns a path of the
+  system's back into `user://` or `res://`.
   `Options.user_root` puts it somewhere else: a test's folder, or beside a
   game kept on a stick. A `user://` path that climbs out with `..` is
   `error.OutsideProject`, as a `res://` one is.
@@ -2050,7 +2060,23 @@ try config.save(app, "user://settings.cfg");
   system's own paths. `writeText` makes the folders on the way and writes
   the new text beside the old before putting it in place, so a game that
   stops halfway through a save leaves the last one whole. `removeFile` takes
-  a file, or a folder with nothing in it.
+  a file, or a folder with nothing in it. `appendText` adds to the end,
+  `fileInfo` says a file's size and when it was written, `isDir` whether it
+  is a folder, and `fileSha256` hashes it.
+- **A save sealed, or small.** `writeSecret(path, text, password)` compresses
+  the text and seals it with AES-256-GCM under a key Argon2id makes from the
+  password, a new salt and nonce each time; `readSecret` gives it back, and
+  says `error.CannotOpen` for another password or a file changed by as much
+  as a bit - never a text the game would take. `secret_cost` is how hard the
+  password is made to guess. `writeCompressed` and `readCompressed` are gzip
+  alone. A password in a game's code is found by whoever looks for it: this
+  keeps a save from being read or changed by hand, not from a determined
+  player.
+- **The system's programs**: `openPath` opens a file in the program the
+  player opens its kind with, `showInFolder` picks it out in its folder, and
+  `openUrl` opens a web or mail address - `http`, `https` and `mailto` only,
+  so a script cannot start a program with it. `error.Unsupported` where
+  there is nothing to ask, on a page or a phone.
 - **A config file needs no declaring.** `ConfigFile` is sections of keys, a
   JSON object of objects to read and to edit by hand, with comments allowed.
   A key is whatever it was last set to - a bool, a number, text - read with
@@ -2442,11 +2468,44 @@ struct Door {
   - An `Entity` argument arrives as the entity's handle, and the script's instance or its entity's handle goes back to the engine as an `Entity`.
   - A connection made while its script did not compile is heard once it does.
 - **A script keeps a save in the player's folder, and reaches no other.**
-  `files.readText(path)`, `writeText(path, text)`, `exists(path)`,
-  `makeDir(path)`, `list(path)` and `remove(path)` read under `res://` and
-  `user://`, and write under `user://` only. Any other path is
-  `error.NotAllowed`, so a script neither reads the player's documents nor
-  breaks the game it came with. A call that fails gives an error to `catch`:
+  `files` reads under `res://` and `user://`, and writes under `user://`
+  only. Any other path is `error.NotAllowed`, so a script neither reads the
+  player's documents nor breaks the game it came with. A call that fails
+  gives an error to `catch`. Its calls:
+  - `readText(path)`, `writeText(path, text)`, `appendText(path, text)`,
+    `exists`, `isDir`, `makeDir`, `list`, `remove`;
+  - `copy(from, to)` and `move(from, to)`, which make the folders they go
+    in, and never go over a file unless their third argument, `replace`, is
+    true;
+  - `size(path)`, `modifiedTime(path)` - a `DateTime`, so a slot shows
+    `modifiedTime(slot).relative()` - and `sha256(path)`;
+  - `writeSecret(path, text, password)` and `readSecret(path, password)`,
+    `writeCompressed` and `readCompressed`, as the App's;
+  - `config(path, password = "")`: a settings file of sections of keys -
+    `get(section, key, default)`, `set`, `has`, `erase`, `eraseSection`,
+    `sections()`, `keys(section)`, `save()`. A value comes back as the kind
+    its default is: a `vec2` for a `vec2` default, a colour for a colour.
+    With a password it is read and saved sealed;
+  - `writeData(value, path)`: a struct of a script's as a data file - its
+    `@export` fields - which `readData(path)` (or `app.readData`) makes
+    again: a save as a struct;
+  - paths: `join(folder, name)`, `dirName`, `fileName`, `stem`, `extension`,
+    `isValidName(name)`, `validName(name)` - what the player typed made a
+    name a file can have - `globalPath` (where `user://` is on this
+    computer, to tell the player) and `localPath` (back);
+  - `open(path)` and `showInFolder(path)`, and `app.openUrl(url)`.
+
+  ```zig
+  const slot = files.join("user://saves", files.validName(name) + ".json");
+  files.writeText(slot, json.stringify(state)) catch |e| print("not saved:", e.name);
+  print(files.modifiedTime(slot).relative());                 // 5 minutes ago
+  const settings = files.config("user://settings.cfg") catch return;
+  const volume = settings.get("audio", "music", 0.8);          // 0.8 the first time
+  settings.set("audio", "music", 0.5) catch {};
+  settings.save() catch {};
+  ```
+
+  With the language's `json` module:
 
   ```zig
   const json = @import("json");

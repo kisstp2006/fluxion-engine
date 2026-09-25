@@ -108,6 +108,7 @@ pub const Application = struct {
     max_fps: u16 = 0,
     autoload: []const []const u8 = &.{},
     boot_splash: BootSplash = .{},
+    user_folder: []const u8 = "",
 
     /// What the window shows while the game opens. See `App.openProject`.
     pub const BootSplash = struct {
@@ -131,6 +132,7 @@ pub const Application = struct {
         .max_fps = .{ attr.Range{ .min = 0, .max = 1000, .step = 1 }, attr.Advanced{}, attr.Doc{ .text = "The most frames a second the game draws; nought for no limit." } },
         .autoload = .{attr.Doc{ .text = "Scenes and scripts made before the main scene, each named after its file, and kept when the scene changes." }},
         .boot_splash = .{attr.Doc{ .text = "What the window shows while the game opens." }},
+        .user_folder = .{ attr.Advanced{}, attr.Doc{ .text = "The folder user:// is, in the system's folder for programs' data: empty for the project's name. Studio/Game keeps a studio's games together." } },
     };
 };
 
