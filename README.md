@@ -2714,8 +2714,10 @@ Here, and checked by the tests:
   colours and raises everything under it.
 - Every system timed, under the name it was added with: its time over the
   last frame, and the whole schedule printable with `{f}`.
-- Textures loaded from PNG, handed out as generational handles, and a white
-  texel for everything untextured.
+- Textures loaded from PNG or JPEG - told apart by their first bytes, not
+  their names - handed out as generational handles, and a white texel for
+  everything untextured. A photo stored on its side comes in as Exif says it
+  was taken.
 - The 2D pass: transforms, regions, tints, pivots, layers, order within a
   layer, visibility, additive blending, textures that repeat, interpolation
   between fixed steps, and a camera with zoom, rotation and an area it always

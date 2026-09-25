@@ -21,6 +21,7 @@ const image = @import("fluxion_image");
 
 const json = @import("fluxion_json");
 
+const AssetKind = @import("asset_kind.zig").AssetKind;
 const Project = @import("Project.zig");
 
 /// Whether a load has a thread of its own, or is worked a piece a frame.
@@ -125,7 +126,7 @@ pub const SceneLoad = struct {
                 .string, .key => |held| held,
                 else => continue,
             };
-            if (!std.mem.startsWith(u8, text, Project.scheme) or !std.ascii.endsWithIgnoreCase(text, ".png")) continue;
+            if (!std.mem.startsWith(u8, text, Project.scheme) or AssetKind.ofPath(text) != .texture) continue;
             if (self.names(text)) continue;
             const copy = try self.gpa.dupe(u8, text);
             errdefer self.gpa.free(copy);
@@ -144,7 +145,7 @@ pub const SceneLoad = struct {
     fn decode(self: *SceneLoad, source: []const u8) !void {
         const file = try Project.underRoot(self.gpa, self.root, source);
         defer self.gpa.free(file);
-        var picture = try image.png.readFile(self.gpa, self.io, file, .{});
+        var picture = try image.readFile(self.gpa, self.io, file, .{});
         errdefer picture.deinit(self.gpa);
         const named = try self.gpa.dupe(u8, source);
         errdefer self.gpa.free(named);

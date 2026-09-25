@@ -5559,7 +5559,7 @@ fn useProjectIcon(self: *App) void {
     defer self.gpa.free(source);
     const file = self.project.osPath(self.gpa, source) catch return;
     defer self.gpa.free(file);
-    var decoded = image.png.readFile(self.gpa, io, file, .{}) catch |err| {
+    var decoded = image.readFile(self.gpa, io, file, .{}) catch |err| {
         return log.warn("the project's icon {s} did not read: {t}", .{ path, err });
     };
     defer decoded.deinit(self.gpa);

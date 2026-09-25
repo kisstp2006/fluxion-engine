@@ -62,7 +62,7 @@ pub const AssetKind = enum {
     /// What one is, for a field that asks for one.
     pub fn about(self: AssetKind) []const u8 {
         return switch (self) {
-            .texture => "A PNG",
+            .texture => "A PNG or a JPEG",
             .font => "A TrueType font",
             .scene => "A scene",
             .script => "A Flux script",
@@ -96,7 +96,7 @@ pub const AssetKind = enum {
     /// The endings of its files, the usual one first.
     pub fn extensions(self: AssetKind) []const []const u8 {
         return switch (self) {
-            .texture => &.{".png"},
+            .texture => &.{ ".png", ".jpg", ".jpeg" },
             .font => &.{ ".ttf", ".otf", ".ttc" },
             .scene => &.{ ".json", ".scene", ".cbor" },
             .script => &.{".flux"},
