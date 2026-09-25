@@ -81,6 +81,7 @@ pub const Screen = struct {
             .glsl = .{ .vertex = module.glsl.vertex, .fragment = module.glsl.fragment },
             .glsl_es = .{ .vertex = module.glsl_es.vertex, .fragment = module.glsl_es.fragment },
             .hlsl = .{ .vertex = module.hlsl.vertex, .fragment = module.hlsl.fragment },
+            .spirv = .{ .vertex = module.spirv.vertex, .fragment = module.spirv.fragment },
             .label = "screen",
         });
         errdefer device.destroyShader(gpu);

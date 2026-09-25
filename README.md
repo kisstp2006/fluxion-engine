@@ -15,7 +15,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Zig-0.16-F7A41D?logo=zig&logoColor=white" alt="Zig 0.16">
   <img src="https://img.shields.io/badge/licence-BSD--3--Clause-blue" alt="Licence: BSD-3-Clause">
-  <img src="https://img.shields.io/badge/renderer-OpenGL%20%7C%20Direct3D%2011-5c6bc0" alt="Renderer: OpenGL or Direct3D 11">
+  <img src="https://img.shields.io/badge/renderer-OpenGL%20%7C%20Direct3D%2011%20%7C%20Direct3D%2012%20%7C%20Vulkan-5c6bc0" alt="Renderer: OpenGL, Direct3D 11, Direct3D 12 or Vulkan">
   <img src="https://img.shields.io/badge/tests-no%20window%2C%20no%20GPU-2ea44f" alt="Tests run with no window and no GPU">
   <img src="https://img.shields.io/badge/status-early%20development-orange" alt="Status: early development">
 </p>
@@ -1865,21 +1865,32 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
 
 ### The renderer chooses the backend
 
-| Renderer | APIs | Windows | Linux, macOS, Android | Browser |
-| --- | --- | --- | --- | --- |
-| `compatibility` | Direct3D 11, OpenGL 3.3 | Direct3D 11, then OpenGL | OpenGL | WebGL 2 |
-| `modern` | Direct3D 12, Vulkan | not built yet | not built yet | not built yet |
+| Renderer | APIs | Windows | Linux, Android | macOS | Browser |
+| --- | --- | --- | --- | --- | --- |
+| `compatibility` | Direct3D 11, OpenGL 3.3 | Direct3D 11, then OpenGL | OpenGL | OpenGL | WebGL 2 |
+| `modern` (experimental) | Direct3D 12, Vulkan | Direct3D 12, then Vulkan | Vulkan | none | none |
 
 - **`Backend.auto` opens the best of the project's renderer** - the first of
   `Renderer.backends(os)` - and a folder with no project file is drawn with
   the compatibility renderer. So on Windows a game opens Direct3D 11 unless
-  asked otherwise, examples and editor included.
-- **A renderer that is not built opens nothing**: a `modern` project stops
-  with `error.RendererNotBuilt` and says to choose `compatibility`, rather
-  than being drawn with something it will not look like.
-- **`--backend` wins over the project**, so one game can be checked on every
-  backend of its renderer - `--backend gl` on Windows - and one outside it is
-  allowed, and said in the log.
+  asked otherwise, examples and editor included, and a `modern` one
+  Direct3D 12.
+- **The modern renderer is experimental.** It draws everything the engine
+  does, and the same picture - a scene, its interface, its shaders, the
+  editor - but its backends are newer, slower, and less proven, and the log
+  says so when one opens (`Backend.experimental`).
+- **A renderer with nothing to draw with here opens nothing**: a `modern`
+  project in a browser or on macOS stops with `error.RendererNotBuilt` and
+  says to choose `compatibility`, rather than being drawn with something it
+  will not look like.
+- **`--backend` wins over the project** - `gl`, `d3d11`, `d3d12`, `vulkan` -
+  so one game can be checked on every backend of its renderer, and one
+  outside it is allowed, and said in the log.
+- **Nothing in the engine asks which backend it is on.** It draws through
+  fluxion-rhi, hands every shader over in every language fluxion-shader
+  writes it in, describes its window once - its handle, and its way to make
+  a Vulkan surface - and asks the device what it draws the other way up.
+  Choosing the backend is the one place it is named.
 
 ## 💾 Saves and settings
 
@@ -2728,8 +2739,9 @@ Here, and checked by the tests:
   written by one generic reader that writes only what differs and keeps what
   it does not know; read with no App for a project manager, read by every
   game as it starts - its window, clear colour, fixed step and icon - and its
-  renderer choosing the backend - Direct3D 11 first on Windows - with
-  `--backend` still over it.
+  renderer choosing the backend - Direct3D 11 first on Windows, Direct3D 12
+  for the experimental modern renderer, Vulkan elsewhere - with `--backend`
+  still over it.
 - Reflection: every component described - fields, defaults, ranges, units -
   and found on an entity by its scene name, read and written in place, added
   and taken off; the engine's calls and a game's states made by name, errors

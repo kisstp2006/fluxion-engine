@@ -60,8 +60,9 @@ pub const header: settings_file.Header = .{ .header = "fluxion_project", .versio
 pub const Renderer = enum {
     /// Direct3D 11 and OpenGL 3.3, and WebGL 2 in a browser: what there is.
     compatibility,
-    /// Direct3D 12 and Vulkan. Not built yet: a project that asks for it
-    /// opens no window, rather than being drawn with something else.
+    /// Direct3D 12 and Vulkan. Experimental: see `experimental`. Where it has
+    /// no backend - a browser, macOS - a project that asks for it opens no
+    /// window, rather than being drawn with something else.
     modern,
 
     /// The graphics APIs it means, in words, for a person choosing one.
@@ -72,9 +73,15 @@ pub const Renderer = enum {
         };
     }
 
+    /// Whether its backends are still being finished: see
+    /// `App.Backend.experimental`.
+    pub fn experimental(self: Renderer) bool {
+        return self == .modern;
+    }
+
     /// Its backends on an operating system, best first: the first is what
     /// `Backend.auto` opens, and the others are what the same game can be
-    /// checked on. Nothing for a renderer that is not built.
+    /// checked on. Nothing where it has none.
     pub fn backends(self: Renderer, os: std.Target.Os.Tag) []const App.Backend {
         return switch (self) {
             .compatibility => switch (os) {
@@ -82,7 +89,11 @@ pub const Renderer = enum {
                 .freestanding, .emscripten, .wasi => &.{.webgl},
                 else => &.{.gl},
             },
-            .modern => &.{},
+            .modern => switch (os) {
+                .windows => &.{ .d3d12, .vulkan },
+                .freestanding, .emscripten, .wasi, .macos, .ios => &.{},
+                else => &.{.vulkan},
+            },
         };
     }
 };
@@ -174,7 +185,7 @@ pub const Rendering = struct {
     pub const default_clear_color: Color = .hex(0x0E1013);
 
     pub const reflect_fields = .{
-        .renderer = .{ attr.Restart{}, attr.Doc{ .text = "The family of graphics APIs the game is drawn with." } },
+        .renderer = .{ attr.Restart{}, attr.Doc{ .text = "The family of graphics APIs the game is drawn with. Modern - Direct3D 12 and Vulkan - is experimental." } },
         .clear_color = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "What every frame is cleared to, under the world." } },
         .default_texture_filter = .{ attr.Restart{}, attr.Doc{ .text = "How a texture is sampled when it does not say: nearest for pixel art, linear for a painting." } },
     };
@@ -604,5 +615,9 @@ test "a renderer's backends, best first, on each system" {
     try testing.expectEqualSlices(App.Backend, &.{.gl}, Renderer.compatibility.backends(.linux));
     try testing.expectEqualSlices(App.Backend, &.{.gl}, Renderer.compatibility.backends(.macos));
     try testing.expectEqualSlices(App.Backend, &.{.webgl}, Renderer.compatibility.backends(.emscripten));
-    try testing.expectEqual(@as(usize, 0), Renderer.modern.backends(.windows).len);
+    try testing.expectEqualSlices(App.Backend, &.{ .d3d12, .vulkan }, Renderer.modern.backends(.windows));
+    try testing.expectEqualSlices(App.Backend, &.{.vulkan}, Renderer.modern.backends(.linux));
+    try testing.expectEqual(@as(usize, 0), Renderer.modern.backends(.macos).len);
+    try testing.expectEqual(@as(usize, 0), Renderer.modern.backends(.emscripten).len);
+    try testing.expect(Renderer.modern.experimental() and !Renderer.compatibility.experimental());
 }

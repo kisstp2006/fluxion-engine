@@ -116,15 +116,27 @@ pub const Backend = enum {
     gl,
     /// Direct3D 11. Windows only.
     d3d11,
+    /// Direct3D 12. Windows only. Experimental: see `experimental`.
+    d3d12,
+    /// Vulkan: Windows, Linux and Android, where a driver has it.
+    /// Experimental: see `experimental`.
+    vulkan,
     /// WebGL 2, in a browser.
     webgl,
     /// Accepts everything, draws nothing. What `.headless` uses.
     none,
+
+    /// Whether it is still being finished: it draws everything the engine
+    /// does, the picture the others do, and is slower than they are and
+    /// less proven - which the log says when one opens.
+    pub fn experimental(self: Backend) bool {
+        return self == .d3d12 or self == .vulkan;
+    }
 };
 
 pub const BackendError = error{
-    /// The project's renderer has no backend built on this system: `modern`,
-    /// for now, which is Direct3D 12 and Vulkan.
+    /// The project's renderer has no backend on this system: `modern` in a
+    /// browser, or on macOS.
     RendererNotBuilt,
 };
 
@@ -882,7 +894,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     // Headless opens no renderer, so the project's is not asked about.
     const renderer: Project.Renderer = if (self.project.settings) |held| held.rendering.renderer else .compatibility;
     const backend: Backend = if (options.headless) .none else chooseBackend(options.backend, renderer, builtin.os.tag) catch |err| {
-        log.err("the {t} renderer ({s}) is not built yet: set \"renderer\" to \"compatibility\" in {s}, or give --backend", .{ renderer, renderer.apis(), Project.file_name });
+        log.err("the {t} renderer ({s}) has no backend here: set \"renderer\" to \"compatibility\" in {s}, or give --backend", .{ renderer, renderer.apis(), Project.file_name });
         return err;
     };
     if (!options.headless and options.backend != .auto and std.mem.indexOfScalar(Backend, renderer.backends(builtin.os.tag), backend) == null) {
@@ -943,6 +955,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .backend = switch (backend) {
             .gl => .gl,
             .d3d11 => .d3d11,
+            .d3d12 => .d3d12,
+            .vulkan => .vulkan,
             .webgl => .webgl,
             .none => .none,
             .auto => .auto,
@@ -952,10 +966,14 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .gl = if (backend == .gl and self.window != null) self.window.?.hooks() else null,
     });
     errdefer self.device.deinit();
+    if (backend.experimental()) log.warn("drawing with {t} ({s}), which is experimental", .{ backend, self.device.info().renderer });
 
     if (self.window) |*w| {
+        // The window as it is, whichever backend draws into it: its handle,
+        // and its hooks for a backend that makes its surface from it.
         self.surface = try self.device.createSurface(.{
             .native_window = w.nativeHandle(),
+            .window = w.surfaceHooks(),
             .width = width,
             .height = height,
             // Told to the swapchain as well as the window: Direct3D keeps it
@@ -5776,14 +5794,10 @@ pub fn controlPreviewBox(self: *App, entity: ecs.Entity) ?ui_lib.BoundingBox {
 }
 
 /// Whether a texture `drawWorld` drew into comes out upside down when drawn
-/// as a picture: true on OpenGL, whose framebuffers count rows from the
-/// bottom. Direct3D and Vulkan count them from the top; of a backend the
-/// caller supplied nothing is known, and it is taken to as well.
+/// as a picture: what the device says of what it draws - true on OpenGL,
+/// whose framebuffers count rows from the bottom.
 pub fn drawnUpsideDown(self: *const App) bool {
-    return switch (self.device.backendTag()) {
-        .gl, .webgl => true,
-        .d3d11, .d3d12, .vulkan, .none, .other => false,
-    };
+    return self.device.caps().features.render_target_origin_bottom_left;
 }
 
 /// Clear `into` to the background and draw `debug_under` on it, for the
@@ -8274,12 +8288,19 @@ test "auto opens the best of the project's renderer, and a backend asked for win
     try testing.expectEqual(Backend.webgl, try chooseBackend(.auto, .compatibility, .emscripten));
     try testing.expectEqual(Backend.gl, try chooseBackend(.gl, .compatibility, .windows));
 
-    // Not built: refused, not drawn with something else - unless asked for.
-    try testing.expectError(error.RendererNotBuilt, chooseBackend(.auto, .modern, .windows));
+    // The modern renderer: Direct3D 12 first on Windows, Vulkan elsewhere.
+    try testing.expectEqual(Backend.d3d12, try chooseBackend(.auto, .modern, .windows));
+    try testing.expectEqual(Backend.vulkan, try chooseBackend(.auto, .modern, .linux));
+    try testing.expect(Backend.vulkan.experimental() and !Backend.d3d11.experimental());
+
+    // None here: refused, not drawn with something else - unless asked for.
+    try testing.expectError(error.RendererNotBuilt, chooseBackend(.auto, .modern, .macos));
     try testing.expectEqual(Backend.d3d11, try chooseBackend(.d3d11, .modern, .windows));
 
     const flags = try App.parseFlags(App.Flags, &.{ "game", "--backend", "gl" });
     try testing.expectEqual(Backend.gl, flags.apply(.{}).backend);
+    const vulkan = try App.parseFlags(App.Flags, &.{ "game", "--backend", "vulkan" });
+    try testing.expectEqual(Backend.vulkan, vulkan.apply(.{}).backend);
 }
 
 test "a headless dialog is never answered by itself, and a test's answer comes in the next frame" {

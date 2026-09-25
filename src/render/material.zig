@@ -160,14 +160,10 @@ fn vertexFormat(ty: shader.Type) ?rhi.VertexFormat {
 }
 
 /// `SCREEN_FLIP` for a device: how clip space's `y` becomes a row of a
-/// texture drawn into. Direct3D's first row is at the top of clip space;
-/// OpenGL's is at the bottom, and Vulkan's clip space is turned over, so
-/// both of them count the other way.
+/// texture drawn into - down from the top, or up from the bottom where the
+/// device says what it draws is stored bottom row first.
 pub fn screenFlip(device: *const rhi.Device) f32 {
-    return switch (device.backendTag()) {
-        .gl, .webgl, .vulkan => 1,
-        .d3d11, .d3d12, .none, .other => -1,
-    };
+    return if (device.caps().features.render_target_origin_bottom_left) 1 else -1;
 }
 
 /// What `compile` finds in a file before compiling it.
@@ -284,6 +280,7 @@ pub fn compile(
         .glsl = .{ .vertex = module.glsl.vertex, .fragment = module.glsl.fragment },
         .glsl_es = .{ .vertex = module.glsl_es.vertex, .fragment = module.glsl_es.fragment },
         .hlsl = .{ .vertex = module.hlsl.vertex, .fragment = module.hlsl.fragment },
+        .spirv = .{ .vertex = module.spirv.vertex, .fragment = module.spirv.fragment },
         .label = label,
     }) catch |err| {
         problems.print("the graphics driver refused it: {s}\n", .{device.diagnostics()}) catch {};

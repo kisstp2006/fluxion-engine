@@ -473,6 +473,18 @@ pub fn nativeHandle(self: *const Window) usize {
     return self.handle.native();
 }
 
+/// What a backend that makes its surface from the window asks of it - a
+/// Vulkan surface - for `SurfaceDesc.window`. `context` is this struct, so
+/// its address has to outlive the surface.
+pub fn surfaceHooks(self: *Window) rhi.WindowHooks {
+    return .{ .context = self, .make_vulkan_surface = makeVulkanSurface };
+}
+
+fn makeVulkanSurface(context: *anyopaque, instance: usize, get_instance_proc_addr: *const anyopaque) ?u64 {
+    const self: *Window = @ptrCast(@alignCast(context));
+    return self.handle.createVulkanSurface(instance, @ptrCast(@alignCast(get_instance_proc_addr)), null) catch null;
+}
+
 /// What the OpenGL backend needs from whoever made the context. `context` is
 /// this struct, so its address has to outlive the device.
 pub fn hooks(self: *Window) rhi.GlHooks {
