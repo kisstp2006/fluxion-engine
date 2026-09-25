@@ -42,8 +42,8 @@
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.
         .fluxion_image = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-image#79463ef201f11e15ada014467c0ad1d58b2a882d",
-            .hash = "fluxion_image-0.1.0-fyJkdS7vAAB1p43VSutvpxQB32hIcvJb3fGSZbo_qeha",
+            .url = "git+https://github.com/kisstp2006/fluxion-image#bfbc08c78e0be76d3b211905c6be2b24a9c0bbce",
+            .hash = "fluxion_image-0.1.0-fyJkdcdSAgCeokSdRsZ3NIhVbeBTiZBp79OCPIWJYmQG",
         },
 
         // The sprite shader, written once and emitted as GLSL and as HLSL.
