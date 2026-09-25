@@ -36,8 +36,8 @@
         // The interface layer: the layout `.ui` systems declare into, and the
         // renderer that draws it over the 2D layer.
         .fluxion_ui = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-ui#d0377892e64230aa395f3a095fe911805370cae9",
-            .hash = "fluxion_ui-0.1.0-lw4Wsy00DwA4T_-0d8RMyPyrcd46RtCipkh_Tt__YOOr",
+            .url = "git+https://github.com/kisstp2006/fluxion-ui#66a1978021c74d1701de6773fda1a3c68e8073e5",
+            .hash = "fluxion_ui-0.1.0-lw4Ws3lVDwDOterm7bsDDIs5R0TN_UAkcew-VGa_zYxT",
         },
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.
@@ -111,8 +111,8 @@
         // fluxion-reflect and fluxion-json are pinned where these are, so a
         // `reflect.Value` is one type across the two.
         .fluxion_script = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-script#20a366d302cc3d3872b937f35dd2e47251120a29",
-            .hash = "fluxion_script-0.1.0-rt2DKsDdEQAAKx0bkOd5OiDZFBwi5750Ejlg_5rxWqI-",
+            .url = "git+https://github.com/kisstp2006/fluxion-script#707c094aba660bc9085084cfce05c8091471860e",
+            .hash = "fluxion_script-0.1.0-rt2DKkv0EQDMg2a8D_8N3-789EI4kaFVtJtnbWrmwoFZ",
         },
 
         // Generational handles: what the asset tables hand out, and what a
