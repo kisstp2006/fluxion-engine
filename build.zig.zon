@@ -42,8 +42,8 @@
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.
         .fluxion_image = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-image#bfbc08c78e0be76d3b211905c6be2b24a9c0bbce",
-            .hash = "fluxion_image-0.1.0-fyJkdcdSAgCeokSdRsZ3NIhVbeBTiZBp79OCPIWJYmQG",
+            .url = "git+https://github.com/kisstp2006/fluxion-image#71517095d2154f12daa136e4740faa3ed1eb6500",
+            .hash = "fluxion_image-0.1.0-fyJkdVuyAgBtSj4e-PwUA2rG1XYBYYUFrWmMUpnP0ZPO",
         },
 
         // The sprite shader, written once and emitted as GLSL and as HLSL.
@@ -103,16 +103,16 @@
         // an editor's inspector reads and writes, and what a console calls by
         // name. Its fluxion-json is the one above, so its JSON is the scenes'.
         .fluxion_reflect = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-reflect#bbb2c9c0f2cd3b39175ebc45cd7f5133ade8df55",
-            .hash = "fluxion_reflect-0.1.0-Aw2l_0C7BQDtS7H0sduXo9rMQNiscuM55NSBuhEnNNcU",
+            .url = "git+https://github.com/kisstp2006/fluxion-reflect#2f48e6ef8e44a55039cdbd8cbbd3521f344cb8f8",
+            .hash = "fluxion_reflect-0.1.0-Aw2l_2DGBQAt1GqJ0oVM7f-9xEwagzceO1A2F4mfDKVI",
         },
         // Flux, the scripting language: one VM on the App for a game that
         // calls `useScripts`, and a `Script` component per entity. Its own
         // fluxion-reflect and fluxion-json are pinned where these are, so a
         // `reflect.Value` is one type across the two.
         .fluxion_script = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-script#e30d81127b1fd7b65e366e8a7e2ed1459cf0776e",
-            .hash = "fluxion_script-0.1.0-rt2DKh2bEQCHmLzDg-xERv7HG9aj98H1q2te3FXWO_J5",
+            .url = "git+https://github.com/kisstp2006/fluxion-script#dd9c866e4310d8db272113df390f07ee18171a0a",
+            .hash = "fluxion_script-0.1.0-rt2DKtOdEQBujarmXuAxk8HQ7THKpLB2kQfWQL7q8zHm",
         },
 
         // Generational handles: what the asset tables hand out, and what a
