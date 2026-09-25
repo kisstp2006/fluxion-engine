@@ -78,6 +78,8 @@ const background_mod = @import("background.zig");
 const signals_mod = @import("signals.zig");
 const events_mod = @import("events.zig");
 const script_mod = @import("script.zig");
+const datetime = @import("datetime.zig");
+const clocks_mod = @import("clocks.zig");
 const sprite = @import("render/sprite.zig");
 const View = @import("render/view.zig").View;
 const Screen = @import("render/screen.zig").Screen;
@@ -464,6 +466,13 @@ data_files: data_mod.DataFiles = .{},
 audio: audio_mod.Audio,
 /// Each tween's steps: see `tween.zig` and `tween`.
 tweens: tween_mod.Tweens = .{},
+/// The game's own clocks: see `clocks.zig` and `newClock`.
+clocks: clocks_mod.Clocks = .{},
+/// The culture dates and times are written in, once asked for: see
+/// `culture`.
+culture_held: ?*datetime.Culture = null,
+/// The locale `setLocale` chose, over the project's.
+locale_chosen: ?[]u8 = null,
 /// The words components keep beside them: see `texts.zig` and `textOf`.
 texts: texts_mod.Texts = .{},
 /// Every `.shader` file read, compiled for the 2D layer: see `shaders.zig`
@@ -1108,6 +1117,9 @@ pub fn destroy(self: *App) void {
     self.data_files.deinit(gpa);
     self.audio.deinit();
     self.tweens.deinit(gpa);
+    self.clocks.deinit(gpa);
+    if (self.culture_held) |held| held.close();
+    if (self.locale_chosen) |chosen| gpa.free(chosen);
     self.texts.deinit(gpa);
     self.shader_params.deinit(gpa);
     self.animation_players.deinit(gpa);
@@ -1529,6 +1541,7 @@ pub fn step(self: *App) anyerror!bool {
     if (self.time.delta == 0) self.input.endFixedStep();
 
     self.inherited.forget();
+    self.clocks.step(self.time.delta, self, clockRuns);
     try timer.count(self, .update, self.time.delta);
     try tween_mod.update(self, self.time.delta);
     try animation_mod.update(self, self.time.delta);
@@ -4281,6 +4294,114 @@ fn valueOf(self: *App, entity: ecs.Entity, entry: *const scene.Registry.Entry) ?
     return .init(entry.type, cell);
 }
 
+// -------------------------------------------------------------------------
+// Dates, times and the player's culture
+// -------------------------------------------------------------------------
+
+/// This moment, on the system's clock. The start of 1970 in an app with no
+/// clock, which is what a test has.
+pub fn now(self: *const App) datetime.Instant {
+    const io = self.io orelse return .{};
+    const ns = std.Io.Timestamp.now(io, .real).nanoseconds;
+    return .{ .us = @intCast(@divFloor(ns, 1000)) };
+}
+
+/// This moment on the system's calendar and clock, in its time zone.
+pub fn localNow(self: *const App) datetime.DateTime {
+    return self.now().in(.local);
+}
+
+/// The culture the game writes dates, times and spans of time in: the one
+/// `setLocale` chose, else the project's `internationalization.locale`, else
+/// the player's own - with the choices they made in the system's settings.
+/// Its names and patterns are the system's: see `platform.culture`.
+pub fn culture(self: *App) Allocator.Error!*datetime.Culture {
+    if (self.culture_held) |held| return held;
+    const tag = self.locale_chosen orelse if (self.project.settings) |settings| settings.internationalization.locale else "";
+    const made = try datetime.Culture.open(self.gpa, tag);
+    self.culture_held = made;
+    return made;
+}
+
+/// Write dates and times as `tag` does from now on - `de-DE`, `ja-JP` - or,
+/// for an empty one, as the player does.
+pub fn setLocale(self: *App, tag: []const u8) Allocator.Error!void {
+    const copy = try self.gpa.dupe(u8, tag);
+    if (self.locale_chosen) |old| self.gpa.free(old);
+    self.locale_chosen = copy;
+    if (self.culture_held) |held| held.close();
+    self.culture_held = null;
+}
+
+/// The tag of the culture the game writes in: `hu-HU`.
+pub fn locale(self: *App) Allocator.Error![]const u8 {
+    return (try self.culture()).tag;
+}
+
+/// A clock of the game's own, running at `options.rate` from
+/// `options.start`. See `clocks.zig`.
+pub fn newClock(self: *App, options: clocks_mod.Options) Allocator.Error!clocks_mod.ClockHandle {
+    return self.clocks.add(self.gpa, options);
+}
+
+pub fn removeClock(self: *App, clock: clocks_mod.ClockHandle) void {
+    self.clocks.remove(clock);
+}
+
+/// What the clock shows; null for one taken away.
+pub fn clockTime(self: *App, clock: clocks_mod.ClockHandle) ?datetime.DateTime {
+    const held = self.clocks.get(clock) orelse return null;
+    return held.time();
+}
+
+/// Set the clock to show `time`'s fields, whatever its zone.
+pub fn setClockTime(self: *App, clock: clocks_mod.ClockHandle, time: datetime.DateTime) void {
+    const held = self.clocks.get(clock) orelse return;
+    held.reading = time.wallMicroseconds();
+    held.leftover = 0;
+}
+
+pub fn clockRate(self: *App, clock: clocks_mod.ClockHandle) f64 {
+    const held = self.clocks.get(clock) orelse return 0;
+    return held.rate;
+}
+
+/// Seconds of the clock a real second: 60 is a minute a second.
+pub fn setClockRate(self: *App, clock: clocks_mod.ClockHandle, rate: f64) void {
+    const held = self.clocks.get(clock) orelse return;
+    held.rate = @max(rate, 0);
+}
+
+pub fn pauseClock(self: *App, clock: clocks_mod.ClockHandle) void {
+    const held = self.clocks.get(clock) orelse return;
+    held.paused = true;
+}
+
+pub fn resumeClock(self: *App, clock: clocks_mod.ClockHandle) void {
+    const held = self.clocks.get(clock) orelse return;
+    held.paused = false;
+}
+
+pub fn isClockPaused(self: *App, clock: clocks_mod.ClockHandle) bool {
+    const held = self.clocks.get(clock) orelse return true;
+    return held.paused;
+}
+
+/// The minutes, hours and days that turned over on the clock in the last
+/// frame.
+pub fn clockPassed(self: *App, clock: clocks_mod.ClockHandle) clocks_mod.Passed {
+    const held = self.clocks.get(clock) orelse return .{};
+    return held.passed;
+}
+
+/// Whether a clock runs this frame: as its owner does, or, with none, while
+/// the game is not paused.
+fn clockRuns(self: *App, owner: ?ecs.Entity) clocks_mod.Clocks.Runs {
+    const entity = owner orelse return if (self.paused) .still else .runs;
+    if (!self.world.isAlive(entity)) return .gone;
+    return if (self.isProcessing(entity)) .runs else .still;
+}
+
 /// `App` as fluxion-reflect sees it: no insides, and the calls a console, a
 /// script or an editor's command palette may make by name - see `callNamed`.
 /// A call is listed when it takes and gives plain values: the ones taking a
@@ -5691,9 +5812,9 @@ fn snapshotPrevious(self: *App) !void {
 
     var it = try ecs.Query(.{components.Transform2D}).over(&self.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(components.Transform2D), chunk.entities) |now, entity| {
-            if (!now.interpolate) continue;
-            try self.snapshots.put(self.gpa, entity, .of(now));
+        for (chunk.slice(components.Transform2D), chunk.entities) |current, entity| {
+            if (!current.interpolate) continue;
+            try self.snapshots.put(self.gpa, entity, .of(current));
         }
     }
 }
@@ -6629,11 +6750,11 @@ test "a previous transform is taken before each fixed step" {
     var it = try ecs.Query(.{components.Transform2D}).over(&app.world);
     const chunk = it.next().?;
     const entity = chunk.entities[0];
-    const now = chunk.slice(components.Transform2D)[0];
+    const current = chunk.slice(components.Transform2D)[0];
 
     // Where it is, where it was, and halfway between: what is drawn. The
     // game's sums see where it is.
-    try testing.expectEqual(@as(f32, 10), now.x);
+    try testing.expectEqual(@as(f32, 10), current.x);
     try testing.expectEqual(@as(f32, 0), app.snapshots.get(entity).?.x);
     try testing.expectApproxEqAbs(@as(f32, 0.5), app.time.alpha(), 0.001);
     try testing.expectApproxEqAbs(@as(f32, 5), app.drawnTransform(entity).?.x, 0.01);
@@ -7556,8 +7677,8 @@ test "a font read again is drawn again in the interface, not from the old one's 
     try testing.expect(try app.assets.reloadFont(font));
     _ = try app.step();
     try testing.expect(std.meta.eql(texture, app.interface.renderer.?.atlas_texture));
-    const now = .{ renderer.atlas.pen_y, renderer.atlas.pen_x };
-    try testing.expect(now[0] > packed_to[0] or (now[0] == packed_to[0] and now[1] > packed_to[1]));
+    const current = .{ renderer.atlas.pen_y, renderer.atlas.pen_x };
+    try testing.expect(current[0] > packed_to[0] or (current[0] == packed_to[0] and current[1] > packed_to[1]));
     try testing.expectEqualSlices(*const typeface.Font, &.{&app.assets.fontOf(.none).?.face}, app.interface.faces.slice());
 }
 

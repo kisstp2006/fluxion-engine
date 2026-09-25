@@ -715,6 +715,56 @@ try app.signal(fuse, fx.Timer, .timeout).connectFn(explode, .{});
 - **`app.createTimer(seconds)`** makes a one-shot timer on an entity of its
   own, which goes once it has said `timeout`.
 
+## 📅 Dates, times and the player's culture
+
+```zig
+const now = app.now();                                  // an Instant: this moment, everywhere
+const here = app.localNow();                            // a DateTime: the player's calendar and clock
+const culture = try app.culture();                      // how the player writes them
+var buf: [128]u8 = undefined;
+here.writeStyle(culture, .long, .short, &buf)           // "2026. szeptember 25. 19:42", "September 25, 2026 at 7:42 PM"
+here.write(culture, "EEEE, MMMM d.", &buf)              // "péntek, szeptember 25."
+here.addDays(1).startOfDay()                            // tomorrow at midnight, by the clock
+here.plus(.ofHours(24))                                 // exactly a day on
+fx.datetime.relative(culture, then, now, .local, .wide, &buf)  // "5 perccel ezelőtt", "yesterday"
+try fx.DateTime.parseIso("2026-09-25T19:42:05+02:00", .local)
+try app.setLocale("de-DE");                             // from now on, as Germany writes them
+```
+
+- **A moment and a calendar's fields are two things.** An `Instant` is a
+  point in time, in microseconds since 1970 UTC. A `DateTime` is what a
+  calendar and a clock show for it in a `Zone`: UTC, the system's own with
+  its summer time, or a fixed offset. `addDays`, `addMonths` and `addYears`
+  keep the hour on the clock - the 31st of January and a month is the last
+  of February - and `plus` adds exactly. A `Duration` is a span, written as
+  a clock (`1:05:03`) or in the culture's words (`1 hour, 5 minutes`).
+- **Counted in the Gregorian calendar**, back and forward as far as anyone
+  needs: weekdays, the day of the year, ISO weeks, the start of a day, a
+  week, a month or a year. ISO 8601 is written and read, with offsets and
+  fractions of a second.
+- **Written as the player's culture writes them**, which the system says -
+  see `platform.culture`, the system's own ICU. The names of months and
+  days, the four date and time styles, a pattern for any fields
+  (`writeSkeleton(culture, "MMMMd")`), twelve hours or twenty-four, the first
+  day of the week, how long ago in words, and plural forms. Patterns are
+  CLDR's letters; see `DateTime.write`. Without ICU it is English.
+- **The game chooses** with the project's `internationalization.locale` - a
+  tag such as `hu-HU`, or empty for the player's own - and `app.setLocale`
+  as it runs.
+- **Clocks of the game's own**, without an entity: a night from midnight to
+  six in six minutes, a farm's days.
+
+  ```zig
+  const night = try app.newClock(.{ .start = fx.DateTime.at(.utc, 2026, 1, 1, 0, 0, 0), .rate = 60 });
+  app.clockTime(night)                // a minute of it every real second
+  app.clockPassed(night).hours        // what turned over in the last frame
+  app.pauseClock(night);
+  ```
+
+  A clock keeps the time it is given, without a zone, and runs on the
+  frame's time: `time.scale` slows it and a pause stands it. Given an
+  `owner`, it runs as that entity does and goes with it.
+
 ## 🔊 Sound
 
 ```zig
@@ -2386,12 +2436,29 @@ struct Door {
       return json.parse(text) catch null;
   }
   ```
+- **Dates and times through `time`**, in the game's culture: `time.now()`,
+  `time.date(2026, 9, 25)`, `time.parse("2026-09-25 19:42")`,
+  `time.minutes(5)`, `time.setLocale("de-DE")`; a date's `format("HH:mm")`,
+  `formatStyle("long", "short")`, `relative()`, `addDays(1)`,
+  `weekdayName()`; a span's `format("wide")`. `time.clock(start, rate)` is a
+  clock of the game's own, whose `minute_passed`, `hour_passed` and
+  `day_passed` are signals:
+
+  ```zig
+  var night: any = null;
+  fn ready(self) {
+      night = time.clock(time.date(2026, 1, 1), 60);
+      night.hour_passed.connect(fn(hours: int) {
+          if (night.time().hour == 6) print("6 AM");
+      });
+  }
+  ```
 - **In a scene**, a `Script` is its file's path and its struct, and once the
   scene is saved, the file's UUID as well. Reading the scene loads the file:
   `"Script": { "source": "res://scripts/door.flux", "struct_name": "Door" }`
 - **An editor checks scripts as the game compiles them.**
   `app.scriptSetup()` gives the language service's `flux.service.Options`
-  with `app` and `self.entity` declared. This is for completions and
+  with `app`, `files`, `time` and `self.entity` declared. This is for completions and
   diagnostics, and it needs no `useScripts`.
 - **The engine's calls are known as a script is compiled.** `app`,
   `self.entity`, an entity a call gives, a component got by its name -

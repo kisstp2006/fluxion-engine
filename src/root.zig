@@ -328,6 +328,17 @@ pub const AudioClipHandle = audio.AudioClipHandle;
 pub const scenes = @import("scenes.zig");
 pub const SceneHandle = scenes.SceneHandle;
 pub const data = @import("data.zig");
+/// Dates and times: a moment, a span, and a calendar's fields in a time zone,
+/// written as the person's culture writes them. See `datetime.zig`.
+pub const datetime = @import("datetime.zig");
+pub const Instant = datetime.Instant;
+pub const Duration = datetime.Duration;
+pub const DateTime = datetime.DateTime;
+pub const Zone = datetime.Zone;
+/// A game's own clocks: a date and time at a rate of its own. See
+/// `clocks.zig` and `App.newClock`.
+pub const clocks = @import("clocks.zig");
+pub const ClockHandle = clocks.ClockHandle;
 pub const DataHandle = data.DataHandle;
 pub const background = @import("background.zig");
 pub const inherited = @import("inherited.zig");
@@ -468,6 +479,8 @@ test {
     _ = @import("sprite_frames.zig");
     _ = @import("sprite_frames_test.zig");
     _ = @import("animation_test.zig");
+    _ = @import("datetime.zig");
+    _ = @import("clocks.zig");
     _ = @import("audio_test.zig");
     _ = @import("background.zig");
     _ = @import("scenes_test.zig");

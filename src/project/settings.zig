@@ -267,6 +267,18 @@ pub const Gui = struct {
     };
 };
 
+/// Which language and region the game writes dates, times and spans of time
+/// in. See `App.culture`.
+pub const Internationalization = struct {
+    /// A BCP 47 tag - `hu-HU`, `en-US`, `pt-BR` - or empty for the player's
+    /// own, with the choices they made in the system's settings.
+    locale: []const u8 = "",
+
+    pub const reflect_fields = .{
+        .locale = .{ attr.Locale{}, attr.Doc{ .text = "The language and region dates, times and spans are written in: a tag such as hu-HU, or empty for the player's own." } },
+    };
+};
+
 /// How the game's sound is mixed. See `audio.zig`.
 pub const Audio = struct {
     /// The buses sound is mixed on, each into the one it sends to, and all
@@ -319,6 +331,7 @@ pub const Settings = struct {
     audio: Audio = .{},
     layer_names: LayerNames = .{},
     gui: Gui = .{},
+    internationalization: Internationalization = .{},
     input: InputMap = .{},
     /// The memory the text above is kept in, and the file's keys this build
     /// has no section for.

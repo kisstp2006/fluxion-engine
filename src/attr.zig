@@ -98,6 +98,10 @@ pub const ProjectFile = struct {
 /// an editor offers to choose from.
 pub const AudioBus = struct {};
 
+/// Text that names a locale - `hu-HU`, `en-US` - which an editor offers
+/// from a list, and takes any the system knows.
+pub const Locale = struct {};
+
 /// A setting that has to say something: a project's name.
 pub const Required = struct {};
 

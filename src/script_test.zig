@@ -1443,6 +1443,92 @@ test "a script connects to and awaits the engine's signals: a component's, a tim
     try testing.expectEqual(@as(usize, 1), app.scripts.?.bridges.items.len);
 }
 
+test "a script writes dates in the game's culture, counts with them, reads ISO 8601, and runs a clock of its own" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("calendar.flux",
+        \\var formatted = "";
+        \\var named = "";
+        \\var added = "";
+        \\var parsed = "";
+        \\var clock_text = "";
+        \\var words = "";
+        \\var refused = "";
+        \\var hours_seen = 0;
+        \\var night: any = null;
+        \\fn heard(hours: int) { hours_seen += hours; }
+        \\struct Calendar {
+        \\    fn ready(self) {
+        \\        time.setLocale("en-US");
+        \\        const d = time.utcDate(2026, 9, 25, 19, 42, 5);
+        \\        formatted = d.format("yyyy-MM-dd HH:mm:ss");
+        \\        named = d.format("EEEE, MMMM d");
+        \\        added = d.addDays(7).addMonths(1).format("yyyy-MM-dd");
+        \\        parsed = time.parse("2026-09-25T18:00:00+02:00").toUtc().iso();
+        \\        clock_text = time.minutes(65).format();
+        \\        words = time.hours(26).format("wide");
+        \\        const wrong: any = time.parse("the day after") catch null;
+        \\        if (wrong == null) refused = "refused";
+        \\        night = time.clock(time.utcDate(2026, 1, 1), 3600);
+        \\        night.hour_passed.connect(heard);
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("2026-09-25 19:42:05", globalText(app, file, "formatted"));
+    try testing.expectEqualStrings("Friday, September 25", globalText(app, file, "named"));
+    try testing.expectEqualStrings("2026-11-02", globalText(app, file, "added"));
+    try testing.expectEqualStrings("2026-09-25T16:00:00Z", globalText(app, file, "parsed"));
+    try testing.expectEqualStrings("1:05:00", globalText(app, file, "clock_text"));
+    try testing.expectEqualStrings("1 day, 2 hours", globalText(app, file, "words"));
+    try testing.expectEqualStrings("refused", globalText(app, file, "refused"));
+    try testing.expectEqualStrings("en-US", try app.locale());
+
+    // A frame is a quarter of a second, and the clock an hour a second.
+    for (0..8) |_| _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqual(@as(i64, 2), global(app, file, "hours_seen").asInt());
+    // Paused, it stands.
+    app.setPaused(true);
+    for (0..8) |_| _ = try app.step();
+    try testing.expectEqual(@as(i64, 2), global(app, file, "hours_seen").asInt());
+}
+
+test "an editor's analysis knows time's calls and what they give" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const source =
+        \\fn f() {
+        \\    time.date(2026);
+        \\    time.now().addDays("one");
+        \\}
+    ;
+    const a = try flux.service.Analysis.init(testing.allocator, "calendar.flux", source, app.scriptSetup());
+    defer a.deinit();
+    var said: std.ArrayList([]const u8) = .empty;
+    for (a.diagnostics.items.items) |d| try said.append(arena, try arena.dupe(u8, d.message));
+    try testing.expect(said.items.len >= 2);
+    try testing.expectEqualStrings("`date` takes 3 to 6 arguments, and is given 1", said.items[0]);
+
+    const text = "fn f() { time.now().$ }";
+    const where = std.mem.indexOfScalar(u8, text, '$').?;
+    const shown = try std.mem.concat(arena, u8, &.{ text[0..where], text[where + 1 ..] });
+    const found = try flux.service.complete(testing.allocator, arena, "calendar.flux", shown, @intCast(where), app.scriptSetup());
+    for ([_][]const u8{ "formatStyle", "addDays", "relative", "year" }) |wanted| {
+        for (found.items) |item| {
+            if (std.mem.eql(u8, item.label, wanted)) break;
+        } else {
+            std.debug.print("{s} is not offered\n", .{wanted});
+            return error.NotOffered;
+        }
+    }
+}
+
 test "a script makes entities and scenes, takes them out, and calls what it defers at the end of the frame" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

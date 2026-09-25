@@ -145,6 +145,8 @@ const sprite_frames = @import("sprite_frames.zig");
 const Assets = @import("assets.zig");
 const geometry = @import("geometry.zig");
 const Color = @import("color.zig").Color;
+const datetime = @import("datetime.zig");
+const clocks_mod = @import("clocks.zig");
 
 const Entity = ecs.Entity;
 const log = std.log.scoped(.fluxion_engine);
@@ -413,6 +415,215 @@ pub const FileAccess = struct {
         if (!std.mem.startsWith(u8, path, Project.user_scheme)) return error.NotAllowed;
     }
 };
+
+/// What a script reaches as `time`: this moment, dates made and read,
+/// spans of time, the culture they are written in, and clocks of the game's
+/// own. Dates are `DateTime` values and spans `Duration` ones, with their
+/// calls:
+///
+/// ```
+/// let now = time.now();
+/// print(now.formatStyle("long", "short"));          // 2026. szeptember 25. 19:42
+/// print(now.addDays(1).format("EEEE"));              // szombat
+/// let saved = time.parse("2026-09-25T18:00:00+02:00");
+/// print(saved.relative());                           // 1 órával ezelőtt
+/// let night = time.clock(time.date(2026, 1, 1), 60);
+/// night.hour_passed.connect(fn(hours) { print(night.time().format("h a")); });
+/// ```
+pub const TimeAccess = struct {
+    app: *App,
+
+    pub const reflect_name = "Time";
+    pub const reflect_opaque = true;
+    pub const reflect_methods = .{
+        .now = .{},
+        .utcNow = .{},
+        .unix = .{},
+        .fromUnix = .{attr.Params{ .names = &.{"seconds"} }},
+        .date = .{ attr.Params{ .names = &.{ "year", "month", "day", "hour", "minute", "second" } }, attr.defaults(.{ 0, 0, 0 }) },
+        .utcDate = .{ attr.Params{ .names = &.{ "year", "month", "day", "hour", "minute", "second" } }, attr.defaults(.{ 0, 0, 0 }) },
+        .parse = .{attr.Params{ .names = &.{"text"} }},
+        .seconds = .{attr.Params{ .names = &.{"n"} }},
+        .minutes = .{attr.Params{ .names = &.{"n"} }},
+        .hours = .{attr.Params{ .names = &.{"n"} }},
+        .days = .{attr.Params{ .names = &.{"n"} }},
+        .locale = .{},
+        .setLocale = .{attr.Params{ .names = &.{"tag"} }},
+        .systemLocale = .{attr.Params{ .names = &.{"vm"} }},
+        .zoneName = .{attr.Params{ .names = &.{"vm"} }},
+        .clock = .{ attr.Params{ .names = &.{ "vm", "start", "rate" } }, attr.defaults(.{1.0}) },
+    };
+
+    /// This moment, on the player's calendar and clock.
+    pub fn now(self: *TimeAccess) datetime.DateTime {
+        return self.app.localNow();
+    }
+
+    pub fn utcNow(self: *TimeAccess) datetime.DateTime {
+        return self.app.now().in(.utc);
+    }
+
+    /// Seconds since 1970-01-01 00:00 UTC.
+    pub fn unix(self: *TimeAccess) f64 {
+        return self.app.now().unix();
+    }
+
+    /// The moment `seconds` after 1970 began, on the player's clock.
+    pub fn fromUnix(_: *TimeAccess, since_1970: f64) datetime.DateTime {
+        return datetime.Instant.fromUnix(since_1970).in(.local);
+    }
+
+    /// A date and time on the player's clock. What does not fit carries
+    /// over: day 32 of January is the first of February.
+    pub fn date(_: *TimeAccess, year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) datetime.DateTime {
+        return datetime.DateTime.at(.local, year, month, day, hour, minute, second);
+    }
+
+    pub fn utcDate(_: *TimeAccess, year: i64, month: i64, day: i64, hour: i64, minute: i64, second: i64) datetime.DateTime {
+        return datetime.DateTime.at(.utc, year, month, day, hour, minute, second);
+    }
+
+    /// ISO 8601: `2026-09-25`, `2026-09-25 19:42`, `...T19:42:05+02:00`.
+    /// One without an offset is on the player's clock.
+    pub fn parse(_: *TimeAccess, text: []const u8) anyerror!datetime.DateTime {
+        return datetime.DateTime.parseIso(text, .local);
+    }
+
+    pub fn seconds(_: *TimeAccess, n: f64) datetime.Duration {
+        return .ofSeconds(n);
+    }
+    pub fn minutes(_: *TimeAccess, n: f64) datetime.Duration {
+        return .ofMinutes(n);
+    }
+    pub fn hours(_: *TimeAccess, n: f64) datetime.Duration {
+        return .ofHours(n);
+    }
+    pub fn days(_: *TimeAccess, n: f64) datetime.Duration {
+        return .ofDays(n);
+    }
+
+    /// The tag of the culture dates are written in: `hu-HU`.
+    pub fn locale(self: *TimeAccess) anyerror![]const u8 {
+        return self.app.locale();
+    }
+
+    /// Write in `tag`'s way from now on - `de-DE` - or, for `""`, the
+    /// player's.
+    pub fn setLocale(self: *TimeAccess, tag: []const u8) anyerror!void {
+        try self.app.setLocale(tag);
+    }
+
+    /// The player's own locale, whatever the game writes in.
+    pub fn systemLocale(_: *TimeAccess, vm: *flux.Vm) []const u8 {
+        const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
+        const held: *[platform.culture.max_tag]u8 = scripts.said[0..platform.culture.max_tag];
+        return platform.culture.userLocale(held);
+    }
+
+    /// The player's time zone: `Europe/Budapest`, where the system names it.
+    pub fn zoneName(_: *TimeAccess, vm: *flux.Vm) []const u8 {
+        const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
+        return platform.culture.timeZoneName(&scripts.said);
+    }
+
+    /// A clock of the game's own, showing `start`'s fields and running
+    /// `rate` seconds a real second. See `ClockRef`.
+    pub fn clock(self: *TimeAccess, vm: *flux.Vm, start: datetime.DateTime, rate: f64) anyerror!flux.Value {
+        const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
+        const handle = try self.app.newClock(.{ .start = start, .rate = rate });
+        return clockValue(scripts, handle);
+    }
+};
+
+/// A clock of the game's own as a script holds it: what `time.clock(start,
+/// rate)` gives. `time()` is what it shows, `setTime`, `setRate`, `pause`,
+/// `unpause` and `remove` change it, and its signals say what turned over -
+/// each once a frame with how many:
+///
+/// ```
+/// let night = time.clock(time.date(2026, 1, 1), 60);
+/// night.hour_passed.connect(fn(hours) { if (night.time().hour == 6) win(); });
+/// await night.day_passed;
+/// ```
+///
+/// It stands while the game is paused. A call on one taken away says so.
+pub const ClockRef = struct {
+    scripts: *Scripts,
+    handle: clocks_mod.ClockHandle,
+
+    pub const signal_names = [3][]const u8{ "minute_passed", "hour_passed", "day_passed" };
+
+    pub const reflect_name = "Clock";
+    pub const reflect_opaque = true;
+    pub const reflect_methods = .{
+        .time = .{},
+        .setTime = .{attr.Params{ .names = &.{"time"} }},
+        .rate = .{},
+        .setRate = .{attr.Params{ .names = &.{"rate"} }},
+        .pause = .{},
+        .unpause = .{},
+        .isPaused = .{},
+        .remove = .{},
+    };
+
+    /// What it shows.
+    pub fn time(self: *ClockRef) anyerror!datetime.DateTime {
+        return self.scripts.app.clockTime(self.handle) orelse error.NoSuchClock;
+    }
+
+    /// Show `to`'s fields from now on.
+    pub fn setTime(self: *ClockRef, to: datetime.DateTime) anyerror!void {
+        if (self.scripts.app.clockTime(self.handle) == null) return error.NoSuchClock;
+        self.scripts.app.setClockTime(self.handle, to);
+    }
+
+    /// Seconds of it a real second.
+    pub fn rate(self: *ClockRef) f64 {
+        return self.scripts.app.clockRate(self.handle);
+    }
+
+    pub fn setRate(self: *ClockRef, to: f64) anyerror!void {
+        if (self.scripts.app.clockTime(self.handle) == null) return error.NoSuchClock;
+        self.scripts.app.setClockRate(self.handle, to);
+    }
+
+    pub fn pause(self: *ClockRef) void {
+        self.scripts.app.pauseClock(self.handle);
+    }
+
+    pub fn unpause(self: *ClockRef) void {
+        self.scripts.app.resumeClock(self.handle);
+    }
+
+    pub fn isPaused(self: *ClockRef) bool {
+        return self.scripts.app.isClockPaused(self.handle);
+    }
+
+    pub fn remove(self: *ClockRef) void {
+        self.scripts.app.removeClock(self.handle);
+    }
+};
+
+fn clockKey(handle: clocks_mod.ClockHandle) u64 {
+    return @bitCast(handle);
+}
+
+/// The value a clock is to the scripts: one clock, one value.
+fn clockValue(scripts: *Scripts, handle: clocks_mod.ClockHandle) flux.Vm.Error!flux.Value {
+    const key = clockKey(handle);
+    if (scripts.clock_values.get(key)) |known| return known;
+    const vm = scripts.vm;
+    try scripts.clock_values.ensureUnusedCapacity(scripts.app.gpa, 1);
+    const ref = try vm.gpa.create(ClockRef);
+    ref.* = .{ .scripts = scripts, .handle = handle };
+    const made = vm.adoptHandle(ref) catch |err| {
+        vm.gpa.destroy(ref);
+        return err;
+    };
+    try vm.hold(made);
+    scripts.clock_values.putAssumeCapacityNoClobber(key, made);
+    return made;
+}
 
 /// A set of sprite frames as a script holds it: what `sprite.sprite_frames`,
 /// `app.newSpriteFrames()` and `app.loadSpriteFrames(path)` give. The calls
@@ -807,6 +1018,8 @@ pub const Scripts = struct {
     resolver: flux.Resolver,
     /// What scripts reach as `files`.
     file_access: FileAccess,
+    /// What scripts reach as `time`.
+    time_access: TimeAccess,
     files: FileTable = .empty,
     /// Each entity's instance, in the order they were made.
     instances: std.AutoArrayHashMapUnmanaged(Entity, Instance) = .empty,
@@ -851,6 +1064,14 @@ pub const Scripts = struct {
     input_handled: bool = false,
     /// `Event.describe`'s words, for the call that asked.
     described: [64]u8 = undefined,
+    /// The words a date, a time or a span was written in, for the call that
+    /// asked: see `datetime.zig`.
+    said: [512]u8 = undefined,
+    /// The value each clock is to the scripts, once handed to them.
+    clock_values: std.AutoHashMapUnmanaged(u64, flux.Value) = .empty,
+    /// A clock's `minute_passed`, `hour_passed` and `day_passed`, once a
+    /// script has reached for them; `.null` for one it has not.
+    clock_signals: std.AutoHashMapUnmanaged(u64, [3]flux.Value) = .empty,
 
     /// The VM, with `app` and `self.entity` in it.
     pub fn create(app: *App, options: Options) (Allocator.Error || flux.Vm.Error)!*Scripts {
@@ -881,6 +1102,7 @@ pub const Scripts = struct {
                 .why = "its entity was despawned, or the component was taken off",
             },
             .file_access = .{ .app = app },
+            .time_access = .{ .app = app },
         };
         const vm = try flux.Vm.create(app.gpa, .{
             .out = options.out orelse &self.printed.writer,
@@ -896,7 +1118,7 @@ pub const Scripts = struct {
         });
         errdefer vm.destroy();
         vm.host = self;
-        try install(vm, try vm.handle(app), try vm.handle(&self.file_access));
+        try install(vm, try vm.handle(app), try vm.handle(&self.file_access), try vm.handle(&self.time_access));
         self.frame = try vm.newSignal("frame", 0);
         try vm.hold(self.frame);
         self.vm = vm;
@@ -912,6 +1134,8 @@ pub const Scripts = struct {
         self.entity_of.deinit(gpa);
         self.handles.deinit(gpa);
         self.frames_handles.deinit(gpa);
+        self.clock_values.deinit(gpa);
+        self.clock_signals.deinit(gpa);
         self.refused.deinit(gpa);
         self.scratch.deinit(gpa);
         self.changed.deinit(gpa);
@@ -1203,6 +1427,7 @@ pub const Scripts = struct {
                         error.Panic => self.sayPanic(null, "the next frame of"),
                     };
                 }
+                self.emitClocks();
                 self.callEach(.update, dt);
                 // The scripts' own clock, so `await wait(1.0)` wakes - but
                 // not the waits of the entities that do not run now.
@@ -1813,6 +2038,48 @@ pub const Scripts = struct {
 
     /// The scripts' own signal for `component.name` of `source`, made the
     /// first time a script reaches it and connected to the engine's.
+    /// A clock's `minute_passed`, `hour_passed` or `day_passed`, made the
+    /// first time a script reaches for it.
+    fn clockSignal(self: *Scripts, handle: clocks_mod.ClockHandle, which: usize) flux.Vm.Error!flux.Value {
+        const got = try self.clock_signals.getOrPut(self.app.gpa, clockKey(handle));
+        if (!got.found_existing) got.value_ptr.* = @splat(.null);
+        if (got.value_ptr[which].tag != .signal) {
+            const signal = try self.vm.newSignal(ClockRef.signal_names[which], 1);
+            try self.vm.hold(signal);
+            // Asked again: making it may have grown the table.
+            self.clock_signals.getPtr(clockKey(handle)).?[which] = signal;
+            return signal;
+        }
+        return got.value_ptr[which];
+    }
+
+    /// Each clock's signals for what turned over on it in this frame's step,
+    /// with how many.
+    fn emitClocks(self: *Scripts) void {
+        if (self.clock_signals.count() == 0) return;
+        const Due = struct { signal: flux.Value, count: u64 };
+        var due: std.ArrayList(Due) = .empty;
+        defer due.deinit(self.app.gpa);
+        var it = self.clock_signals.iterator();
+        while (it.next()) |entry| {
+            const handle: clocks_mod.ClockHandle = @bitCast(entry.key_ptr.*);
+            const clock = self.app.clocks.get(handle) orelse continue;
+            const counts = [3]u64{ clock.passed.minutes, clock.passed.hours, clock.passed.days };
+            for (entry.value_ptr.*, counts) |signal, count| {
+                if (signal.tag != .signal or count == 0) continue;
+                due.append(self.app.gpa, .{ .signal = signal, .count = count }) catch return self.outOfMemory(null);
+            }
+        }
+        for (due.items) |each| {
+            const count = flux.bind.toValue(self.vm, @as(i64, @intCast(@min(each.count, std.math.maxInt(i64))))) catch return self.outOfMemory(null);
+            self.vm.setBudget(self.options.budget);
+            self.vm.emitSignalValue(each.signal, &.{count}) catch |err| switch (err) {
+                error.OutOfMemory => self.outOfMemory(null),
+                error.Panic => self.sayPanic(null, "a clock's signal in"),
+            };
+        }
+    }
+
     fn bridgeOf(self: *Scripts, source: Entity, component: []const u8, name: []const u8, arity: usize) flux.Vm.Error!flux.Value {
         const gpa = self.app.gpa;
         const key = try std.fmt.allocPrint(gpa, "{s}.{s}", .{ component, name });
@@ -2218,6 +2485,12 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
         if (std.mem.eql(u8, name, "resource_path")) return try vm.string(frames.resourcePath());
         return null;
     }
+    if (now.as(ClockRef)) |clock| {
+        const which = for (ClockRef.signal_names, 0..) |signal_name, i| {
+            if (std.mem.eql(u8, signal_name, name)) break i;
+        } else return null;
+        return try self.clockSignal(clock.handle, which);
+    }
     const ref = now.asConst(EntityRef) orelse return null;
     if (!self.app.world.isAlive(ref.entity)) return null;
     const found = self.app.signalNamed(ref.entity, name) catch |err| switch (err) {
@@ -2438,15 +2711,17 @@ fn notAnEntity(vm: *flux.Vm, value: flux.Value) flux.Vm.Error {
 /// What every VM that compiles the game's scripts is given - the game's
 /// own, and each of an editor's analyses - so the two agree on what a
 /// script may name.
-pub fn install(vm: *flux.Vm, app: flux.Value, files: flux.Value) Allocator.Error!void {
+pub fn install(vm: *flux.Vm, app: flux.Value, files: flux.Value, time: flux.Value) Allocator.Error!void {
     try vm.declareHostMemberOf("entity", reflect.typeOf(EntityRef), entity_doc);
     try vm.defineGlobal("app", app, app_doc);
     try vm.defineGlobal("files", files, files_doc);
+    try vm.defineGlobal("time", time, time_doc);
 }
 
 const entity_doc = "The entity this script is on: `alive()`, `name()`, `uuid()`, `has(name)`, `get(name)`, `add(name)`, `remove(name)`.";
 const app_doc = "The engine: the calls `App.reflect_methods` lists.";
 const files_doc = "The game's files to read (`res://`) and the player's to read and write (`user://`): `readText(path)`, `writeText(path, text)`, `exists(path)`, `makeDir(path)`, `list(path)`, `remove(path)`.";
+const time_doc = "Dates, times and spans, written in the game's culture: `now()`, `date(year, month, day)`, `parse(text)`, `minutes(n)`, `locale()`, `setLocale(tag)`, and `clock(start, rate)` for a clock of the game's own.";
 
 /// What `entity.get("Timer")` and `entity.add("Timer")` give, for the
 /// compiler to know its fields and calls by: the component registered under
@@ -2585,6 +2860,7 @@ fn installForAnalysis(context: ?*anyopaque, vm: *flux.Vm) anyerror!void {
     try vm.declareHostMemberOf("entity", reflect.typeOf(EntityRef), entity_doc);
     try vm.declareGlobal("app", reflect.typeOf(App), app_doc);
     try vm.declareGlobal("files", reflect.typeOf(FileAccess), files_doc);
+    try vm.declareGlobal("time", reflect.typeOf(TimeAccess), time_doc);
     vm.options.host_types = &host_types;
     vm.options.host_result = .{ .context = context, .run = componentResult };
 }
