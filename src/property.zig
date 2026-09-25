@@ -42,8 +42,14 @@ pub const Value = union(enum) {
     /// Text in a `[N]u8`, padded with zeros: see `nameOf` and `text`.
     name: [name_len]u8,
 
-    /// The longest name a value holds.
-    pub const name_len = 64;
+    /// The longest name a value holds: short enough that the whole value is
+    /// one a script can hand `App.tweenProperty`, which takes an argument of
+    /// 64 bytes at most.
+    pub const name_len = 56;
+
+    comptime {
+        std.debug.assert(@sizeOf(Value) <= 64);
+    }
 
     /// `text` as a name, cut to `name_len` bytes.
     pub fn nameOf(said: []const u8) Value {

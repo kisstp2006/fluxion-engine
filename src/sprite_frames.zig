@@ -642,7 +642,9 @@ pub fn cellRegion(index: u32, columns: u16, rows: u16, width: f32, height: f32) 
 // The component
 // -------------------------------------------------------------------------
 
-pub const name_len = 64;
+/// The longest animation name a sprite holds: as long as a track's key
+/// holds, so a name keyed on the timeline is the whole name.
+pub const name_len = @import("property.zig").Value.name_len;
 
 fn nameIn(buffer: *const [name_len]u8) []const u8 {
     return std.mem.sliceTo(buffer, 0);

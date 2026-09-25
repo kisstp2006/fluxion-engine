@@ -161,33 +161,34 @@ pub const Nesting = struct {
 };
 
 /// What a load did.
+/// Counts, in 32 bits so the whole is small enough to hand a script back.
 pub const Loaded = struct {
     /// How many entities it spawned, the ones inside instances too.
-    entities: usize = 0,
+    entities: u32 = 0,
     /// Its entities with no parent in it: what hangs from `LoadOptions.parent`.
-    roots: usize = 0,
+    roots: u32 = 0,
     /// The one of them, when there is one: what an instance is. `.none` for
     /// a scene of several.
     root: Entity = .none,
     /// Components the file has that nothing here is registered as: kept
     /// with their entities, saved back as they were, and never run. An
     /// editor without the game's components meets these. See `Unknown`.
-    components_unknown: usize = 0,
+    components_unknown: u32 = 0,
     /// Entities given a new UUID, because one in the world had the one the
     /// file gave them: the same scene loaded twice, say. References inside
     /// the scene still find them.
-    reassigned: usize = 0,
+    reassigned: u32 = 0,
     /// Files found by their UUID at another path than the scene names: moved
     /// or renamed with their `.uid` files. Saving the scene again writes
     /// where they are now.
-    moved: usize = 0,
+    moved: u32 = 0,
     /// Connections made to a signal no component of this build declares, or
     /// to a method the target has not got: kept, saved back as they were,
     /// and never heard. An editor without the game's components meets these.
-    connections_unknown: usize = 0,
+    connections_unknown: u32 = 0,
     /// Connections passed over because one of their two ends is in neither
     /// the scene nor the world.
-    connections_skipped: usize = 0,
+    connections_skipped: u32 = 0,
 };
 
 /// What `assets` says of one file: its UUID, and how a texture is sampled
@@ -1138,7 +1139,7 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     // own and the file's - unless an entity already in the world has that
     // one, when it is given a new one, and the file's stays the scene's own
     // name for it.
-    var loaded: Loaded = .{ .roots = told.roots };
+    var loaded: Loaded = .{ .roots = @intCast(told.roots) };
     for (entities.items, 0..) |e, place| {
         if (told.nested.contains(place)) continue;
         const uuid = uuidAt(options, &told, place) orelse continue;
@@ -1210,10 +1211,10 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
         try l.fill();
         // The list is the order of every parent's children.
         try app.placeInOrder(entities.items);
-        loaded.moved = l.moved;
-        loaded.components_unknown = l.components_unknown;
-        loaded.connections_unknown = l.connections_unknown;
-        loaded.connections_skipped = l.connections_skipped;
+        loaded.moved = @intCast(l.moved);
+        loaded.components_unknown = @intCast(l.components_unknown);
+        loaded.connections_unknown = @intCast(l.connections_unknown);
+        loaded.connections_skipped = @intCast(l.connections_skipped);
     }
 
     // Last of all: a chunk is an entity, and making one while the values
@@ -1225,7 +1226,7 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
         chunk.cells = pending.cells;
     }
     if (told.roots == 1) loaded.root = entities.items[told.root_place.?];
-    loaded.entities = made.items.len - first;
+    loaded.entities = @intCast(made.items.len - first);
     return loaded;
 }
 

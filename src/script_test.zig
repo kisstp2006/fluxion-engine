@@ -9,6 +9,7 @@ const testing = std.testing;
 
 const App = @import("App.zig");
 const ecs = @import("fluxion_ecs");
+const reflect = @import("fluxion_reflect");
 const script = @import("script.zig");
 const scene = @import("scene.zig");
 const signals = @import("signals.zig");
@@ -2089,4 +2090,51 @@ test "a script asks the player for a file of theirs, hears the files let go over
     _ = try app.step();
     try testing.expectEqualStrings("dropped", globalText(app, file, "heard"));
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
+test "a script moves a property with a tween" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("mover.flux",
+        \\struct Mover {
+        \\    fn ready(self) {
+        \\        const t = app.tween(self.entity) catch return;
+        \\        app.tweenProperty(t, self.entity, "Transform2D.x", 10.0, 0.5) catch return;
+        \\        app.tweenProperty(t, self.entity, "Transform2D.x,y", vec2(20, 30), 0.5) catch return;
+        \\    }
+        \\}
+    );
+    const mover = try app.world.spawnWith(.{ Transform2D.at(0, 0), Script.of(file) });
+    for (0..8) |_| _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqual(@as(f32, 20), app.world.get(mover, Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 30), app.world.get(mover, Transform2D).?.y);
+}
+
+test "every call a script can make takes arguments and gives back a result a script can pass" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const Check = struct {
+        /// A script passes each argument, and takes each result, in 64
+        /// bytes; a pointer or a slice is its own.
+        fn fits(t: *const reflect.Type) bool {
+            return t.kind == .pointer or t.kind == .slice or t.size <= 64;
+        }
+
+        fn methods(t: *const reflect.Type) !void {
+            for (t.methods.slice()) |m| {
+                const f = m.type.info.function;
+                var ok = fits(f.return_type);
+                for (f.params.slice()) |p| ok = ok and fits(p.type);
+                if (!ok) {
+                    std.debug.print("{s}.{s} takes or gives back more than a script can pass\n", .{ t.name.slice(), m.name.slice() });
+                    return error.TooLargeForAScript;
+                }
+            }
+        }
+    };
+    inline for (.{ App, script.FileAccess, script.TimeAccess, script.ImagesAccess, script.ImageRef, script.ConfigRef, script.FramesRef, script.ClockRef, script.EntityRef }) |T| {
+        try Check.methods(reflect.typeOf(T));
+    }
+    for (app.scene_components.entries.items) |entry| try Check.methods(entry.type);
 }
