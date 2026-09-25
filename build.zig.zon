@@ -103,16 +103,16 @@
         // an editor's inspector reads and writes, and what a console calls by
         // name. Its fluxion-json is the one above, so its JSON is the scenes'.
         .fluxion_reflect = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-reflect#7c72be7ac337e90bfa2810f319a3bd65b96e3574",
-            .hash = "fluxion_reflect-0.1.0-Aw2l_wugBQBox00gw_VtykRfPLtzzAWQYde2AxOdpxAU",
+            .url = "git+https://github.com/kisstp2006/fluxion-reflect#bbb2c9c0f2cd3b39175ebc45cd7f5133ade8df55",
+            .hash = "fluxion_reflect-0.1.0-Aw2l_0C7BQDtS7H0sduXo9rMQNiscuM55NSBuhEnNNcU",
         },
         // Flux, the scripting language: one VM on the App for a game that
         // calls `useScripts`, and a `Script` component per entity. Its own
         // fluxion-reflect and fluxion-json are pinned where these are, so a
         // `reflect.Value` is one type across the two.
         .fluxion_script = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-script#89ee85035516e3653719e2e8b95ba5cc94d60784",
-            .hash = "fluxion_script-0.1.0-rt2DKq4VEQDq0uUjRZgkVC2bOL97U6fTDN-lIrs7phqV",
+            .url = "git+https://github.com/kisstp2006/fluxion-script#605b710125cb6d84a7e8b1bee761ab242d1d8bb3",
+            .hash = "fluxion_script-0.1.0-rt2DKjMnEQByoWeeoEs6sP9SCgao17gHKx0Gb_L2JsfP",
         },
 
         // Generational handles: what the asset tables hand out, and what a
