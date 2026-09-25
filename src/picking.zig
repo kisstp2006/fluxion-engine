@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! Godot's physics object picking: what the pointer is over, and what it
+//! Physics object picking: what the pointer is over, and what it
 //! did there. Once a frame, after the `.input` stage and before the first
 //! fixed step, every pointer event of the frame goes to the collision
 //! objects under it as `input_event`, and what the pointer is over now says
@@ -8,7 +8,7 @@
 //!
 //! What can be picked is an `Area2D` or a `RigidBody2D` with
 //! `input_pickable`, through a collider that holds the point, is on a layer
-//! - a `collision_layer` of nought is never picked, as in Godot - and whose
+//! - a `collision_layer` of nought is never picked - and whose
 //! object, if it is drawn at all, is visible.
 
 const std = @import("std");
@@ -100,10 +100,11 @@ pub fn update(self: *Picking, app: *App) !void {
 /// Whether picking happens at all this frame.
 fn picks(app: *App) bool {
     if (app.input.isHandled()) return false;
-    // A locked pointer has no place to pick with; Godot skips CAPTURED too.
+    // A locked pointer has no place to pick with.
     if (app.cursor() == .locked) return false;
     if (!app.input.pointer.inside) return false;
-    // The interface has it: Godot's STOP control marks the event handled.
+    // The interface has it: a control under the pointer keeps it from the
+    // world.
     if (app.hasInterface() and app.ui.wantsPointer()) return false;
     return true;
 }
@@ -146,10 +147,12 @@ fn take(self: *Picking, app: *App, id: physics.ShapeId, point: Vec2) !void {
     if (!holds(app, entry, point)) return;
     const shape = app.bodies.entityOf(app, id) orelse return;
     const collider = app.world.get(shape, Collider2D) orelse return;
-    // Godot picks through a shape on a layer, and has no picking mask.
+    // Only a shape on a layer is picked; there is no picking mask.
     if (collider.collision_layer == 0) return;
     const object = Bodies.objectOf(&app.world, shape) orelse return;
     if (!pickable(app, object)) return;
+    // What waits while the game is paused hears nothing of the pointer.
+    if (!app.isProcessing(object)) return;
 
     const drawn = app.world.get(object, Sprite);
     if (drawn) |sprite| {
@@ -167,14 +170,11 @@ fn take(self: *Picking, app: *App, id: physics.ShapeId, point: Vec2) !void {
 /// Whether the shape itself holds the point, not only its box.
 fn holds(app: *App, entry: *const physics.World.ShapeEntry, point: Vec2) bool {
     const local = app.physics.shapeTransform(entry).unapply(point);
-    return switch (entry.def.geometry) {
-        .circle => |c| local.distSq(c.center) <= c.radius * c.radius,
-        .polygon => |*p| p.containsLocal(local),
-    };
+    return entry.def.geometry.containsLocal(local);
 }
 
-/// Whether an object takes the pointer at all: Godot's `input_pickable`,
-/// true on an area and false on a body. A lone collider, which is its own
+/// Whether an object takes the pointer at all: its `input_pickable`, true
+/// on an area and false on a body. A lone collider, which is its own
 /// static body, is never picked.
 fn pickable(app: *App, object: Entity) bool {
     if (app.world.get(object, Area2D)) |area| {
@@ -207,7 +207,7 @@ fn deliver(self: *Picking, app: *App, event: ?pointer.InputEvent) !void {
             if (!first and app.physics_object_picking_first_only) continue;
             try say(app, hit.object, .input_event, .{ .event = what, .shape = hit.shape });
             // Heard at once, so a handler that takes the pointer stops the
-            // rest of them hearing it: Godot 4.2 does the same.
+            // rest of them hearing it.
             try app.signals.drain(app);
             if (app.input.isHandled()) return;
         }
@@ -217,7 +217,7 @@ fn deliver(self: *Picking, app: *App, event: ?pointer.InputEvent) !void {
 }
 
 /// What the pointer has left since the last pass: the objects first, then
-/// the shapes, as Godot says them.
+/// the shapes.
 fn leaveRest(self: *Picking, app: *App) !void {
     var at: usize = 0;
     while (at < self.over.count()) {
@@ -227,7 +227,7 @@ fn leaveRest(self: *Picking, app: *App) !void {
             continue;
         }
         self.over.swapRemoveAt(at);
-        // A thing that has died says nothing, as Godot's freed object does.
+        // A thing that has died says nothing.
         if (app.world.isAlive(object)) try say(app, object, .mouse_exited, .{});
     }
     at = 0;

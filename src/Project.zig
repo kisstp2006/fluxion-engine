@@ -18,10 +18,10 @@
 //! say where it is, once there is one.
 //!
 //! **A project's file can have a UUID**, kept beside it in a `.uid` file -
-//! `art/hero.png.uid`, one line, `uid://...` - as Godot 4 keeps its. A scene
-//! names a file by its UUID as well as by its path, and reading one goes by
-//! the UUID first, so a texture moved or renamed together with its `.uid` file
-//! is found where it went. A `uid://` path is taken wherever a `res://` one is.
+//! `art/hero.png.uid`, one line, `uid://...`. A scene names a file by its
+//! UUID as well as by its path, and reading one goes by the UUID first, so a
+//! texture moved or renamed together with its `.uid` file is found where it
+//! went. A `uid://` path is taken wherever a `res://` one is.
 //!
 //! Where a UUID's file is, is learnt from the `.uid` files read along the way;
 //! one nobody has read yet sends the engine through the whole project once,
@@ -40,44 +40,65 @@ const Allocator = std.mem.Allocator;
 
 const json = @import("fluxion_json");
 const Uuid = @import("fluxion_id").Uuid;
+const folders = @import("fluxion_platform").folders;
 
-const settings_file = @import("project/settings.zig");
+const project_file = @import("project/settings.zig");
 
 const Project = @This();
 const log = std.log.scoped(.fluxion_engine);
 
 /// What a project's file is called, at its root: `project.fluxion`.
-pub const file_name = settings_file.file_name;
+pub const file_name = project_file.file_name;
 
-/// What a project file says: its name, its renderer, its icon and the rest.
-/// See `project/settings.zig`.
-pub const Settings = settings_file.Settings;
+/// What a project file says, a section a field: `application`, `display`,
+/// `rendering`, `physics_2d`, `layer_names`, `gui`, `input`. See
+/// `project/settings.zig`.
+pub const Settings = project_file.Settings;
+
+/// The project file's sections.
+pub const Application = project_file.Application;
+pub const Display = project_file.Display;
+pub const Rendering = project_file.Rendering;
+/// How a 2D world moves: `physics_2d` in the project file.
+pub const Physics2D = project_file.Physics2D;
+pub const Audio = project_file.Audio;
+pub const LayerNames = project_file.LayerNames;
+pub const Gui = project_file.Gui;
+pub const InputMap = project_file.InputMap;
 
 /// Which family of graphics APIs a project is drawn with, and its backends
 /// on each system.
-pub const Renderer = settings_file.Renderer;
-/// How a 2D world moves: `physics_2d` in the project file.
-pub const Physics2D = settings_file.Physics2D;
+pub const Renderer = project_file.Renderer;
 
-pub const ReadError = settings_file.ReadError;
-pub const WriteError = settings_file.WriteError;
-pub const CreateError = settings_file.CreateError;
+/// The top of a project file: `"fluxion_project": 2`.
+pub const settings_header = project_file.header;
+
+pub const ReadError = project_file.ReadError;
+pub const WriteError = project_file.WriteError;
+pub const CreateError = project_file.CreateError;
 
 /// The project file in a folder, read with no `App` and no GPU: what a
 /// project manager lists projects by.
-pub const readSettings = settings_file.read;
+pub const readSettings = project_file.read;
 
 /// Write a folder's project file in place of the one there.
-pub const writeSettings = settings_file.write;
+pub const writeSettings = project_file.write;
+
+/// The project file's text, as `writeSettings` writes it.
+pub const settingsText = project_file.text;
 
 /// Make a new project: its folder and its project file.
-pub const create = settings_file.create;
+pub const create = project_file.create;
 
 /// What a project path starts with.
 pub const scheme = "res://";
 
 /// What a path naming a file by its UUID starts with.
 pub const uid_scheme = "uid://";
+
+/// What a path in the player's own folder starts with: saved games and
+/// settings, which a game writes and its files are not. See `userRoot`.
+pub const user_scheme = "user://";
 
 /// What is added to a file's name for the file its UUID is kept in.
 pub const uid_extension = ".uid";
@@ -89,6 +110,9 @@ pub const Error = error{
     /// A `uid://` path whose UUID does not read, or that no `.uid` file in
     /// the project holds.
     NoSuchUid,
+    /// A `user://` path on a system that keeps no folder for a program's
+    /// data, or with no `Io` to ask it.
+    NoUserFolder,
 } || Allocator.Error;
 
 pub const InitError = std.Io.Dir.OpenError || std.Io.Dir.RealPathError || Allocator.Error;
@@ -126,6 +150,13 @@ settings: ?Settings = null,
 /// What new UUIDs are drawn from: seeded by the operating system, or with no
 /// `Io` by a constant, so a test makes the same ones every run.
 source: std.Random.DefaultCsprng,
+
+/// Where `user://` is, once `userRoot` has worked it out - or set first: a
+/// test's folder, a game kept on a stick with its saves beside it. Owned.
+user_root: ?[]u8 = null,
+/// What the game is called when the project file does not say: the folder
+/// `user://` is under is named after it. Owned.
+fallback_name: ?[]u8 = null,
 
 /// The project at `root` - the working directory when null, and the folder
 /// it is in when `root` names a project file, as a file association hands it
@@ -174,6 +205,8 @@ pub fn deinit(self: *Project) void {
     self.by_path.deinit(self.gpa);
     self.gpa.free(self.root);
     self.gpa.free(self.cwd);
+    if (self.user_root) |held| self.gpa.free(held);
+    if (self.fallback_name) |held| self.gpa.free(held);
     self.* = undefined;
 }
 
@@ -209,10 +242,12 @@ pub fn isValidProjectPath(path: []const u8) bool {
 /// absolute path for one outside it. With no `Io`, as it is. The caller
 /// frees it.
 pub fn canonical(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
-    if (std.mem.startsWith(u8, path, scheme)) {
-        const inside = try tidy(gpa, path[scheme.len..]);
-        defer gpa.free(inside);
-        return std.mem.concat(gpa, u8, &.{ scheme, inside });
+    inline for (.{ scheme, user_scheme }) |prefix| {
+        if (std.mem.startsWith(u8, path, prefix)) {
+            const inside = try tidy(gpa, path[prefix.len..]);
+            defer gpa.free(inside);
+            return std.mem.concat(gpa, u8, &.{ prefix, inside });
+        }
     }
     if (std.mem.startsWith(u8, path, uid_scheme)) {
         return gpa.dupe(u8, try self.pathOfUidPath(path));
@@ -228,20 +263,75 @@ pub fn canonical(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
 }
 
 /// The operating system's path for any path the engine takes: `res://` under
-/// the root, `uid://` wherever its file is, any other path as it is. The
-/// caller frees it.
+/// the root, `uid://` wherever its file is, `user://` under `userRoot`, any
+/// other path as it is. The caller frees it.
 pub fn osPath(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
+    if (std.mem.startsWith(u8, path, user_scheme)) return joinUnder(gpa, try self.userRoot(), path[user_scheme.len..]);
     const project_path = if (std.mem.startsWith(u8, path, uid_scheme))
         try self.pathOfUidPath(path)
     else
         path;
     if (!std.mem.startsWith(u8, project_path, scheme)) return gpa.dupe(u8, path);
 
-    const inside = try tidy(gpa, project_path[scheme.len..]);
+    return underRoot(gpa, self.root, project_path);
+}
+
+/// Where a `res://` path is under `root`: `osPath` with no project, and so
+/// nothing but arithmetic on the two - what a thread of its own can ask. A
+/// path that is not `res://` is itself.
+pub fn underRoot(gpa: Allocator, root: []const u8, path: []const u8) Error![]u8 {
+    if (!std.mem.startsWith(u8, path, scheme)) return gpa.dupe(u8, path);
+    return joinUnder(gpa, root, path[scheme.len..]);
+}
+
+/// `inside`, tidied, under `base`, in the system's spelling.
+fn joinUnder(gpa: Allocator, base: []const u8, inside_given: []const u8) Error![]u8 {
+    const inside = try tidy(gpa, inside_given);
     defer gpa.free(inside);
-    const joined = if (inside.len == 0) try gpa.dupe(u8, self.root) else try std.fs.path.join(gpa, &.{ self.root, inside });
+    const joined = if (inside.len == 0) try gpa.dupe(u8, base) else try std.fs.path.join(gpa, &.{ base, inside });
     if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, joined, '/', std.fs.path.sep);
     return joined;
+}
+
+/// Where `user://` is: a folder of the game's own under the one the system
+/// keeps for programs' data - `%APPDATA%` on Windows, `~/.local/share` on
+/// Linux, `~/Library/Application Support` on a Mac - named after the game:
+/// the project file's `application.name`, or what the game called itself.
+/// Worked out once; the folder is made when something is written in it.
+pub fn userRoot(self: *Project) Error![]const u8 {
+    if (self.user_root) |held| return held;
+    const io = self.io orelse return error.NoUserFolder;
+    const data = folders.path(self.gpa, io, .data) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.NoUserFolder,
+    };
+    defer self.gpa.free(data);
+    var buffer: [128]u8 = undefined;
+    const name = folderName(&buffer, self.gameName());
+    self.user_root = try std.fs.path.join(self.gpa, &.{ data, name });
+    return self.user_root.?;
+}
+
+/// What the game is called, for its folder.
+fn gameName(self: *const Project) []const u8 {
+    if (self.settings) |held| if (held.application.name.len > 0) return held.application.name;
+    return self.fallback_name orelse "fluxion";
+}
+
+/// A name as a folder can be called on any system: letters, digits, spaces,
+/// `-`, `_` and `.`, and `_` for the rest; never empty, nor ending in a dot
+/// or a space, which Windows does not keep.
+pub fn folderName(buffer: []u8, name: []const u8) []const u8 {
+    var len: usize = 0;
+    for (name) |c| {
+        if (len == buffer.len) break;
+        const kept = std.ascii.isAlphanumeric(c) or c == ' ' or c == '-' or c == '_' or c == '.' or c >= 0x80;
+        buffer[len] = if (kept) c else '_';
+        len += 1;
+    }
+    var trimmed = std.mem.trim(u8, buffer[0..len], " .");
+    if (trimmed.len == 0) trimmed = "fluxion";
+    return trimmed;
 }
 
 /// The part of an absolute path below the root, or null for one that is not
@@ -556,7 +646,7 @@ pub fn forgetFile(self: *Project, path: []const u8) Allocator.Error!void {
     const named = self.canonical(self.gpa, path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // A path that names nothing here has nothing to forget.
-        error.OutsideProject, error.NoSuchUid => return,
+        error.OutsideProject, error.NoSuchUid, error.NoUserFolder => return,
     };
     defer self.gpa.free(named);
     try self.repoint(named, null);
@@ -818,6 +908,36 @@ fn listed(dir: std.Io.Dir, folder: []const u8, name: []const u8) !bool {
         if (std.mem.eql(u8, entry.name, name)) return true;
     }
     return false;
+}
+
+test "user:// is a folder of the game's own, named as the project names the game" {
+    var project: Project = try .init(testing.allocator, testing.io, null);
+    defer project.deinit();
+    project.user_root = try testing.allocator.dupe(u8, "saves-here");
+    const path = try project.osPath(testing.allocator, "user://slots/./one.json");
+    defer testing.allocator.free(path);
+    const expected = try std.fs.path.join(testing.allocator, &.{ "saves-here", "slots", "one.json" });
+    defer testing.allocator.free(expected);
+    try testing.expectEqualStrings(expected, path);
+    try testing.expectError(error.OutsideProject, project.osPath(testing.allocator, "user://../escape.json"));
+    const kept = try project.canonical(testing.allocator, "user://slots//./one.json");
+    defer testing.allocator.free(kept);
+    try testing.expectEqualStrings("user://slots/one.json", kept);
+
+    var buffer: [32]u8 = undefined;
+    try testing.expectEqualStrings("Five Nights_ Demo", folderName(&buffer, "Five Nights: Demo."));
+    try testing.expectEqualStrings("fluxion", folderName(&buffer, "..."));
+
+    // Given no folder, it is one named after the game in the system's.
+    var named: Project = try .init(testing.allocator, testing.io, null);
+    defer named.deinit();
+    named.fallback_name = try testing.allocator.dupe(u8, "Night: Shift");
+    const where = named.userRoot() catch |err| switch (err) {
+        error.NoUserFolder => return, // a system that keeps none
+        else => return err,
+    };
+    try testing.expectEqualStrings("Night_ Shift", std.fs.path.basename(where));
+    try testing.expect(std.fs.path.isAbsolute(where));
 }
 
 test "a file moved takes its UUID along, and never goes over another or into itself" {

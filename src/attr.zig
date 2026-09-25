@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const reflect = @import("fluxion_reflect");
+const AssetKind = @import("asset_kind.zig").AssetKind;
 
 /// The span a number is meant to keep to, and the step to move it by.
 pub const Range = reflect.attr.Range;
@@ -35,6 +36,23 @@ pub const Hidden = reflect.attr.Hidden;
 
 /// Shown, and not to be changed by hand.
 pub const ReadOnly = reflect.attr.ReadOnly;
+
+/// The names of a method's parameters, `self` not among them: what a
+/// script's completion shows.
+pub const Params = reflect.attr.Params;
+
+/// What a method's last parameters are when a call leaves them out:
+/// `attr.defaults(.{ "", 1.0, false })`.
+pub const defaults = reflect.attr.defaults;
+
+/// A field written through a method of its type's that takes the new value:
+/// a change with more to do than be stored. A script's write goes through it.
+pub const Setter = reflect.attr.Setter;
+
+/// State the engine works out while the game runs - whether a sprite plays,
+/// what its pass saw last - never written to a scene, and so never an
+/// instance's difference from its scene either.
+pub const Unsaved = struct {};
 
 /// An angle, kept in radians and shown in degrees. With a `Unit`, the unit
 /// comes after the degrees: an angle a second.
@@ -55,10 +73,52 @@ pub const Layers = struct {
     pub const Names = enum {
         /// None: the layers are their numbers.
         none,
-        /// `physics_2d.layer_names` in `project.fluxion`.
+        /// `layer_names.physics_2d` in `project.fluxion`.
         physics_2d,
+        /// `layer_names.render_2d`.
+        render_2d,
     };
 };
+
+// -------------------------------------------------------------------------
+// Settings
+// -------------------------------------------------------------------------
+//
+// What a setting of a settings file is, besides its value: see
+// `settings_file.zig`. An editor draws its settings windows by them.
+
+/// Text that names a file of the project's - `res://` or `uid://`, or empty -
+/// of this kind, or of any kind when it says none: checked when the file is
+/// read and written, and shown as a field that takes a file of the kind.
+pub const ProjectFile = struct {
+    kind: ?AssetKind = null,
+};
+
+/// Text that names one of the project's audio buses - `audio.buses` - which
+/// an editor offers to choose from.
+pub const AudioBus = struct {};
+
+/// A setting that has to say something: a project's name.
+pub const Required = struct {};
+
+/// A setting shown only with the advanced settings on.
+pub const Advanced = struct {};
+
+/// A setting that takes effect when the program starts again - the game's,
+/// for a project's; the editor's, for an editor's.
+pub const Restart = struct {};
+
+/// On a component: whether a click in an editor's scene picks an entity
+/// that has it, until the entity is told otherwise there. A `Control`'s is
+/// false - a UI over the whole screen would take every click - and a game's
+/// own component may say the same. An entity is passed over when any of its
+/// components says false; the list of everything under the pointer still
+/// offers it, and the tree picks it as ever.
+///
+/// ```zig
+/// pub const reflect_attributes = .{fx.attr.Pickable{ .by_default = false }};
+/// ```
+pub const Pickable = struct { by_default: bool = true };
 
 // -------------------------------------------------------------------------
 // Geometry an editor can draw and drag
@@ -72,7 +132,7 @@ pub const Layers = struct {
 pub const Radius = struct {};
 
 /// Half a width and a height, drawn as a box around the middle with handles
-/// on its sides and corners: Godot's `extents`.
+/// on its sides and corners: the `extents` of a box.
 pub const Extents = struct {};
 
 /// On a component whose geometry sits away from its entity's origin: the
@@ -107,6 +167,20 @@ pub const Property = struct {
     name: []const u8,
     get: []const u8,
     set: []const u8,
+};
+
+/// Words a component keeps beside it rather than in a field, as long as
+/// they need to be: kept by the app under its entity - see `texts.zig`. A
+/// scene writes them among the component's fields, an editor shows them as
+/// one, and a script reads and writes them as one: `label.text`.
+///
+/// ```zig
+/// pub const reflect_attributes = .{fx.attr.Text{ .name = "text", .multiline = true }};
+/// ```
+pub const Text = struct {
+    name: []const u8,
+    /// Whether it may run over several lines.
+    multiline: bool = false,
 };
 
 /// Stop the build at a property of `T`'s that names a method `T` does not

@@ -18,6 +18,8 @@ const App = @import("App.zig");
 const components = @import("components.zig");
 const hierarchy = @import("hierarchy.zig");
 const sprite = @import("render/sprite.zig");
+const tilemap = @import("tilemap.zig");
+const tileset = @import("tileset.zig");
 
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;
@@ -25,6 +27,7 @@ const Transform2D = components.Transform2D;
 const RigidBody2D = components.RigidBody2D;
 const Collider2D = components.Collider2D;
 const Area2D = components.Area2D;
+const CharacterBody2D = components.CharacterBody2D;
 const Sprite = components.Sprite;
 const BodyId = physics.BodyId;
 const ShapeId = physics.ShapeId;
@@ -80,9 +83,10 @@ mark: u32 = 0,
 /// Entities told already that they cannot be a body and an area at once.
 refused: std.AutoHashMapUnmanaged(Entity, void) = .empty,
 /// Pairs of bodies kept from touching, with how many times each was asked:
-/// Godot's collision exceptions, by entity, so they outlast a body made
-/// anew. The physics is told of each pair once, while both bodies are there.
+/// the collision exceptions, by entity, so they outlast a body made anew.
+/// The physics is told of each pair once, while both bodies are there.
 exceptions: std.AutoArrayHashMapUnmanaged(EntityPair, u32) = .empty,
+tile_bodies: std.AutoHashMapUnmanaged(Entity, TileBody) = .empty,
 
 /// Two entities, the lower first, so either order names the pair.
 pub const EntityPair = struct {
@@ -105,6 +109,8 @@ const BodyLink = struct {
     rigid: ?RigidBody2D = null,
     /// As last synced either way.
     transform: Transform2D = .{},
+    /// What it hung from when it was last synced.
+    parent: Entity = .none,
     /// Where the body was last put, in the world.
     placed: Pose = .{},
 };
@@ -115,6 +121,24 @@ const ShapeLink = struct {
     shape: ShapeId = .none,
     body: BodyId = .none,
     made_from: Inputs = undefined,
+};
+
+const TileBody = struct {
+    body: BodyId,
+    map: Entity,
+    revision: u32,
+    settings: TileSettings,
+    placed: Pose,
+    seen: u32,
+};
+
+const TileSettings = struct {
+    tile_set: tileset.TileSetHandle,
+    tile_set_revision: u32,
+    collision_layer: u32,
+    collision_mask: u32,
+    friction: f32,
+    bounce: f32,
 };
 
 /// Everything a shape is made from: when any of it changes, the shape is
@@ -162,6 +186,7 @@ pub fn deinit(self: *Bodies, gpa: Allocator) void {
     self.ended_frame.deinit(gpa);
     self.refused.deinit(gpa);
     self.exceptions.deinit(gpa);
+    self.tile_bodies.deinit(gpa);
     self.* = undefined;
 }
 
@@ -181,9 +206,163 @@ pub fn sync(self: *Bodies, app: *App) !void {
     if (self.mark == 0) self.mark = 1;
     self.moving.clearRetainingCapacity();
     try self.syncRigid(app);
+    try self.syncCharacters(app);
     try self.syncAreas(app);
     try self.syncColliders(app);
+    try self.syncTiles(app);
     try self.sweep(app);
+}
+
+fn syncTiles(self: *Bodies, app: *App) !void {
+    var it = try ecs.Query(.{tilemap.TileChunk}).over(&app.world);
+    while (it.next()) |chunk| {
+        for (chunk.entities, chunk.slice(tilemap.TileChunk)) |entity, tiles| {
+            const map = app.world.get(tiles.map, tilemap.TileMap) orelse continue;
+            const local = app.world.get(tiles.map, Transform2D) orelse continue;
+            const world = hierarchy.resolve(&app.world, &still, tiles.map, local.*, 1) orelse continue;
+            const at = Pose.of(world);
+            const set = app.tile_sets.get(map.tile_set);
+            const settings: TileSettings = .{
+                .tile_set = map.tile_set,
+                // The set's own revision: a shape edited in an editor
+                // reaches the physics as a saved file would.
+                .tile_set_revision = if (set) |held| held.revision else 0,
+                .collision_layer = map.collision_layer,
+                .collision_mask = map.collision_mask,
+                .friction = map.friction,
+                .bounce = map.bounce,
+            };
+            if (self.tile_bodies.getPtr(entity)) |held| {
+                if (held.map.eql(tiles.map) and held.revision == tiles.revision and std.meta.eql(held.settings, settings) and std.meta.eql(held.placed, at)) {
+                    held.seen = self.mark;
+                    continue;
+                }
+                try self.destroy(app, held.body);
+            }
+            const body = try app.physics.createBody(.{
+                .type = .static,
+                .position = .init(at.x, at.y),
+                .angle = at.rotation,
+                .user_data = tiles.map.toInt(),
+            });
+            errdefer app.physics.destroyBody(body);
+            try addTileShapes(app, body, tiles, map.*, set, at);
+            try self.tile_bodies.put(app.gpa, entity, .{
+                .body = body,
+                .map = tiles.map,
+                .revision = tiles.revision,
+                .settings = settings,
+                .placed = at,
+                .seen = self.mark,
+            });
+        }
+    }
+
+    var stale: std.ArrayList(Entity) = .empty;
+    defer stale.deinit(app.gpa);
+    var links = self.tile_bodies.iterator();
+    while (links.next()) |entry| if (entry.value_ptr.seen != self.mark) try stale.append(app.gpa, entry.key_ptr.*);
+    for (stale.items) |entity| {
+        const held = self.tile_bodies.get(entity) orelse continue;
+        try self.destroy(app, held.body);
+        _ = self.tile_bodies.remove(entity);
+    }
+}
+
+/// One chunk's shapes on its body: the tiles their tile set calls `full`,
+/// merged into as few boxes as they make, and one polygon for each tile with
+/// a shape of its own.
+///
+/// A map with no tile set stops nothing: what is solid is the set's to say.
+fn addTileShapes(app: *App, body: BodyId, chunk: tilemap.TileChunk, map: tilemap.TileMap, set: ?*const tileset.TileSet, placed_map: Pose) !void {
+    const held = set orelse return;
+    var used = [_]bool{false} ** tilemap.tiles_per_chunk;
+    const tile_width: f32 = @floatFromInt(@max(held.tile_width, 1));
+    const tile_height: f32 = @floatFromInt(@max(held.tile_height, 1));
+    const material: physics.Material = .{ .friction = map.friction, .restitution = map.bounce, .density = 1 };
+    const filter: physics.Filter = .{ .category = map.collision_layer, .mask = map.collision_mask };
+
+    for (0..tilemap.chunk_side) |y| for (0..tilemap.chunk_side) |x| {
+        const start = y * tilemap.chunk_side + x;
+        if (used[start]) continue;
+        const tile = held.tileOf(chunk.cells[start]);
+        switch (tile.collision) {
+            .none => continue,
+            .polygon => {
+                used[start] = true;
+                try addTilePolygon(app, body, chunk, chunk.cells[start], tile, x, y, tile_width, tile_height, placed_map, material, filter);
+                continue;
+            },
+            .full => {},
+        }
+
+        // A run to the right, then as many rows below it as are full all the
+        // way across: the fewest boxes this chunk's solid tiles make.
+        var width: usize = 1;
+        while (x + width < tilemap.chunk_side and !used[start + width] and held.tileOf(chunk.cells[start + width]).collision == .full) : (width += 1) {}
+        var height: usize = 1;
+        rows: while (y + height < tilemap.chunk_side) : (height += 1) {
+            for (0..width) |across| {
+                const at = (y + height) * tilemap.chunk_side + x + across;
+                if (used[at] or held.tileOf(chunk.cells[at]).collision != .full) break :rows;
+            }
+        }
+        for (0..height) |down| {
+            for (0..width) |across| used[(y + down) * tilemap.chunk_side + x + across] = true;
+        }
+
+        const local_x = (@as(f32, @floatFromInt(chunk.x * tilemap.chunk_side)) + @as(f32, @floatFromInt(x)) + @as(f32, @floatFromInt(width)) / 2) * tile_width * placed_map.scale_x;
+        const local_y = (@as(f32, @floatFromInt(chunk.y * tilemap.chunk_side)) + @as(f32, @floatFromInt(y)) + @as(f32, @floatFromInt(height)) / 2) * tile_height * placed_map.scale_y;
+        const half_width = @as(f32, @floatFromInt(width)) * tile_width * @abs(placed_map.scale_x) / 2;
+        const half_height = @as(f32, @floatFromInt(height)) * tile_height * @abs(placed_map.scale_y) / 2;
+        _ = try app.physics.addShape(body, .{
+            .geometry = .{ .polygon = .offsetBox(half_width, half_height, .init(local_x, local_y), 0) },
+            .material = material,
+            .filter = filter,
+            .user_data = chunk.map.toInt(),
+        });
+    };
+}
+
+/// One tile's own shape, put where the cell turns it: `tilemap.place` says
+/// where a corner of the picture lands, and a corner of the shape lands
+/// there too.
+fn addTilePolygon(
+    app: *App,
+    body: BodyId,
+    chunk: tilemap.TileChunk,
+    cell: tilemap.Cell,
+    tile: tileset.Tile,
+    x: usize,
+    y: usize,
+    tile_width: f32,
+    tile_height: f32,
+    placed_map: Pose,
+    material: physics.Material,
+    filter: physics.Filter,
+) !void {
+    const corner_x = (@as(f32, @floatFromInt(chunk.x * tilemap.chunk_side)) + @as(f32, @floatFromInt(x))) * tile_width;
+    const corner_y = (@as(f32, @floatFromInt(chunk.y * tilemap.chunk_side)) + @as(f32, @floatFromInt(y))) * tile_height;
+
+    var points: [tileset.max_points]Vec2 = undefined;
+    const given = tile.polygon();
+    for (given, 0..) |point, i| {
+        const at = tilemap.place(cell, point.x / tile_width, point.y / tile_height);
+        points[i] = .init(
+            (corner_x + at[0] * tile_width) * placed_map.scale_x,
+            (corner_y + at[1] * tile_height) * placed_map.scale_y,
+        );
+    }
+    const polygon = physics.Polygon.fromPoints(points[0..given.len]) catch |err| {
+        log.warn("a tile's shape is not a polygon the physics can hold: {t}", .{err});
+        return;
+    };
+    _ = try app.physics.addShape(body, .{
+        .geometry = .{ .polygon = polygon },
+        .material = material,
+        .filter = filter,
+        .user_data = chunk.map.toInt(),
+    });
 }
 
 fn grow(comptime T: type, gpa: Allocator, list: *std.ArrayList(T), len: usize, empty: T) Allocator.Error!void {
@@ -210,12 +389,14 @@ fn syncRigid(self: *Bodies, app: *App) !void {
 fn update(app: *App, link: *BodyLink, place: Transform2D, rigid: RigidBody2D) void {
     const body = app.physics.body(link.body) orelse return;
     const was = link.rigid.?;
-    if (moved(link.transform, place) or (rigid.type == .static and !place.parent.isNone())) {
+    const parent = hierarchy.parentOf(&app.world, link.entity);
+    if (moved(link.transform, place) or !link.parent.eql(parent) or (rigid.type == .static and !parent.isNone())) {
         if (placed(app, link.entity, place)) |at| {
             if (!std.meta.eql(at, link.placed)) body.setTransform(.init(at.x, at.y), at.rotation);
             link.placed = at;
         }
         link.transform = place;
+        link.parent = parent;
     }
     if (!std.meta.eql(rigid.linear_velocity, was.linear_velocity) or rigid.angular_velocity != was.angular_velocity) {
         body.linear_velocity = rigid.linear_velocity;
@@ -266,7 +447,7 @@ fn make(self: *Bodies, app: *App, link: *BodyLink, e: Entity, place: Transform2D
         .bullet = r.continuous_cd != .disabled,
         .user_data = e.toInt(),
     });
-    link.* = .{ .entity = e, .body = body, .rigid = rigid, .transform = place, .placed = at };
+    link.* = .{ .entity = e, .body = body, .rigid = rigid, .transform = place, .parent = hierarchy.parentOf(&app.world, e), .placed = at };
     // A body made anew has lost its exceptions with the old one.
     for (self.exceptions.keys()) |pair| {
         if (!pair.has(e)) continue;
@@ -294,7 +475,7 @@ pub const ExceptionError = error{
     SameBody,
 } || Allocator.Error;
 
-/// Keep two bodies from touching: Godot's `add_collision_exception_with`.
+/// Keep two bodies from touching, whatever their layers and masks say.
 /// Counted, so two calls take two removals. It lasts until then or until
 /// either entity is gone, a body made anew included.
 pub fn addException(self: *Bodies, app: *App, a: Entity, b: Entity) ExceptionError!void {
@@ -343,11 +524,11 @@ pub fn exceptionsOf(self: *const Bodies, e: Entity, found: []Entity) []Entity {
 /// Whether an entity is a body a collision exception can name: a
 /// `RigidBody2D`, or a collider that is a static body of its own.
 fn isBody(world: *ecs.World, e: Entity) bool {
-    if (world.has(e, RigidBody2D)) return true;
+    if (world.has(e, RigidBody2D) or world.has(e, CharacterBody2D)) return true;
     if (world.has(e, Area2D)) return false;
-    const place = world.get(e, Transform2D) orelse return false;
+    if (!world.has(e, Transform2D)) return false;
     if (!world.has(e, Collider2D)) return false;
-    const owner = ownerOf(world, e, place.*) orelse return false;
+    const owner = ownerOf(world, e) orelse return false;
     return owner.eql(e);
 }
 
@@ -358,6 +539,45 @@ fn destroy(self: *Bodies, app: *App, id: BodyId) !void {
         try self.departed.append(app.gpa, .{ .shape = at, .entity = .fromInt(entry.def.user_data) });
     }
     app.physics.destroyBody(id);
+}
+
+/// A `CharacterBody2D` is a kinematic body that goes where its transform
+/// goes: `character.zig` moves both at once. Not written back after a step,
+/// which moves it nowhere.
+fn syncCharacters(self: *Bodies, app: *App) !void {
+    var it = try ecs.Query(.{ Transform2D, CharacterBody2D }).over(&app.world);
+    while (it.next()) |chunk| {
+        if (app.world.has(chunk.entities[0], RigidBody2D)) {
+            for (chunk.entities) |e| if (try self.refused.fetchPut(app.gpa, e, {}) == null) {
+                log.warn("{f} has a CharacterBody2D and a RigidBody2D; it is a rigid body, and the character does nothing", .{e});
+            };
+            continue;
+        }
+        for (chunk.entities, chunk.slice(Transform2D)) |e, place| {
+            const character: RigidBody2D = .{ .type = .kinematic };
+            const link = &self.bodies.items[e.index];
+            if (link.entity.eql(e) and link.rigid != null and link.rigid.?.type == .kinematic) {
+                update(app, link, place, character);
+            } else {
+                const at = placed(app, e, place) orelse continue;
+                try self.make(app, link, e, place, at, character);
+            }
+            self.body_seen.items[e.index] = self.mark;
+        }
+    }
+}
+
+/// A character's body and its entity were moved together, to `position`
+/// in the world: what the next sync would otherwise take for a move.
+pub fn movedTo(self: *Bodies, app: *App, e: Entity, position: Vec2, rotation: f32) void {
+    if (e.index >= self.bodies.items.len) return;
+    const link = &self.bodies.items[e.index];
+    if (!link.entity.eql(e)) return;
+    link.placed.x = position.x;
+    link.placed.y = position.y;
+    link.placed.rotation = rotation;
+    if (app.world.get(e, Transform2D)) |place| link.transform = place.*;
+    link.parent = hierarchy.parentOf(&app.world, e);
 }
 
 /// An `Area2D` is a kinematic body that goes where its transform goes. An
@@ -394,7 +614,7 @@ fn syncColliders(self: *Bodies, app: *App) !void {
         // One archetype: every row has a body of its own, or none does.
         const own_body = owns(&app.world, chunk.entities[0]);
         for (chunk.entities, chunk.slice(Transform2D), chunk.slice(Collider2D)) |e, place, collider| {
-            const owner = if (own_body or place.parent.isNone()) e else ownerOf(&app.world, e, place) orelse continue;
+            const owner = if (own_body or hierarchy.parentOf(&app.world, e).isNone()) e else ownerOf(&app.world, e) orelse continue;
             if (!own_body and owner.eql(e)) try self.syncStatic(app, e, place);
             // Not there while disabled: its shape goes with the sweep.
             if (collider.disabled) continue;
@@ -417,13 +637,15 @@ fn syncColliders(self: *Bodies, app: *App) !void {
 fn syncStatic(self: *Bodies, app: *App, e: Entity, place: Transform2D) !void {
     const link = &self.bodies.items[e.index];
     if (link.entity.eql(e) and link.rigid == null) {
-        if (moved(link.transform, place) or !place.parent.isNone()) {
+        const parent = hierarchy.parentOf(&app.world, e);
+        if (moved(link.transform, place) or !parent.isNone() or !link.parent.eql(parent)) {
             const at = placed(app, e, place) orelse return;
             if (!std.meta.eql(at, link.placed)) {
                 if (app.physics.body(link.body)) |body| body.setTransform(.init(at.x, at.y), at.rotation);
                 link.placed = at;
             }
             link.transform = place;
+            link.parent = parent;
         }
     } else {
         const at = placed(app, e, place) orelse return;
@@ -438,40 +660,41 @@ pub fn isArea(world: *ecs.World, e: Entity) bool {
     return world.has(e, Area2D) and !world.has(e, RigidBody2D);
 }
 
-/// Whether an entity is a collision object of its own: a body, or an area.
+/// Whether an entity is a collision object of its own: a body, a
+/// character, or an area.
 fn owns(world: *ecs.World, e: Entity) bool {
-    return world.has(e, RigidBody2D) or world.has(e, Area2D);
+    return world.has(e, RigidBody2D) or world.has(e, CharacterBody2D) or world.has(e, Area2D);
 }
 
-/// Which collision object a collider belongs to: Godot's `CollisionObject2D`
-/// of a shape. Its own entity when that is a body or an area, else the
+/// Which collision object a collider belongs to: the body or area that owns
+/// a shape. Its own entity when that is a body or an area, else the
 /// nearest one above it that is, else its own entity, which is its own
 /// static body. Null when it is neither a collider nor an object itself, or
 /// when the chain above it is broken.
 pub fn objectOf(world: *ecs.World, e: Entity) ?Entity {
-    const place = world.get(e, Transform2D) orelse return null;
+    if (!world.has(e, Transform2D)) return null;
     if (!world.has(e, Collider2D)) return if (owns(world, e)) e else null;
-    return ownerOf(world, e, place.*);
+    return ownerOf(world, e);
 }
 
 /// Whose body a collider is part of: its own entity when that is a body or
 /// an area, else the nearest one above it that is, else its own. Null when
 /// the chain above it is broken.
-fn ownerOf(world: *ecs.World, e: Entity, place: Transform2D) ?Entity {
+fn ownerOf(world: *ecs.World, e: Entity) ?Entity {
     if (owns(world, e)) return e;
-    var above = place.parent;
+    var above = hierarchy.parentOf(world, e);
     var depth: usize = 0;
     while (!above.isNone()) : (depth += 1) {
         if (depth == Transform2D.max_depth) return null;
-        const up = world.get(above, Transform2D) orelse return if (world.isAlive(above)) e else null;
+        if (!world.has(above, Transform2D)) return if (world.isAlive(above)) e else null;
         if (owns(world, above)) return above;
-        above = up.parent;
+        above = hierarchy.parentOf(world, above);
     }
     return e;
 }
 
 fn inputsOf(app: *App, e: Entity, place: Transform2D, collider: Collider2D, owner: Entity) ?Inputs {
-    const scale = if (owner.eql(e) and place.parent.isNone())
+    const scale = if (owner.eql(e) and hierarchy.parentOf(&app.world, e).isNone())
         .{ place.scale_x, place.scale_y }
     else
         worldScale(app, owner) orelse return null;
@@ -482,13 +705,16 @@ fn inputsOf(app: *App, e: Entity, place: Transform2D, collider: Collider2D, owne
         // a moving body does not make its shapes again.
         var chain: [Transform2D.max_depth]Transform2D = undefined;
         var depth: usize = 0;
+        var at = e;
         var link = place;
         while (true) {
             if (depth == chain.len) return null;
             chain[depth] = link;
             depth += 1;
-            if (link.parent.eql(owner)) break;
-            link = (app.world.get(link.parent, Transform2D) orelse return null).*;
+            const above = hierarchy.parentOf(&app.world, at);
+            if (above.eql(owner)) break;
+            link = (app.world.get(above, Transform2D) orelse return null).*;
+            at = above;
         }
         while (depth > 0) {
             depth -= 1;
@@ -503,7 +729,7 @@ fn inputsOf(app: *App, e: Entity, place: Transform2D, collider: Collider2D, owne
 
 fn worldScale(app: *App, e: Entity) ?[2]f32 {
     const place = app.world.get(e, Transform2D) orelse return null;
-    if (place.parent.isNone()) return .{ place.scale_x, place.scale_y };
+    if (hierarchy.parentOf(&app.world, e).isNone()) return .{ place.scale_x, place.scale_y };
     const world = hierarchy.resolve(&app.world, &still, e, place.*, 1) orelse return null;
     return .{ world.scale_x, world.scale_y };
 }
@@ -512,6 +738,7 @@ fn spriteOf(app: *App, e: Entity, collider: Collider2D) [4]f32 {
     const wanted = switch (collider.shape) {
         .rectangle => collider.extents.x == 0 or collider.extents.y == 0,
         .circle => collider.radius == 0,
+        .capsule => collider.radius == 0 or collider.extents.y == 0,
     };
     if (!wanted) return @splat(0);
     const drawn = app.world.get(e, Sprite) orelse return @splat(0);
@@ -558,6 +785,23 @@ fn shapeOf(inputs: Inputs, e: Entity) ?physics.Shape {
             const centre = centreOf(place, offset);
             if (!(radius > least_size) or !finite(&.{ radius, centre.x, centre.y })) return null;
             break :blk .{ .circle = .{ .center = centre, .radius = radius } };
+        },
+        .capsule => blk: {
+            if (c.radius == 0 or c.extents.y == 0) {
+                offset[0] += inputs.sprite[2];
+                offset[1] += inputs.sprite[3];
+            }
+            const radius = @abs(if (c.radius != 0) c.radius else inputs.sprite[0] / 2) * @abs(place.scale_x);
+            const half_height = @abs(if (c.extents.y != 0) c.extents.y else inputs.sprite[1] / 2) * @abs(place.scale_y);
+            const centre = centreOf(place, offset);
+            const turn = place.rotation + c.rotation;
+            if (!(radius > least_size) or !finite(&.{ radius, half_height, centre.x, centre.y, turn })) return null;
+            // From the middle to each end's centre, along the entity's `y`.
+            const reach = half_height - radius;
+            // No longer than it is round: a circle.
+            if (!(reach > least_size)) break :blk .{ .circle = .{ .center = centre, .radius = radius } };
+            const along: Vec2 = .init(-@sin(turn) * reach, @cos(turn) * reach);
+            break :blk .{ .capsule = .{ .center1 = centre.sub(along), .center2 = centre.add(along), .radius = radius } };
         },
     };
     return .{
@@ -635,7 +879,7 @@ fn sweep(self: *Bodies, app: *App) !void {
 
 fn moved(was: Transform2D, now: Transform2D) bool {
     return was.x != now.x or was.y != now.y or was.rotation != now.rotation or
-        was.scale_x != now.scale_x or was.scale_y != now.scale_y or !was.parent.eql(now.parent) or
+        was.scale_x != now.scale_x or was.scale_y != now.scale_y or
         was.inherit_rotation != now.inherit_rotation or was.inherit_scale != now.inherit_scale;
 }
 
@@ -654,7 +898,7 @@ pub fn afterStep(self: *Bodies, app: *App) !void {
         const link = &self.bodies.items[index];
         const body = app.physics.bodyConst(link.body) orelse continue;
         const place = app.world.get(link.entity, Transform2D) orelse continue;
-        const local = localPose(app, place.*, body) orelse continue;
+        const local = localPose(app, link.entity, place.*, body) orelse continue;
         place.x = local.x;
         place.y = local.y;
         place.rotation = local.rotation;
@@ -672,13 +916,14 @@ pub fn afterStep(self: *Bodies, app: *App) !void {
 }
 
 /// A body's place in its entity's parent's space.
-fn localPose(app: *App, place: Transform2D, body: *const physics.Body) ?Pose {
+fn localPose(app: *App, e: Entity, place: Transform2D, body: *const physics.Body) ?Pose {
     const at = body.position();
-    const parent_local = app.world.get(place.parent, Transform2D) orelse {
-        if (!place.parent.isNone() and !app.world.isAlive(place.parent)) return null;
+    const above = hierarchy.parentOf(&app.world, e);
+    const parent_local = app.world.get(above, Transform2D) orelse {
+        if (!above.isNone() and !app.world.isAlive(above)) return null;
         return .{ .x = at.x, .y = at.y, .rotation = body.angle };
     };
-    const parent = hierarchy.resolve(&app.world, &still, place.parent, parent_local.*, 1) orelse return null;
+    const parent = hierarchy.resolve(&app.world, &still, above, parent_local.*, 1) orelse return null;
     const local = parent.unapply(at.x, at.y);
     return .{
         .x = local.x,
@@ -717,6 +962,12 @@ pub fn clear(self: *Bodies, app: *App) void {
     for (self.bodies.items) |link| {
         if (!link.entity.isNone()) app.physics.destroyBody(link.body);
     }
+    // A chunk's body is kept by its entity, and a fresh world hands those
+    // entities out again: left here, an old body would be taken for the new
+    // world's.
+    var tiles = self.tile_bodies.valueIterator();
+    while (tiles.next()) |held| app.physics.destroyBody(held.body);
+    self.tile_bodies.clearRetainingCapacity();
     self.bodies.clearRetainingCapacity();
     self.shapes.clearRetainingCapacity();
     self.body_seen.clearRetainingCapacity();
@@ -744,10 +995,22 @@ pub fn idOf(self: *const Bodies, e: Entity) ?BodyId {
     return null;
 }
 
+/// The box round an entity's collider in the world, as the physics holds
+/// it: turned, scaled, and sized from a sprite as the shape was made. Null
+/// for an entity with no shape.
+pub fn boundsOf(self: *const Bodies, app: *App, e: Entity) ?physics.Aabb {
+    if (e.index >= self.shapes.items.len) return null;
+    const link = self.shapes.items[e.index];
+    if (!link.entity.eql(e)) return null;
+    const entry = app.physics.shape(link.shape) orelse return null;
+    return entry.def.geometry.aabb(app.physics.shapeTransform(entry));
+}
+
 /// The collider a shape is, or null for one the engine did not make.
 pub fn entityOf(self: *const Bodies, app: *App, shape: ShapeId) ?Entity {
     if (app.physics.shape(shape)) |entry| {
         const e: Entity = .fromInt(entry.def.user_data);
+        if (app.world.has(e, tilemap.TileMap)) return e;
         if (e.index >= self.shapes.items.len) return null;
         const link = self.shapes.items[e.index];
         return if (link.entity.eql(e) and link.shape.eql(shape)) e else null;
@@ -808,8 +1071,8 @@ pub fn overlapBox(self: *const Bodies, app: *App, min: Vec2, max: Vec2, found: [
 const scene = @import("scene.zig");
 
 /// Earth's pull at a hundred units to the metre, with nothing slowing a
-/// body down: what these tests' numbers were worked out for. The defaults,
-/// Godot 3's, have tests of their own.
+/// body down: what these tests' numbers were worked out for. The defaults
+/// have tests of their own.
 pub const earth: @import("Project.zig").Physics2D = .{ .default_gravity = 981, .default_linear_damp = 0, .default_angular_damp = 0 };
 
 fn headless(frame_time: f32) !*App {
@@ -948,7 +1211,7 @@ test "a collider hanging from a body is part of that body" {
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
     const hull = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{ .gravity_scale = 0 }, Collider2D.rectangle(5, 5) });
-    const arm = try app.world.spawnWith(.{ Transform2D.childOf(hull, 20, 0), Collider2D.rectangle(5, 5) });
+    const arm = try app.world.spawnWith(.{ Transform2D.at(20, 0), components.Parent.of(hull), Collider2D.rectangle(5, 5) });
     try app.syncBodies();
 
     try testing.expectEqual(@as(usize, 1), app.physics.bodyCount());
@@ -1010,7 +1273,7 @@ test "a moving parent does not carry a body, whose place is written in the paren
     const app = try headless(1.0 / 60.0);
     defer app.destroy();
     const cart = try app.world.spawnWith(.{Transform2D.at(100, 0)});
-    const rider = try app.world.spawnWith(.{ Transform2D.childOf(cart, 10, 0), RigidBody2D{ .gravity_scale = 0 }, Collider2D.circle(2) });
+    const rider = try app.world.spawnWith(.{ Transform2D.at(10, 0), components.Parent.of(cart), RigidBody2D{ .gravity_scale = 0 }, Collider2D.circle(2) });
     try frames(app, 1);
     try testing.expectApproxEqAbs(@as(f32, 110), app.bodyOf(rider).?.position().x, 0.001);
 
@@ -1066,7 +1329,7 @@ test "a body's damping of minus one is the project's, and its own is its own" {
     const drifting = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.circle(4) });
     const braked = try app.world.spawnWith(.{ Transform2D.at(50, 0), RigidBody2D{ .linear_damp = 3, .angular_damp = 0 }, Collider2D.circle(4) });
     try app.syncBodies();
-    // Godot 3's, with no project file to say otherwise.
+    // The defaults, with no project file to say otherwise.
     try testing.expectEqual(@as(f32, 0.1), app.bodyOf(drifting).?.linear_damping);
     try testing.expectEqual(@as(f32, 1), app.bodyOf(drifting).?.angular_damping);
     try testing.expectEqual(@as(f32, 3), app.bodyOf(braked).?.linear_damping);
@@ -1077,7 +1340,7 @@ test "a body's damping of minus one is the project's, and its own is its own" {
     try testing.expectEqual(@as(f32, 0.1), app.bodyOf(braked).?.linear_damping);
 }
 
-test "gravity is the project's, and the rules for touching are Godot 3's whatever a game passes" {
+test "gravity is the project's, and the rules for touching are the engine's whatever a game passes" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     try testing.expectEqual(@as(f32, 98), app.physics.gravity.y);

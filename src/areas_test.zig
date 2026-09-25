@@ -178,7 +178,7 @@ test "a kinematic body is in a still area while it is there, and the questions s
     try testing.expectEqual(@as(usize, 0), app.overlappingBodies(trigger, &found).len);
 }
 
-test "a hitbox and the hurtbox that asks for it hear each other: Godot 3's layers go both ways" {
+test "a hitbox and the hurtbox that asks for it hear each other: the layers go both ways" {
     const app = try headless();
     defer app.destroy();
     const hitboxes: u32 = 1 << 2;
@@ -231,7 +231,7 @@ test "an area that stops monitoring leaves what was in it, and answers nothing" 
     try testing.expectEqual(@as(usize, 1), Seen.count(.body_in));
 
     app.world.get(zone, Area2D).?.monitoring = false;
-    // Asked before the next step, it is empty already, where Godot errors.
+    // Asked before the next step, it is empty already.
     var early: [4]Entity = undefined;
     try testing.expectEqual(@as(usize, 0), app.overlappingBodies(zone, &early).len);
     try testing.expect(!app.overlapsBody(zone, thing));
@@ -271,8 +271,8 @@ test "an area carries the colliders hanging from it, and every one of them is a 
     const app = try headless();
     defer app.destroy();
     const room = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{} });
-    const left = try app.world.spawnWith(.{ Transform2D.childOf(room, -40, 0), Collider2D.rectangle(10, 10) });
-    _ = try app.world.spawnWith(.{ Transform2D.childOf(room, 40, 0), Collider2D.rectangle(10, 10) });
+    const left = try app.world.spawnWith(.{ Transform2D.at(-40, 0), components.Parent.of(room), Collider2D.rectangle(10, 10) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(40, 0), components.Parent.of(room), Collider2D.rectangle(10, 10) });
     const walker = try app.world.spawnWith(.{ Transform2D.at(-40, 0), RigidBody2D{ .type = .kinematic }, Collider2D.rectangle(5, 5) });
     try watch(app, room);
 

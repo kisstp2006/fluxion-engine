@@ -45,6 +45,7 @@ const Picking = @import("picking.zig");
 const pointer = @import("pointer.zig");
 const Clipboard = @import("clipboard.zig");
 const Commands = @import("commands.zig");
+const control = @import("control.zig");
 const DebugViews = @import("debug_views.zig");
 const dialog = @import("dialog.zig");
 const Project = @import("Project.zig");
@@ -56,15 +57,37 @@ const Window = @import("window.zig");
 const world_ui = @import("world_ui.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
+const inherited_mod = @import("inherited.zig");
 const timer = @import("timer.zig");
+const tilemap = @import("tilemap.zig");
+const geometry = @import("geometry.zig");
+const AssetKind = @import("asset_kind.zig").AssetKind;
+const theme = @import("theme.zig");
+const tileset = @import("tileset.zig");
 const scene = @import("scene.zig");
+const scenes_mod = @import("scenes.zig");
+const data_mod = @import("data.zig");
+const audio_mod = @import("audio.zig");
+const property_mod = @import("property.zig");
+const tween_mod = @import("tween.zig");
+const texts_mod = @import("texts.zig");
+const animation_mod = @import("animation.zig");
+const sprite_frames_mod = @import("sprite_frames.zig");
+const exports_mod = @import("exports.zig");
+const background_mod = @import("background.zig");
 const signals_mod = @import("signals.zig");
 const events_mod = @import("events.zig");
 const script_mod = @import("script.zig");
 const sprite = @import("render/sprite.zig");
 const View = @import("render/view.zig").View;
+const Screen = @import("render/screen.zig").Screen;
+const shaders_mod = @import("shaders.zig");
+const views_mod = @import("views.zig");
+const character = @import("character.zig");
+const stretch_mod = @import("stretch.zig");
 
 const Color = @import("color.zig").Color;
+const ConfigFile = @import("config.zig").ConfigFile;
 const Schedule = schedule_mod.Schedule;
 const Stage = schedule_mod.Stage;
 const System = schedule_mod.System;
@@ -93,15 +116,27 @@ pub const Backend = enum {
     gl,
     /// Direct3D 11. Windows only.
     d3d11,
+    /// Direct3D 12. Windows only. Experimental: see `experimental`.
+    d3d12,
+    /// Vulkan: Windows, Linux and Android, where a driver has it.
+    /// Experimental: see `experimental`.
+    vulkan,
     /// WebGL 2, in a browser.
     webgl,
     /// Accepts everything, draws nothing. What `.headless` uses.
     none,
+
+    /// Whether it is still being finished: it draws everything the engine
+    /// does, the picture the others do, and is slower than they are and
+    /// less proven - which the log says when one opens.
+    pub fn experimental(self: Backend) bool {
+        return self == .d3d12 or self == .vulkan;
+    }
 };
 
 pub const BackendError = error{
-    /// The project's renderer has no backend built on this system: `modern`,
-    /// for now, which is Direct3D 12 and Vulkan.
+    /// The project's renderer has no backend on this system: `modern` in a
+    /// browser, or on macOS.
     RendererNotBuilt,
 };
 
@@ -135,38 +170,82 @@ pub const Options = struct {
     /// What the title bar says. Null is the project's name, from its project
     /// file, or "fluxion" with none.
     title: ?[]const u8 = null,
-    width: u32 = 1280,
-    height: u32 = 720,
+    /// The window's size. Null is what the project file's `display` says -
+    /// 1280 by 720 with none. So are the four below: a game says them in code
+    /// only to overrule its project.
+    width: ?u32 = null,
+    height: ?u32 = null,
     backend: Backend = .auto,
-    vsync: bool = true,
+    vsync: ?bool = null,
+    /// The most frames a second, slept down to. Null is what the project
+    /// file's `application.max_fps` says - no limit, with nought or none.
+    max_fps: ?f32 = null,
+    /// Open what the project says a game opens with, at `startup`: see
+    /// `openProject`. A game made in code leaves it off and spawns its own.
+    open_project: bool = false,
 
     /// Whether the player may drag the window's edges. `setWindowSize` works
     /// either way.
-    resizable: bool = true,
+    resizable: ?bool = null,
 
     /// Open maximised. Only a resizable window can be.
-    maximized: bool = false,
+    maximized: ?bool = null,
 
     /// Open filling the screen. `width` and `height` are still the size of
     /// the window it goes back to.
-    fullscreen: Fullscreen = .windowed,
+    fullscreen: ?Fullscreen = null,
+
+    /// How the frame fits the window. Null is the project file's
+    /// `display.stretch_mode` and `stretch_aspect`, over its `width` and
+    /// `height`: an editor, whose window is its own and not the game's, says
+    /// `.{}` - the window itself. See `stretch.zig`.
+    stretch: ?stretch_mod.Stretch = null,
+
+    /// The least the window may be dragged to. Null is the project file's
+    /// `display.min_width` and `min_height`; an editor says its own.
+    min_size: ?[2]u32 = null,
+
+    /// Put the project file's `application.icon` on the window. An editor,
+    /// whose window is its own and not the game's, leaves it off.
+    project_icon: bool = true,
+
+    /// Take the project file's actions, over the built-in ones. An editor,
+    /// whose keys are its own and not the game's, leaves it off, and moves
+    /// round its interface with the built-in ones alone.
+    project_input: bool = true,
 
     /// What files are read with and the clock is read from. Null means no
     /// files and a fixed step, as in a test.
     io: ?std.Io = null,
+
+    /// Where the game's chance starts - `randomFloat` and the rest - so a
+    /// run can be played again the same. Null draws it from the operating
+    /// system, or with no `io` is a constant.
+    random_seed: ?u64 = null,
 
     /// The project's root directory, which `res://` paths are from - or its
     /// `project.fluxion`, which names the same directory. Null is the working
     /// directory. See `Project`.
     root: ?[]const u8 = null,
 
+    /// Where `user://` is: the player's saves and settings. Null is a folder
+    /// named after the game in the one the system keeps for programs' data.
+    /// A test gives its own; so may a game kept on a stick, with its saves
+    /// beside it. See `Project.userRoot`.
+    user_root: ?[]const u8 = null,
+
     /// Where the project file went wrong, when it did: `create` fails then,
     /// and says it in the log as well.
     project_diagnostics: ?*json.Diagnostics = null,
 
     /// Every frame counts as exactly this many seconds, whatever the clock
-    /// says, so every run is the same. `Flags.apply` sets it for `--capture`.
+    /// says, so every run is the same.
     frame_time: ?f32 = null,
+
+    /// Every frame counts as exactly one fixed step, whatever the clock says
+    /// and however long the project makes the step. `Flags.apply` sets it for
+    /// `--capture`.
+    fixed_frame_time: bool = false,
 
     /// A key that ends the game, handled after the `.input` stage. Null leaves
     /// every key to the game.
@@ -184,11 +263,18 @@ pub const Options = struct {
     /// texture.
     headless: bool = false,
 
-    /// What the frame is cleared to.
-    background: Color = .hex(0x0E1013),
+    /// The window's close button - and Alt+F4 - only ask: `close_pressed`
+    /// says so, and the program ends the run with `quit` if it agrees. For a
+    /// program with unsaved work to ask about; a game closes at once.
+    ask_before_closing: bool = false,
 
-    /// One fixed step, in seconds.
-    fixed_delta: f32 = 1.0 / 60.0,
+    /// What the frame is cleared to. Null is the project file's
+    /// `rendering.clear_color`.
+    background: ?Color = null,
+
+    /// One fixed step, in seconds. Null is a step of the project file's
+    /// `physics_2d.ticks_per_second` - sixty a second, with none.
+    fixed_delta: ?f32 = null,
 
     /// Stop after this many frames. A headless app has no window to close, so
     /// it needs this or a system that calls `quit`.
@@ -197,16 +283,22 @@ pub const Options = struct {
     /// Worker threads for parallel queries. Null is one fewer than the cores.
     workers: ?u32 = null,
 
+    /// Where the game's sound goes: the machine's sound device, or - as
+    /// headless always does - mixed each frame and heard nowhere. See
+    /// `audio.zig`.
+    audio: audio_mod.Output = .auto,
+
     /// A hundred units to the metre, for a world measured in pixels: what
-    /// the physics' tolerances are scaled by. The engine keeps Godot 3's
+    /// the physics' tolerances are scaled by. The engine keeps its own
     /// rules whatever the rest says: gravity is `physics_2d`'s, two
     /// colliders touch when either one's mask has the other's layer, and a
     /// pair's friction is the smaller and its bounce the sum.
     physics: physics_lib.Settings = .{ .units_per_metre = 100 },
 
     /// How the 2D world moves - gravity, and what a body's damping of minus
-    /// one means - for a game with no project file: Godot 3's numbers. A
-    /// project file's `physics_2d` is taken instead.
+    /// one means - for a game with no project file: the defaults, a gravity
+    /// of 98 where a unit is a pixel. A project file's `physics_2d` is
+    /// taken instead.
     physics_2d: Project.Physics2D = .{},
 };
 
@@ -248,7 +340,7 @@ pub const Flags = struct {
         if (self.root) |root| out.root = root;
         if (self.capture != null) {
             out.frames = out.frames orelse capture_frames;
-            out.frame_time = out.fixed_delta;
+            out.fixed_frame_time = true;
         }
         return out;
     }
@@ -356,22 +448,63 @@ physics: physics_lib.World,
 physics_2d: Project.Physics2D,
 /// Which body is which entity's. See `bodies.zig`.
 bodies: Bodies = .{},
+
+/// Every `.tileset` file read, and the handles a `TileMap` points at one
+/// with. See `loadTileSet`.
+tile_sets: tileset.TileSets = .{},
+/// Every `.theme` file read, and the handles a `Control` points at one with.
+/// See `loadTheme`.
+themes: theme.Themes = .{},
+/// Every scene read as a file to make things of: see `loadScene`.
+scenes: scenes_mod.Scenes = .{},
+/// Every data file read: see `loadData`.
+data_files: data_mod.DataFiles = .{},
+/// The sound device, the clips read, the project's buses and what the
+/// players play: see `audio.zig` and `loadAudio`.
+audio: audio_mod.Audio,
+/// Each tween's steps: see `tween.zig` and `tween`.
+tweens: tween_mod.Tweens = .{},
+/// The words components keep beside them: see `texts.zig` and `textOf`.
+texts: texts_mod.Texts = .{},
+/// Every `.shader` file read, compiled for the 2D layer: see `shaders.zig`
+/// and `loadShader`.
+shaders: shaders_mod.Shaders = .{},
+/// The numbers each `Material` gives its shader: see `setShaderParam`.
+shader_params: shaders_mod.Params = .{},
+/// The picture each `RenderView` draws: see `views.zig` and `viewTexture`.
+views: views_mod.Views = .{},
+/// How the frame fits the window, and the size the game was made at. See
+/// `stretch.zig`.
+stretch: stretch_mod.Stretch = .{},
+/// What this frame is laid out and drawn at, and where on the window it is
+/// shown: the window itself unless the project stretches its game.
+frame: stretch_mod.Frame = .window(1, 1),
+/// Every `.anim` file read: see `animation.zig` and `loadAnimations`.
+animation_libraries: animation_mod.Libraries = .{},
+/// What each `AnimationPlayer`'s tracks are bound to.
+animation_players: animation_mod.Players = .{},
+/// Every `.frames` file read: see `sprite_frames.zig` and `loadSpriteFrames`.
+sprite_frames: sprite_frames_mod.AllFrames = .{},
+/// The theme the project file names for every control, and the path it was
+/// read by: see `projectTheme`.
+project_theme: ProjectTheme = .{},
+/// Which entity holds each chunk of each map, so painting a tile finds its
+/// chunk without walking every chunk in the world. Kept beside the world,
+/// as the names are: a chunk holds no handle of its own.
+tile_chunks: std.AutoHashMapUnmanaged(ChunkKey, ecs.Entity) = .empty,
 /// What is inside each `Area2D`, and the signals that say so. See
 /// `areas.zig`.
 areas: Areas = .{},
 /// What the pointer is over, and what it did there. See `picking.zig`.
 picking: Picking = .{},
 
-/// Whether the pointer picks what it is over at all: Godot's
-/// `physics/common/enable_object_picking`. An editor turns it off while it
-/// edits a scene rather than plays it.
+/// Whether the pointer picks what it is over at all. An editor turns it off
+/// while it edits a scene rather than plays it.
 physics_object_picking: bool = true,
 /// Whether what is picked comes in the order it is drawn, the topmost
-/// first. Godot works the other way by default, and its order is the
-/// broadphase's.
+/// first. Off, the order is the broadphase's.
 physics_object_picking_sort: bool = true,
-/// Whether only the first of several under the pointer hears the event,
-/// as Godot 4.3 can.
+/// Whether only the first of several under the pointer hears the event.
 physics_object_picking_first_only: bool = false,
 
 /// Where the game's files are - `res://` - and the UUIDs of the ones that
@@ -380,6 +513,9 @@ project: Project,
 
 assets: Assets,
 sprites: sprite.Renderer,
+/// Where a frame something reads is drawn, and copied for what reads it.
+/// See `render/screen.zig`.
+screen: Screen,
 
 /// Lines, shapes and text drawn over everything, for one frame unless its
 /// style says for how many seconds. Inside `.fixed` they last until the next
@@ -407,6 +543,7 @@ debug_views: DebugViews = .{},
 
 /// What `.ui` systems declare the interface into.
 ui: ui_lib.Ui,
+control_nodes: control.Nodes = .{},
 /// How the interface is fed and drawn: its font, scale and safe area.
 interface: Interface = .{},
 
@@ -431,11 +568,13 @@ snapshots: hierarchy.Snapshots = .empty,
 /// What `despawnOrphans` found. Kept for its capacity.
 orphans: std.ArrayList(ecs.Entity) = .empty,
 
-/// Every named entity's name, and every name's entity. Each name is one
-/// allocation, shared by the two maps and freed once. An array map, so that
+/// Every named entity's name, and every name's entities, in the order they
+/// were given it: `find`'s answer is the first living one. Each name's text
+/// is one allocation, the key in `by_name`, which `names` points into and
+/// which is freed when nothing has the name any more. An array map, so that
 /// `forgetDeadNames` can walk it by index while removing from it.
 names: std.AutoArrayHashMapUnmanaged(ecs.Entity, []const u8) = .empty,
-by_name: std.StringHashMapUnmanaged(ecs.Entity) = .empty,
+by_name: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(ecs.Entity)) = .empty,
 
 /// Every entity given a UUID, and every UUID's entity: kept beside the world
 /// as names are, and written into a scene with it. An array map, for the same
@@ -448,9 +587,32 @@ by_uuid: std.AutoHashMapUnmanaged(Uuid, ecs.Entity) = .empty,
 sibling_ranks: std.AutoArrayHashMapUnmanaged(ecs.Entity, u64) = .empty,
 /// The next place given out.
 next_rank: u64 = 0,
+/// Each parent's children in their order, and the roots: see `childrenOf`.
+tree: Tree = .{},
+/// The groups entities are in, by name, each with its members in the order
+/// they joined. See `addToGroup`.
+groups: std.StringArrayHashMapUnmanaged(std.ArrayListUnmanaged(ecs.Entity)) = .empty,
+/// Whether the game is paused. See `setPaused`.
+paused: bool = false,
+/// What each entity inherits - `Processing` and `Appearance` - worked out
+/// as it is asked for. See `inherited.zig`.
+inherited: inherited_mod.Inherited = .{},
+/// Every instance of a scene in the world, by its root: what it is an
+/// instance of, and what it made. See `instantiate`.
+instances: std.AutoArrayHashMapUnmanaged(ecs.Entity, Instance) = .empty,
+/// The scene the game is playing, and its roots: what `changeScene` takes
+/// away. See `openScene`.
+scene_now: scenes_mod.SceneHandle = .none,
+scene_roots: std.ArrayListUnmanaged(ecs.Entity) = .empty,
+/// The scene `changeScene` asked for, opened at the end of the frame.
+scene_next: ?scenes_mod.SceneHandle = null,
+/// Scenes reading in the background: see `loadInBackground`.
+loads: std.ArrayListUnmanaged(*background_mod.SceneLoad) = .empty,
 /// What `newUuid` draws from: seeded by the operating system, or with no
 /// `Io` by a constant, so a test makes the same ones every run.
 uuid_source: std.Random.DefaultCsprng,
+/// What the game's chance is drawn from: `randomFloat` and the rest.
+random_source: std.Random.DefaultPrng,
 
 /// What a scene can hold, and what each component is called in one: the
 /// engine's own from the start, and a game's once `registerComponents` has
@@ -459,6 +621,9 @@ scene_components: scene.Registry = .{},
 /// The components scenes held that nothing here is registered as, each kept
 /// with its entity and written back with it. See `unknownComponentsOf`.
 unknown_components: scene.Unknown = .{},
+/// What each entity's script's `@export`s are given in place of their
+/// defaults. See `exports.zig`.
+exports: exports_mod.Exports = .{},
 
 /// Every signal's connections, the calls waiting for their sync point, and
 /// `dispatch`, the switch that makes none. See `signal`.
@@ -483,6 +648,8 @@ scripts: ?*script_mod.Scripts = null,
 types: reflect.Registry,
 
 input: Input = .{},
+/// `describeAction`'s words, for the call that asked.
+described: [64]u8 = undefined,
 schedule: Schedule = .empty,
 
 /// The game's own states: menu, playing, paused. See `states.zig`.
@@ -515,6 +682,16 @@ vsync_on: bool = true,
 
 /// Cleared by `quit`, and by the frame counter running out.
 running: bool = true,
+
+/// From `Options`: whether the close button only sets `close_pressed`.
+/// Whether `startup` opens the project: see `Options.open_project`.
+open_project: bool = false,
+ask_before_closing: bool = false,
+
+/// Set when the window's close button was pressed and `ask_before_closing`
+/// kept that from ending the run, until the program has answered it and sets
+/// it back.
+close_pressed: bool = false,
 frames_left: ?u32,
 started: bool = false,
 
@@ -536,12 +713,16 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .world = .init(gpa),
         .commands = .init(gpa, &self.world),
         .jobs = undefined,
-        .physics = .init(gpa, godotRules(options.physics)),
+        .physics = .init(gpa, withEngineRules(options.physics)),
         .physics_2d = options.physics_2d,
         .bodies = .{},
+        .tile_sets = .{},
+        .themes = .{},
+        .tile_chunks = .empty,
         .project = undefined,
         .assets = undefined,
         .sprites = undefined,
+        .screen = undefined,
         .debug = undefined,
         .debug_frame = .init(gpa),
         .debug_steps = .init(gpa),
@@ -552,17 +733,20 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .debug_visible = true,
         .debug_views = .{},
         .ui = .init(gpa),
+        .control_nodes = .{},
         .interface = .{},
         .clipboard = .{},
         .next_dialog = 1,
         .trash = null,
         // A fixed frame time wins over the clock, and the clock over nothing.
+        // The fixed step is known once the project file is read; the source
+        // is set again then.
         .time = .init(if (options.frame_time) |seconds|
             .{ .fixed = seconds }
         else if (options.io) |io|
             .{ .clock = io }
         else
-            .{ .fixed = options.fixed_delta }),
+            .{ .fixed = options.fixed_delta orelse Resolved.default_fixed_delta }),
         .snapshots = .empty,
         .orphans = .empty,
         .names = .empty,
@@ -570,7 +754,9 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .uuids = .empty,
         .by_uuid = .empty,
         .uuid_source = undefined,
+        .random_source = undefined,
         .scene_components = .{},
+        .audio = undefined,
         .signals = .init(gpa),
         .event_channels = .empty,
         .types = .init(gpa),
@@ -578,16 +764,19 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .schedule = .{ .io = options.io, .commands = &self.commands, .signals = &self.signals },
         .states = .{},
         .gate = null,
-        .background = options.background,
+        .background = options.background orelse Project.Rendering.default_clear_color,
         .world_on_screen = true,
-        .width = options.width,
-        .height = options.height,
+        .width = options.width orelse 0,
+        .height = options.height orelse 0,
         .resized = false,
         .quit_key = options.quit_key,
+        .ask_before_closing = options.ask_before_closing,
+        .open_project = options.open_project,
         .fullscreen_key = options.fullscreen_key,
         .debug_key = options.debug_key,
-        .vsync_on = options.vsync,
+        .vsync_on = options.vsync orelse true,
         .running = true,
+        .close_pressed = false,
         .frames_left = options.frames,
         .started = false,
     };
@@ -595,13 +784,15 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     errdefer self.commands.deinit();
     errdefer self.ui.deinit();
     errdefer self.physics.deinit();
-    self.time.fixed_delta = options.fixed_delta;
 
     var seed: [std.Random.DefaultCsprng.secret_seed_length]u8 = @splat(0x5E);
     if (options.io) |io| io.random(&seed);
     self.uuid_source = .init(seed);
+    self.random_source = .init(options.random_seed orelse self.drawnSeed());
     self.project = try .init(gpa, options.io, options.root);
     errdefer self.project.deinit();
+    if (options.user_root) |held| self.project.user_root = try gpa.dupe(u8, held);
+    if (options.title) |held| self.project.fallback_name = try gpa.dupe(u8, held);
     // Before the backend is chosen: the project's renderer chooses it, and
     // the window has to know whether it is OpenGL's. A project file that is
     // wrong stops the start, and says why - where the caller asked for it,
@@ -614,9 +805,35 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             return err;
         };
     }
+    // The project's actions over the built-in ones.
+    const project_actions: []const Input.Action = if (!options.project_input) &.{} else if (self.project.settings) |held| held.input.actions else &.{};
+    try self.input.actions.reset(gpa, project_actions);
+    errdefer self.input.deinit(gpa);
+    // The sound device, and the project's buses on it.
+    self.audio = audio_mod.Audio.init(gpa, options.audio, options.headless, if (self.project.settings) |held| held.audio.buses else &.{}) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        // Nothing but a mixer that did not make itself: no sound at all.
+        else => error.Failed,
+    };
+    errdefer self.audio.deinit();
     // The project's physics, or the game's with no project file.
     if (self.project.settings) |held| self.physics_2d = held.physics_2d;
     self.physics.gravity = self.physics_2d.gravity();
+
+    // The window, the frame and the clock: what the game says, over what
+    // the project says, over the engine's own.
+    const resolved: Resolved = .of(options, if (self.project.settings) |*held| held else null, self.physics_2d);
+    self.background = resolved.background;
+    self.width = resolved.width;
+    self.height = resolved.height;
+    self.stretch = resolved.stretch;
+    self.fitFrame();
+    self.vsync_on = resolved.vsync;
+    self.time.fixed_delta = resolved.fixed_delta;
+    self.time.max_fps = resolved.max_fps;
+    if (options.frame_time == null and (options.fixed_frame_time or options.io == null)) {
+        self.time.source = .{ .fixed = resolved.fixed_delta };
+    }
 
     errdefer self.scene_components.deinit(gpa);
     errdefer self.types.deinit();
@@ -624,25 +841,60 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Transform2D,
         components.Sprite,
         components.Text2D,
-        components.Animation,
         components.Camera2D,
+        components.RenderView,
+        components.ViewTexture,
         components.RigidBody2D,
+        components.CharacterBody2D,
         components.Collider2D,
         components.Area2D,
         timer.Timer,
+        audio_mod.AudioPlayer,
+        audio_mod.AudioSpatial2D,
+        audio_mod.AudioListener2D,
+        tween_mod.Tween,
+        animation_mod.AnimationPlayer,
+        sprite_frames_mod.AnimatedSprite2D,
+        shaders_mod.Material,
+        inherited_mod.Processing,
+        inherited_mod.Appearance,
+        tilemap.TileMap,
+        tilemap.TileChunk,
+        control.Control,
+        control.CanvasLayer,
+        control.Viewport,
+        control.BoxContainer,
+        control.MarginContainer,
+        control.CenterContainer,
+        control.ScrollContainer,
+        control.PanelContainer,
+        control.ThemeOverride,
+        control.Label,
+        control.Button,
+        control.CheckBox,
+        control.LineEdit,
+        control.Slider,
+        control.ProgressBar,
+        control.Focus,
+        control.ColorRect,
+        control.RichText,
+        control.Popup,
+        control.TabContainer,
+        control.TextureRect,
+        control.NinePatchRect,
     }) catch |err| switch (err) {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
     };
-    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle }) catch |err| switch (err) {
+    self.types.addAll(.{ DebugViews, Color, components.Region, Assets.TextureHandle, Assets.FontHandle, tileset.TileSetHandle, theme.ThemeHandle, audio_mod.AudioClipHandle, animation_mod.AnimationLibraryHandle, sprite_frames_mod.SpriteFramesHandle, sprite_frames_mod.LoopMode, shaders_mod.ShaderHandle, character.Collision, geometry.Vec2i, geometry.Rect2, geometry.Rect2i }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => unreachable,
     };
 
     // Headless opens no renderer, so the project's is not asked about.
-    const renderer: Project.Renderer = if (self.project.settings) |held| held.renderer else .compatibility;
+    const renderer: Project.Renderer = if (self.project.settings) |held| held.rendering.renderer else .compatibility;
     const backend: Backend = if (options.headless) .none else chooseBackend(options.backend, renderer, builtin.os.tag) catch |err| {
-        log.err("the {t} renderer ({s}) is not built yet: set \"renderer\" to \"compatibility\" in {s}, or give --backend", .{ renderer, renderer.apis(), Project.file_name });
+        log.err("the {t} renderer ({s}) has no backend here: set \"renderer\" to \"compatibility\" in {s}, or give --backend", .{ renderer, renderer.apis(), Project.file_name });
         return err;
     };
     if (!options.headless and options.backend != .auto and std.mem.indexOfScalar(Backend, renderer.backends(builtin.os.tag), backend) == null) {
@@ -656,18 +908,22 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         self.window = @as(Window, undefined);
         self.window.?.open(gpa, .{
             .title = titleOf(options, self.project.settings),
-            .width = options.width,
-            .height = options.height,
-            .resizable = options.resizable,
-            .maximized = options.maximized,
+            .width = resolved.width,
+            .height = resolved.height,
+            .resizable = resolved.resizable,
+            .maximized = resolved.maximized,
             .gl = backend == .gl,
-            .vsync = options.vsync,
+            .vsync = resolved.vsync,
         }) catch |err| {
             self.window = null;
             if (Window.isAbsent(err)) return Error.NoDisplay;
             return err;
         };
         self.clipboard.system = &self.window.?.ctx;
+        if (resolved.min_size[0] > 0 or resolved.min_size[1] > 0) {
+            self.window.?.setSizeLimits(.{ .min_width = resolved.min_size[0], .min_height = resolved.min_size[1] }) catch |err|
+                log.warn("the window's least size could not be set: {t}", .{err});
+        }
     }
     errdefer if (self.window) |*w| w.close();
 
@@ -675,15 +931,15 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     // its final size. Not fatal: a game that cannot fill the screen still
     // runs in a window.
     if (self.window) |*w| {
-        if (options.fullscreen != .windowed) {
-            w.setFullscreen(options.fullscreen) catch |err| {
+        if (resolved.fullscreen != .windowed) {
+            w.setFullscreen(resolved.fullscreen) catch |err| {
                 log.warn("could not open fullscreen: {t}", .{err});
             };
         }
     }
 
-    const width = if (self.window) |*w| w.width else options.width;
-    const height = if (self.window) |*w| w.height else options.height;
+    const width = if (self.window) |*w| w.width else resolved.width;
+    const height = if (self.window) |*w| w.height else resolved.height;
     self.width = width;
     self.height = height;
     // The surface is about to be made at this size, so the first frame has
@@ -699,6 +955,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .backend = switch (backend) {
             .gl => .gl,
             .d3d11 => .d3d11,
+            .d3d12 => .d3d12,
+            .vulkan => .vulkan,
             .webgl => .webgl,
             .none => .none,
             .auto => .auto,
@@ -708,15 +966,19 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .gl = if (backend == .gl and self.window != null) self.window.?.hooks() else null,
     });
     errdefer self.device.deinit();
+    if (backend.experimental()) log.warn("drawing with {t} ({s}), which is experimental", .{ backend, self.device.info().renderer });
 
     if (self.window) |*w| {
+        // The window as it is, whichever backend draws into it: its handle,
+        // and its hooks for a backend that makes its surface from it.
         self.surface = try self.device.createSurface(.{
             .native_window = w.nativeHandle(),
+            .window = w.surfaceHooks(),
             .width = width,
             .height = height,
             // Told to the swapchain as well as the window: Direct3D keeps it
             // on the swapchain, OpenGL on the context.
-            .vsync = options.vsync,
+            .vsync = resolved.vsync,
         });
     } else {
         // No window, so the frame goes into a texture, through every draw
@@ -738,9 +1000,22 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 
     self.assets = try .init(gpa, &self.device, options.io, &self.project);
     errdefer self.assets.deinit();
+    if (self.project.settings) |held| self.assets.default_filter = switch (held.rendering.default_texture_filter) {
+        .nearest => .nearest,
+        .linear => .linear,
+    };
+    if (options.project_icon) self.useProjectIcon();
 
     self.sprites = try .init(gpa, &self.device);
     errdefer self.sprites.deinit(gpa);
+    self.screen = try .init(gpa, &self.device);
+    errdefer self.screen.deinit();
+    self.sprites.texts = &self.texts;
+    self.sprites.shaders = &self.shaders;
+    self.sprites.params = &self.shader_params;
+    self.sprites.screen = &self.screen;
+    self.sprites.views = &self.views;
+    self.interface.custom = .{ .context = self, .draw = drawControlBox };
 
     self.debug_renderer = try .init(gpa, &self.device, .{});
     errdefer self.debug_renderer.deinit();
@@ -755,33 +1030,103 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 fn titleOf(options: Options, settings: ?Project.Settings) []const u8 {
     if (options.title) |title| return title;
     if (settings) |held| {
-        if (held.name.len > 0) return held.name;
+        if (held.application.name.len > 0) return held.application.name;
     }
     return "fluxion";
 }
+
+/// What the window, the frame and the clock are made with: the game's
+/// `Options` where they say, the project file's `display`, `rendering` and
+/// `physics_2d` where they do not, and the engine's own under both - which
+/// are the sections' defaults, so a project that says nothing and a folder
+/// with no project file open the same.
+const Resolved = struct {
+    width: u32,
+    height: u32,
+    stretch: stretch_mod.Stretch,
+    min_size: [2]u32,
+    vsync: bool,
+    resizable: bool,
+    maximized: bool,
+    fullscreen: Fullscreen,
+    background: Color,
+    fixed_delta: f32,
+    max_fps: ?f32,
+
+    const default_fixed_delta: f32 = 1.0 / @as(f32, @floatFromInt((Project.Physics2D{}).ticks_per_second));
+
+    fn of(options: Options, settings: ?*const Project.Settings, physics_2d: Project.Physics2D) Resolved {
+        const display: Project.Display = if (settings) |held| held.display else .{};
+        const rendering: Project.Rendering = if (settings) |held| held.rendering else .{};
+        const application: Project.Application = if (settings) |held| held.application else .{};
+        return .{
+            .width = options.width orelse display.width,
+            .height = options.height orelse display.height,
+            // Made at the project's size, whatever size the window opens.
+            .stretch = options.stretch orelse .{
+                .mode = display.stretch_mode,
+                .aspect = display.stretch_aspect,
+                .width = display.width,
+                .height = display.height,
+            },
+            .min_size = options.min_size orelse .{ display.min_width, display.min_height },
+            .vsync = options.vsync orelse display.vsync,
+            .resizable = options.resizable orelse display.resizable,
+            .maximized = options.maximized orelse (display.mode == .maximized),
+            .fullscreen = options.fullscreen orelse if (display.mode == .fullscreen) .borderless else .windowed,
+            .background = options.background orelse rendering.clear_color,
+            .fixed_delta = options.fixed_delta orelse 1.0 / @as(f32, @floatFromInt(@max(physics_2d.ticks_per_second, 1))),
+            .max_fps = options.max_fps orelse if (application.max_fps > 0) @floatFromInt(application.max_fps) else null,
+        };
+    }
+};
 
 pub fn destroy(self: *App) void {
     const gpa = self.gpa;
 
     // First, while everything a script's handle points at is still there.
     if (self.scripts) |scripts| scripts.calls.destroy(scripts);
+    self.input.deinit(gpa);
     self.schedule.deinit(gpa);
     self.states.deinit(gpa);
     self.snapshots.deinit(gpa);
     self.orphans.deinit(gpa);
-    for (self.names.values()) |name| gpa.free(name);
     self.names.deinit(gpa);
+    self.freeNames();
     self.by_name.deinit(gpa);
+    self.tree.deinit(gpa);
+    self.freeGroups();
+    self.groups.deinit(gpa);
+    self.inherited.deinit(gpa);
+    self.freeInstances();
+    self.instances.deinit(gpa);
+    self.scene_roots.deinit(gpa);
+    // Each is taken out of the list as it goes.
+    while (self.loads.items.len > 0) self.dropLoad(self.loads.items[self.loads.items.len - 1]);
+    self.loads.deinit(gpa);
+    self.scenes.deinit(gpa);
+    self.data_files.deinit(gpa);
+    self.audio.deinit();
+    self.tweens.deinit(gpa);
+    self.texts.deinit(gpa);
+    self.shader_params.deinit(gpa);
+    self.animation_players.deinit(gpa);
+    self.animation_libraries.deinit(gpa);
+    self.sprite_frames.deinit(gpa);
     self.uuids.deinit(gpa);
     self.by_uuid.deinit(gpa);
     self.sibling_ranks.deinit(gpa);
     self.scene_components.deinit(gpa);
     self.unknown_components.deinit(gpa);
+    self.exports.deinit(gpa);
     self.signals.deinit();
     for (self.event_channels.values()) |channel| channel.deinit(channel.events, gpa);
     self.event_channels.deinit(gpa);
     self.types.deinit();
     self.bodies.deinit(gpa);
+    self.tile_sets.deinit(gpa);
+    self.themes.deinit(gpa);
+    self.tile_chunks.deinit(gpa);
     self.areas.deinit(gpa);
     self.picking.deinit(gpa);
     self.physics.deinit();
@@ -792,8 +1137,12 @@ pub fn destroy(self: *App) void {
     self.debug_under_frame.deinit();
     self.interface.deinit();
     self.clipboard.deinit(gpa);
+    self.control_nodes.deinit(gpa);
     self.ui.deinit();
     self.sprites.deinit(gpa);
+    self.screen.deinit();
+    self.shaders.deinit(gpa, &self.device);
+    self.views.deinit(gpa, &self.assets);
     self.assets.deinit();
     self.project.deinit();
     self.jobs.deinit();
@@ -823,6 +1172,23 @@ pub fn destroy(self: *App) void {
 /// that it outlives the schedule, which keeps it uncopied.
 pub fn addSystem(self: *App, stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
     return self.schedule.addEntry(self.gpa, stage, .{ .name = name, .run = system, .gate = self.gate });
+}
+
+/// `addSystem`, for a system that runs whether the game is paused or not:
+/// the key that pauses and unpauses it. The rest stop while it is paused.
+/// See `setPaused`.
+///
+/// ```zig
+/// try app.addSystemAlways(.input, "pause key", togglePause);
+/// ```
+pub fn addSystemAlways(self: *App, stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
+    return self.schedule.addEntry(self.gpa, stage, .{ .name = name, .run = system, .gate = self.gate, .pause = .always });
+}
+
+/// `addSystem`, for a system that runs only while the game is paused: a
+/// pause menu's. See `setPaused`.
+pub fn addSystemWhenPaused(self: *App, stage: Stage, comptime name: []const u8, system: System) Allocator.Error!void {
+    return self.schedule.addEntry(self.gpa, stage, .{ .name = name, .run = system, .gate = self.gate, .pause = .when_paused });
 }
 
 /// Add a system that runs only while `value`'s state has that value.
@@ -873,6 +1239,48 @@ pub fn addSystemsIn(self: *App, value: anytype, register: *const fn (app: *App) 
     defer self.gate = outer;
     self.gate = .{ .state = .of(value) };
     try register(self);
+}
+
+// -------------------------------------------------------------------------
+// Pause
+// -------------------------------------------------------------------------
+
+/// Pause the game, or let it go on.
+///
+/// ```zig
+/// app.setPaused(true);
+/// try app.world.add(pause_menu, fx.Processing{ .mode = .when_paused });
+/// try app.addSystemAlways(.input, "pause key", togglePause);
+/// ```
+///
+/// While it is paused only what asked to run does: an entity whose
+/// `Processing` says `.when_paused` or `.always` - and what hangs from it -
+/// and the systems added with `addSystemWhenPaused` or `addSystemAlways`.
+/// The rest wait where they are: their timers, their scripts' `fixed` and
+/// `update`, their tasks, their animation, their controls and the pointer
+/// over them, and the game's other systems. The physics stops for
+/// everything. Time goes on, unlike with `time.scale` at nought, so a pause
+/// menu can fade in.
+pub fn setPaused(self: *App, paused: bool) void {
+    self.paused = paused;
+    self.schedule.paused = paused;
+}
+
+pub fn isPaused(self: *const App) bool {
+    return self.paused;
+}
+
+/// Whether an entity runs now: its `Processing`, or the nearest one above
+/// it, against the pause.
+pub fn isProcessing(self: *App, entity: ecs.Entity) bool {
+    return self.inherited.of(self.gpa, &self.world, entity).processing.runs(self.paused);
+}
+
+/// How an entity shows, everything above it counted: whether it is drawn,
+/// the colour its own is multiplied by, and what its layer is raised by.
+/// See `Appearance`.
+pub fn resolvedAppearance(self: *App, entity: ecs.Entity) inherited_mod.Resolved {
+    return self.inherited.of(self.gpa, &self.world, entity);
 }
 
 // -------------------------------------------------------------------------
@@ -988,6 +1396,7 @@ pub fn run(self: *App) anyerror!void {
 pub fn startup(self: *App) anyerror!void {
     if (self.started) return;
     self.started = true;
+    if (self.open_project) try self.openProject();
     try self.schedule.run(.startup, self);
     try self.enterFirstStates();
 }
@@ -1017,11 +1426,23 @@ pub fn step(self: *App) anyerror!bool {
             self.running = false;
             return false;
         }
+        if (window.close_pressed) {
+            window.close_pressed = false;
+            if (!self.ask_before_closing) {
+                self.running = false;
+                return false;
+            }
+            self.close_pressed = true;
+        }
         if (window.resized) {
             window.resized = false;
             try self.adoptSize(window.width, window.height);
         }
     }
+    // Every action from this frame's keys, buttons and sticks, for the
+    // interface and the first system alike.
+    self.input.updateActions();
+    self.fitFrame();
     self.fitInterface();
 
     // In the background - an Android app switched away from, a page hidden -
@@ -1035,6 +1456,9 @@ pub fn step(self: *App) anyerror!bool {
     if (self.input.justResumed()) self.time.restart();
 
     self.time.tick();
+    self.inherited.forget();
+    // A game that wrote `paused` itself is taken at its word from here on.
+    self.schedule.paused = self.paused;
     self.debug_frame.advance(self.time.delta);
     self.debug_under_frame.advance(self.time.delta);
     if (self.hasInterface()) try self.feedInterface();
@@ -1045,12 +1469,16 @@ pub fn step(self: *App) anyerror!bool {
     try self.commands.apply();
     try self.changeStates();
 
-    // Bodies are synced before each fixed step. A paused frame - and the
-    // first, which has no time to step - is synced here instead, so the
-    // queries find what was spawned.
+    // Bodies are synced before each fixed step. A frame with no time - and
+    // the first, which has no time to step - is synced here instead, so the
+    // queries find what was spawned, and so is a paused game's, whose steps
+    // move no body.
     self.bodies.beginFrame();
-    if (self.time.delta == 0) try self.bodies.sync(self);
+    if (self.time.delta == 0 or self.paused) try self.bodies.sync(self);
 
+    // The scripts hear the frame's input first: each `input`, and what
+    // none took to each `unhandled_input`.
+    if (self.scripts) |scripts| try scripts.calls.pass(scripts, .input);
     try self.schedule.run(.input, self);
     self.shortcuts();
     // The pointer's speed, from everything this frame has said of it,
@@ -1078,18 +1506,20 @@ pub fn step(self: *App) anyerror!bool {
         defer self.debug_under.canvas = &self.debug_under_frame;
 
         while (self.time.takeFixedStep()) |_| {
+            self.inherited.forget();
             self.debug_steps.advance(self.time.fixed_delta);
             self.debug_under_steps.advance(self.time.fixed_delta);
             // Where everything was before this step, to draw between steps.
             try self.snapshotPrevious();
-            try timer.count(self, .physics, self.time.fixed_delta);
+            try timer.count(self, .fixed, self.time.fixed_delta);
             try self.signals.drain(self);
             if (self.scripts) |scripts| {
-                try scripts.calls.pass(scripts, .{ .physics = self.time.fixed_delta });
+                try scripts.calls.pass(scripts, .{ .fixed = self.time.fixed_delta });
                 try self.signals.drain(self);
             }
             try self.schedule.run(.fixed, self);
-            try self.stepPhysics();
+            // Nothing moves a paused game's bodies: there is one physics.
+            if (!self.paused) try self.stepPhysics();
             // Seen, so gone: the next step hears only what comes after.
             self.input.endFixedStep();
         }
@@ -1098,7 +1528,11 @@ pub fn step(self: *App) anyerror!bool {
     // pressed on a pause menu must not reach the first step after it.
     if (self.time.delta == 0) self.input.endFixedStep();
 
-    try timer.count(self, .idle, self.time.delta);
+    self.inherited.forget();
+    try timer.count(self, .update, self.time.delta);
+    try tween_mod.update(self, self.time.delta);
+    try animation_mod.update(self, self.time.delta);
+    try sprite_frames_mod.update(self, self.time.delta);
     try self.signals.drain(self);
     if (self.scripts) |scripts| {
         try scripts.calls.pass(scripts, .{ .update = self.time.delta });
@@ -1106,14 +1540,29 @@ pub fn step(self: *App) anyerror!bool {
     }
     try self.schedule.run(.update, self);
     try self.schedule.run(.late, self);
-    // Deferred signal calls, Godot's idle time: after `.late`, before the
-    // engine's own passes, so what they despawn is gone by the draw.
+    // Deferred signal calls: after `.late`, before the engine's own
+    // passes, so what they despawn is gone by the draw.
     try self.signals.flushDeferred(self);
+
+    // The scene `changeScene` asked for, before the engine's passes: what
+    // hung from the old one goes with it this frame.
+    if (self.scene_next) |next| {
+        self.scene_next = null;
+        self.openScene(next) catch |err| log.err("the scene {s} did not open: {t}", .{ self.sceneSource(next) orelse "?", err });
+    }
+    // A load with no thread of its own is worked a piece a frame.
+    if (!background_mod.threaded) for (self.loads.items) |load| {
+        _ = load.work();
+    };
 
     // The engine's own passes, after the game's `.late` systems and before
     // drawing: whatever hung from something despawned goes with it, and then
     // the names of everything that died are given back.
     try self.despawnOrphans();
+    // Every player's sound as its component says, after everything that
+    // could say otherwise, and `finished` heard before the frame is drawn.
+    try self.audio.update(self);
+    try self.signals.drain(self);
     // The scripts of the dead, and of what lost its `Script`, hear `exit`
     // in the frame it happened.
     if (self.scripts) |scripts| {
@@ -1123,11 +1572,23 @@ pub fn step(self: *App) anyerror!bool {
     self.forgetDeadNames();
     self.forgetDeadUuids();
     self.forgetDeadPlaces();
+    self.forgetDeadGroupMembers();
+    self.forgetDeadInstances();
     self.unknown_components.forgetDead(self.gpa, &self.world);
+    self.exports.forgetDead(&self.world);
+    self.tweens.forgetDead(self.gpa, &self.world);
+    self.texts.forgetDead(self.gpa, &self.world);
+    self.shader_params.forgetDead(self.gpa, &self.world);
+    self.views.forgetDead(self.gpa, &self.world, &self.assets, components.RenderView);
+    self.animation_players.forgetDead(self.gpa, &self.world);
     self.signals.forgetDead(&self.world);
-    try self.animate();
+    // Every animated sprite's frame in its Sprite, after all that could
+    // change it.
+    try sprite_frames_mod.show(self);
     if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
 
+    // What the systems changed of how things show is seen by the drawing.
+    self.inherited.forget();
     if (self.hasInterface()) try self.layOutInterface();
 
     // Nothing to draw on while Android has taken the surface away.
@@ -1197,7 +1658,7 @@ fn feedInterface(self: *App) !void {
 
 fn layOutInterface(self: *App) !void {
     self.interface.commands = &.{};
-    self.ui.begin(self.interface.surface(@floatFromInt(self.width), @floatFromInt(self.height)));
+    self.ui.begin(self.interface.surface(@floatFromInt(self.frame.width), @floatFromInt(self.frame.height)));
     {
         // One root for every `.ui` system: fluxion-ui makes the first element
         // the root, so a second system's would land beside it. `.grow`,
@@ -1213,15 +1674,26 @@ fn layOutInterface(self: *App) !void {
     }
 }
 
+/// This frame's size and place on the window, as the stretch says, and the
+/// pointer's pixels turned into its. See `stretch.zig`.
+fn fitFrame(self: *App) void {
+    self.frame = self.stretch.frameOf(self.width, self.height);
+    self.input.frame_origin = .init(self.frame.shown.x, self.frame.shown.y);
+    self.input.frame_ratio = self.frame.ratio();
+}
+
 /// The interface's scale for this frame: the game's `zoom` times the
 /// display's, which it follows unless told not to - and 1 with no window.
+/// A stretched game's is its frame's scale instead, which already counts
+/// the window's pixels.
 fn fitInterface(self: *App) void {
     const display: f32 = if (self.window) |*window|
         (if (self.interface.follow_display) window.content_scale else 1)
     else
         1;
     self.interface.display_scale = display;
-    self.interface.scale = self.interface.zoom * display;
+    const outer: f32 = if (self.stretch.mode == .disabled) display else self.frame.scale;
+    self.interface.scale = self.interface.zoom * outer;
     if (self.interface.follow_safe_area) {
         const edges = self.safeArea();
         self.interface.safe_area = .{
@@ -1261,6 +1733,7 @@ fn interfaceFaces(self: *App) []const *const typeface.Font {
 fn adoptSize(self: *App, width: u32, height: u32) !void {
     self.width = width;
     self.height = height;
+    self.fitFrame();
     self.resized = true;
     if (self.surface) |surface| try self.device.resizeSurface(surface, width, height);
 }
@@ -1277,32 +1750,30 @@ pub fn quit(self: *App) void {
     if (self.window) |*w| w.requestClose();
 }
 
-/// Step every `Animation` and write the cell it landed on into its `Sprite`.
-/// On the frame's delta: an animation is seen, not simulated.
-fn animate(self: *App) !void {
-    const delta = self.time.delta;
-
-    var it = try ecs.Query(.{ components.Sprite, components.Animation }).over(&self.world);
-    while (it.next()) |chunk| {
-        for (chunk.slice(components.Sprite), chunk.slice(components.Animation)) |*drawn, *animation| {
-            drawn.region = animation.advance(delta);
-        }
-    }
-}
-
 /// Despawn everything whose parent has died, and what hangs from that in
-/// turn; see `Transform2D.parent`. Once a frame, because a game despawns
-/// through `world.despawn` and nothing here sees it. It goes round until a
-/// pass finds nothing, so a turret's barrel goes one pass after the turret.
+/// turn; see `Parent`. Once a frame, because a game despawns through
+/// `world.despawn` and nothing here sees it. It goes round until a pass
+/// finds nothing, so a turret's barrel goes one pass after the turret.
 fn despawnOrphans(self: *App) !void {
     while (true) {
         self.orphans.clearRetainingCapacity();
 
-        var it = try ecs.Query(.{components.Transform2D}).over(&self.world);
+        var it = try ecs.Query(.{components.Parent}).over(&self.world);
         while (it.next()) |chunk| {
-            for (chunk.slice(components.Transform2D), chunk.entities) |place, entity| {
-                if (place.parent.isNone() or self.world.isAlive(place.parent)) continue;
+            for (chunk.slice(components.Parent), chunk.entities) |held, entity| {
+                if (held.entity.isNone() or self.world.isAlive(held.entity)) continue;
                 try self.orphans.append(self.gpa, entity);
+            }
+        }
+
+        // A chunk is its map's rather than its child, and goes the same way:
+        // a map despawned takes its tiles with it.
+        var chunks = try ecs.Query(.{tilemap.TileChunk}).over(&self.world);
+        while (chunks.next()) |chunk| {
+            for (chunk.slice(tilemap.TileChunk), chunk.entities) |tiles, entity| {
+                if (self.world.has(tiles.map, tilemap.TileMap)) continue;
+                try self.orphans.append(self.gpa, entity);
+                _ = self.tile_chunks.remove(.{ .map = tiles.map, .x = tiles.x, .y = tiles.y });
             }
         }
 
@@ -1314,16 +1785,16 @@ fn despawnOrphans(self: *App) !void {
 }
 
 // -------------------------------------------------------------------------
-// Where things are: Godot 3's Node2D, through the parent chain
+// Where things are, through the parent chain
 // -------------------------------------------------------------------------
 
 /// Resolving against no snapshots is resolving where things are, not where
 /// they are drawn.
 const still: hierarchy.Snapshots = .empty;
 
-/// Where an entity really is, with every parent above it applied: Godot's
-/// `global_transform`. Null when it has no transform, or when something it
-/// hangs from was despawned this frame. The result has no parent, so writing
+/// Where an entity really is, with every parent above it applied. Null
+/// when it has no transform, or when something it hangs from was despawned
+/// this frame. The result has no parent, so writing
 /// it over the entity's own transform lets go while keeping it in place.
 ///
 /// Where it is, not where it is drawn: an entity that `interpolate`s is drawn
@@ -1349,12 +1820,12 @@ pub const PlaceError = error{
 };
 
 /// Put an entity where `placed` says in the world, and keep its parent: its
-/// own transform becomes the one that, under its parents, lands there.
-/// Godot's `global_transform =`. Its parent, its inherit switches and its
-/// `interpolate` stay its own; `placed`'s are not read.
+/// own transform becomes the one that, under its parents, lands there. Its
+/// parent, its inherit switches and its `interpolate` stay its own;
+/// `placed`'s are not read.
 pub fn setWorldTransform(self: *App, entity: ecs.Entity, placed: components.Transform2D) PlaceError!void {
+    const above = try self.parentPlace(entity);
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
-    const above = try self.parentPlace(own.*);
     const at = above.unapply(placed.x, placed.y);
     own.x = at.x;
     own.y = at.y;
@@ -1363,12 +1834,13 @@ pub fn setWorldTransform(self: *App, entity: ecs.Entity, placed: components.Tran
     own.scale_y = if (own.inherit_scale) placed.scale_y / nonZero(above.scale_y) else placed.scale_y;
 }
 
-/// Where a transform's parent is in the world: nothing at all for none, or
+/// Where an entity's parent is in the world: nothing at all for none, or
 /// for a living parent with no transform of its own, which places nothing.
-fn parentPlace(self: *App, own: components.Transform2D) PlaceError!components.Transform2D {
-    if (own.parent.isNone()) return .{};
-    if (self.world.get(own.parent, components.Transform2D) == null and self.world.isAlive(own.parent)) return .{};
-    return self.worldTransform(own.parent) orelse error.Unplaced;
+fn parentPlace(self: *App, entity: ecs.Entity) PlaceError!components.Transform2D {
+    const above = self.parentOf(entity);
+    if (above.isNone()) return .{};
+    if (self.world.get(above, components.Transform2D) == null and self.world.isAlive(above)) return .{};
+    return self.worldTransform(above) orelse error.Unplaced;
 }
 
 /// A scale of zero is left out rather than divided by, as `unapply` does.
@@ -1382,7 +1854,7 @@ fn placeOf(self: *App, entity: ecs.Entity) PlaceError!components.Transform2D {
     return self.worldTransform(entity) orelse error.Unplaced;
 }
 
-/// Where an entity is in the world: Godot's `global_position`.
+/// Where an entity is in the world.
 pub fn globalPosition(self: *App, entity: ecs.Entity) ?math.Vec2 {
     const placed = self.worldTransform(entity) orelse return null;
     return .init(placed.x, placed.y);
@@ -1395,8 +1867,7 @@ pub fn setGlobalPosition(self: *App, entity: ecs.Entity, position: math.Vec2) Pl
     try self.setWorldTransform(entity, placed);
 }
 
-/// Which way an entity faces in the world, in radians: Godot's
-/// `global_rotation`.
+/// Which way an entity faces in the world, in radians.
 pub fn globalRotation(self: *App, entity: ecs.Entity) ?f32 {
     const placed = self.worldTransform(entity) orelse return null;
     return placed.rotation;
@@ -1408,7 +1879,7 @@ pub fn setGlobalRotation(self: *App, entity: ecs.Entity, radians: f32) PlaceErro
     try self.setWorldTransform(entity, placed);
 }
 
-/// How big an entity is in the world: Godot's `global_scale`.
+/// How big an entity is in the world.
 pub fn globalScale(self: *App, entity: ecs.Entity) ?math.Vec2 {
     const placed = self.worldTransform(entity) orelse return null;
     return .init(placed.scale_x, placed.scale_y);
@@ -1422,44 +1893,43 @@ pub fn setGlobalScale(self: *App, entity: ecs.Entity, scale: math.Vec2) PlaceErr
 }
 
 /// Move an entity by `offset` in the world, whatever its parents have done
-/// to its axes: Godot's `global_translate`.
+/// to its axes.
 pub fn globalTranslate(self: *App, entity: ecs.Entity, offset: math.Vec2) PlaceError!void {
     const placed = try self.placeOf(entity);
     try self.setGlobalPosition(entity, .init(placed.x + offset.x, placed.y + offset.y));
 }
 
-/// A point in the world, in an entity's own space: Godot's `to_local`.
+/// A point in the world, in an entity's own space.
 pub fn toLocal(self: *App, entity: ecs.Entity, global_point: math.Vec2) ?math.Vec2 {
     const placed = self.worldTransform(entity) orelse return null;
     const local = placed.unapply(global_point.x, global_point.y);
     return .init(local.x, local.y);
 }
 
-/// A point in an entity's own space, in the world: Godot's `to_global`.
+/// A point in an entity's own space, in the world.
 pub fn toGlobal(self: *App, entity: ecs.Entity, local_point: math.Vec2) ?math.Vec2 {
     const placed = self.worldTransform(entity) orelse return null;
     const global = placed.apply(local_point.x, local_point.y);
     return .init(global.x, global.y);
 }
 
-/// How far an entity would turn to face a point with its `+x`, in radians:
-/// Godot's `get_angle_to`, measured in its own space and scale.
+/// How far an entity would turn to face a point with its `+x`, in radians,
+/// measured in its own space and scale.
 pub fn getAngleTo(self: *App, entity: ecs.Entity, point: math.Vec2) ?f32 {
     const local = self.toLocal(entity, point) orelse return null;
     const own = self.world.get(entity, components.Transform2D).?;
     return std.math.atan2(local.y * own.scale_y, local.x * own.scale_x);
 }
 
-/// Turn an entity so that its `+x` faces a point in the world: Godot's
-/// `look_at`.
+/// Turn an entity so that its `+x` faces a point in the world.
 pub fn lookAt(self: *App, entity: ecs.Entity, point: math.Vec2) PlaceError!void {
     const angle = self.getAngleTo(entity, point) orelse return if (self.world.has(entity, components.Transform2D)) error.Unplaced else error.NoTransform;
     self.world.get(entity, components.Transform2D).?.rotation += angle;
 }
 
-/// Where an entity is in the space of `ancestor`, something it hangs from:
-/// Godot's `get_relative_transform_to_parent`. Nothing moved for the entity
-/// itself, and null for an entity `ancestor` is not above.
+/// Where an entity is in the space of `ancestor`, something it hangs from.
+/// Nothing moved for the entity itself, and null for an entity `ancestor`
+/// is not above.
 pub fn getRelativeTransformToParent(self: *App, entity: ecs.Entity, ancestor: ecs.Entity) ?components.Transform2D {
     var chain: [components.Transform2D.max_depth]components.Transform2D = undefined;
     var depth: usize = 0;
@@ -1467,10 +1937,11 @@ pub fn getRelativeTransformToParent(self: *App, entity: ecs.Entity, ancestor: ec
     while (!at.eql(ancestor)) {
         if (depth == chain.len) return null;
         const own = self.world.get(at, components.Transform2D) orelse return null;
-        if (own.parent.isNone()) return null;
+        const above = self.parentOf(at);
+        if (above.isNone()) return null;
         chain[depth] = own.*;
         depth += 1;
-        at = own.parent;
+        at = above;
     }
     var placed: components.Transform2D = .{};
     while (depth > 0) {
@@ -1480,15 +1951,14 @@ pub fn getRelativeTransformToParent(self: *App, entity: ecs.Entity, ancestor: ec
     return placed;
 }
 
-/// Move an entity along its own `+x`, in its parent's space: Godot's
-/// `move_local_x`. By `delta` units, or with `scaled` by `delta` of its own
-/// scaled lengths.
+/// Move an entity along its own `+x`, in its parent's space. By `delta`
+/// units, or with `scaled` by `delta` of its own scaled lengths.
 pub fn moveLocalX(self: *App, entity: ecs.Entity, delta: f32, scaled: bool) PlaceError!void {
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     moveAlong(own, .init(@cos(own.rotation) * own.scale_x, @sin(own.rotation) * own.scale_x), delta, scaled);
 }
 
-/// The same along its own `+y`: Godot's `move_local_y`.
+/// The same along its own `+y`.
 pub fn moveLocalY(self: *App, entity: ecs.Entity, delta: f32, scaled: bool) PlaceError!void {
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     moveAlong(own, .init(-@sin(own.rotation) * own.scale_y, @cos(own.rotation) * own.scale_y), delta, scaled);
@@ -1500,13 +1970,13 @@ fn moveAlong(own: *components.Transform2D, axis: math.Vec2, delta: f32, scaled: 
     own.y += along.y * delta;
 }
 
-/// Turn an entity by `radians` more: Godot's `rotate`.
+/// Turn an entity by `radians` more.
 pub fn rotate(self: *App, entity: ecs.Entity, radians: f32) PlaceError!void {
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     own.rotation += radians;
 }
 
-/// Multiply an entity's scale by `ratio`: Godot's `apply_scale`.
+/// Multiply an entity's scale by `ratio`.
 pub fn applyScale(self: *App, entity: ecs.Entity, ratio: math.Vec2) PlaceError!void {
     const own = self.world.get(entity, components.Transform2D) orelse return error.NoTransform;
     own.scale_x *= ratio.x;
@@ -1514,8 +1984,7 @@ pub fn applyScale(self: *App, entity: ecs.Entity, ratio: math.Vec2) PlaceError!v
 }
 
 /// A timer that runs once, `seconds` from now, on an entity of its own that
-/// goes after its `timeout`: Godot's `SceneTree.create_timer`, to connect
-/// to and forget.
+/// goes after its `timeout`: one to connect to and forget.
 ///
 /// ```zig
 /// const fuse = try app.createTimer(1.5);
@@ -1553,13 +2022,15 @@ pub fn single(self: *App, comptime T: type) ?*T {
 
 /// What `setName` can refuse.
 pub const NameError = error{
-    /// Another living entity is called that. A name picks out one thing.
+    /// A sibling is called that: another living entity with the same
+    /// parent, or another root. A path of names picks out one thing.
     NameTaken,
     /// The entity has been despawned, or never was.
     NoSuchEntity,
 } || Allocator.Error;
 
-/// Call an entity something, so that `find` can come back to it.
+/// Call an entity something, so that `find` and a path of names can come
+/// back to it.
 ///
 /// ```zig
 /// fn spawn(app: *App) !void {
@@ -1573,38 +2044,73 @@ pub const NameError = error{
 /// }
 /// ```
 ///
-/// The name is the entity's own, as a Unity GameObject's is, not a
-/// component: naming does not move the entity to another archetype. One
-/// living entity to a name - another is `error.NameTaken` - because `find`
-/// hands back one. A despawned entity's name is free at once, and calling
-/// this again renames. The text is copied. `ecs.save` does not write names.
+/// The name is the entity's own, not a component: naming does not move the
+/// entity to another archetype. Siblings - the children of one parent, or
+/// the roots - have names of their own, another's is `error.NameTaken`, so a
+/// path of names leads to one thing; two entities in different places may
+/// share one, as two copies of a scene do. A despawned entity's name is free
+/// at once, and calling this again renames. The text is copied.
 pub fn setName(self: *App, entity: ecs.Entity, name: []const u8) NameError!void {
     if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    if (self.nameOf(entity)) |own| if (std.mem.eql(u8, own, name)) return;
+    if (self.siblingNamed(self.parentOf(entity), name, entity) != null) return error.NameTaken;
+    try self.giveName(entity, name);
+}
 
-    var stale: ?ecs.Entity = null;
-    if (self.by_name.get(name)) |holder| {
-        if (holder.eql(entity)) return;
-        if (self.world.isAlive(holder)) return error.NameTaken;
-        // Despawned and not yet forgotten: the name is free.
-        stale = holder;
+/// `setName`, where a sibling that has the name already gives this one the
+/// first free one after it - "Rock 2" - rather than refusing: what a scene
+/// read into a family does, and `setParent`.
+pub fn setFreeName(self: *App, entity: ecs.Entity, wanted: []const u8) NameError!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    var buffer: [256]u8 = undefined;
+    const name = self.freeName(self.parentOf(entity), wanted, entity, &buffer);
+    if (self.nameOf(entity)) |own| if (std.mem.eql(u8, own, name)) return;
+    try self.giveName(entity, name);
+}
+
+/// `wanted`, or it with the first number after it that no child of
+/// `parent` but `except` is called: "Sprite", "Sprite 2", "Sprite 3". Written
+/// into `buffer` when a number is added; a name too long for it is cut.
+pub fn freeName(self: *const App, parent: ecs.Entity, wanted: []const u8, except: ecs.Entity, buffer: []u8) []const u8 {
+    if (self.siblingNamed(parent, wanted, except) == null) return wanted;
+    const base = wanted[0..@min(wanted.len, buffer.len -| 8)];
+    var number: usize = 2;
+    while (number < 100_000) : (number += 1) {
+        const tried = std.fmt.bufPrint(buffer, "{s} {d}", .{ base, number }) catch break;
+        if (self.siblingNamed(parent, tried, except) == null) return tried;
     }
+    return wanted;
+}
 
+/// A living child of `parent` but `except` called `name`, if there is one.
+fn siblingNamed(self: *const App, parent: ecs.Entity, name: []const u8, except: ecs.Entity) ?ecs.Entity {
+    const holders = self.by_name.getPtr(name) orelse return null;
+    for (holders.items) |holder| {
+        if (holder.eql(except) or !self.world.isAlive(holder)) continue;
+        if (self.parentOf(holder).eql(parent)) return holder;
+    }
+    return null;
+}
+
+/// Give an entity a name, whoever else has it: the checks are the caller's.
+fn giveName(self: *App, entity: ecs.Entity, name: []const u8) Allocator.Error!void {
     // Everything that can fail comes before anything changes, so a failed
-    // rename keeps the old name. The copy comes first of all, because `name`
-    // may point into a name that is about to be freed.
-    const copy = try self.gpa.dupe(u8, name);
-    errdefer self.gpa.free(copy);
+    // rename keeps the old name.
     try self.names.ensureUnusedCapacity(self.gpa, 1);
     try self.by_name.ensureUnusedCapacity(self.gpa, 1);
+    const known = self.by_name.getPtr(name);
+    const copy = if (known == null) try self.gpa.dupe(u8, name) else null;
+    errdefer if (copy) |text| self.gpa.free(text);
+    var fresh: std.ArrayListUnmanaged(ecs.Entity) = .empty;
+    errdefer fresh.deinit(self.gpa);
+    if (known) |holders| try holders.ensureUnusedCapacity(self.gpa, 1) else try fresh.ensureTotalCapacity(self.gpa, 1);
 
-    if (stale) |holder| self.forgetName(holder);
-    const slot = self.names.getOrPutAssumeCapacity(entity);
-    if (slot.found_existing) {
-        _ = self.by_name.remove(slot.value_ptr.*);
-        self.gpa.free(slot.value_ptr.*);
-    }
-    slot.value_ptr.* = copy;
-    self.by_name.putAssumeCapacityNoClobber(copy, entity);
+    // Nothing below here can fail.
+    self.forgetName(entity);
+    const slot = self.by_name.getOrPutAssumeCapacity(copy orelse name);
+    if (!slot.found_existing) slot.value_ptr.* = fresh;
+    slot.value_ptr.appendAssumeCapacity(entity);
+    self.names.putAssumeCapacity(entity, slot.key_ptr.*);
 }
 
 /// What an entity is called, or null when it has no name or is not alive.
@@ -1614,22 +2120,47 @@ pub fn nameOf(self: *const App, entity: ecs.Entity) ?[]const u8 {
     return self.names.get(entity);
 }
 
-/// The living entity called `name`, or null. Cheap enough to ask every
-/// frame. See `setName`.
+/// A living entity called `name` - the first given it of those that are -
+/// or null. Cheap enough to ask every frame. Where two in different places
+/// share a name, `findPath` and `findIn` say which. See `setName`.
 ///
 /// ```zig
 /// const player = app.find("player") orelse return;
 /// ```
 pub fn find(self: *const App, name: []const u8) ?ecs.Entity {
-    const entity = self.by_name.get(name) orelse return null;
-    return if (self.world.isAlive(entity)) entity else null;
+    const holders = self.by_name.getPtr(name) orelse return null;
+    for (holders.items) |holder| {
+        if (self.world.isAlive(holder)) return holder;
+    }
+    return null;
 }
 
-/// Take one entity's name off it, if it has one, and free the text.
+/// Take one entity's name off it, if it has one, and free the text once
+/// nothing has it.
 fn forgetName(self: *App, entity: ecs.Entity) void {
     const named = self.names.fetchSwapRemove(entity) orelse return;
-    _ = self.by_name.remove(named.value);
-    self.gpa.free(named.value);
+    const slot = self.by_name.getEntry(named.value) orelse return;
+    const holders = slot.value_ptr;
+    for (holders.items, 0..) |holder, at| {
+        if (!holder.eql(entity)) continue;
+        _ = holders.orderedRemove(at);
+        break;
+    }
+    if (holders.items.len > 0) return;
+    const key = slot.key_ptr.*;
+    holders.deinit(self.gpa);
+    self.by_name.removeByPtr(slot.key_ptr);
+    self.gpa.free(key);
+}
+
+/// Give back every name's text and list, and empty `by_name`.
+fn freeNames(self: *App) void {
+    var it = self.by_name.iterator();
+    while (it.next()) |entry| {
+        self.gpa.free(entry.key_ptr.*);
+        entry.value_ptr.deinit(self.gpa);
+    }
+    self.by_name.clearRetainingCapacity();
 }
 
 // -------------------------------------------------------------------------
@@ -1645,6 +2176,59 @@ pub const UuidError = error{
     /// The entity has been despawned, or never was.
     NoSuchEntity,
 } || Allocator.Error;
+
+// -------------------------------------------------------------------------
+// Chance
+// -------------------------------------------------------------------------
+//
+// The game's own source of chance, apart from the one UUIDs are drawn from:
+// seeded by the operating system when the app is made, or by
+// `Options.random_seed` or `seedRandom`, so a run seeded the same way draws
+// the same numbers. Not for secrets.
+
+/// A number from nought up to, but not including, one.
+pub fn randomFloat(self: *App) f32 {
+    return self.random_source.random().float(f32);
+}
+
+/// A number from `low` up to `high`.
+pub fn randomRange(self: *App, low: f32, high: f32) f32 {
+    return low + (high - low) * self.randomFloat();
+}
+
+/// A whole number from `low` to `high`, either of them possible, whichever
+/// way round they are given.
+pub fn randomInt(self: *App, low: i64, high: i64) i64 {
+    return self.random_source.random().intRangeAtMost(i64, @min(low, high), @max(low, high));
+}
+
+/// True that part of the time: `randomChance(0.25)` one time in four.
+pub fn randomChance(self: *App, chance: f32) bool {
+    return self.randomFloat() < chance;
+}
+
+/// A place in a list of `count` things, to pick one of them by. Nought for
+/// a list of none.
+pub fn randomIndex(self: *App, count: i64) i64 {
+    if (count <= 0) return 0;
+    return self.random_source.random().intRangeLessThan(i64, 0, count);
+}
+
+/// Start the numbers again from `seed`: the same seed, the same numbers.
+pub fn seedRandom(self: *App, seed: i64) void {
+    self.random_source = .init(@bitCast(seed));
+}
+
+/// Start the numbers again from a seed of the operating system's.
+pub fn randomize(self: *App) void {
+    self.random_source = .init(self.drawnSeed());
+}
+
+fn drawnSeed(self: *const App) u64 {
+    var seed: u64 = 0x5EED_F1A5_0000_0001;
+    if (self.io) |io| io.random(std.mem.asBytes(&seed));
+    return seed;
+}
 
 /// A new random UUID - version 4 - for an entity, or for anything else a
 /// game wants named once and for good.
@@ -1744,10 +2328,10 @@ fn siblingRank(self: *const App, entity: ecs.Entity) u64 {
 }
 
 /// Whether `a` comes before `b` among their parent's children: what to sort
-/// siblings by. Siblings are the entities with the same `Transform2D.parent`,
-/// and the roots - no parent, or no transform - are one family of their
-/// own. An editor that groups the world by parent itself sorts each group
-/// with this, rather than asking `childrenOf` of every entity.
+/// siblings by. Siblings are the entities with the same `Parent`, and the
+/// roots - no parent - are one family of their own. An editor that groups
+/// the world by parent itself sorts each group with this, rather than asking
+/// `childrenOf` of every entity.
 ///
 /// ```zig
 /// std.mem.sort(fx.Entity, group, @as(*const fx.App, app), fx.App.siblingBefore);
@@ -1756,59 +2340,515 @@ pub fn siblingBefore(self: *const App, a: ecs.Entity, b: ecs.Entity) bool {
     return self.siblingRank(a) < self.siblingRank(b);
 }
 
-/// The parent an entity hangs from, `.none` for a root: the family its
-/// place is kept in.
-fn parentOf(self: *const App, entity: ecs.Entity) ecs.Entity {
-    const place = self.world.getConst(entity, components.Transform2D) orelse return .none;
-    return place.parent;
+/// The parent an entity hangs from, `.none` for a root: see `Parent`.
+pub fn parentOf(self: *const App, entity: ecs.Entity) ecs.Entity {
+    return hierarchy.parentOf(&self.world, entity);
+}
+
+/// What `setParent` can refuse.
+pub const ParentError = error{
+    /// The entity has been despawned, or never was - or the parent has.
+    NoSuchEntity,
+    /// The parent is the entity itself, or something that hangs from it: a
+    /// loop, which nothing could be placed by.
+    Loop,
+} || PlaceError || NameError || ecs.World.Error;
+
+/// Hang `entity` from `parent`, or from nothing for a root, last among its
+/// new siblings. With `keep_global` it stays where it is in the world, its
+/// own transform written to land there under the new parent; without, its
+/// numbers stay as they are and it moves with the new parent's space. A
+/// sibling with its name already gives it the first free one after it.
+pub fn setParent(self: *App, entity: ecs.Entity, parent: ecs.Entity, keep_global: bool) ParentError!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    if (!parent.isNone()) {
+        if (!self.world.isAlive(parent)) return error.NoSuchEntity;
+        if (parent.eql(entity) or self.hangsFrom(parent, entity)) return error.Loop;
+    }
+    if (self.parentOf(entity).eql(parent)) return;
+    const was = if (keep_global and self.world.has(entity, components.Transform2D))
+        self.worldTransform(entity) orelse return error.Unplaced
+    else
+        null;
+    if (parent.isNone()) {
+        try self.world.remove(entity, components.Parent);
+    } else {
+        self.world.add(entity, components.Parent.of(parent)) catch |err| return switch (err) {
+            error.NoSuchEntity => error.NoSuchEntity,
+            else => |other| other,
+        };
+    }
+    try self.setSiblingIndex(entity, std.math.maxInt(u32));
+    if (self.nameOf(entity)) |name| {
+        var copy: [256]u8 = undefined;
+        const held = copy[0..@min(name.len, copy.len)];
+        @memcpy(held, name[0..held.len]);
+        try self.setFreeName(entity, held);
+    }
+    if (was) |placed| try self.setWorldTransform(entity, placed);
+}
+
+/// Whether `entity` hangs from `ancestor`, however far down.
+pub fn hangsFrom(self: *const App, entity: ecs.Entity, ancestor: ecs.Entity) bool {
+    var at = self.parentOf(entity);
+    var depth: usize = 0;
+    while (!at.isNone() and depth < 256) : (depth += 1) {
+        if (at.eql(ancestor)) return true;
+        at = self.parentOf(at);
+    }
+    return false;
+}
+
+/// Each parent's children in their order, and the roots, as one list of
+/// families: built from the `Parent` components when the world has changed
+/// shape since, or a place or a parent was given.
+pub const Tree = struct {
+    families: std.AutoHashMapUnmanaged(ecs.Entity, Family) = .empty,
+    order: std.ArrayListUnmanaged(ecs.Entity) = .empty,
+    /// The world's `structure` when it was built; null when something has
+    /// changed that the world does not count.
+    built: ?u64 = null,
+
+    pub const Family = struct { start: u32, count: u32 };
+
+    fn deinit(self: *Tree, gpa: Allocator) void {
+        self.families.deinit(gpa);
+        self.order.deinit(gpa);
+    }
+
+    /// Build it again when next asked.
+    pub fn forget(self: *Tree) void {
+        self.built = null;
+    }
+};
+
+/// A parent's children in their order, `.none` for the roots: a slice of
+/// the tree, good until the world next changes shape.
+pub fn children(self: *App, parent: ecs.Entity) []const ecs.Entity {
+    self.buildTree() catch return &.{};
+    const family = self.tree.families.get(parent) orelse return &.{};
+    return self.tree.order.items[family.start..][0..family.count];
+}
+
+fn buildTree(self: *App) Allocator.Error!void {
+    if (self.tree.built == self.world.structure) return;
+    const gpa = self.gpa;
+    const Member = struct { parent: ecs.Entity, rank: u64, entity: ecs.Entity };
+    var members: std.ArrayListUnmanaged(Member) = .empty;
+    defer members.deinit(gpa);
+    try members.ensureTotalCapacity(gpa, self.world.count());
+    for (self.world.archetypeSlice()) |*archetype| {
+        for (archetype.entities.items) |entity| {
+            members.appendAssumeCapacity(.{ .parent = self.parentOf(entity), .rank = self.siblingRank(entity), .entity = entity });
+        }
+    }
+    std.mem.sort(Member, members.items, {}, struct {
+        fn before(_: void, a: Member, b: Member) bool {
+            const pa = a.parent.toInt();
+            const pb = b.parent.toInt();
+            if (pa != pb) return pa < pb;
+            return a.rank < b.rank;
+        }
+    }.before);
+    self.tree.families.clearRetainingCapacity();
+    self.tree.order.clearRetainingCapacity();
+    try self.tree.order.ensureTotalCapacity(gpa, members.items.len);
+    for (members.items, 0..) |member, at| {
+        self.tree.order.appendAssumeCapacity(member.entity);
+        const family = try self.tree.families.getOrPut(gpa, member.parent);
+        if (!family.found_existing) family.value_ptr.* = .{ .start = @intCast(at), .count = 0 };
+        family.value_ptr.count += 1;
+    }
+    self.tree.built = self.world.structure;
+}
+
+/// How many children a parent has; the roots for `.none`.
+pub fn childCount(self: *App, parent: ecs.Entity) i64 {
+    return @intCast(self.children(parent).len);
+}
+
+/// A parent's child at `index` in their order, or null past the end.
+pub fn childAt(self: *App, parent: ecs.Entity, index: i64) ?ecs.Entity {
+    const family = self.children(parent);
+    if (index < 0 or index >= family.len) return null;
+    return family[@intCast(index)];
+}
+
+/// The child of `parent` called `name`, the roots for `.none`.
+pub fn childNamed(self: *App, parent: ecs.Entity, name: []const u8) ?ecs.Entity {
+    for (self.children(parent)) |child| {
+        const own = self.names.get(child) orelse continue;
+        if (std.mem.eql(u8, own, name)) return child;
+    }
+    return null;
+}
+
+/// Where a path of names leads from `from`: "Arm/Hand" is `from`'s child
+/// called Arm and that one's child called Hand. `..` is a step up to the
+/// parent, `.` stays, and a path that starts with `/` starts from the roots
+/// rather than from `from`. Null where a step finds nothing.
+///
+/// ```zig
+/// const hand = app.findPath(player, "Arm/Hand") orelse return;
+/// const door = app.findPath(button, "../../Door") orelse return;
+/// ```
+pub fn findPath(self: *App, from: ecs.Entity, path: []const u8) ?ecs.Entity {
+    var at = if (path.len > 0 and path[0] == '/') ecs.Entity.none else from;
+    var parts = std.mem.tokenizeScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (std.mem.eql(u8, part, ".")) continue;
+        if (std.mem.eql(u8, part, "..")) {
+            if (at.isNone()) return null;
+            at = self.parentOf(at);
+            continue;
+        }
+        at = self.childNamed(at, part) orelse return null;
+    }
+    return if (at.isNone()) null else at;
+}
+
+/// The first entity called `name` that hangs from `root`, however far down,
+/// in the tree's order; the whole world for `.none`. What a scene's own
+/// "unique" names are found by, from its root.
+pub fn findIn(self: *App, root: ecs.Entity, name: []const u8) ?ecs.Entity {
+    for (self.children(root)) |child| {
+        if (self.names.get(child)) |own| if (std.mem.eql(u8, own, name)) return child;
+    }
+    for (self.children(root)) |child| {
+        if (self.findIn(child, name)) |found| return found;
+    }
+    return null;
+}
+
+// -------------------------------------------------------------------------
+// Tiles
+// -------------------------------------------------------------------------
+
+/// Which chunk of which map: what `tile_chunks` finds an entity by.
+pub const ChunkKey = struct {
+    map: ecs.Entity,
+    x: i32,
+    y: i32,
+};
+
+pub const SetTileError = error{ NotATileMap, OutOfMemory };
+
+/// Put `cell` at `x`, `y` of `map`, counted in tiles from the map's origin
+/// and negative above it and to its left. The chunk it lands in is made when
+/// there is none.
+///
+/// Gives back the chunk holding the cell, or null when an empty cell was put
+/// where there was no chunk - or emptied the last tile of one, which takes
+/// the chunk away with it.
+pub fn setTile(self: *App, map: ecs.Entity, x: i32, y: i32, cell: tilemap.Cell) SetTileError!?ecs.Entity {
+    if (!self.world.has(map, tilemap.TileMap)) return error.NotATileMap;
+    const chunk_x = @divFloor(x, tilemap.chunk_side);
+    const chunk_y = @divFloor(y, tilemap.chunk_side);
+    const local_x: u8 = @intCast(@mod(x, tilemap.chunk_side));
+    const local_y: u8 = @intCast(@mod(y, tilemap.chunk_side));
+
+    const entity = self.tileChunkAt(map, chunk_x, chunk_y) orelse {
+        // Nothing there to empty.
+        if (cell.isEmpty()) return null;
+        const made = try self.makeTileChunk(map, chunk_x, chunk_y);
+        _ = self.world.get(made, tilemap.TileChunk).?.set(local_x, local_y, cell);
+        return made;
+    };
+
+    const chunk = self.world.get(entity, tilemap.TileChunk).?;
+    _ = chunk.set(local_x, local_y, cell);
+    if (cell.isEmpty() and chunk.isEmpty()) {
+        _ = self.tile_chunks.remove(.{ .map = map, .x = chunk_x, .y = chunk_y });
+        self.world.despawn(entity);
+        return null;
+    }
+    return entity;
+}
+
+/// What is at `x`, `y` of `map`: `Cell.empty` where nothing was painted.
+pub fn tileAt(self: *App, map: ecs.Entity, x: i32, y: i32) tilemap.Cell {
+    const chunk_x = @divFloor(x, tilemap.chunk_side);
+    const chunk_y = @divFloor(y, tilemap.chunk_side);
+    const entity = self.tileChunkAt(map, chunk_x, chunk_y) orelse return .empty;
+    const chunk = self.world.get(entity, tilemap.TileChunk).?;
+    return chunk.get(@intCast(@mod(x, tilemap.chunk_side)), @intCast(@mod(y, tilemap.chunk_side))).?;
+}
+
+/// The entity holding a map's chunk at `x`, `y`, in chunks. Found through
+/// the index rather than by walking every chunk in the world.
+pub fn tileChunkAt(self: *App, map: ecs.Entity, x: i32, y: i32) ?ecs.Entity {
+    const key: ChunkKey = .{ .map = map, .x = x, .y = y };
+    const entity = self.tile_chunks.get(key) orelse return null;
+    // A chunk despawned elsewhere leaves its key behind; the first look
+    // after that gives it back.
+    const chunk = self.world.get(entity, tilemap.TileChunk) orelse {
+        _ = self.tile_chunks.remove(key);
+        return null;
+    };
+    if (!chunk.map.eql(map) or chunk.x != x or chunk.y != y) {
+        _ = self.tile_chunks.remove(key);
+        return null;
+    }
+    return entity;
+}
+
+/// A chunk of a map, made and put in the index. Its cells start empty.
+pub fn makeTileChunk(self: *App, map: ecs.Entity, x: i32, y: i32) SetTileError!ecs.Entity {
+    if (!self.world.has(map, tilemap.TileMap)) return error.NotATileMap;
+    try self.tile_chunks.ensureUnusedCapacity(self.gpa, 1);
+    const entity = self.world.spawnWith(.{tilemap.TileChunk{ .map = map, .x = x, .y = y }}) catch return error.OutOfMemory;
+    self.tile_chunks.putAssumeCapacity(.{ .map = map, .x = x, .y = y }, entity);
+    return entity;
+}
+
+/// How big one tile of a map is, in its own pixels: what its tile set says,
+/// or the default for a map without one.
+pub fn tileSizeOf(self: *App, map: ecs.Entity) [2]f32 {
+    const held = self.world.getConst(map, tilemap.TileMap) orelse return .{ tileset.default_tile_size, tileset.default_tile_size };
+    const set = self.tile_sets.get(held.tile_set) orelse return .{ tileset.default_tile_size, tileset.default_tile_size };
+    return .{ @floatFromInt(set.tile_width), @floatFromInt(set.tile_height) };
+}
+
+/// Which cell of `map` a point of the world is in, counted in tiles from the
+/// map's origin as `setTile` counts them. Null for an entity with no
+/// `TileMap`.
+pub fn cellAt(self: *App, map: ecs.Entity, point: math.Vec2) ?geometry.Vec2i {
+    if (!self.world.has(map, tilemap.TileMap)) return null;
+    const placed = self.worldTransform(map) orelse return null;
+    const local = placed.unapply(point.x, point.y);
+    const tile = self.tileSizeOf(map);
+    return .init(
+        std.math.lossyCast(i32, @floor(local.x / tile[0])),
+        std.math.lossyCast(i32, @floor(local.y / tile[1])),
+    );
+}
+
+/// The cells of `map` something is painted in: the smallest rectangle that
+/// holds them all. Null for a map with nothing painted.
+pub fn usedCells(self: *App, map: ecs.Entity) ?geometry.Rect2i {
+    var out: ?geometry.Rect2i = null;
+    var it = self.tile_chunks.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (!key.map.eql(map)) continue;
+        // One despawned elsewhere is not the map's any more.
+        const chunk = self.world.getConst(entry.value_ptr.*, tilemap.TileChunk) orelse continue;
+        if (!chunk.map.eql(map) or chunk.x != key.x or chunk.y != key.y) continue;
+        for (chunk.cells, 0..) |cell, at| {
+            if (cell.isEmpty()) continue;
+            const x = key.x * tilemap.chunk_side + @as(i32, @intCast(at % tilemap.chunk_side));
+            const y = key.y * tilemap.chunk_side + @as(i32, @intCast(at / tilemap.chunk_side));
+            const place: geometry.Vec2i = .init(x, y);
+            out = if (out) |held| held.expandTo(place) else .fromCells(place, place);
+        }
+    }
+    return out;
+}
+
+/// What the tile at `x`, `y` of `map` says under its tile set's data layer
+/// called `layer`: nought, or false, where it says nothing, and null where
+/// nothing is painted or the set has no layer of that name. A script has the
+/// number, or the truth, itself.
+pub fn tileData(self: *App, map: ecs.Entity, x: i32, y: i32, layer: []const u8) ?tileset.Value {
+    const held = self.world.getConst(map, tilemap.TileMap) orelse return null;
+    const set = self.tile_sets.get(held.tile_set) orelse return null;
+    return set.dataOf(self.tileAt(map, x, y), layer);
+}
+
+/// The same for the tile under a point of the world: the one something
+/// stands on, say.
+pub fn tileDataAt(self: *App, map: ecs.Entity, point: math.Vec2, layer: []const u8) ?tileset.Value {
+    const cell = self.cellAt(map, point) orelse return null;
+    return self.tileData(map, cell.x, cell.y, layer);
+}
+
+// -------------------------------------------------------------------------
+// Files of every kind
+// -------------------------------------------------------------------------
+//
+// One call each for what every kind of file has - where a handle's file is,
+// and the handle of a file - whatever the kind: what a scene writes and
+// reads handles by, and what an editor's file fields go through. See
+// `AssetKind`.
+
+/// The file a handle was read from, whatever kind of file it holds: its
+/// `res://` path. Null for `.none`, for an expired handle, and for one made
+/// in memory.
+pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
+    const H = @TypeOf(handle);
+    const kind = comptime AssetKind.of(H) orelse @compileError(@typeName(H) ++ " holds no file");
+    return switch (kind) {
+        .texture => self.assets.textureSource(handle),
+        .font => self.assets.fontSource(handle),
+        .script => self.scriptSource(handle),
+        .tileset => self.tileSetSource(handle),
+        .theme => self.themeSource(handle),
+        .scene => self.sceneSource(handle),
+        .data => self.dataSource(handle),
+        .audio => self.audioSource(handle),
+        .animation => self.animation_libraries.sourceOf(handle),
+        .frames => self.sprite_frames.sourceOf(handle),
+        .shader => self.shaders.sourceOf(handle),
+    };
+}
+
+/// The handle of the file at `path`, read now if nothing has read it yet: a
+/// texture sampled as textures are by default, the first font of a file.
+pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
+    const kind = comptime AssetKind.of(H) orelse @compileError(@typeName(H) ++ " holds no file");
+    return switch (kind) {
+        .texture => self.assets.findTexture(path) orelse try self.assets.loadTexture(path, .{}),
+        .font => self.assets.findFont(path) orelse try self.assets.loadFont(path, .{}),
+        .script => self.loadScript(path),
+        .tileset => self.loadTileSet(path),
+        .theme => self.loadTheme(path),
+        .scene => self.loadScene(path),
+        .data => self.loadData(path),
+        .audio => self.loadAudio(path),
+        .animation => self.loadAnimations(path),
+        .frames => self.loadSpriteFrames(path),
+        .shader => self.loadShader(path),
+    };
+}
+
+/// The handle of the file at `path`, if something has read it.
+pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
+    const kind = comptime AssetKind.of(H) orelse @compileError(@typeName(H) ++ " holds no file");
+    return switch (kind) {
+        .texture => self.assets.findTexture(path),
+        .font => self.assets.findFont(path),
+        .script => self.findScript(path),
+        .tileset => self.findTileSet(path),
+        .theme => self.findTheme(path),
+        .scene => self.findScene(path),
+        .data => self.findData(path),
+        .audio => self.findAudio(path),
+        .animation => self.findAnimations(path),
+        .frames => self.findSpriteFrames(path),
+        .shader => self.findShader(path),
+    };
+}
+
+/// Read a `.tileset` file, or find the one read from there already. See
+/// `tileset.TileSets`.
+pub fn loadTileSet(self: *App, path: []const u8) !tileset.TileSetHandle {
+    return self.tile_sets.load(self, path);
+}
+
+/// A tile set from text rather than a file: a test's, or a tool's.
+pub fn addTileSet(self: *App, name: []const u8, text: []const u8) !tileset.TileSetHandle {
+    return self.tile_sets.add(self, name, text);
+}
+
+pub fn findTileSet(self: *App, path: []const u8) ?tileset.TileSetHandle {
+    return self.tile_sets.find(path);
+}
+
+/// Read a tile set's file again, for an editor that has just saved it.
+/// Whatever was built from it is built again.
+pub fn reloadTileSet(self: *App, handle: tileset.TileSetHandle) !bool {
+    return self.tile_sets.reload(self, handle);
+}
+
+pub fn tileSetOf(self: *App, handle: tileset.TileSetHandle) ?*const tileset.TileSet {
+    return self.tile_sets.get(handle);
+}
+
+/// The path a tile set was read from: what a scene writes in a handle's
+/// place, and what an editor shows.
+pub fn tileSetSource(self: *App, handle: tileset.TileSetHandle) ?[]const u8 {
+    return self.tile_sets.sourceOf(handle);
+}
+
+/// The theme the project file names for its whole interface - `gui.theme` -
+/// which every control is drawn with under the one it names itself; `.none`
+/// for the engine's own look. Read the first time it is asked for, and again
+/// when the project file names another.
+pub fn projectTheme(self: *App) theme.ThemeHandle {
+    const named = if (self.project.settings) |settings| settings.gui.theme else "";
+    const held = &self.project_theme;
+    if (std.mem.eql(u8, held.path(), named)) return held.handle;
+    held.remember(named);
+    held.handle = .none;
+    if (named.len == 0) return .none;
+    // Kept even when it does not read, so that it is said once and not a
+    // frame.
+    held.handle = self.loadTheme(named) catch |err| blk: {
+        log.warn("the project's theme {s} did not read: {t}", .{ named, err });
+        break :blk .none;
+    };
+    return held.handle;
+}
+
+pub const ProjectTheme = struct {
+    handle: theme.ThemeHandle = .none,
+    bytes: [512]u8 = undefined,
+    len: usize = 0,
+
+    fn path(self: *const ProjectTheme) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    fn remember(self: *ProjectTheme, named: []const u8) void {
+        self.len = @min(named.len, self.bytes.len);
+        @memcpy(self.bytes[0..self.len], named[0..self.len]);
+    }
+};
+
+/// Read a `.theme` file, or find the one read from there already. See
+/// `theme.Themes`.
+pub fn loadTheme(self: *App, path: []const u8) !theme.ThemeHandle {
+    return self.themes.load(self, path);
+}
+
+/// A theme from text rather than a file: a test's, or a tool's.
+pub fn addTheme(self: *App, name: []const u8, text: []const u8) !theme.ThemeHandle {
+    return self.themes.add(self, name, text);
+}
+
+pub fn findTheme(self: *App, path: []const u8) ?theme.ThemeHandle {
+    return self.themes.find(path);
+}
+
+/// Read a theme's file again, for an editor that has just saved it.
+pub fn reloadTheme(self: *App, handle: theme.ThemeHandle) !bool {
+    return self.themes.reload(self, handle);
+}
+
+pub fn themeOf(self: *App, handle: theme.ThemeHandle) ?*const theme.Theme {
+    return self.themes.get(handle);
+}
+
+/// The path a theme was read from: what a scene writes in a handle's place,
+/// and what an editor shows.
+pub fn themeSource(self: *App, handle: theme.ThemeHandle) ?[]const u8 {
+    return self.themes.sourceOf(handle);
 }
 
 /// A parent's children in their order, as many as `found` holds, the first
-/// ones kept when there are more; `.none` for the roots. Godot's
-/// `get_children`. One walk over the world each time.
+/// ones kept when there are more; `.none` for the roots. See `children` for
+/// the slice itself.
 pub fn childrenOf(self: *App, parent: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
-    if (found.len == 0) return found;
-    var count: usize = 0;
-    for (self.world.archetypeSlice()) |*archetype| {
-        for (archetype.entities.items) |entity| {
-            if (!self.parentOf(entity).eql(parent)) continue;
-            if (count < found.len) {
-                found[count] = entity;
-                count += 1;
-                continue;
-            }
-            // Full: this one replaces the last in order, if it comes before.
-            var last: usize = 0;
-            for (found[1..], 1..) |held, i| {
-                if (self.siblingBefore(found[last], held)) last = i;
-            }
-            if (self.siblingBefore(entity, found[last])) found[last] = entity;
-        }
-    }
-    std.mem.sort(ecs.Entity, found[0..count], @as(*const App, self), siblingBefore);
+    const family = self.children(parent);
+    const count = @min(family.len, found.len);
+    @memcpy(found[0..count], family[0..count]);
     return found[0..count];
 }
 
-/// Where an entity is among its parent's children, from nought: Godot's
-/// `get_index`. Null for one that is not alive.
+/// Where an entity is among its parent's children, from nought. Null for
+/// one that is not alive.
 pub fn siblingIndex(self: *App, entity: ecs.Entity) ?u32 {
     if (!self.world.isAlive(entity)) return null;
-    const parent = self.parentOf(entity);
-    const rank = self.siblingRank(entity);
-    var before: u32 = 0;
-    for (self.world.archetypeSlice()) |*archetype| {
-        for (archetype.entities.items) |other| {
-            if (other.eql(entity) or !self.parentOf(other).eql(parent)) continue;
-            if (self.siblingRank(other) < rank) before += 1;
-        }
+    for (self.children(self.parentOf(entity)), 0..) |sibling, at| {
+        if (sibling.eql(entity)) return @intCast(at);
     }
-    return before;
+    return null;
 }
 
 /// Put an entity at `index` among its parent's children, the ones from
-/// there on moving along one: Godot's `move_child`. An index past the end
-/// is the end. Kept beside the world, and written into a scene as the order
-/// its list is in, so it comes back as it was.
+/// there on moving along one. An index past the end is the end. Kept beside
+/// the world, and written into a scene as the order its list is in, so it
+/// comes back as it was.
 pub fn setSiblingIndex(self: *App, entity: ecs.Entity, index: u32) (error{NoSuchEntity} || Allocator.Error)!void {
     if (!self.world.isAlive(entity)) return error.NoSuchEntity;
     const parent = self.parentOf(entity);
@@ -1816,13 +2856,9 @@ pub fn setSiblingIndex(self: *App, entity: ecs.Entity, index: u32) (error{NoSuch
     // Numbered afresh, the whole family, so none of it is left half placed.
     var family: std.ArrayList(ecs.Entity) = .empty;
     defer family.deinit(self.gpa);
-    for (self.world.archetypeSlice()) |*archetype| {
-        for (archetype.entities.items) |other| {
-            if (other.eql(entity) or !self.parentOf(other).eql(parent)) continue;
-            try family.append(self.gpa, other);
-        }
+    for (self.children(parent)) |other| {
+        if (!other.eql(entity)) try family.append(self.gpa, other);
     }
-    std.mem.sort(ecs.Entity, family.items, @as(*const App, self), siblingBefore);
     try family.insert(self.gpa, @min(index, family.items.len), entity);
     try self.placeInOrder(family.items);
 }
@@ -1835,6 +2871,7 @@ pub fn placeInOrder(self: *App, entities: []const ecs.Entity) Allocator.Error!vo
         self.sibling_ranks.putAssumeCapacity(entity, self.next_rank);
         self.next_rank += 1;
     }
+    self.tree.forget();
 }
 
 /// Give every living entity that has no place one, in the order of its
@@ -1866,6 +2903,125 @@ fn forgetDeadPlaces(self: *App) void {
 }
 
 // -------------------------------------------------------------------------
+// Groups
+// -------------------------------------------------------------------------
+//
+// A group is a name entities are put under - "enemies", "pickups" - to be
+// found and called together, wherever they are in the tree. Kept beside the
+// world, as names are, and written into a scene with each entity.
+
+/// Put an entity in a group, made the first time it is named. Once is
+/// enough: being put in again changes nothing.
+pub fn addToGroup(self: *App, entity: ecs.Entity, group: []const u8) (error{NoSuchEntity} || Allocator.Error)!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    if (self.isInGroup(entity, group)) return;
+    const known = self.groups.getPtr(group);
+    const members = known orelse blk: {
+        const copy = try self.gpa.dupe(u8, group);
+        errdefer self.gpa.free(copy);
+        try self.groups.put(self.gpa, copy, .empty);
+        break :blk self.groups.getPtr(copy).?;
+    };
+    try members.append(self.gpa, entity);
+}
+
+/// Take an entity out of a group. The group stays, empty.
+pub fn removeFromGroup(self: *App, entity: ecs.Entity, group: []const u8) void {
+    const members = self.groups.getPtr(group) orelse return;
+    for (members.items, 0..) |member, at| {
+        if (!member.eql(entity)) continue;
+        _ = members.orderedRemove(at);
+        return;
+    }
+}
+
+pub fn isInGroup(self: *const App, entity: ecs.Entity, group: []const u8) bool {
+    const members = self.groups.getPtr(group) orelse return false;
+    for (members.items) |member| {
+        if (member.eql(entity)) return true;
+    }
+    return false;
+}
+
+/// A group's members, in the order they joined: a slice good until a member
+/// joins or leaves. One despawned this frame is still in it until the frame
+/// ends.
+pub fn groupMembers(self: *const App, group: []const u8) []const ecs.Entity {
+    const members = self.groups.getPtr(group) orelse return &.{};
+    return members.items;
+}
+
+/// How many living members a group has.
+pub fn groupSize(self: *const App, group: []const u8) i64 {
+    var count: i64 = 0;
+    for (self.groupMembers(group)) |member| {
+        if (self.world.isAlive(member)) count += 1;
+    }
+    return count;
+}
+
+/// A group's living member at `index`, in the order they joined; null past
+/// the end.
+pub fn groupMember(self: *const App, group: []const u8, index: i64) ?ecs.Entity {
+    var at: i64 = 0;
+    for (self.groupMembers(group)) |member| {
+        if (!self.world.isAlive(member)) continue;
+        if (at == index) return member;
+        at += 1;
+    }
+    return null;
+}
+
+/// The groups an entity is in, as many as `found` holds.
+pub fn groupsOf(self: *const App, entity: ecs.Entity, found: [][]const u8) [][]const u8 {
+    var count: usize = 0;
+    for (self.groups.keys(), self.groups.values()) |name, members| {
+        if (count == found.len) break;
+        for (members.items) |member| {
+            if (!member.eql(entity)) continue;
+            found[count] = name;
+            count += 1;
+            break;
+        }
+    }
+    return found[0..count];
+}
+
+/// Call a method on every living member of a group, in the order they
+/// joined - a component's, the script's, or one `addMethod` added: see
+/// `callMethodOn`. A member that has no such method is passed over. The
+/// members are copied first, so a call may add to the group or take from it.
+pub fn callGroup(self: *App, group: []const u8, method: []const u8) anyerror!void {
+    const members = try self.gpa.dupe(ecs.Entity, self.groupMembers(group));
+    defer self.gpa.free(members);
+    for (members) |member| {
+        if (!self.world.isAlive(member)) continue;
+        self.callMethodOn(member, method, &.{}) catch |err| switch (err) {
+            error.NoSuchMethod => continue,
+            else => return err,
+        };
+    }
+}
+
+/// Take the dead out of every group, at the end of the frame.
+fn forgetDeadGroupMembers(self: *App) void {
+    for (self.groups.values()) |*members| {
+        var at = members.items.len;
+        while (at > 0) {
+            at -= 1;
+            if (!self.world.isAlive(members.items[at])) _ = members.orderedRemove(at);
+        }
+    }
+}
+
+fn freeGroups(self: *App) void {
+    for (self.groups.keys(), self.groups.values()) |name, *members| {
+        self.gpa.free(name);
+        members.deinit(self.gpa);
+    }
+}
+
+// -------------------------------------------------------------------------
 // Scenes
 // -------------------------------------------------------------------------
 
@@ -1881,6 +3037,7 @@ fn forgetDeadPlaces(self: *App) void {
 /// nothing. Each is described in `types` as well, so `componentOf` can find
 /// it by that name, and an `attr.Property` it declares is checked.
 pub fn registerComponents(self: *App, comptime list: anytype) scene.Registry.Error!void {
+    @setEvalBranchQuota(10_000);
     inline for (list) |T| {
         comptime attr.check(T);
         // Described first: a description nothing uses is harmless, and a
@@ -1910,19 +3067,752 @@ pub fn saveScene(self: *App, path: []const u8, options: scene.SaveOptions) !void
     return scene.save(self, io, path, options);
 }
 
-/// Read a scene into the world, beside whatever is in it already, and say
-/// what came of it. See `scene`.
+/// Read the file at `path` into the world, beside whatever is in it
+/// already, and say what came of it: what an editor opens a scene with. A
+/// game makes things of a scene with `instantiate`, and plays one with
+/// `changeScene`. See `scene`.
 ///
 /// ```zig
 /// var diagnostics: fx.json.Diagnostics = .{};
-/// _ = app.loadScene("levels/meadow.json", .{ .diagnostics = &diagnostics }) catch |err| {
+/// _ = app.readScene("levels/meadow.json", .{ .diagnostics = &diagnostics }) catch |err| {
 ///     std.log.err("{f}", .{diagnostics});
 ///     return err;
 /// };
 /// ```
-pub fn loadScene(self: *App, path: []const u8, options: scene.LoadOptions) !scene.Loaded {
+pub fn readScene(self: *App, path: []const u8, options: scene.LoadOptions) !scene.Loaded {
     const io = self.io orelse return error.NoIo;
     return scene.load(self, io, path, options);
+}
+
+/// Read a scene's file to make things of, or find the one read from there
+/// already. Nothing is made of it yet: see `instantiate` and `changeScene`,
+/// and `scenes`.
+///
+/// A file `loadInBackground` is reading is taken from that load - waited
+/// for, if it is not done - rather than read again.
+pub fn loadScene(self: *App, path: []const u8) !scenes_mod.SceneHandle {
+    if (self.loads.items.len > 0) {
+        const named = try self.project.canonical(self.gpa, path);
+        defer self.gpa.free(named);
+        if (self.loadOf(named)) |load| return self.takeLoad(load);
+    }
+    return self.scenes.load(self, path);
+}
+
+/// A scene from memory rather than a file: a test's, or one a game wrote
+/// with `scene.write`. `name` is what it is found and written by.
+pub fn addScene(self: *App, name: []const u8, bytes: []const u8) !scenes_mod.SceneHandle {
+    return self.scenes.add(self.gpa, name, bytes);
+}
+
+/// The scene read from `path` already, if one was, however the path is
+/// spelt: `res://`, from the root, or the system's.
+pub fn findScene(self: *App, path: []const u8) ?scenes_mod.SceneHandle {
+    if (self.scenes.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.scenes.find(named);
+}
+
+/// The path a scene was read from: what an instance is written as.
+pub fn sceneSource(self: *App, handle: scenes_mod.SceneHandle) ?[]const u8 {
+    return self.scenes.sourceOf(handle);
+}
+
+/// Read a scene's file again, for an editor that has just saved it: what is
+/// made of it next is what was saved. What was made of it already stays.
+pub fn reloadScene(self: *App, handle: scenes_mod.SceneHandle) !bool {
+    return self.scenes.reload(self, handle);
+}
+
+pub fn unloadScene(self: *App, handle: scenes_mod.SceneHandle) void {
+    self.scenes.unload(self.gpa, handle);
+}
+
+/// A tween: an entity of its own, hanging from `owner` - `.none` for the
+/// top of the tree - whose steps move properties over time, and which goes
+/// once it is done. See `tween.zig`.
+pub fn tween(self: *App, owner: ecs.Entity) !ecs.Entity {
+    const made = try self.spawn(owner);
+    errdefer self.world.despawn(made);
+    try self.world.add(made, tween_mod.Tween{});
+    return made;
+}
+
+/// A step of `tween_entity`: the property `path` of `moved` - see
+/// `property.zig` - moved from what it holds when the step starts to `to`,
+/// over `seconds`.
+pub fn tweenProperty(self: *App, tween_entity: ecs.Entity, moved: ecs.Entity, path: []const u8, to: property_mod.Value, seconds: f32) !void {
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return error.NotATween;
+    const compiled = try property_mod.Property.compile(self, path);
+    if (to.as(compiled.kind) == null) return error.WrongKindOfValue;
+    const plan = try self.tweens.planOf(self.gpa, tween_entity);
+    try plan.steps.append(self.gpa, .{
+        .target = moved,
+        .property = compiled,
+        .to = to,
+        .seconds = @max(seconds, 0),
+        .ease = plan.ease,
+        .with_before = plan.parallel and plan.steps.items.len > 0,
+    });
+}
+
+/// A step that waits `seconds`.
+pub fn tweenInterval(self: *App, tween_entity: ecs.Entity, seconds: f32) !void {
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return error.NotATween;
+    const plan = try self.tweens.planOf(self.gpa, tween_entity);
+    try plan.steps.append(self.gpa, .{ .seconds = @max(seconds, 0), .with_before = plan.parallel and plan.steps.items.len > 0 });
+}
+
+/// The steps added after this start together with the one before them,
+/// rather than after it.
+pub fn tweenParallel(self: *App, tween_entity: ecs.Entity, together: bool) !void {
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return error.NotATween;
+    (try self.tweens.planOf(self.gpa, tween_entity)).parallel = together;
+}
+
+/// The curve the steps added after this move by: `linear`, `quad_out`,
+/// `back_in`, `elastic_out`, ... False for a name that is none.
+pub fn tweenEase(self: *App, tween_entity: ecs.Entity, name: []const u8) bool {
+    const kind = std.meta.stringToEnum(math.ease.Kind, name) orelse return false;
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return false;
+    const plan = self.tweens.planOf(self.gpa, tween_entity) catch return false;
+    plan.ease = kind;
+    return true;
+}
+
+/// Read a `.anim` file - an animation library - or find the one read from
+/// there already. What an `AnimationPlayer` plays; see `animation.zig`.
+pub fn loadAnimations(self: *App, path: []const u8) !animation_mod.AnimationLibraryHandle {
+    return self.animation_libraries.load(self, path);
+}
+
+/// An animation library from text rather than a file: a test's, or a
+/// tool's. A name given before gets the new text.
+pub fn addAnimations(self: *App, name: []const u8, text: []const u8) !animation_mod.AnimationLibraryHandle {
+    return self.animation_libraries.add(self.gpa, name, text);
+}
+
+pub fn findAnimations(self: *App, path: []const u8) ?animation_mod.AnimationLibraryHandle {
+    if (self.animation_libraries.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.animation_libraries.find(named);
+}
+
+/// Read a `.anim` file again, for an editor that has just saved it.
+pub fn reloadAnimations(self: *App, handle: animation_mod.AnimationLibraryHandle) !bool {
+    return self.animation_libraries.reload(self, handle);
+}
+
+/// Read a `.frames` file - animations of pictures - or find the one read
+/// from there already. What an `AnimatedSprite2D` plays; see
+/// `sprite_frames.zig`.
+pub fn loadSpriteFrames(self: *App, path: []const u8) !sprite_frames_mod.SpriteFramesHandle {
+    return self.sprite_frames.load(self, path);
+}
+
+/// New sprite frames, of no file until `saveSpriteFrames` writes them: one
+/// animation, `"default"`, at 5 frames a second.
+pub fn newSpriteFrames(self: *App) !sprite_frames_mod.SpriteFramesHandle {
+    return self.sprite_frames.addNew(self);
+}
+
+/// `frames` written to `path`. New ones become that file's; a file's are
+/// written there as a copy.
+pub fn saveSpriteFrames(self: *App, frames: sprite_frames_mod.SpriteFramesHandle, path: []const u8) !void {
+    return self.sprite_frames.saveAs(self, frames, path);
+}
+
+/// Sprite frames from text rather than a file. A name given before gets the
+/// new text.
+pub fn addSpriteFrames(self: *App, name: []const u8, text: []const u8) !sprite_frames_mod.SpriteFramesHandle {
+    return self.sprite_frames.add(self, name, text);
+}
+
+/// Sprite frames made in code: `clips` over a `columns` by `rows` grid of
+/// `texture`, found by `name`.
+pub fn addGridFrames(self: *App, name: []const u8, texture: Assets.TextureHandle, columns: u16, rows: u16, clips: []const sprite_frames_mod.GridClip) !sprite_frames_mod.SpriteFramesHandle {
+    return self.sprite_frames.addGrid(self, name, texture, columns, rows, clips);
+}
+
+pub fn findSpriteFrames(self: *App, path: []const u8) ?sprite_frames_mod.SpriteFramesHandle {
+    if (self.sprite_frames.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.sprite_frames.find(named);
+}
+
+pub fn reloadSpriteFrames(self: *App, handle: sprite_frames_mod.SpriteFramesHandle) !bool {
+    return self.sprite_frames.reload(self, handle);
+}
+
+/// Read a `.shader` file, or find the one read from there already: what a
+/// `Material` draws with. One that does not compile says why in the log and
+/// draws as none. See `shaders.zig`.
+pub fn loadShader(self: *App, path: []const u8) !shaders_mod.ShaderHandle {
+    return self.shaders.load(self, path);
+}
+
+/// A shader from text rather than a file: a test's, or a tool's. A name
+/// given before gets the new text.
+pub fn addShader(self: *App, name: []const u8, text: []const u8) !shaders_mod.ShaderHandle {
+    return self.shaders.add(self, name, text);
+}
+
+pub fn findShader(self: *App, path: []const u8) ?shaders_mod.ShaderHandle {
+    if (self.shaders.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.shaders.find(named);
+}
+
+/// Text an editor has open for a shader and has not saved, as it is typed:
+/// what names it draws with it from the next frame, or - while it does not
+/// compile - with what last did. `reloadShader` goes back to the file.
+pub fn previewShader(self: *App, handle: shaders_mod.ShaderHandle, text: []const u8) !void {
+    return self.shaders.preview(self, handle, text);
+}
+
+/// Read a shader's file again, for an editor that has just saved it: what
+/// names it draws with the new one from the next frame.
+pub fn reloadShader(self: *App, handle: shaders_mod.ShaderHandle) !bool {
+    return self.shaders.reload(self, handle);
+}
+
+/// A shader as it was read: its text, what it compiled to, and why it did
+/// not when it did not.
+pub fn shaderOf(self: *App, handle: shaders_mod.ShaderHandle) ?*const shaders_mod.Shader {
+    return self.shaders.get(handle);
+}
+
+/// Give `entity`'s material a number for its shader's field `name`: one
+/// float, or one per component of a vector, a matrix's column by column.
+/// None gives it back what the file says.
+pub fn setShaderParam(self: *App, entity: ecs.Entity, name: []const u8, numbers: []const f32) !void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    try self.shader_params.set(self.gpa, entity, name, numbers);
+}
+
+/// What `entity`'s material gives its shader's field `name`, or null when it
+/// gives what the file says.
+pub fn shaderParam(self: *App, entity: ecs.Entity, name: []const u8) ?[]const f32 {
+    return self.shader_params.get(entity, name);
+}
+
+/// The field `name` of `entity`'s material's shader, or null for none: one
+/// its shader has not, or a shader that did not compile.
+pub fn shaderParamField(self: *App, entity: ecs.Entity, name: []const u8) ?shaders_mod.material.Field {
+    const held = self.world.get(entity, shaders_mod.Material) orelse return null;
+    const drawn = self.shaders.get(held.shader) orelse return null;
+    for (drawn.params()) |field| {
+        if (std.mem.eql(u8, field.name, name)) return field;
+    }
+    return null;
+}
+
+/// What `entity`'s material gives its shader's field `name` - its own, or
+/// else the file's - as the floats `shaders.pack` puts in the buffer, into
+/// `out`. Null for a field its shader does not have.
+pub fn shaderParamOrDefault(self: *App, entity: ecs.Entity, name: []const u8, out: *[16]f32) ?[]const f32 {
+    const held = self.world.get(entity, shaders_mod.Material) orelse return null;
+    const drawn = self.shaders.get(held.shader) orelse return null;
+    for (drawn.params()) |field| {
+        if (!std.mem.eql(u8, field.name, name)) continue;
+        const count = shaders_mod.componentsOf(field.ty);
+        out.* = @splat(0);
+        if (field.default) |first| @memcpy(out[0..@min(first.len, count)], first[0..@min(first.len, count)]);
+        if (self.shader_params.get(entity, name)) |own| @memcpy(out[0..@min(own.len, count)], own[0..@min(own.len, count)]);
+        return out[0..count];
+    }
+    return null;
+}
+
+/// Whether a frame has something in it that reads what is drawn under it:
+/// then it is drawn where it can be read. See `render/screen.zig`.
+fn readsScreen(self: *App) bool {
+    var it = ecs.Query(.{shaders_mod.Material}).over(&self.world) catch return false;
+    while (it.next()) |chunk| {
+        for (chunk.slice(shaders_mod.Material)) |held| {
+            const compiled = self.shaders.compiledOf(held.shader) orelse continue;
+            if (compiled.readsScreen()) return true;
+        }
+    }
+    return false;
+}
+
+/// Draw what each active `RenderView` sees into its picture: before the
+/// screen, so what shows one shows this frame's. See `views.zig`.
+fn drawViews(self: *App) !void {
+    var it = try ecs.Query(.{ components.Transform2D, components.Camera2D, components.RenderView }).over(&self.world);
+    while (it.next()) |chunk| {
+        const places = chunk.slice(components.Transform2D);
+        const cameras = chunk.slice(components.Camera2D);
+        const views = chunk.slice(components.RenderView);
+        for (places, cameras, views, chunk.entities) |local, camera, view, entity| {
+            if (!view.active) continue;
+            const placed = hierarchy.resolve(&self.world, &self.snapshots, entity, local, self.time.alpha()) orelse continue;
+            const picture = try self.viewPicture(entity, view);
+            const gpu = (self.assets.get(picture) orelse continue).gpu;
+            self.sprites.drawing = entity;
+            defer self.sprites.drawing = .none;
+            const through: View = .through(camera, placed, @floatFromInt(@max(view.width, 1)), @floatFromInt(@max(view.height, 1)));
+            try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, &self.inherited, .{ .texture = gpu }, through, view.clear_color, self.time.alpha());
+        }
+    }
+}
+
+/// A render view's picture, at the size it says now.
+fn viewPicture(self: *App, entity: ecs.Entity, view: components.RenderView) !Assets.TextureHandle {
+    const filter: rhi.Filter = if (view.filter == .linear) .linear else .nearest;
+    if (self.views.textureOf(entity)) |held| {
+        try self.assets.resizeRenderTexture(held, view.width, view.height, filter);
+        return held;
+    }
+    const made = try self.assets.addRenderTexture(view.width, view.height, filter, self.drawnUpsideDown(), "render view");
+    errdefer self.assets.unload(made);
+    try self.views.textures.put(self.gpa, entity, made);
+    return made;
+}
+
+/// The picture a `RenderView` draws, as a texture: to put on a sprite, a
+/// texture rect, or anything else a texture goes, from code. Made now if it
+/// has not drawn one yet; `error.NotAView` for an entity with no view.
+pub fn viewTexture(self: *App, view: ecs.Entity) !Assets.TextureHandle {
+    const held = self.world.get(view, components.RenderView) orelse return error.NotAView;
+    return self.viewPicture(view, held.*);
+}
+
+/// Draw a control's box the interface left for its material: see
+/// `control.Nodes.drawCustom`.
+fn drawControlBox(context: ?*anyopaque, command: ui_lib.RenderCommand, scissor: ?rhi.Rect, into: rhi.RenderTarget, size: ui_lib.Dimensions) anyerror!void {
+    const self: *App = @ptrCast(@alignCast(context.?));
+    try self.control_nodes.drawCustom(self, command, scissor, into, size);
+}
+
+/// Read a sound's file - `.wav`, `.ogg` or `.mp3` - or find the one read
+/// from there already. What an `AudioPlayer` plays; see `audio.zig`.
+pub fn loadAudio(self: *App, path: []const u8) !audio_mod.AudioClipHandle {
+    return self.audio.load(self, path);
+}
+
+/// A sound from memory rather than a file: a test's, or a tool's. Its
+/// format is what its bytes say, or else its name's ending.
+pub fn addAudio(self: *App, name: []const u8, bytes: []const u8) !audio_mod.AudioClipHandle {
+    return self.audio.add(name, bytes);
+}
+
+/// The sound read from `path` already, if one was, however the path is
+/// spelt.
+pub fn findAudio(self: *App, path: []const u8) ?audio_mod.AudioClipHandle {
+    if (self.audio.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.audio.find(named);
+}
+
+pub fn audioSource(self: *App, handle: audio_mod.AudioClipHandle) ?[]const u8 {
+    return self.audio.sourceOf(handle);
+}
+
+/// Let a sound go, and every player playing it stop.
+pub fn unloadAudio(self: *App, handle: audio_mod.AudioClipHandle) void {
+    self.audio.unload(handle);
+}
+
+/// How long a sound is, in seconds: from Flux, `app.audioLength("res://door.ogg")`.
+pub fn audioLength(self: *App, clip: audio_mod.AudioClipHandle) f32 {
+    const held = self.audio.get(clip) orelse return 0;
+    return @floatCast(held.info.seconds());
+}
+
+/// Turn the bus called `name` up or down, in decibels. False for a bus the
+/// project has not.
+pub fn setBusVolumeDb(self: *App, name: []const u8, db: f32) bool {
+    return self.audio.setBusVolumeDb(name, db);
+}
+
+/// A bus's volume in decibels; `audio.silent_db` for one there is not.
+pub fn busVolumeDb(self: *App, name: []const u8) f32 {
+    return self.audio.busVolumeDb(name) orelse audio_mod.silent_db;
+}
+
+pub fn setBusMute(self: *App, name: []const u8, mute: bool) bool {
+    return self.audio.setBusMute(name, mute);
+}
+
+pub fn isBusMuted(self: *App, name: []const u8) bool {
+    return self.audio.isBusMuted(name);
+}
+
+/// A slider's 0 to 1 as decibels, and back: `app.setBusVolumeDb("Music",
+/// app.linearToDb(slider.value))`.
+pub fn linearToDb(self: *const App, linear: f32) f32 {
+    _ = self;
+    return audio_mod.linearToDb(linear);
+}
+
+pub fn dbToLinear(self: *const App, db: f32) f32 {
+    _ = self;
+    return audio_mod.dbToLinear(db);
+}
+
+/// Read a `.data` file, or find the one read from there already: see
+/// `data`. What it says is read when its struct is made, by `readData`.
+pub fn loadData(self: *App, path: []const u8) !data_mod.DataHandle {
+    return self.data_files.load(self, path);
+}
+
+/// A data file from memory rather than a file: a test's, or one a tool
+/// wrote with `data.write`. `name` is what it is found and written by.
+pub fn addData(self: *App, name: []const u8, bytes: []const u8) !data_mod.DataHandle {
+    return self.data_files.add(self.gpa, name, bytes);
+}
+
+/// The data file read from `path` already, if one was, however the path is
+/// spelt.
+pub fn findData(self: *App, path: []const u8) ?data_mod.DataHandle {
+    if (self.data_files.find(path)) |known| return known;
+    const named = self.project.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    return self.data_files.find(named);
+}
+
+pub fn dataSource(self: *App, handle: data_mod.DataHandle) ?[]const u8 {
+    return self.data_files.sourceOf(handle);
+}
+
+/// Read a data file again, for an editor that has just saved it: what
+/// `readData` makes next is what was saved.
+pub fn reloadData(self: *App, handle: data_mod.DataHandle) !bool {
+    return self.data_files.reload(self, handle);
+}
+
+pub fn unloadData(self: *App, handle: data_mod.DataHandle) void {
+    self.data_files.unload(self.gpa, handle);
+}
+
+/// A data file's struct, made anew and given the file's values - from Flux,
+/// `app.readData("res://dialogue/intro.data")`. A value the struct cannot
+/// hold is said and passed over, as a scene's `"exports"` are.
+pub fn readData(self: *App, handle: data_mod.DataHandle) !script_mod.flux.Value {
+    const scripts = self.scripts orelse return error.NoScripts;
+    const held = self.data_files.get(handle) orelse return error.NoSuchData;
+    const contents = try data_mod.read(self.gpa, held.bytes);
+    defer contents.deinit();
+    return scripts.calls.readData(scripts, &contents, held.source);
+}
+
+/// A scene made as a thing in the world: its one root, hanging from
+/// `parent` - `.none` for the top of the tree - with everything else of the
+/// scene under it. What a spawner makes a bat of, or a level a door of.
+///
+/// ```zig
+/// const bat = try app.loadScene("res://enemies/bat.json");
+/// const one = try app.instantiate(bat, cave);
+/// ```
+///
+/// Each instance's entities are given UUIDs of their own, made from the
+/// instance's and the scene's, so two are never confused and a scene that
+/// names one inside an instance finds it again every time it is read. A
+/// scene saved with an instance in it writes the instance - the file it is
+/// of, and what its root has that the file does not give it - so an edit of
+/// the file reaches every instance of it. A scene of more than one root is
+/// `error.NotOneRoot`: save its roots under one first.
+pub fn instantiate(self: *App, scene_handle: scenes_mod.SceneHandle, parent: ecs.Entity) !ecs.Entity {
+    const held = self.scenes.get(scene_handle) orelse return error.NoSuchScene;
+    if (!parent.isNone() and !self.world.isAlive(parent)) return error.NoSuchEntity;
+    var made: std.ArrayList(ecs.Entity) = .empty;
+    defer made.deinit(self.gpa);
+    errdefer for (made.items) |e| if (self.world.isAlive(e)) self.world.despawn(e);
+    const within: scene.Nesting = .{ .scene = scene_handle };
+    const loaded = try scene.read(self, held.bytes, .{
+        .parent = parent,
+        .instance = self.newUuid(),
+        .spawned = &made,
+        .within = &within,
+    });
+    try self.keepInstance(loaded.root, scene_handle, made.items);
+    return loaded.root;
+}
+
+/// One instance of a scene: see `instantiate`.
+pub const Instance = struct {
+    scene: scenes_mod.SceneHandle,
+    /// What it made, its root not among them, the insides of the instances
+    /// in it among them.
+    members: []ecs.Entity,
+    /// Its root as the scene made it, every field of every component, for
+    /// a scene written with the instance in it to write what differs.
+    template: []u8,
+};
+
+/// Remember `root` as an instance of `scene_handle`, which made `made`.
+pub fn keepInstance(self: *App, root: ecs.Entity, scene_handle: scenes_mod.SceneHandle, made: []const ecs.Entity) !void {
+    const gpa = self.gpa;
+    var members: std.ArrayList(ecs.Entity) = .empty;
+    errdefer members.deinit(gpa);
+    try members.ensureTotalCapacity(gpa, made.len);
+    for (made) |e| {
+        if (!e.eql(root)) members.appendAssumeCapacity(e);
+    }
+    const template = try scene.entityTemplate(self, gpa, root);
+    errdefer gpa.free(template);
+    try self.instances.ensureUnusedCapacity(gpa, 1);
+    const owned = try members.toOwnedSlice(gpa);
+    self.instances.putAssumeCapacity(root, .{ .scene = scene_handle, .members = owned, .template = template });
+}
+
+/// What `root` is an instance of, when it is the root of one.
+pub fn instanceOf(self: *const App, root: ecs.Entity) ?*const Instance {
+    return self.instances.getPtr(root);
+}
+
+/// The root of the instance an entity is inside of, if it is inside one -
+/// the outermost, where instances are inside instances. Not for a root
+/// itself unless it is inside another.
+pub fn instanceHolding(self: *const App, entity: ecs.Entity) ?ecs.Entity {
+    var found: ?ecs.Entity = null;
+    for (self.instances.keys(), self.instances.values()) |root, held| {
+        if (!self.world.isAlive(root)) continue;
+        for (held.members) |member| {
+            if (!member.eql(entity)) continue;
+            // The outermost holds the most.
+            if (found) |other| {
+                if (self.instances.getPtr(other).?.members.len >= held.members.len) break;
+            }
+            found = root;
+            break;
+        }
+    }
+    return found;
+}
+
+/// An instance made the scene's own: its insides are written as themselves
+/// from now on, and a change to the scene file reaches it no more.
+pub fn makeLocal(self: *App, root: ecs.Entity) void {
+    const held = self.instances.fetchSwapRemove(root) orelse return;
+    self.gpa.free(held.value.members);
+    self.gpa.free(held.value.template);
+}
+
+fn freeInstances(self: *App) void {
+    for (self.instances.values()) |held| {
+        self.gpa.free(held.members);
+        self.gpa.free(held.template);
+    }
+}
+
+/// Forget the instances whose root has died, at the end of the frame.
+fn forgetDeadInstances(self: *App) void {
+    var at = self.instances.count();
+    while (at > 0) {
+        at -= 1;
+        const root = self.instances.keys()[at];
+        if (self.world.isAlive(root)) continue;
+        const held = self.instances.values()[at];
+        self.gpa.free(held.members);
+        self.gpa.free(held.template);
+        self.instances.swapRemoveAt(at);
+    }
+}
+
+/// Despawn an entity and everything that hangs from it, now rather than at
+/// the end of the frame.
+pub fn despawnTree(self: *App, entity: ecs.Entity) Allocator.Error!void {
+    if (!self.world.isAlive(entity)) return;
+    var doomed: std.ArrayList(ecs.Entity) = .empty;
+    defer doomed.deinit(self.gpa);
+    try doomed.append(self.gpa, entity);
+    var at: usize = 0;
+    while (at < doomed.items.len) : (at += 1) {
+        try doomed.appendSlice(self.gpa, self.children(doomed.items[at]));
+    }
+    for (doomed.items) |e| {
+        if (self.world.isAlive(e)) self.world.despawn(e);
+    }
+}
+
+/// Play another scene from the end of this frame: the one playing goes,
+/// with everything that hangs from it, and this is read in its place.
+/// What does not belong to the scene - an autoload, what the game spawned
+/// at the top of the tree itself - stays. See `openScene`.
+///
+/// ```zig
+/// app.changeScene(try app.loadScene("res://levels/two.json"));
+/// ```
+pub fn changeScene(self: *App, scene_handle: scenes_mod.SceneHandle) void {
+    self.scene_next = scene_handle;
+}
+
+/// `changeScene`, now: before the first frame, or from a tool.
+pub fn openScene(self: *App, scene_handle: scenes_mod.SceneHandle) !void {
+    const held = self.scenes.get(scene_handle) orelse return error.NoSuchScene;
+    // Gone first, so the next is read with its own UUIDs even when it is
+    // the same scene again.
+    for (self.scene_roots.items) |root| try self.despawnTree(root);
+    self.scene_roots.clearRetainingCapacity();
+    self.scene_now = .none;
+    var made: std.ArrayList(ecs.Entity) = .empty;
+    defer made.deinit(self.gpa);
+    _ = try scene.read(self, held.bytes, .{ .spawned = &made });
+    for (made.items) |e| {
+        if (self.parentOf(e).isNone() and !self.world.has(e, tilemap.TileChunk)) try self.scene_roots.append(self.gpa, e);
+    }
+    self.scene_now = scene_handle;
+}
+
+/// The scene the game is playing: what `openScene` or `changeScene` opened
+/// last. `.none` before one has.
+pub fn currentScene(self: *const App) scenes_mod.SceneHandle {
+    return self.scene_now;
+}
+
+/// The first entity at the top of the scene the game is playing - the one
+/// root of a scene that has one - or `.none` before a scene is open.
+pub fn currentSceneRoot(self: *const App) ecs.Entity {
+    for (self.scene_roots.items) |root| if (self.world.isAlive(root)) return root;
+    return .none;
+}
+
+/// Open what the project says a game opens with: its boot splash while it
+/// reads, its autoloads - each named after its file and kept when the scene
+/// changes - and then its main scene. What `Options.open_project` does at
+/// `startup`.
+pub fn openProject(self: *App) !void {
+    const settings = self.project.settings orelse return;
+    const application = settings.application;
+    if (application.boot_splash.show) self.showBootSplash(application.boot_splash);
+    try self.openAutoloads();
+    if (application.main_scene.len > 0) try self.openScene(try self.loadScene(application.main_scene));
+}
+
+/// The project's `application.autoload` list, made: each scene or script an
+/// entity named after its file, which a scene change leaves. What
+/// `openProject` does before the main scene, for a tool that opens another.
+pub fn openAutoloads(self: *App) !void {
+    const settings = self.project.settings orelse return;
+    for (settings.application.autoload) |path| {
+        self.autoload(path) catch |err| {
+            log.err("the autoload {s} did not open: {t}", .{ path, err });
+            return err;
+        };
+    }
+}
+
+/// One autoload: a script on an entity of its own, or a scene's instance,
+/// named after its file.
+fn autoload(self: *App, path: []const u8) !void {
+    const name = std.fs.path.stem(path);
+    const made = if (std.ascii.endsWithIgnoreCase(path, ".flux")) blk: {
+        const file = try self.loadScript(path);
+        break :blk try self.world.spawnWith(.{script_mod.Script.of(file)});
+    } else try self.instantiate(try self.loadScene(path), .none);
+    try self.setFreeName(made, name);
+}
+
+/// A frame of the project's boot splash: its colour, and its picture in the
+/// middle of the window. Nothing without a window.
+fn showBootSplash(self: *App, splash: Project.Application.BootSplash) void {
+    if (self.window == null) return;
+    const kept = self.background;
+    defer self.background = kept;
+    self.background = splash.color;
+    var shown: ?ecs.Entity = null;
+    if (splash.image.len > 0) {
+        if (self.assets.loadTexture(splash.image, .{ .filter = .linear })) |picture| {
+            const middle = self.screenToWorld(@as(f32, @floatFromInt(self.frame.width)) / 2, @as(f32, @floatFromInt(self.frame.height)) / 2);
+            shown = self.world.spawnWith(.{ components.Transform2D.at(middle.x, middle.y), components.Sprite.of(picture) }) catch null;
+        } else |err| log.warn("the boot splash's picture {s} did not read: {t}", .{ splash.image, err });
+    }
+    defer if (shown) |e| self.world.despawn(e);
+    self.render() catch |err| log.warn("the boot splash was not drawn: {t}", .{err});
+}
+
+/// Read a scene beside the game: its file, and the pictures it names
+/// decoded, on a thread of its own - on a page, a piece a frame.
+/// `loadProgress` says how far it has got, and `loadScene` of the same file
+/// - or a `changeScene` to it from a script - takes it once it is done,
+/// without a pause. A file on its way already, or read already, is left as
+/// it is. See `background`.
+///
+/// ```zig
+/// try app.loadInBackground("res://levels/two.json");
+/// // each frame:
+/// bar.value = app.loadProgress("res://levels/two.json") * 100;
+/// if (bar.value >= 100) app.changeScene(try app.loadScene("res://levels/two.json"));
+/// ```
+pub fn loadInBackground(self: *App, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    if (self.findScene(path) != null) return;
+    // Memory any thread can ask for, since the load's thread does.
+    const gpa = std.heap.smp_allocator;
+    const source = try self.project.canonical(gpa, path);
+    if (self.loadOf(source) != null) {
+        gpa.free(source);
+        return;
+    }
+    errdefer gpa.free(source);
+    const root = try gpa.dupe(u8, self.project.root);
+    errdefer gpa.free(root);
+    const load = try gpa.create(background_mod.SceneLoad);
+    errdefer gpa.destroy(load);
+    load.* = .{ .gpa = gpa, .io = io, .source = source, .root = root };
+    try self.loads.append(self.gpa, load);
+    if (background_mod.threaded) {
+        load.thread = std.Thread.spawn(.{}, background_mod.SceneLoad.run, .{load}) catch null;
+        // No thread to be had: a piece a frame, as on a page.
+        if (load.thread == null) load.run();
+    }
+}
+
+/// How far the scene at `path` has got, from nought to one: one once it is
+/// read, in the background or not, and nought while nothing is reading it.
+pub fn loadProgress(self: *App, path: []const u8) f32 {
+    if (self.findScene(path) != null) return 1;
+    const named = self.project.canonical(self.gpa, path) catch return 0;
+    defer self.gpa.free(named);
+    const load = self.loadOf(named) orelse return 0;
+    // One only once it can be taken without a wait.
+    return if (load.done()) 1 else @min(load.progress(), 0.99);
+}
+
+/// The background load of the file at `source`, as `Project.canonical`
+/// spells it.
+fn loadOf(self: *App, source: []const u8) ?*background_mod.SceneLoad {
+    for (self.loads.items) |load| if (std.mem.eql(u8, load.source, source)) return load;
+    return null;
+}
+
+/// The scene a background load read, once it is done - waited for, if it
+/// is not - with the pictures it decoded made textures. The load is let go
+/// of either way. A scene that did not read is its error.
+fn takeLoad(self: *App, load: *background_mod.SceneLoad) !scenes_mod.SceneHandle {
+    defer self.dropLoad(load);
+    load.join();
+    while (load.work()) {}
+    if (load.failure) |err| return err;
+    for (load.decoded.items) |picture| {
+        if (self.assets.findTexture(picture.source) != null) continue;
+        _ = self.assets.adoptTexture(picture.source, picture.width, picture.height, picture.pixels, .{}) catch |err|
+            log.warn("the picture {s} did not reach the GPU: {t}", .{ picture.source, err });
+    }
+    if (self.scenes.find(load.source)) |known| {
+        _ = try self.scenes.add(self.gpa, load.source, load.bytes);
+        return known;
+    }
+    return self.scenes.add(self.gpa, load.source, load.bytes);
+}
+
+/// A load let go of, whether it was taken or not.
+fn dropLoad(self: *App, load: *background_mod.SceneLoad) void {
+    for (self.loads.items, 0..) |held, at| {
+        if (held != load) continue;
+        _ = self.loads.swapRemove(at);
+        break;
+    }
+    load.deinit();
+    load.gpa.destroy(load);
 }
 
 /// Write a scene with nothing in it to `path`: a new level, for an editor to
@@ -1949,6 +3839,104 @@ pub fn sceneInfo(self: *App, path: []const u8, diagnostics: ?*json.Diagnostics) 
     return scene.readInfo(self.gpa, bytes, diagnostics);
 }
 
+/// The most a file is read as text: `readText`.
+pub const text_limit = 64 << 20;
+
+/// The text of the file at `path` - `res://`, `user://`, `uid://` or the
+/// system's own - in `gpa`'s memory, for the caller to free.
+/// `error.FileNotFound` where there is none.
+pub fn readText(self: *App, gpa: Allocator, path: []const u8) ![]u8 {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    return std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(text_limit));
+}
+
+/// Write `text` to the file at `path`, over what it held, making the
+/// folders on the way. The new text is written beside the old and then put
+/// in its place, so a game that stops halfway through a save leaves the
+/// last one whole.
+pub fn writeText(self: *App, path: []const u8, text: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, file, .{ .replace = true, .make_path = true });
+    defer atomic.deinit(io);
+    try atomic.file.writeStreamingAll(io, text);
+    try atomic.replace(io);
+}
+
+/// Whether there is a file or a folder at `path`.
+pub fn fileExists(self: *App, path: []const u8) bool {
+    const io = self.io orelse return false;
+    const file = self.project.osPath(self.gpa, path) catch return false;
+    defer self.gpa.free(file);
+    std.Io.Dir.cwd().access(io, file, .{}) catch return false;
+    return true;
+}
+
+/// Make the folder at `path`, and the ones it is in. One there already is
+/// fine.
+pub fn makeDir(self: *App, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try std.Io.Dir.cwd().createDirPath(io, file);
+}
+
+/// Take out the file at `path`, or the folder, when it is empty.
+pub fn removeFile(self: *App, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    std.Io.Dir.cwd().deleteFile(io, file) catch |err| switch (err) {
+        error.IsDir => try std.Io.Dir.cwd().deleteDir(io, file),
+        else => return err,
+    };
+}
+
+/// What a folder holds, by name, in order. See `listDir`.
+pub const Listing = struct {
+    /// A folder's name ends with `/`: `slots/`.
+    names: [][]u8,
+
+    pub fn deinit(self: Listing, gpa: Allocator) void {
+        for (self.names) |name| gpa.free(name);
+        gpa.free(self.names);
+    }
+};
+
+/// The names in the folder at `path`, sorted, a folder's ending with `/`.
+/// `error.FileNotFound` where there is none.
+pub fn listDir(self: *App, gpa: Allocator, path: []const u8) !Listing {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    var dir = try std.Io.Dir.cwd().openDir(io, file, .{ .iterate = true });
+    defer dir.close(io);
+
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (names.items) |name| gpa.free(name);
+        names.deinit(gpa);
+    }
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        try names.ensureUnusedCapacity(gpa, 1);
+        const folder = entry.kind == .directory;
+        const name = try gpa.alloc(u8, entry.name.len + @intFromBool(folder));
+        @memcpy(name[0..entry.name.len], entry.name);
+        if (folder) name[entry.name.len] = '/';
+        names.appendAssumeCapacity(name);
+    }
+    std.mem.sort([]u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return .{ .names = try names.toOwnedSlice(gpa) };
+}
+
 /// Everything out of the world at once - every entity, name and UUID - and
 /// an empty world in its place: a level loaded over another is this and then
 /// `loadScene`. Not from inside a query, which is walking the world it
@@ -1962,14 +3950,28 @@ pub fn clearWorld(self: *App) void {
     self.world = .init(self.gpa);
     self.snapshots.clearRetainingCapacity();
     self.orphans.clearRetainingCapacity();
-    for (self.names.values()) |name| self.gpa.free(name);
+    self.tile_chunks.clearRetainingCapacity();
     self.names.clearRetainingCapacity();
-    self.by_name.clearRetainingCapacity();
+    self.freeNames();
+    self.tree.forget();
+    self.freeGroups();
+    self.groups.clearRetainingCapacity();
     self.uuids.clearRetainingCapacity();
     self.by_uuid.clearRetainingCapacity();
     self.sibling_ranks.clearRetainingCapacity();
     self.unknown_components.clear(self.gpa);
+    self.exports.clear();
+    self.freeInstances();
+    self.instances.clearRetainingCapacity();
+    self.scene_roots.clearRetainingCapacity();
+    self.scene_now = .none;
     self.signals.clear();
+    self.audio.clear();
+    self.tweens.clear(self.gpa);
+    self.texts.clear(self.gpa);
+    self.shader_params.clear(self.gpa);
+    self.views.clear(&self.assets);
+    self.animation_players.clear(self.gpa);
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
 }
@@ -2060,6 +4062,21 @@ pub fn scriptSource(self: *App, handle: script_mod.ScriptHandle) ?[]const u8 {
     return scripts.sourceOf(handle);
 }
 
+/// The fields the struct of `entity`'s script marks `@export`, made or not,
+/// as many as `found` holds: what an editor shows under the `Script`. None
+/// for an entity with no script, or one whose script does not compile.
+pub fn exportedFields(self: *App, entity: ecs.Entity, found: []script_mod.flux.FieldInfo) []script_mod.flux.FieldInfo {
+    const scripts = self.scripts orelse return found[0..0];
+    return scripts.calls.exportedFields(scripts, entity, found);
+}
+
+/// The same for the struct `struct_name` of `script` - empty for the one
+/// named after its file: what an editor shows of a data file.
+pub fn structFields(self: *App, script: script_mod.ScriptHandle, struct_name: []const u8, found: []script_mod.flux.FieldInfo) []script_mod.flux.FieldInfo {
+    const scripts = self.scripts orelse return found[0..0];
+    return scripts.calls.structFields(scripts, script, struct_name, found);
+}
+
 /// What an editor's language service needs to check and complete a game's
 /// scripts as the game compiles them: `app` and `self.entity`. Hand it to
 /// `flux.service`, with a loader for the files being edited. It needs no
@@ -2095,6 +4112,14 @@ pub fn moveFile(self: *App, from: []const u8, to: []const u8) !void {
     defer self.gpa.free(new);
     try self.project.moveFile(old, new);
     try self.assets.renamed(old, new);
+    try self.tile_sets.renamed(self.gpa, old, new);
+    try self.scenes.renamed(self.gpa, old, new);
+    try self.data_files.renamed(self.gpa, old, new);
+    try self.audio.renamed(old, new);
+    try self.animation_libraries.renamed(self.gpa, old, new);
+    try self.sprite_frames.renamed(self.gpa, old, new);
+    try self.shaders.renamed(self.gpa, old, new);
+    try self.themes.renamed(self.gpa, old, new);
     if (self.scripts) |scripts| try scripts.renamed(old, new);
 }
 
@@ -2266,16 +4291,45 @@ pub const reflect_opaque = true;
 pub const reflect_methods = .{
     .quit,
     .setName,
+    .setFreeName,
     .nameOf,
     .find,
+    .setParent,
+    .parentOf,
+    .hangsFrom,
+    .childCount,
+    .childAt,
+    .childNamed,
+    .findPath,
+    .findIn,
+    .addToGroup,
+    .removeFromGroup,
+    .isInGroup,
+    .groupSize,
+    .groupMember,
+    .callGroup,
+    .setPaused,
+    .isPaused,
+    .isProcessing,
     .clearWorld,
     .addComponentNamed,
     .removeComponentNamed,
     .stateNamed,
     .setStateNamed,
     .saveScene,
-    .loadScene,
+    .readScene,
+    .loadInBackground,
+    .loadProgress,
+    .currentScene,
+    .currentSceneRoot,
     .createTimer,
+    .randomFloat,
+    .randomRange,
+    .randomInt,
+    .randomChance,
+    .randomIndex,
+    .seedRandom,
+    .randomize,
     .worldTransform,
     .setWorldTransform,
     .globalPosition,
@@ -2294,6 +4348,54 @@ pub const reflect_methods = .{
     .moveLocalY,
     .rotate,
     .applyScale,
+    .setInputAsHandled,
+    .bindAction,
+    .clearAction,
+    .spawn,
+    .instantiate,
+    .changeScene,
+    .readData,
+    .newSpriteFrames,
+    .loadSpriteFrames,
+    .saveSpriteFrames,
+    .tween,
+    .tweenProperty,
+    .tweenInterval,
+    .tweenParallel,
+    .tweenEase,
+    .grabFocus,
+    .hasFocus,
+    .releaseFocus,
+    .controlRect,
+    .setAnchorsPreset,
+    .audioLength,
+    .setBusVolumeDb,
+    .busVolumeDb,
+    .setBusMute,
+    .isBusMuted,
+    .linearToDb,
+    .dbToLinear,
+    .nextFrame,
+    .callDeferred,
+    .keyDown,
+    .keyAxis,
+    .actionDown,
+    .actionJustPressed,
+    .actionJustReleased,
+    .actionStrength,
+    .actionAxis,
+    .actionVector,
+    .pressAction,
+    .releaseAction,
+    .describeAction,
+    .saveInputMap,
+    .loadInputMap,
+    .isOnFloor,
+    .moveAndSlide,
+    .moveAndCollide,
+    .cellAt,
+    .tileData,
+    .tileDataAt,
     .screenToWorld,
     .worldToScreen,
     .pointerInWorld,
@@ -2305,12 +4407,17 @@ pub const reflect_methods = .{
     .toggleFullscreen,
     .setWindowTitle,
     .setWindowSize,
+    .windowSize,
     .setWindowPosition,
     .windowPosition,
     .setWindowState,
     .windowState,
     .setVsync,
     .vsync,
+    .setMaxFps,
+    .maxFps,
+    .setInterfaceZoom,
+    .interfaceZoom,
     .setCursor,
     .cursor,
     .setCursorShape,
@@ -2345,7 +4452,7 @@ fn callValue(receiver: reflect.Value, name: []const u8, args: []const reflect.Va
 
     // Taken whole - error or value - so that an error comes back as one,
     // rather than going into `result` or nowhere.
-    var held: [64]u8 align(16) = undefined;
+    var held: [128]u8 align(16) = undefined;
     if (returns.size > held.len or returns.alignment > 16) return error.Unsupported;
     const returned: reflect.Value = .init(returns, &held);
     try receiver.call(name, args, returned);
@@ -2358,13 +4465,13 @@ fn callValue(receiver: reflect.Value, name: []const u8, args: []const reflect.Va
 // Signals and events
 // -------------------------------------------------------------------------
 //
-// Godot's signals, on components, and the typed events the engine's own
-// are made from. See `signals.zig` and `events.zig`.
+// Signals, on components, and the typed events the engine's own are made
+// from. See `signals.zig` and `events.zig`.
 
 pub const Signal = signals_mod.Signal;
 
-/// The signal `name` that `C` declares, of `entity`: Godot's
-/// `entity.name`, checked as it is compiled.
+/// The signal `name` that `C` declares, of `entity`, checked as it is
+/// compiled.
 ///
 /// ```zig
 /// try app.signal(player, Health, .hit).connect(.method(hud, "_on_player_hit"), .{});
@@ -2432,7 +4539,6 @@ pub fn emitNamed(self: *App, entity: ecs.Entity, name: []const u8, values: []con
 }
 
 /// Whether one of `entity`'s components declares a signal by that name.
-/// Godot's `has_signal`.
 pub fn hasSignal(self: *App, entity: ecs.Entity, name: []const u8) bool {
     _ = self.signalNamed(entity, name) catch |err| return err == error.AmbiguousSignal;
     return true;
@@ -2440,7 +4546,7 @@ pub fn hasSignal(self: *App, entity: ecs.Entity, name: []const u8) bool {
 
 /// Every signal `entity` has, component by component in the order they
 /// were registered - its script's where `Script` is - as many as `found`
-/// holds. Godot's `get_signal_list`.
+/// holds.
 pub fn signalsOf(self: *App, entity: ecs.Entity, found: []signals_mod.Info) []signals_mod.Info {
     var count: usize = 0;
     var held: [64]ComponentValue = undefined;
@@ -2495,16 +4601,14 @@ pub fn disconnectNamed(self: *App, source: ecs.Entity, name: []const u8, callabl
 
 /// Every connection of `source`'s signals, known or not, in the order they
 /// were made: the order they are heard in, and the order a scene keeps and
-/// reads back. A disconnect and a connect again puts one last, as Godot's
-/// Edit Connection does. Godot's `get_signal_connection_list`, over all.
+/// reads back. A disconnect and a connect again puts one last.
 pub fn connectionsFrom(self: *App, source: ecs.Entity, found: []signals_mod.Connection) []signals_mod.Connection {
     const listed = self.signals.connectionsFrom(source, found);
     for (listed) |*c| c.signal = self.signalWritten(c.*);
     return listed;
 }
 
-/// Every connection to a method of `receiver`. Godot's
-/// `get_incoming_connections`.
+/// Every connection to a method of `receiver`.
 pub fn connectionsTo(self: *App, receiver: ecs.Entity, found: []signals_mod.Connection) []signals_mod.Connection {
     const listed = self.signals.connectionsTo(receiver, found);
     for (listed) |*c| c.signal = self.signalWritten(c.*);
@@ -2518,7 +4622,7 @@ pub fn connectionCount(self: *const App, source: ecs.Entity) usize {
     return list.items.len;
 }
 
-/// Whether `entity`'s emits do nothing. Godot's `set_block_signals`.
+/// Whether `entity`'s emits do nothing.
 pub fn setBlockSignals(self: *App, entity: ecs.Entity, on: bool) Allocator.Error!void {
     if (on) try self.signals.blocked.put(self.gpa, entity, {}) else _ = self.signals.blocked.remove(entity);
 }
@@ -2529,8 +4633,8 @@ pub fn isBlockingSignals(self: *const App, entity: ecs.Entity) bool {
 
 /// Let a signal's connection call `f` by `name`, when no component of the
 /// target has a method by it: `fn (app: *App, self: fx.Entity, ...) !void`,
-/// `self` the entity connected to - Godot's implicit one - and after it what
-/// the connection hands on. The values are converted to the parameters as
+/// `self` the entity connected to, and after it what the connection hands
+/// on. The values are converted to the parameters as
 /// it is called, and a call with the wrong number is that call's error.
 ///
 /// ```zig
@@ -2777,9 +4881,186 @@ pub fn openWorldUi(
     self.ui.open(placed);
 }
 
+/// Draw the scene's `Control` trees every frame. Calling it again does
+/// nothing, so a reusable game module may safely ask for it too.
+pub fn useControlNodes(self: *App) !void {
+    try self.control_nodes.enable(self);
+}
+
 /// Where the pointer is in the world.
 pub fn pointerInWorld(self: *App) math.Vec2 {
     return self.screenToWorld(self.input.pointer.x, self.input.pointer.y);
+}
+
+/// A new entity, with nothing on it, hanging from `parent` - or a root, for
+/// none. What a script makes things with: `app.spawn(self.entity)`, then
+/// `add("Sprite")`.
+pub fn spawn(self: *App, parent: ecs.Entity) !ecs.Entity {
+    const made = try self.world.spawn();
+    errdefer self.world.despawn(made);
+    if (!parent.isNone()) try self.setParent(made, parent, false);
+    return made;
+}
+
+/// Take the event a script's `input` or `unhandled_input` is handling: the
+/// scripts after it do not hear it, nor does any `unhandled_input`.
+pub fn setInputAsHandled(self: *App) void {
+    if (self.scripts) |scripts| scripts.input_handled = true;
+}
+
+/// One more input for an action: the key, mouse button or controller
+/// button an event is - what a settings menu rebinds with, from the
+/// `input` that caught the player's next press. Kept with `saveInputMap`.
+pub fn bindAction(self: *App, name: []const u8, event: script_mod.Event) !void {
+    const binding = event.binding() orelse return error.NotAnInput;
+    try self.input.actions.bind(self.gpa, name, binding);
+}
+
+/// Take every input off an action, to give it new ones with `bindAction`.
+/// Says whether there is one of that name.
+pub fn clearAction(self: *App, name: []const u8) bool {
+    return self.input.actions.unbindAll(name);
+}
+
+/// What a script awaits for the next frame: `await app.nextFrame()`. Null
+/// in a game with no scripts.
+pub fn nextFrame(self: *App) script_mod.flux.Value {
+    const scripts = self.scripts orelse return .null;
+    return scripts.calls.nextFrame(scripts);
+}
+
+/// Call a script's function at the end of this frame, after its systems and
+/// signals: `app.callDeferred(self.respawn)`.
+pub fn callDeferred(self: *App, callable: script_mod.flux.Value) !void {
+    const scripts = self.scripts orelse return error.NoScripts;
+    return scripts.calls.callDeferred(scripts, callable);
+}
+
+pub fn keyDown(self: *const App, name: []const u8) bool {
+    const key = std.meta.stringToEnum(platform.Key, name) orelse return false;
+    return self.input.isDown(key);
+}
+
+pub fn keyAxis(self: *const App, negative: []const u8, positive: []const u8) f32 {
+    var value: f32 = 0;
+    if (self.keyDown(negative)) value -= 1;
+    if (self.keyDown(positive)) value += 1;
+    return value;
+}
+
+/// `input.actionDown`, for a script: whether the action is down.
+pub fn actionDown(self: *const App, name: []const u8) bool {
+    return self.input.actionDown(name);
+}
+
+/// `input.actionJustPressed`: whether it went down this frame, or since the
+/// last fixed step inside `fixed`.
+pub fn actionJustPressed(self: *const App, name: []const u8) bool {
+    return self.input.actionJustPressed(name);
+}
+
+pub fn actionJustReleased(self: *const App, name: []const u8) bool {
+    return self.input.actionJustReleased(name);
+}
+
+/// How far down the action is, from nought to one.
+pub fn actionStrength(self: *const App, name: []const u8) f32 {
+    return self.input.actionStrength(name);
+}
+
+/// Two actions as one axis, from -1 to 1.
+pub fn actionAxis(self: *const App, negative: []const u8, positive: []const u8) f32 {
+    return self.input.actionAxis(negative, positive);
+}
+
+/// Four actions as a direction no longer than one, up negative.
+pub fn actionVector(self: *const App, left: []const u8, right: []const u8, up: []const u8, down: []const u8) math.Vec2 {
+    return self.input.actionVector(left, right, up, down);
+}
+
+/// Hold an action down from code, at `strength` from nought to one, until
+/// `releaseAction`: a button on a touch screen.
+pub fn pressAction(self: *App, name: []const u8, strength: f32) error{NoSuchAction}!void {
+    return self.input.pressAction(name, strength);
+}
+
+pub fn releaseAction(self: *App, name: []const u8) error{NoSuchAction}!void {
+    return self.input.releaseAction(name);
+}
+
+/// What the player presses for an action, in words - `Space`, `Pad A` - on
+/// what they last used. See `Input.describeAction`.
+pub fn describeAction(self: *App, name: []const u8) []const u8 {
+    return self.input.describeAction(&self.described, name);
+}
+
+/// Keep what the player changed of the actions in a file of its own - as
+/// `user://input.json` - to read back with `loadInputMap`. Written whole or
+/// not at all.
+pub fn saveInputMap(self: *App, path: []const u8) !void {
+    const text = try self.input.actions.write(self.gpa);
+    defer self.gpa.free(text);
+    try self.writeText(path, text);
+}
+
+/// Take what a file `saveInputMap` wrote says of the game's actions. False
+/// when there is no file yet - the first run - and the actions stay as the
+/// project has them. An action the game no longer has is passed over.
+pub fn loadInputMap(self: *App, path: []const u8) !bool {
+    const text = self.readText(self.gpa, path) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer self.gpa.free(text);
+    var diagnostics: json.Diagnostics = .{};
+    _ = self.input.actions.read(self.gpa, text, &diagnostics) catch |err| {
+        if (err != error.OutOfMemory) log.warn("{s}: {f}", .{ path, diagnostics });
+        return err;
+    };
+    return true;
+}
+
+/// Move a `CharacterBody2D` by its velocity for this step - `time.delta` -
+/// stopping at what it meets and sliding along it, and say what it stands
+/// on and is against in its fields after. Whether anything stopped it. See
+/// `character.zig`.
+pub fn moveAndSlide(self: *App, entity: ecs.Entity) character.Error!bool {
+    return character.moveAndSlide(self, entity);
+}
+
+/// Move a `CharacterBody2D` once, by `motion`, stopping `safe_margin` short
+/// of the first thing in the way: what that was, or null for nothing.
+pub fn moveAndCollide(self: *App, entity: ecs.Entity, motion: math.Vec2) character.Error!?character.Collision {
+    return character.moveAndCollide(self, entity, motion);
+}
+
+/// Whether an entity stands on a floor: something facing up under the bottom
+/// of its collider, no further below it than `distance`. A floor under the
+/// middle of the bottom, or under either end of it, counts, so a body half
+/// over an edge still stands; the bottom is the collider's as the physics
+/// holds it, so a turned body stands on whatever corner is lowest.
+///
+/// The rays start a little inside the body: one resting on a floor has sunk
+/// the physics' slop into it, and a ray that starts inside the floor finds
+/// nothing of it.
+pub fn isOnFloor(self: *App, entity: ecs.Entity, distance: f32) bool {
+    // A character knows: its last move said.
+    if (self.world.get(entity, components.CharacterBody2D)) |held| return held.on_floor;
+    const collider = self.world.get(entity, components.Collider2D) orelse return false;
+    const box = self.bodies.boundsOf(self, entity) orelse return false;
+    const settings = self.physics.settings;
+    const sunk = 4 * settings.linear_slop * settings.units_per_metre;
+    const inside = @min(sunk, (box.max.y - box.min.y) / 2);
+    const own = self.bodies.idOf(entity);
+    const filter: physics_lib.Filter = .{ .category = collider.collision_layer, .mask = collider.collision_mask };
+    for ([_]f32{ 0.5, 0.1, 0.9 }) |along| {
+        const x = box.min.x + (box.max.x - box.min.x) * along;
+        const hit = self.castRay(.init(x, box.max.y - inside), .init(x, box.max.y + @max(distance, 0)), filter) orelse continue;
+        // Another collider of the same body is not a floor.
+        if (hit.entity.eql(entity) or std.meta.eql(self.bodies.idOf(hit.entity), own)) continue;
+        if (hit.normal.y < -0.5) return true;
+    }
+    return false;
 }
 
 /// Where an entity's sprite is drawn, as its four corners in the world, round
@@ -2789,7 +5070,8 @@ pub fn pointerInWorld(self: *App) math.Vec2 {
 pub fn spriteCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     const drawn = (self.world.get(entity, components.Sprite) orelse return null).*;
     const placed = self.drawnTransform(entity) orelse return null;
-    const texture = self.assets.get(drawn.texture) orelse self.assets.get(self.assets.white) orelse return null;
+    const shown = self.views.shown(&self.world, entity, drawn.texture);
+    const texture = self.assets.get(shown) orelse self.assets.get(self.assets.white) orelse return null;
     return sprite.cornersOf(drawn, placed, texture);
 }
 
@@ -2802,19 +5084,175 @@ pub fn textCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
     const label = (self.world.get(entity, components.Text2D) orelse return null).*;
     const placed = self.drawnTransform(entity) orelse return null;
     const face = self.assets.fontOf(label.font) orelse return null;
-    return sprite.labelCornersOf(label, placed, face);
+    return sprite.labelCornersOf(label, self.textOf(entity, components.Text2D, "text"), placed, face);
+}
+
+// -------------------------------------------------------------------------
+// Texts
+// -------------------------------------------------------------------------
+
+/// What `C`'s text `property` says on `entity`: empty for nothing, or for an
+/// entity without it. A component keeps its words beside it, as long as
+/// they are - see `texts.zig`. The text lasts until it is set again.
+///
+/// ```zig
+/// const said = app.textOf(label, fx.Label, "text");
+/// ```
+pub fn textOf(self: *const App, entity: ecs.Entity, comptime C: type, comptime property: []const u8) []const u8 {
+    return self.texts.get(entity, comptime texts_mod.keyFor(C, property));
+}
+
+/// Say `text` in `C`'s text `property` on `entity`. `C` has to keep a text of
+/// that name - the build says so - and the entity has to be alive.
+///
+/// ```zig
+/// try app.setText(title, fx.Label, "text", "Paused");
+/// ```
+pub fn setText(self: *App, entity: ecs.Entity, comptime C: type, comptime property: []const u8, text: []const u8) !void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    try self.texts.set(self.gpa, entity, comptime texts_mod.keyFor(C, property), text);
+}
+
+/// `setText` with the words formatted: a score, a time.
+///
+/// ```zig
+/// try app.printText(score, fx.Text2D, "text", "{d} points", .{points});
+/// ```
+pub fn printText(self: *App, entity: ecs.Entity, comptime C: type, comptime property: []const u8, comptime format: []const u8, args: anytype) !void {
+    const made = try std.fmt.allocPrint(self.gpa, format, args);
+    defer self.gpa.free(made);
+    try self.setText(entity, C, property, made);
+}
+
+/// Give the keyboard's and a pad's focus to a control: a menu's first
+/// button as it opens. From Flux too.
+pub fn grabFocus(self: *App, entity: ecs.Entity) void {
+    var buffer: [48]u8 = undefined;
+    self.ui.setFocus(control.focusIdOf(self, &buffer, entity));
+}
+
+/// Whether a control has the focus.
+pub fn hasFocus(self: *App, entity: ecs.Entity) bool {
+    var buffer: [48]u8 = undefined;
+    return self.ui.isFocused(control.focusIdOf(self, &buffer, entity));
+}
+
+/// Take the focus from whatever has it.
+pub fn releaseFocus(self: *App) void {
+    self.ui.clearFocus();
+}
+
+/// Where a control was laid out when the interface was last drawn, in the
+/// units its anchors and offsets are in: its `size` is what a panel slides
+/// in by, from a script as `app.controlRect(panel).size.x`. Null for one not
+/// laid out - not a control, hidden, or not drawn yet.
+pub fn controlRect(self: *App, entity: ecs.Entity) ?geometry.Rect2 {
+    var id: [48]u8 = undefined;
+    const box = self.ui.boxOf(control.idOf(&id, entity)) orelse return null;
+    const scale = if (self.interface.scale > 0) self.interface.scale else 1;
+    return .init(box.x / scale, box.y / scale, box.width / scale, box.height / scale);
+}
+
+/// Anchor a control where `preset` says: see `Control.setAnchorsPreset`.
+pub fn setAnchorsPreset(self: *App, entity: ecs.Entity, preset: control.Control.AnchorsPreset) !void {
+    const held = self.world.get(entity, control.Control) orelse return error.NoSuchComponent;
+    held.setAnchorsPreset(preset);
+}
+
+/// `textOf` by names, for what knows a component only by the name a scene
+/// gives it: an editor, a script.
+pub fn textNamed(self: *const App, entity: ecs.Entity, component: []const u8, property: []const u8) []const u8 {
+    return self.texts.get(entity, texts_mod.keyOf(component, property));
+}
+
+/// `setText` by names. The component has to be registered and keep a text
+/// of that name.
+pub fn setTextNamed(self: *App, entity: ecs.Entity, component: []const u8, property: []const u8, text: []const u8) !void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    const entry = self.scene_components.find(component) orelse return error.NoSuchComponent;
+    if (textAttributeOf(entry.type, property) == null) return error.NoSuchText;
+    try self.texts.set(self.gpa, entity, texts_mod.keyOf(component, property), text);
+}
+
+/// The text `property` a component's type keeps beside it, if it keeps one.
+pub fn textAttributeOf(owner: *const reflect.Type, property: []const u8) ?*const attr.Text {
+    for (owner.attributes.slice()) |*attribute| {
+        const text = attribute.as(attr.Text) orelse continue;
+        if (std.mem.eql(u8, text.name, property)) return text;
+    }
+    return null;
+}
+
+/// The box a map's painted tiles fill, in the map's own pixels: left, top,
+/// right and bottom. Null for an entity with no `TileMap`, or one with no
+/// tiles in it.
+pub fn tileMapBounds(self: *App, entity: ecs.Entity) ?[4]f32 {
+    if (!self.world.has(entity, tilemap.TileMap)) return null;
+    var min_x: i32 = std.math.maxInt(i32);
+    var min_y: i32 = std.math.maxInt(i32);
+    var max_x: i32 = std.math.minInt(i32);
+    var max_y: i32 = std.math.minInt(i32);
+    var it = ecs.Query(.{tilemap.TileChunk}).over(&self.world) catch return null;
+    while (it.next()) |chunk| for (chunk.slice(tilemap.TileChunk)) |tiles| {
+        if (!tiles.map.eql(entity)) continue;
+        for (tiles.cells, 0..) |cell, index| {
+            if (cell.isEmpty()) continue;
+            const x = tiles.x * tilemap.chunk_side + @as(i32, @intCast(index % tilemap.chunk_side));
+            const y = tiles.y * tilemap.chunk_side + @as(i32, @intCast(index / tilemap.chunk_side));
+            min_x = @min(min_x, x);
+            min_y = @min(min_y, y);
+            max_x = @max(max_x, x + 1);
+            max_y = @max(max_y, y + 1);
+        }
+    };
+    if (min_x > max_x) return null;
+    const tile = self.tileSizeOf(entity);
+    return .{
+        @as(f32, @floatFromInt(min_x)) * tile[0],
+        @as(f32, @floatFromInt(min_y)) * tile[1],
+        @as(f32, @floatFromInt(max_x)) * tile[0],
+        @as(f32, @floatFromInt(max_y)) * tile[1],
+    };
+}
+
+pub fn tileMapCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
+    const bounds = self.tileMapBounds(entity) orelse return null;
+    const placed = self.drawnTransform(entity) orelse return null;
+    const top_left = placed.apply(bounds[0], bounds[1]);
+    const top_right = placed.apply(bounds[2], bounds[1]);
+    const bottom_right = placed.apply(bounds[2], bounds[3]);
+    const bottom_left = placed.apply(bounds[0], bounds[3]);
+    return .{
+        .init(top_left.x, top_left.y),
+        .init(top_right.x, top_right.y),
+        .init(bottom_right.x, bottom_right.y),
+        .init(bottom_left.x, bottom_left.y),
+    };
 }
 
 /// Whichever of the two an entity is drawn as: its sprite's corners, else
 /// its label's. What an editor outlines, frames and tests a click against
 /// without asking which it is.
 pub fn drawnCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
-    return self.spriteCorners(entity) orelse self.textCorners(entity);
+    return self.spriteCorners(entity) orelse self.textCorners(entity) orelse self.tileMapCorners(entity);
 }
 
-/// What the camera sees, at the size of the window.
-fn currentView(self: *App) View {
-    return .of(&self.world, &self.snapshots, @floatFromInt(self.width), @floatFromInt(self.height));
+/// What the camera sees, at the frame's size and scale: the view the world
+/// is drawn through and the pointer is found in.
+pub fn currentView(self: *App) View {
+    return self.viewAt(self.frame, @floatFromInt(self.frame.width), @floatFromInt(self.frame.height));
+}
+
+/// What the camera sees in a frame this size, as the stretch scales it:
+/// worked out at the size the game is made at - where a world with no
+/// camera has its origin at the top left, and a camera's fit is measured -
+/// and drawn at the frame's pixels.
+fn viewAt(self: *App, frame: stretch_mod.Frame, width: f32, height: f32) View {
+    const scale = if (frame.scale > 0) frame.scale else 1;
+    var view: View = .of(&self.world, &self.snapshots, width / scale, height / scale);
+    view.width = width;
+    view.height = height;
+    return view.zoomed(scale);
 }
 
 // -------------------------------------------------------------------------
@@ -2873,9 +5311,10 @@ pub fn contactsBegun(self: *const App) []const Bodies.Contact {
     return self.bodies.began(self.input.clock == .fixed);
 }
 
-/// The physics' settings as the engine keeps them: Godot 3's rules for
-/// which layers touch and how two surfaces mix, whatever a game passed.
-fn godotRules(settings: physics_lib.Settings) physics_lib.Settings {
+/// The physics' settings as the engine keeps them, whatever a game passed:
+/// two colliders touch when either one's mask has the other's layer, a
+/// pair's friction is the smaller of the two, and its bounce the two added.
+fn withEngineRules(settings: physics_lib.Settings) physics_lib.Settings {
     var kept = settings;
     kept.filter_rule = .either;
     kept.friction_mix = .minimum;
@@ -2883,63 +5322,59 @@ fn godotRules(settings: physics_lib.Settings) physics_lib.Settings {
     return kept;
 }
 
-/// Keep two bodies from touching whatever their layers say: Godot's
-/// `add_collision_exception_with`. Each is a `RigidBody2D` or a collider
-/// that is a static body of its own. Counted, so two calls take two
+/// Keep two bodies from touching whatever their layers say. Each is a
+/// `RigidBody2D` or a collider that is a static body of its own. Counted, so two calls take two
 /// removals, and gone with either entity.
 pub fn addCollisionExceptionWith(self: *App, a: ecs.Entity, b: ecs.Entity) Bodies.ExceptionError!void {
     return self.bodies.addException(self, a, b);
 }
 
-/// Take one `addCollisionExceptionWith` back: Godot's
-/// `remove_collision_exception_with`.
+/// Take one `addCollisionExceptionWith` back.
 pub fn removeCollisionExceptionWith(self: *App, a: ecs.Entity, b: ecs.Entity) void {
     self.bodies.removeException(self, a, b);
 }
 
-/// The bodies `body` is kept from touching, as many as `found` holds:
-/// Godot's `get_collision_exceptions`.
+/// The bodies `body` is kept from touching, as many as `found` holds.
 pub fn collisionExceptionsOf(self: *App, body: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
     return self.bodies.exceptionsOf(body, found);
 }
 
-/// Whose collision object a collider is a shape of: Godot's
-/// `CollisionObject2D` of a shape, and what an area's signals name. The
-/// collider's own entity when that has an `Area2D` or a `RigidBody2D`, else
-/// the nearest one above it that has, else its own entity, which is its own
-/// static body. Null for an entity that is neither.
+/// Whose collision object a collider is a shape of: the body or area that
+/// owns it, and what an area's signals name. The collider's own entity when
+/// that has an `Area2D` or a `RigidBody2D`, else the nearest one above it
+/// that has, else its own entity, which is its own static body. Null for an
+/// entity that is neither.
 pub fn collisionObjectOf(self: *App, collider: ecs.Entity) ?ecs.Entity {
     return Bodies.objectOf(&self.world, collider);
 }
 
-/// The bodies inside `area` now, as many as `found` holds: Godot's
-/// `get_overlapping_bodies`. Empty, with a word in the log, for an area that
-/// is not monitoring.
+/// The bodies inside `area` now, as many as `found` holds. Empty, with a
+/// word in the log, for an area that is not monitoring.
 pub fn overlappingBodies(self: *App, area: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
     return self.areas.overlapping(self, area, false, found);
 }
 
-/// The other areas inside `area` now: Godot's `get_overlapping_areas`.
+/// The other areas inside `area` now, as many as `found` holds.
 pub fn overlappingAreas(self: *App, area: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
     return self.areas.overlapping(self, area, true, found);
 }
 
-/// Whether anything at all is inside `area`: Godot's `has_overlapping_bodies`.
+/// Whether any body at all is inside `area`.
 pub fn hasOverlappingBodies(self: *App, area: ecs.Entity) bool {
     return self.areas.any(self, area, false);
 }
 
-/// Whether another area is inside it: Godot's `has_overlapping_areas`.
+/// Whether another area is inside it.
 pub fn hasOverlappingAreas(self: *App, area: ecs.Entity) bool {
     return self.areas.any(self, area, true);
 }
 
-/// Whether that body is inside it: Godot's `overlaps_body`.
+/// Whether that body is inside it.
 pub fn overlapsBody(self: *App, area: ecs.Entity, body: ecs.Entity) bool {
     return self.areas.overlaps(self, area, body);
 }
 
-/// Whether that area is inside it: Godot's `overlaps_area`.
+/// Whether that area is inside it.
 pub fn overlapsArea(self: *App, area: ecs.Entity, other: ecs.Entity) bool {
     return self.areas.overlaps(self, area, other);
 }
@@ -2987,6 +5422,13 @@ pub fn setWindowSize(self: *App, width: u32, height: u32) Window.Error!void {
     if (self.window) |*window| try window.setSize(width, height);
 }
 
+/// How big the window's content area is, in pixels: what `setWindowSize`
+/// asked for once it has arrived. The size the app was made at when there is
+/// no window.
+pub fn windowSize(self: *const App) geometry.Vec2i {
+    return .init(@intCast(self.width), @intCast(self.height));
+}
+
 /// Put the top left of the window's content area at this point of the
 /// desktop. Nothing without a window.
 pub fn setWindowPosition(self: *App, x: i32, y: i32) Window.Error!void {
@@ -2995,9 +5437,10 @@ pub fn setWindowPosition(self: *App, x: i32, y: i32) Window.Error!void {
 
 /// Where the top left of the window's content area is on the desktop, or
 /// null when there is no window. Always nought, nought on Wayland.
-pub fn windowPosition(self: *const App) ?[2]i32 {
-    if (self.window) |*window| return window.position();
-    return null;
+pub fn windowPosition(self: *const App) ?geometry.Vec2i {
+    const window = if (self.window) |*held| held else return null;
+    const at = window.position();
+    return .init(at[0], at[1]);
 }
 
 /// How small and how large the player may drag the window. A window already
@@ -3030,6 +5473,29 @@ pub fn vsync(self: *const App) bool {
     return self.vsync_on;
 }
 
+/// Hold the frames to at most `fps` a second, nought for no cap: a
+/// settings menu's frame limit. `time.max_fps` from Zig.
+pub fn setMaxFps(self: *App, fps: f32) void {
+    self.time.max_fps = if (fps > 0) fps else null;
+}
+
+/// The cap on frames a second, nought for none.
+pub fn maxFps(self: *const App) f32 {
+    return self.time.max_fps orelse 0;
+}
+
+/// Lay the interface out this many times larger, over what the display and
+/// the stretch ask for: a settings menu's interface size. One is as it is.
+/// `interface.zoom` from Zig.
+pub fn setInterfaceZoom(self: *App, zoom: f32) void {
+    self.interface.zoom = if (zoom > 0) zoom else 1;
+}
+
+/// How much larger the game lays its interface out: see `setInterfaceZoom`.
+pub fn interfaceZoom(self: *const App) f32 {
+    return self.interface.zoom;
+}
+
 /// Lock the pointer, confine it to the window, hide it, or give it back. See
 /// `Cursor`.
 ///
@@ -3059,8 +5525,7 @@ pub fn setCursorShape(self: *App, shape: CursorShape) Window.Error!void {
 }
 
 /// A picture of the game's own for the pointer, with the point in it that
-/// does the pointing; null puts the shape back. Godot's
-/// `Input.set_custom_mouse_cursor`. Nothing without a window.
+/// does the pointing; null puts the shape back. Nothing without a window.
 ///
 /// ```zig
 /// const sword = app.assets.get(cursor_texture).?;
@@ -3082,6 +5547,27 @@ pub fn setWindowIcon(self: *App, images: []const platform.IconImage) Window.Erro
     if (self.window) |*window| try window.setIcon(images);
 }
 
+/// The project file's `application.icon` on the window, when it names one:
+/// what the game shows in the taskbar. A picture that does not read is
+/// said, and the window keeps the system's.
+fn useProjectIcon(self: *App) void {
+    const settings = self.project.settings orelse return;
+    const path = settings.application.icon;
+    if (path.len == 0 or self.window == null) return;
+    const io = self.io orelse return;
+    const source = self.project.canonical(self.gpa, path) catch return;
+    defer self.gpa.free(source);
+    const file = self.project.osPath(self.gpa, source) catch return;
+    defer self.gpa.free(file);
+    var decoded = image.readFile(self.gpa, io, file, .{}) catch |err| {
+        return log.warn("the project's icon {s} did not read: {t}", .{ path, err });
+    };
+    defer decoded.deinit(self.gpa);
+    self.setWindowIcon(&.{.{ .pixels = decoded.pixels, .width = decoded.width, .height = decoded.height }}) catch |err| {
+        log.warn("the project's icon {s} was not put on the window: {t}", .{ path, err });
+    };
+}
+
 /// How far in from each edge of the framebuffer the part of the window that
 /// nothing covers starts: a phone's notch and its gesture bar, a page's
 /// safe area. Nought on every desktop, and without a window.
@@ -3094,9 +5580,8 @@ pub fn safeArea(self: *const App) platform.Insets {
     return .{};
 }
 
-/// Put the pointer there, in framebuffer pixels: Godot's `warp_mouse`. The
-/// system takes a moment to say it moved, so `input.pointer` is set here as
-/// well. Nothing without a window, save moving what a test reads.
+/// Put the pointer there, in framebuffer pixels. The system takes a moment
+/// to say it moved, so `input.pointer` is set here as well. Nothing without a window, save moving what a test reads.
 pub fn warpPointer(self: *App, x: f32, y: f32) void {
     if (self.window) |*window| {
         window.setCursorPos(x, y) catch |err| {
@@ -3108,9 +5593,8 @@ pub fn warpPointer(self: *App, x: f32, y: f32) void {
     self.input.pointer.y = y;
 }
 
-/// Where the pointer is in an entity's own space: Godot's
-/// `get_local_mouse_position`. Null for an entity that is not there, or
-/// whose chain of parents is broken.
+/// Where the pointer is in an entity's own space. Null for an entity that
+/// is not there, or whose chain of parents is broken.
 ///
 /// ```zig
 /// const at = app.pointerIn(dial) orelse return;
@@ -3121,8 +5605,7 @@ pub fn pointerIn(self: *App, entity: ecs.Entity) ?math.Vec2 {
 }
 
 /// A pointer event as an entity sees it: the same event, with its place in
-/// that entity's own space rather than the window's. Godot's
-/// `make_input_local`.
+/// that entity's own space rather than the window's.
 pub fn localEvent(self: *App, entity: ecs.Entity, event: pointer.InputEvent) pointer.InputEvent {
     const at = self.screenToWorld(event.position().x, event.position().y);
     const local = self.toLocal(entity, at) orelse return event;
@@ -3229,16 +5712,38 @@ fn render(self: *App) !void {
 
 /// Every layer, in order, into whatever it is given. Separate from `render`,
 /// so that `capture` can draw the same frame somewhere else.
+///
+/// A frame with a material in it that reads what is drawn under it is drawn
+/// into a texture of its own - a surface cannot be read - and put on `into`
+/// after. See `render/screen.zig`.
 fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void {
+    self.sprites.time = @floatCast(self.interface.seconds);
+    self.screen.copies = 0;
+    try self.drawViews();
+    // The frame for a target this size: the window's, or a capture's.
+    const frame = self.stretch.frameOf(@intFromFloat(width), @intFromFloat(height));
+    const frame_width: f32 = @floatFromInt(frame.width);
+    const frame_height: f32 = @floatFromInt(frame.height);
+    if (!frame.apart and !self.readsScreen()) return self.drawLayersInto(into, frame, frame_width, frame_height);
+    const picture = try self.screen.frameOf(frame.width, frame.height);
+    try self.drawLayersInto(.{ .texture = picture }, frame, frame_width, frame_height);
+    // A picture scaled to the window is sampled as the project's textures
+    // are; a canvas is one pixel to one.
+    const filter: rhi.Filter = if (self.stretch.mode == .picture) self.assets.default_filter else .nearest;
+    const shown = frame.shown;
+    try self.screen.present(picture, into, .{ .x = shown.x, .y = shown.y, .width = shown.width, .height = shown.height }, self.assets.samplerFor(filter, .clamp_to_edge), .black);
+}
+
+fn drawLayersInto(self: *App, into: rhi.RenderTarget, frame: stretch_mod.Frame, width: f32, height: f32) !void {
     // 1. The 3D layer, with a depth test, clearing the frame. Not written
     //    yet; when it is, the 2D pass below stops clearing.
 
     // 2. The 2D layer: sprites and text, sorted back to front, blended, no
     //    depth - or, with the world off the screen, only the clearing.
-    const view: View = .of(&self.world, &self.snapshots, width, height);
+    const view = self.viewAt(frame, width, height);
     if (self.world_on_screen) {
         const clear = try self.drawDebugUnder(into, view);
-        try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, into, view, clear, self.time.alpha());
+        try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, &self.inherited, into, view, clear, self.time.alpha());
     } else try self.clearTarget(into);
 
     // 3. The interface, on top, loading what the 2D layer left - with its
@@ -3271,19 +5776,47 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
 /// On OpenGL a texture drawn into is read bottom row first, so shown in the
 /// interface it wants its `source` turned over; see `drawnUpsideDown`.
 pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
+    self.sprites.time = @floatCast(self.interface.seconds);
+    try self.drawViews();
     const clear = try self.drawDebugUnder(.{ .texture = into }, view);
-    try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.snapshots, .{ .texture = into }, view, clear, self.time.alpha());
+    try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, &self.inherited, .{ .texture = into }, view, clear, self.time.alpha());
     if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
 }
 
+/// The size the game is made at: the project's `display.width` and
+/// `height`, what its interface is laid out in at its first size - or the
+/// window's, with no project.
+pub fn gameSize(self: *const App) [2]f32 {
+    if (self.project.settings) |settings| return .{ @floatFromInt(settings.display.width), @floatFromInt(settings.display.height) };
+    return .{ @floatFromInt(self.width), @floatFromInt(self.height) };
+}
+
+/// Draw the registered Control trees over an editor's scene texture, using
+/// the same declarations and renderer as the running game: laid out at
+/// `gameSize`, with the screen's top left at the world's origin, and as big
+/// as `view` shows the world. A tree with no `CanvasLayer` or `Viewport` of
+/// its own is shown over the screen too. A popup that is shut is drawn open
+/// while it, or something in it, is one of `editing`: what the editor has
+/// picked, to lay it out.
+pub fn drawControlPreview(self: *App, into: rhi.Texture, view: View, editing: []const ecs.Entity) !void {
+    try self.control_nodes.preview(self, into, view, view.width, view.height, self.interface.faces, editing);
+}
+
+/// Draw this frame's world-space debug lines over an editor preview.
+pub fn drawDebugOverlay(self: *App, into: rhi.Texture, view: View) !void {
+    if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
+}
+
+/// A Control's box in the last editor preview, in preview pixels.
+pub fn controlPreviewBox(self: *App, entity: ecs.Entity) ?ui_lib.BoundingBox {
+    return self.control_nodes.previewBox(entity);
+}
+
 /// Whether a texture `drawWorld` drew into comes out upside down when drawn
-/// as a picture: true on OpenGL, whose framebuffers count rows from the
-/// bottom.
+/// as a picture: what the device says of what it draws - true on OpenGL,
+/// whose framebuffers count rows from the bottom.
 pub fn drawnUpsideDown(self: *const App) bool {
-    return switch (self.device.backendTag()) {
-        .gl, .webgl => true,
-        .d3d11, .none => false,
-    };
+    return self.device.caps().features.render_target_origin_bottom_left;
 }
 
 /// Clear `into` to the background and draw `debug_under` on it, for the
@@ -3431,6 +5964,220 @@ test "a sprite nowhere near the camera is not drawn" {
     try testing.expectEqual(@as(u32, 1), app.sprites.culled);
 }
 
+/// A tile set of one untextured source: its first tile solid, its second a
+/// picture and nothing more.
+const solid_tiles =
+    \\{
+    \\  "fluxion_tileset": 1,
+    \\  "tile_size": [16, 16],
+    \\  "sources": [{ "id": 0, "tiles": [{ "at": [0, 0], "collision": "full" }] }]
+    \\}
+;
+
+test "tile maps create signed chunks and cull them before their tiles" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 320, .height = 240 });
+    defer app.destroy();
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    const near = (try app.setTile(map, -1, -1, .at(0, 0, 0))).?;
+    _ = try app.setTile(map, 0, 0, .at(0, 0, 0));
+    const far = (try app.setTile(map, 1024, 1024, .at(0, 0, 0))).?;
+    try app.run();
+
+    try testing.expectEqual(@as(i32, -1), app.world.get(near, tilemap.TileChunk).?.x);
+    try testing.expectEqual(@as(i32, -1), app.world.get(near, tilemap.TileChunk).?.y);
+    try testing.expectEqual(@as(i32, 64), app.world.get(far, tilemap.TileChunk).?.x);
+    try testing.expectEqual(@as(u32, 2), app.sprites.tile_chunks_drawn);
+    try testing.expectEqual(@as(u32, 1), app.sprites.tile_chunks_culled);
+    try testing.expectEqual(@as(u32, 2), app.sprites.drawn);
+
+    // The index finds a chunk, and an emptied one goes away with its key.
+    try testing.expect(app.tileChunkAt(map, -1, -1).?.eql(near));
+    try testing.expect(app.tileAt(map, -1, -1).has(tilemap.Cell.present));
+    try testing.expect(try app.setTile(map, -1, -1, .empty) == null);
+    try testing.expect(app.tileChunkAt(map, -1, -1) == null);
+    try testing.expect(app.tileAt(map, -1, -1).isEmpty());
+    try testing.expect(!app.world.isAlive(near));
+}
+
+test "a map's chunks go when the map does" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    const chunk = (try app.setTile(map, 2, 2, .at(0, 0, 0))).?;
+
+    app.world.despawn(map);
+    try app.run();
+    try testing.expect(!app.world.isAlive(chunk));
+    try testing.expectEqual(@as(usize, 0), app.tile_chunks.count());
+}
+
+test "the tile set says which tiles are solid, and they become one body" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 64, .height = 64 });
+    defer app.destroy();
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    _ = try app.setTile(map, 0, 0, .at(0, 0, 0));
+    _ = try app.setTile(map, 1, 0, .at(0, 0, 0));
+    // A tile the set says nothing of is a picture and no more.
+    _ = try app.setTile(map, 2, 0, .at(0, 3, 0));
+    try app.run();
+
+    try testing.expectEqual(@as(usize, 1), app.physics.bodyCount());
+    try testing.expectEqual(@as(usize, 1), app.physics.shapeCount());
+    const hit = app.castRay(.init(8, -8), .init(8, 24), .{}) orelse return error.TestExpectedEqual;
+    try testing.expect(hit.entity.eql(map));
+
+    _ = try app.setTile(map, 0, 0, .empty);
+    _ = try app.setTile(map, 1, 0, .empty);
+    try app.bodies.sync(app);
+    try testing.expectEqual(@as(usize, 0), app.physics.shapeCount());
+}
+
+test "a map's used cells are the smallest rectangle round what is painted, across chunks" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{} });
+    try testing.expect(app.usedCells(map) == null);
+
+    _ = try app.setTile(map, 3, 2, .at(0, 0, 0));
+    _ = try app.setTile(map, -20, 40, .at(0, 0, 0));
+    const used = app.usedCells(map).?;
+    try testing.expectEqual(geometry.Vec2i.init(-20, 2), used.position);
+    try testing.expectEqual(geometry.Vec2i.init(3, 40), used.last());
+
+    // Another map's cells are its own.
+    const other = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{} });
+    _ = try app.setTile(other, 100, 100, .at(0, 0, 0));
+    try testing.expectEqual(geometry.Vec2i.init(3, 40), app.usedCells(map).?.last());
+}
+
+test "a tile's data is asked for by its cell, or by a point of the world over it" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const set = try app.addTileSet("data.tileset",
+        \\{ "fluxion_tileset": 1, "tile_size": [16, 16], "data_layers": [{ "name": "damage", "type": "int" }],
+        \\  "sources": [{ "id": 0, "tiles": [{ "at": [1, 0], "data": { "damage": 3 } }] }] }
+    );
+    const map = try app.world.spawnWith(.{ components.Transform2D{ .x = 100 }, tilemap.TileMap{ .tile_set = set } });
+    _ = try app.setTile(map, 2, 1, .at(0, 1, 0));
+    _ = try app.setTile(map, 3, 1, .at(0, 0, 0));
+
+    try testing.expectEqual(tileset.Value{ .int = 3 }, app.tileData(map, 2, 1, "damage").?);
+    try testing.expectEqual(tileset.Value{ .int = 0 }, app.tileData(map, 3, 1, "damage").?);
+    try testing.expect(app.tileData(map, 4, 1, "damage") == null);
+    try testing.expect(app.tileData(map, 2, 1, "speed") == null);
+
+    // The map starts 100 to the right: cell (2, 1) is from 132 to 148 across.
+    try testing.expectEqual(geometry.Vec2i.init(2, 1), app.cellAt(map, .init(140, 20)).?);
+    try testing.expectEqual(geometry.Vec2i.init(-1, -1), app.cellAt(map, .init(99, -1)).?);
+    try testing.expectEqual(tileset.Value{ .int = 3 }, app.tileDataAt(map, .init(140, 20), "damage").?);
+    const nothing = try app.world.spawnWith(.{components.Transform2D{}});
+    try testing.expect(app.cellAt(nothing, .init(0, 0)) == null);
+}
+
+test "a tile's own shape is a polygon, turned the way its cell is" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const set = try app.addTileSet("slope.tileset",
+        \\{
+        \\  "fluxion_tileset": 1,
+        \\  "tile_size": [16, 16],
+        \\  "sources": [{ "id": 0, "tiles": [
+        \\    { "at": [0, 0], "collision": "polygon", "polygon": [[0, 16], [16, 16], [16, 0]] }
+        \\  ] }]
+        \\}
+    );
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    _ = try app.setTile(map, 0, 0, .at(0, 0, 0));
+    try app.syncBodies();
+    try testing.expectEqual(@as(usize, 1), app.physics.shapeCount());
+
+    // The ramp rises to the right: at its left edge only the last two
+    // pixels are solid, at its right edge all but the first two.
+    try testing.expect(app.castRay(.init(2, 0), .init(2, 10), .{}) == null);
+    try testing.expect(app.castRay(.init(14, 0), .init(14, 10), .{}) != null);
+
+    // Flipped, it rises to the left instead.
+    _ = try app.setTile(map, 0, 0, tilemap.Cell.at(0, 0, 0).with(tilemap.Cell.flip_h, true));
+    try app.syncBodies();
+    try testing.expect(app.castRay(.init(2, 0), .init(2, 10), .{}) != null);
+    try testing.expect(app.castRay(.init(14, 0), .init(14, 10), .{}) == null);
+}
+
+test "a rigid body detects a tile floor below its collider" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
+    const map = try app.world.spawnWith(.{
+        components.Transform2D{},
+        tilemap.TileMap{ .tile_set = set, .collision_layer = 1, .collision_mask = 2 },
+    });
+    _ = try app.setTile(map, 0, 0, .at(0, 0, 0));
+    const player = try app.world.spawnWith(.{
+        components.Transform2D.at(8, -5),
+        components.RigidBody2D{},
+        components.Collider2D{ .extents = .init(4, 4), .collision_layer = 2, .collision_mask = 1 },
+    });
+    try app.syncBodies();
+    try testing.expect(app.isOnFloor(player, 5));
+
+    app.world.get(player, components.Transform2D).?.y = -20;
+    try app.syncBodies();
+    try testing.expect(!app.isOnFloor(player, 5));
+}
+
+/// What pushes a crate along in a fixed step, as a game's script does: its
+/// speed set, whatever it was.
+const Pusher = struct {
+    var crate: ecs.Entity = .none;
+    var speed: f32 = 0;
+
+    fn push(app: *App) !void {
+        const body = app.world.get(crate, components.RigidBody2D) orelse return;
+        body.linear_velocity.x = speed;
+    }
+};
+
+test "a crate stands on a tile floor at rest and pushed along it, as far as over its edge" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 1.0 / 60.0 };
+    const set = try app.addTileSet("tiles.tileset", solid_tiles);
+    const map = try app.world.spawnWith(.{ components.Transform2D{}, tilemap.TileMap{ .tile_set = set } });
+    for (0..10) |x| _ = try app.setTile(map, @intCast(x), 0, .at(0, 0, 0));
+    // Sized from its sprite, as a crate put in a scene is.
+    const crate = try app.world.spawnWith(.{
+        components.Transform2D.at(40, -30),
+        components.Sprite{ .width = 28, .height = 28 },
+        components.RigidBody2D{},
+        components.Collider2D{},
+    });
+    Pusher.crate = crate;
+    Pusher.speed = 0;
+    try app.addSystem(.fixed, "push", Pusher.push);
+    try app.startup();
+
+    // At rest it has sunk into the floor by the physics' slop - which a ray
+    // from its bottom would start inside of - and stands.
+    for (0..60) |_| _ = try app.step();
+    try testing.expect(app.world.get(crate, components.Transform2D).?.y + 14 > 0);
+    try testing.expect(app.isOnFloor(crate, 6));
+
+    // Pushed along, it stands every step, and still with its middle past the
+    // end of the floor.
+    Pusher.speed = 120;
+    while (app.world.get(crate, components.Transform2D).?.x < 165) {
+        _ = try app.step();
+        try testing.expect(app.isOnFloor(crate, 6));
+    }
+
+    // Off the end, it falls, and stands on nothing.
+    for (0..30) |_| _ = try app.step();
+    try testing.expect(!app.isOnFloor(crate, 6));
+}
+
 test "the world is drawn into a texture through a view of its own" {
     const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240 });
     defer app.destroy();
@@ -3478,7 +6225,7 @@ test "clearing the world leaves nothing in it, and frees every name" {
     defer app.destroy();
     const door = try app.world.spawnWith(.{components.Transform2D.at(1, 2)});
     try app.setName(door, "door");
-    _ = try app.world.spawnWith(.{components.Transform2D.childOf(door, 0, 1)});
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(0, 1), components.Parent.of(door) });
 
     app.clearWorld();
     try testing.expectEqual(@as(usize, 0), app.world.count());
@@ -3517,10 +6264,11 @@ test "a label with no font loaded draws nothing and does not fall over" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();
 
-    _ = try app.world.spawnWith(.{
+    const label = try app.world.spawnWith(.{
         components.Transform2D.at(10, 10),
-        components.Text2D.of("nobody can read this"),
+        components.Text2D{},
     });
+    try app.setText(label, components.Text2D, "text", "nobody can read this");
 
     try app.run();
     try testing.expectEqual(@as(u32, 0), app.sprites.drawn);
@@ -3544,10 +6292,11 @@ test "a label becomes one quad per letter" {
     _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch
         return error.SkipZigTest;
 
-    _ = try app.world.spawnWith(.{
+    const label = try app.world.spawnWith(.{
         components.Transform2D.at(20, 20),
-        components.Text2D.of("Hi!"),
+        components.Text2D{},
     });
+    try app.setText(label, components.Text2D, "text", "Hi!");
 
     try app.run();
 
@@ -3591,7 +6340,7 @@ test "a child is where its parent put it, and its own numbers stay local" {
         components.Sprite.solid(.white, 20, 20),
     });
     const turret = try app.world.spawnWith(.{
-        components.Transform2D.childOf(tank, 0, -12),
+        components.Transform2D.at(0, -12), components.Parent.of(tank),
         components.Sprite.solid(.white, 8, 8),
     });
 
@@ -3612,8 +6361,8 @@ test "a grandchild is composed through the whole chain" {
     defer app.destroy();
 
     const root = try app.world.spawnWith(.{components.Transform2D.at(10, 0)});
-    const middle = try app.world.spawnWith(.{components.Transform2D.childOf(root, 5, 0)});
-    const leaf = try app.world.spawnWith(.{components.Transform2D.childOf(middle, 2, 0)});
+    const middle = try app.world.spawnWith(.{ components.Transform2D.at(5, 0), components.Parent.of(root) });
+    const leaf = try app.world.spawnWith(.{ components.Transform2D.at(2, 0), components.Parent.of(middle) });
 
     try app.run();
     try testing.expectApproxEqAbs(@as(f32, 17), app.worldTransform(leaf).?.x, 0.0001);
@@ -3624,7 +6373,7 @@ test "an entity put somewhere in the world lands there under its parents, and ke
     defer app.destroy();
     // A parent turned a quarter, twice the size.
     const tank = try app.world.spawnWith(.{components.Transform2D{ .x = 100, .y = 50, .rotation = std.math.pi / 2.0, .scale_x = 2, .scale_y = 2 }});
-    const turret = try app.world.spawnWith(.{components.Transform2D.childOf(tank, 10, 0)});
+    const turret = try app.world.spawnWith(.{ components.Transform2D.at(10, 0), components.Parent.of(tank) });
 
     // Ten along the tank's +x, which the quarter turn points down the
     // screen, at twice the length.
@@ -3644,7 +6393,7 @@ test "an entity put somewhere in the world lands there under its parents, and ke
     try testing.expectApproxEqAbs(@as(f32, 3), placed.scale_y, 1e-5);
     // Its own numbers are still the tank's space.
     const own = app.world.get(turret, components.Transform2D).?;
-    try testing.expect(own.parent.eql(tank));
+    try testing.expect(app.parentOf(turret).eql(tank));
     try testing.expectApproxEqAbs(@as(f32, -std.math.pi / 2.0), own.rotation, 1e-5);
     try testing.expectApproxEqAbs(@as(f32, 0.5), own.scale_x, 1e-5);
 
@@ -3666,7 +6415,7 @@ test "what does not inherit its parent's turn or scale is put in the world by it
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const post = try app.world.spawnWith(.{components.Transform2D{ .x = 10, .rotation = 1, .scale_x = 4, .scale_y = 4 }});
-    const plate = try app.world.spawnWith(.{components.Transform2D{ .parent = post, .inherit_rotation = false, .inherit_scale = false }});
+    const plate = try app.world.spawnWith(.{ components.Transform2D{ .inherit_rotation = false, .inherit_scale = false }, components.Parent.of(post) });
     try app.setGlobalRotation(plate, 0.25);
     try app.setGlobalScale(plate, .init(2, 2));
     const own = app.world.get(plate, components.Transform2D).?;
@@ -3679,7 +6428,7 @@ test "a point goes into an entity's space and back, and an entity turns to face 
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const arm = try app.world.spawnWith(.{components.Transform2D{ .x = 30, .y = -20, .rotation = 0.5, .scale_x = 2, .scale_y = 0.5 }});
-    const hand = try app.world.spawnWith(.{components.Transform2D{ .x = 4, .y = 6, .rotation = -0.25, .parent = arm }});
+    const hand = try app.world.spawnWith(.{ components.Transform2D{ .x = 4, .y = 6, .rotation = -0.25 }, components.Parent.of(arm) });
     const point: math.Vec2 = .init(-12, 40);
     const back = app.toGlobal(hand, app.toLocal(hand, point).?).?;
     try testing.expectApproxEqAbs(point.x, back.x, 1e-3);
@@ -3689,7 +6438,7 @@ test "a point goes into an entity's space and back, and an entity turns to face 
     const body = try app.world.spawnWith(.{components.Transform2D{ .x = 5, .y = 5, .rotation = 2, .scale_x = 3, .scale_y = 3 }});
     // Its own scale not the same both ways: facing still is, in its own
     // space.
-    const eye = try app.world.spawnWith(.{components.Transform2D{ .x = 1, .y = -2, .rotation = 0.7, .scale_x = 2, .scale_y = 0.5, .parent = body }});
+    const eye = try app.world.spawnWith(.{ components.Transform2D{ .x = 1, .y = -2, .rotation = 0.7, .scale_x = 2, .scale_y = 0.5 }, components.Parent.of(body) });
     try app.lookAt(eye, point);
     try testing.expectApproxEqAbs(@as(f32, 0), app.getAngleTo(eye, point).?, 1e-4);
     const from = app.globalPosition(eye).?;
@@ -3725,8 +6474,8 @@ test "where an entity is in the space of something above it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const root = try app.world.spawnWith(.{components.Transform2D.at(100, 0)});
-    const middle = try app.world.spawnWith(.{components.Transform2D{ .x = 10, .rotation = std.math.pi / 2.0, .parent = root }});
-    const leaf = try app.world.spawnWith(.{components.Transform2D.childOf(middle, 5, 0)});
+    const middle = try app.world.spawnWith(.{ components.Transform2D{ .x = 10, .rotation = std.math.pi / 2.0 }, components.Parent.of(root) });
+    const leaf = try app.world.spawnWith(.{ components.Transform2D.at(5, 0), components.Parent.of(middle) });
 
     const within = app.getRelativeTransformToParent(leaf, root).?;
     try testing.expectApproxEqAbs(@as(f32, 10), within.x, 1e-4);
@@ -3746,14 +6495,14 @@ test "writing where an entity is says why it cannot: no transform, or a parent t
     try testing.expect(app.globalPosition(bare) == null);
 
     const parent = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
-    const orphan = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 1, 1)});
+    const orphan = try app.world.spawnWith(.{ components.Transform2D.at(1, 1), components.Parent.of(parent) });
     app.world.despawn(parent);
     try testing.expectError(error.Unplaced, app.setGlobalPosition(orphan, .init(0, 0)));
     try testing.expectError(error.Unplaced, app.lookAt(orphan, .init(5, 5)));
 
     // A living parent with no transform of its own places nothing.
     const holder = try app.world.spawnWith(.{components.Camera2D{}});
-    const held = try app.world.spawnWith(.{components.Transform2D.childOf(holder, 3, 4)});
+    const held = try app.world.spawnWith(.{ components.Transform2D.at(3, 4), components.Parent.of(holder) });
     try app.setGlobalPosition(held, .init(7, 8));
     try testing.expectEqual(@as(f32, 7), app.world.get(held, components.Transform2D).?.x);
     try testing.expectEqual(@as(f32, 8), app.world.get(held, components.Transform2D).?.y);
@@ -3768,11 +6517,11 @@ test "what hangs from something that died goes with it" {
         components.Sprite.solid(.white, 20, 20),
     });
     const turret = try app.world.spawnWith(.{
-        components.Transform2D.childOf(tank, 0, -12),
+        components.Transform2D.at(0, -12), components.Parent.of(tank),
         components.Sprite.solid(.white, 8, 8),
     });
     const barrel = try app.world.spawnWith(.{
-        components.Transform2D.childOf(turret, 10, 0),
+        components.Transform2D.at(10, 0), components.Parent.of(turret),
         components.Sprite.solid(.white, 12, 2),
     });
     const bystander = try app.world.spawnWith(.{
@@ -3802,7 +6551,7 @@ test "a parent with no transform places nothing and still owns what hangs from i
     // An entity with no components at all.
     const spell = try app.world.spawn();
     const spark = try app.world.spawnWith(.{
-        components.Transform2D.childOf(spell, 40, 30),
+        components.Transform2D.at(40, 30), components.Parent.of(spell),
         components.Sprite.solid(.white, 4, 4),
     });
 
@@ -3820,29 +6569,6 @@ test "a parent with no transform places nothing and still owns what hangs from i
     app.frames_left = 1;
     _ = try app.step();
     try testing.expect(!app.world.isAlive(spark));
-}
-
-test "an animation moves the sprite's region on" {
-    const app = try App.create(testing.allocator, .{
-        .headless = true,
-        .frames = 6,
-        // Six frames of a tenth of a second, at ten cells a second: once
-        // round a four-cell strip, and two more.
-        .fixed_delta = 0.1,
-    });
-    defer app.destroy();
-    app.time.source = .{ .fixed = 0.1 };
-
-    const walker = try app.world.spawnWith(.{
-        components.Transform2D{},
-        components.Sprite.solid(.white, 8, 8),
-        components.Animation.strip(4, 10),
-    });
-
-    try app.run();
-
-    const showing = app.world.get(walker, components.Sprite).?.region;
-    try testing.expectApproxEqAbs(Region.cell(2, 4, 1).u0, showing.u0, 0.0001);
 }
 
 test "a fixed step runs as many times as the frame is worth" {
@@ -3941,6 +6667,18 @@ fn pressOf(key: platform.Key) platform.Event {
         .action = .press,
         .mods = .{},
     } };
+}
+
+test "key names expose held input and axes to reflected callers" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    app.input.apply(pressOf(.a));
+    try testing.expect(app.keyDown("a"));
+    try testing.expectEqual(@as(f32, -1), app.keyAxis("a", "d"));
+    app.input.apply(pressOf(.d));
+    try testing.expectEqual(@as(f32, 0), app.keyAxis("a", "d"));
+    try testing.expect(!app.keyDown("not-a-key"));
 }
 
 /// One press of space on a chosen frame, and a count of the fixed steps
@@ -4207,7 +6945,7 @@ test "flags override what they say and leave the rest, and a capture is reproduc
     // machine's.
     const captured = (Flags{ .capture = "shot.png" }).apply(base);
     try testing.expectEqual(@as(u32, Flags.capture_frames), captured.frames.?);
-    try testing.expectEqual(captured.fixed_delta, captured.frame_time.?);
+    try testing.expect(captured.fixed_frame_time);
 
     // With a count of its own, that count.
     const counted = (Flags{ .capture = "shot.png", .frames = 7 }).apply(base);
@@ -4351,7 +7089,7 @@ test "the names of the dead are given back at the end of the frame" {
     defer app.destroy();
 
     const ship = try app.world.spawnWith(.{components.Transform2D.at(10, 10)});
-    const flame = try app.world.spawnWith(.{components.Transform2D.childOf(ship, 0, 8)});
+    const flame = try app.world.spawnWith(.{ components.Transform2D.at(0, 8), components.Parent.of(ship) });
     const buoy = try app.world.spawn();
     try app.setName(ship, "ship");
     try app.setName(flame, "flame");
@@ -4365,6 +7103,138 @@ test "the names of the dead are given back at the end of the frame" {
     try testing.expect(app.find("buoy").?.eql(buoy));
     try testing.expectEqual(@as(usize, 1), app.names.count());
     try testing.expectEqual(@as(u32, 1), app.by_name.count());
+}
+
+test "a name is its siblings' own: two parents may each have a child of it, and a clash takes the next free one" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const left = try app.world.spawn();
+    const right = try app.world.spawn();
+    try app.setName(left, "left");
+    try app.setName(right, "right");
+    const first = try app.world.spawnWith(.{components.Parent.of(left)});
+    const second = try app.world.spawnWith(.{components.Parent.of(right)});
+    const third = try app.world.spawnWith(.{components.Parent.of(left)});
+    try app.setName(first, "hand");
+    try app.setName(second, "hand");
+    try testing.expectError(error.NameTaken, app.setName(third, "hand"));
+    try app.setFreeName(third, "hand");
+    try testing.expectEqualStrings("hand 2", app.nameOf(third).?);
+
+    // `find` answers with the first given it; a path says which.
+    try testing.expect(app.find("hand").?.eql(first));
+    try testing.expect(app.findPath(right, "hand").?.eql(second));
+    try testing.expect(app.findPath(second, "../../left/hand 2").?.eql(third));
+    try testing.expect(app.findPath(second, "/left/./hand").?.eql(first));
+    try testing.expect(app.findPath(left, "nobody") == null);
+    try testing.expect(app.findPath(left, "../..") == null);
+    try testing.expect(app.findIn(.none, "hand 2").?.eql(third));
+    try testing.expect(app.findIn(right, "hand").?.eql(second));
+    try testing.expect(app.findIn(right, "hand 2") == null);
+
+    // Moved in among others of its name, it takes the next free one, and
+    // comes last.
+    try app.setParent(second, left, false);
+    try testing.expectEqualStrings("hand 3", app.nameOf(second).?);
+    try testing.expectEqual(@as(i64, 3), app.childCount(left));
+    try testing.expect(app.childAt(left, 0).?.eql(first));
+    try testing.expect(app.childAt(left, 2).?.eql(second));
+    try testing.expect(app.childAt(left, 3) == null);
+    try testing.expectEqual(@as(i64, 0), app.childCount(right));
+}
+
+test "anything hangs in the one tree, and goes with what it hangs from" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const panel = try app.world.spawnWith(.{control.Control{}});
+    const button = try app.world.spawnWith(.{ control.Control{}, components.Parent.of(panel), control.Button{} });
+    try app.setText(button, control.Button, "text", "OK");
+    const clock = try app.world.spawnWith(.{ timer.Timer{}, components.Parent.of(button) });
+    try testing.expect(app.hangsFrom(clock, panel));
+    try testing.expect(!app.hangsFrom(panel, clock));
+
+    // A loop is refused, and changes nothing.
+    try testing.expectError(error.Loop, app.setParent(panel, clock, false));
+    try testing.expectError(error.Loop, app.setParent(panel, panel, false));
+    try testing.expect(app.parentOf(panel).isNone());
+
+    app.world.despawn(panel);
+    _ = try app.step();
+    try testing.expect(!app.world.isAlive(button));
+    try testing.expect(!app.world.isAlive(clock));
+}
+
+test "an entity hung elsewhere stays where it is in the world, or keeps its own numbers" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const ship = try app.world.spawnWith(.{components.Transform2D.at(10, 10)});
+    const rock = try app.world.spawnWith(.{components.Transform2D.at(15, 10)});
+
+    try app.setParent(rock, ship, true);
+    try testing.expectEqual(@as(f32, 5), app.world.get(rock, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 15), app.worldTransform(rock).?.x);
+
+    try app.setParent(rock, .none, true);
+    try testing.expectEqual(@as(f32, 15), app.world.get(rock, components.Transform2D).?.x);
+    try testing.expect(!app.world.has(rock, components.Parent));
+
+    try app.setParent(rock, ship, false);
+    try testing.expectEqual(@as(f32, 15), app.world.get(rock, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 25), app.worldTransform(rock).?.x);
+
+    const gone = try app.world.spawn();
+    app.world.despawn(gone);
+    try testing.expectError(error.NoSuchEntity, app.setParent(rock, gone, false));
+}
+
+fn nudge(app: *App, self: ecs.Entity) !void {
+    app.world.get(self, components.Transform2D).?.x += 1;
+}
+
+test "a group is found and called wherever its members are, and lets the dead go" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    try app.addMethod("nudge", nudge);
+
+    const bat = try app.world.spawnWith(.{components.Transform2D{}});
+    const ghost = try app.world.spawnWith(.{ components.Transform2D{}, components.Parent.of(bat) });
+    const lamp = try app.world.spawnWith(.{components.Transform2D{}});
+    try app.addToGroup(bat, "enemies");
+    try app.addToGroup(ghost, "enemies");
+    try app.addToGroup(ghost, "enemies");
+    try app.addToGroup(ghost, "loud");
+
+    try testing.expectEqual(@as(i64, 2), app.groupSize("enemies"));
+    try testing.expect(app.groupMember("enemies", 1).?.eql(ghost));
+    try testing.expect(app.groupMember("enemies", 2) == null);
+    try testing.expect(!app.isInGroup(lamp, "enemies"));
+    try testing.expectEqual(@as(i64, 0), app.groupSize("nobody"));
+    var held: [4][]const u8 = undefined;
+    const groups = app.groupsOf(ghost, &held);
+    try testing.expectEqual(@as(usize, 2), groups.len);
+    try testing.expectEqualStrings("enemies", groups[0]);
+    try testing.expectEqualStrings("loud", groups[1]);
+
+    try app.callGroup("enemies", "nudge");
+    // A member with no such method is passed over.
+    try app.callGroup("enemies", "no such thing");
+    try testing.expectEqual(@as(f32, 1), app.world.get(bat, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 1), app.world.get(ghost, components.Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 0), app.world.get(lamp, components.Transform2D).?.x);
+
+    app.removeFromGroup(bat, "enemies");
+    try testing.expectEqual(@as(i64, 1), app.groupSize("enemies"));
+
+    // The dead are no members at once, and are let go of at the end of the
+    // frame.
+    app.world.despawn(ghost);
+    try testing.expectEqual(@as(i64, 0), app.groupSize("enemies"));
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.groupMembers("loud").len);
+    try testing.expectError(error.NoSuchEntity, app.addToGroup(ghost, "enemies"));
 }
 
 /// Escape pressed on the third frame, the way the platform would deliver it.
@@ -4735,6 +7605,185 @@ test "a click presses what the interface drew under it, and the game is told" {
     try testing.expectEqual(@as(u32, 1), Clicks.released);
 }
 
+const Paused = struct {
+    var game: u32 = 0;
+    var menu: u32 = 0;
+    var key: u32 = 0;
+    var pressed: u32 = 0;
+
+    fn reset() void {
+        game = 0;
+        menu = 0;
+        key = 0;
+        pressed = 0;
+    }
+    fn countGame(_: *App) anyerror!void {
+        game += 1;
+    }
+    fn countMenu(_: *App) anyerror!void {
+        menu += 1;
+    }
+    fn countKey(_: *App) anyerror!void {
+        key += 1;
+    }
+    fn press(_: *App, _: struct {}) !void {
+        pressed += 1;
+    }
+};
+
+test "a paused game runs only the systems that asked to, and moves no body" {
+    Paused.reset();
+    const app = try App.create(testing.allocator, .{ .headless = true, .fixed_delta = 0.25 });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 0.25 };
+    try app.addSystem(.update, "game", Paused.countGame);
+    try app.addSystemWhenPaused(.update, "menu", Paused.countMenu);
+    try app.addSystemAlways(.input, "key", Paused.countKey);
+    const ball = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.RigidBody2D{}, components.Collider2D.circle(4) });
+
+    for (0..3) |_| _ = try app.step();
+    try testing.expectEqual(@as(u32, 3), Paused.game);
+    try testing.expectEqual(@as(u32, 0), Paused.menu);
+    try testing.expectEqual(@as(u32, 3), Paused.key);
+    const fallen = app.world.get(ball, components.Transform2D).?.y;
+    try testing.expect(fallen > 0);
+
+    app.setPaused(true);
+    for (0..2) |_| _ = try app.step();
+    try testing.expectEqual(@as(u32, 3), Paused.game);
+    try testing.expectEqual(@as(u32, 2), Paused.menu);
+    try testing.expectEqual(@as(u32, 5), Paused.key);
+    try testing.expectEqual(fallen, app.world.get(ball, components.Transform2D).?.y);
+    // Time goes on: it is not a clock stopped at nought.
+    try testing.expect(app.time.delta > 0);
+
+    app.setPaused(false);
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 4), Paused.game);
+    try testing.expect(app.world.get(ball, components.Transform2D).?.y > fallen);
+}
+
+test "an animation waits while its entity does not run" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 0.25 };
+    const frames = try app.addGridFrames("strip", .none, 4, 1, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .speed = 4 }});
+    const strip: sprite_frames_mod.AnimatedSprite2D = .autoplaying(frames, "walk");
+    const walker = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip });
+    const menu = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip, inherited_mod.Processing{ .mode = .always } });
+
+    app.setPaused(true);
+    for (0..2) |_| _ = try app.step();
+    try testing.expectEqual(@as(f32, 0), app.world.get(walker, sprite_frames_mod.AnimatedSprite2D).?.frame_progress);
+    try testing.expectEqual(@as(i32, 0), app.world.get(walker, sprite_frames_mod.AnimatedSprite2D).?.frame);
+    try testing.expectEqual(@as(i32, 1), app.world.get(menu, sprite_frames_mod.AnimatedSprite2D).?.frame);
+}
+
+test "an Appearance hides, fades and raises what hangs from it" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const faded = try app.world.spawnWith(.{
+        components.Transform2D.at(0, 0),
+        components.Sprite.solid(.white, 10, 10),
+        inherited_mod.Appearance{ .modulate = Color.white.withAlpha(0.5), .z = 3 },
+    });
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(2, 0), components.Parent.of(faded), components.Sprite.solid(.white, 4, 4) });
+    const hidden = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), inherited_mod.Appearance{ .visible = false } });
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Parent.of(hidden), components.Sprite.solid(.white, 4, 4) });
+    const plain = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4) });
+    _ = try app.step();
+
+    try testing.expectEqual(@as(u32, 3), app.sprites.drawn);
+    var halves: usize = 0;
+    for (app.sprites.items.items) |item| {
+        if (item.instance.tint[3] == 0.5) halves += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), halves);
+    try testing.expectEqual(@as(i16, 3), app.resolvedAppearance(app.childAt(faded, 0).?).layer(0));
+    try testing.expectEqual(@as(i16, 0), app.resolvedAppearance(plain).layer(0));
+}
+
+test "a button answers while it runs: not while the game is paused, unless it asked to" {
+    Paused.reset();
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100 });
+    defer app.destroy();
+    try app.useControlNodes();
+    const root = try app.world.spawnWith(.{ control.Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, control.CanvasLayer{} });
+    const button = try app.world.spawnWith(.{
+        control.Control{ .width = .{ .mode = .fixed, .value = 100 }, .height = .{ .mode = .fixed, .value = 40 } },
+        components.Parent.of(root),
+        control.Button{},
+    });
+    try app.setText(button, control.Button, "text", "Go");
+    try app.signal(button, control.Button, .pressed).connectFn(Paused.press, .{});
+    try app.startup();
+    _ = try app.step();
+
+    const Click = struct {
+        fn at(a: *App) !void {
+            a.input.apply(leftButton(true, 20, 10));
+            _ = try a.step();
+            a.input.apply(leftButton(false, 20, 10));
+            _ = try a.step();
+        }
+    };
+    try Click.at(app);
+    try testing.expectEqual(@as(u32, 1), Paused.pressed);
+
+    app.setPaused(true);
+    try Click.at(app);
+    try testing.expectEqual(@as(u32, 1), Paused.pressed);
+
+    // A pause menu's button: it answers while the game is paused.
+    try app.world.add(button, inherited_mod.Processing{ .mode = .when_paused });
+    try Click.at(app);
+    try testing.expectEqual(@as(u32, 2), Paused.pressed);
+}
+
+test "a control fades as its Appearance and everything above it says, and grows as its scale does" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100 });
+    defer app.destroy();
+    try app.useControlNodes();
+    const holder = try app.world.spawnWith(.{inherited_mod.Appearance{ .modulate = Color.white.withAlpha(0.5) }});
+    const root = try app.world.spawnWith(.{ control.Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, control.CanvasLayer{}, components.Parent.of(holder) });
+    const panel = try app.world.spawnWith(.{
+        control.Control{ .width = .{ .mode = .fixed, .value = 40 }, .height = .{ .mode = .fixed, .value = 40 }, .scale = 2 },
+        components.Parent.of(root),
+        control.PanelContainer{},
+        inherited_mod.Appearance{ .modulate = Color.white.withAlpha(0.5) },
+    });
+    _ = try app.world.spawnWith(.{
+        control.Control{ .width = .{ .mode = .fixed, .value = 10 }, .height = .{ .mode = .fixed, .value = 10 } },
+        components.Parent.of(root),
+        control.PanelContainer{},
+        inherited_mod.Appearance{ .visible = false },
+    });
+    _ = try app.step();
+
+    var id: [48]u8 = undefined;
+    const box = app.ui.boxOf(control.idOf(&id, panel)).?;
+    var found = false;
+    for (app.interface.commands) |command| {
+        if (!std.meta.eql(command.bounding_box, box)) continue;
+        const colour = switch (command.config) {
+            .rectangle => |fill| fill.color,
+            .image => |picture| picture.tint,
+            else => continue,
+        };
+        // A quarter: its own half, and the half of what its tree hangs from.
+        try testing.expect(colour.a <= 0.25 + 1e-4);
+        try testing.expect(!command.transform.isIdentity());
+        found = true;
+    }
+    try testing.expect(found);
+    // The hidden one is not in the tree at all.
+    var rectangles: usize = 0;
+    for (app.interface.commands) |command| {
+        if (command.config == .rectangle or command.config == .image) rectangles += 1;
+    }
+    try testing.expect(rectangles <= 2);
+}
+
 const Nap = struct {
     fn run(_: *App) anyerror!void {
         try testing.io.sleep(.fromMilliseconds(1), .awake);
@@ -4924,7 +7973,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 9), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 44), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);
@@ -4933,7 +7982,7 @@ test "every engine component is described under the name a scene gives it" {
     const drawn = app.types.find("Sprite").?;
     try testing.expectEqual(@as(f64, 1), drawn.field("pivot_x").?.attribute(reflect.attr.Range).?.max);
     try testing.expect(drawn.field("tint").?.type == app.types.find("Color").?);
-    try testing.expect(app.types.find("Text2D").?.field("bytes").?.attribute(reflect.attr.Hidden) != null);
+    try testing.expect(app.types.find("Text2D").?.attribute(attr.Text) != null);
     try testing.expect(app.types.find("DebugViews").?.field("colliders") != null);
 
     // Described, and left out until asked for: see `types`.
@@ -4965,22 +8014,20 @@ test "a component is found by its name, and read and written where it is" {
     try testing.expect(app.componentOf(thing, "Transform2D") == null);
 }
 
-test "a label's words are a property, written and read through its methods, not its buffer" {
+test "a label's words are a text it keeps beside it, found and written by names" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
-    const label = try app.world.spawnWith(.{ components.Transform2D{}, components.Text2D.of("Score") });
+    const label = try app.world.spawnWith(.{ components.Transform2D{}, components.Text2D{} });
+    try app.setText(label, components.Text2D, "text", "Score");
 
     // As an inspector that has never heard of `Text2D` finds them.
     const words = app.componentOf(label, "Text2D").?;
-    const property = words.type.attribute(attr.Property).?;
-    try testing.expectEqualStrings("text", property.name);
-    var over: []const u8 = "Game over";
-    try words.call(property.set, &.{.of(&over)}, null);
-    var shown: []const u8 = "";
-    try words.call(property.get, &.{}, .of(&shown));
-    try testing.expectEqualStrings("Game over", shown);
-    try testing.expectEqualStrings("Game over", app.world.get(label, components.Text2D).?.slice());
-    try testing.expect(words.type.method(property.set).?.attribute(attr.Multiline) != null);
+    const text = words.type.attribute(attr.Text).?;
+    try testing.expectEqualStrings("text", text.name);
+    try testing.expect(text.multiline);
+    try app.setTextNamed(label, "Text2D", text.name, "Game over");
+    try testing.expectEqualStrings("Game over", app.textNamed(label, "Text2D", "text"));
+    try testing.expectEqualStrings("Game over", app.textOf(label, components.Text2D, "text"));
 }
 
 /// A game's component with a field that declares no default.
@@ -5054,7 +8101,7 @@ test "the engine's calls are made by name, and what they return comes back, erro
     try testing.expectError(error.NameTaken, app.callNamed("setName", &.{ .of(&other), .of(&name) }, null));
     var path: []const u8 = "no/such/scene.json";
     var options: scene.LoadOptions = .{};
-    try testing.expectError(error.FileNotFound, app.callNamed("loadScene", &.{ .of(&path), .of(&options) }, null));
+    try testing.expectError(error.FileNotFound, app.callNamed("readScene", &.{ .of(&path), .of(&options) }, null));
 
     // And a value that comes with the chance of one.
     var copied: []const u8 = "level 3";
@@ -5137,8 +8184,7 @@ test "a project's file is read as it starts, and a root with none starts as befo
     bare.destroy();
 
     try Project.writeSettings(testing.allocator, testing.io, root, .{
-        .name = "Meadow",
-        .tags = &.{"2d"},
+        .application = .{ .name = "Meadow", .tags = &.{"2d"} },
         .physics_2d = .{ .default_gravity = 981, .default_linear_damp = 0.25 },
     });
     // By the folder, or by the file itself, as a file association gives it.
@@ -5147,8 +8193,8 @@ test "a project's file is read as it starts, and a root with none starts as befo
         const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = given });
         defer app.destroy();
         const settings = app.project.settings.?;
-        try testing.expectEqualStrings("Meadow", settings.name);
-        try testing.expectEqualStrings("2d", settings.tags[0]);
+        try testing.expectEqualStrings("Meadow", settings.application.name);
+        try testing.expectEqualStrings("2d", settings.application.tags[0]);
         try testing.expect(std.mem.endsWith(u8, app.project.root, &tmp.sub_path));
         try testing.expectEqualStrings("Meadow", titleOf(.{}, settings));
         try testing.expectEqualStrings("Pong", titleOf(.{ .title = "Pong" }, settings));
@@ -5163,7 +8209,7 @@ test "a project file that is wrong stops the start, and says what and where" {
     defer tmp.cleanup();
     var buffer: [160]u8 = undefined;
     const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data = "{ \"fluxion_project\": 9, \"name\": \"Later\" }" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data = "{ \"fluxion_project\": 9, \"application\": { \"name\": \"Later\" } }" });
 
     var diagnostics: json.Diagnostics = .{};
     try testing.expectError(error.UnsupportedVersion, App.create(testing.allocator, .{
@@ -5172,8 +8218,63 @@ test "a project file that is wrong stops the start, and says what and where" {
         .root = root,
         .project_diagnostics = &diagnostics,
     }));
-    try testing.expectEqualStrings("this project file is version 9; this engine reads version 1", diagnostics.message());
-    try testing.expectEqual(@as(u32, 1), diagnostics.line);
+    try testing.expectEqualStrings("this project file is version 9, written for a newer Fluxion; this one reads version 2", diagnostics.message());
+    try testing.expect(std.mem.endsWith(u8, diagnostics.file(), Project.file_name));
+
+    // A value of the wrong kind, at its line.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data = "{ \"fluxion_project\": 2,\n  \"application\": { \"name\": \"Wide\" },\n  \"display\": { \"width\": \"wide\" } }" });
+    try testing.expectError(error.WrongType, App.create(testing.allocator, .{
+        .headless = true,
+        .io = testing.io,
+        .root = root,
+        .project_diagnostics = &diagnostics,
+    }));
+    try testing.expectEqual(@as(u32, 3), diagnostics.line);
+}
+
+test "the window, the frame and the clock are the game's, then the project's, then the engine's" {
+    const said: Project.Settings = .{
+        .application = .{ .name = "Wide", .max_fps = 30 },
+        .display = .{ .width = 1600, .height = 900, .vsync = false, .mode = .fullscreen },
+        .rendering = .{ .clear_color = .hex(0x102030) },
+        .physics_2d = .{ .ticks_per_second = 120 },
+    };
+    const project: Resolved = .of(.{}, &said, said.physics_2d);
+    try testing.expectEqual(@as(u32, 1600), project.width);
+    try testing.expectEqual(@as(u32, 900), project.height);
+    try testing.expect(!project.vsync);
+    try testing.expectEqual(Fullscreen.borderless, project.fullscreen);
+    try testing.expectEqual(Color.hex(0x102030), project.background);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), project.fixed_delta, 1e-6);
+    try testing.expectEqual(@as(?f32, 30), project.max_fps);
+
+    // What the game says in code overrules its project, and only that.
+    const game: Resolved = .of(.{ .width = 800, .fullscreen = .windowed, .fixed_delta = 0.5 }, &said, said.physics_2d);
+    try testing.expectEqual(@as(u32, 800), game.width);
+    try testing.expectEqual(@as(u32, 900), game.height);
+    try testing.expectEqual(Fullscreen.windowed, game.fullscreen);
+    try testing.expectEqual(@as(f32, 0.5), game.fixed_delta);
+
+    // With no project file, the sections' own defaults.
+    const bare: Resolved = .of(.{}, null, .{});
+    try testing.expectEqual(@as(u32, 1280), bare.width);
+    try testing.expectEqual(@as(u32, 720), bare.height);
+    try testing.expect(bare.vsync and bare.resizable and !bare.maximized);
+    try testing.expectEqual(Fullscreen.windowed, bare.fullscreen);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 60.0), bare.fixed_delta, 1e-6);
+    try testing.expect(bare.max_fps == null);
+
+    // And a game opened in a project's folder takes them.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [160]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try Project.writeSettings(testing.allocator, testing.io, root, said);
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+    defer app.destroy();
+    try testing.expectEqual(@as(u32, 1600), app.width);
+    try testing.expectEqual(Color.hex(0x102030), app.background);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), app.time.fixed_delta, 1e-6);
 }
 
 test "auto opens the best of the project's renderer, and a backend asked for wins" {
@@ -5183,12 +8284,19 @@ test "auto opens the best of the project's renderer, and a backend asked for win
     try testing.expectEqual(Backend.webgl, try chooseBackend(.auto, .compatibility, .emscripten));
     try testing.expectEqual(Backend.gl, try chooseBackend(.gl, .compatibility, .windows));
 
-    // Not built: refused, not drawn with something else - unless asked for.
-    try testing.expectError(error.RendererNotBuilt, chooseBackend(.auto, .modern, .windows));
+    // The modern renderer: Direct3D 12 first on Windows, Vulkan elsewhere.
+    try testing.expectEqual(Backend.d3d12, try chooseBackend(.auto, .modern, .windows));
+    try testing.expectEqual(Backend.vulkan, try chooseBackend(.auto, .modern, .linux));
+    try testing.expect(Backend.vulkan.experimental() and !Backend.d3d11.experimental());
+
+    // None here: refused, not drawn with something else - unless asked for.
+    try testing.expectError(error.RendererNotBuilt, chooseBackend(.auto, .modern, .macos));
     try testing.expectEqual(Backend.d3d11, try chooseBackend(.d3d11, .modern, .windows));
 
     const flags = try App.parseFlags(App.Flags, &.{ "game", "--backend", "gl" });
     try testing.expectEqual(Backend.gl, flags.apply(.{}).backend);
+    const vulkan = try App.parseFlags(App.Flags, &.{ "game", "--backend", "vulkan" });
+    try testing.expectEqual(Backend.vulkan, vulkan.apply(.{}).backend);
 }
 
 test "a headless dialog is never answered by itself, and a test's answer comes in the next frame" {
@@ -5347,7 +8455,7 @@ test "a file moved takes what was read from it along, and the scene saved next n
     // and the scene saved now names where it is.
     const other = try files.app();
     defer other.destroy();
-    const loaded = try other.loadScene("res://meadow.json", .{});
+    const loaded = try other.readScene("res://meadow.json", .{});
     try testing.expectEqual(@as(usize, 1), loaded.moved);
     try app.saveScene("res://meadow.json", .{});
     var said = (try app.sceneInfo("res://meadow.json", null)).?;
@@ -5402,10 +8510,113 @@ test "a new scene is written empty, never over another, and says what it is with
     defer said.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, scene.version), said.version);
     try testing.expectEqual(@as(usize, 0), said.entities);
-    try testing.expectEqual(@as(usize, 0), (try app.loadScene("res://levels.json", .{})).entities);
+    try testing.expectEqual(@as(usize, 0), (try app.readScene("res://levels.json", .{})).entities);
 
     try files.tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.json", .data = "{ \"hello\": 1 }" });
     try testing.expect(try app.sceneInfo("res://notes.json", null) == null);
+}
+
+test "a game's files are read, written whole, listed and taken out, under user:// and elsewhere" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    const app = try files.app();
+    defer app.destroy();
+    app.project.user_root = try std.fs.path.join(testing.allocator, &.{ try files.at(), "saves" });
+
+    try testing.expect(!app.fileExists("user://slots/one.json"));
+    try testing.expectError(error.FileNotFound, app.readText(testing.allocator, "user://slots/one.json"));
+    try app.writeText("user://slots/one.json", "{ \"level\": 1 }");
+    try app.writeText("user://slots/one.json", "{ \"level\": 2 }");
+    try testing.expect(app.fileExists("user://slots/one.json"));
+    const text = try app.readText(testing.allocator, "user://slots/one.json");
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("{ \"level\": 2 }", text);
+
+    try app.makeDir("user://slots/old");
+    try app.makeDir("user://slots/old");
+    try app.writeText("user://slots/a.json", "{}");
+    {
+        const listed = try app.listDir(testing.allocator, "user://slots");
+        defer listed.deinit(testing.allocator);
+        try testing.expectEqual(@as(usize, 3), listed.names.len);
+        try testing.expectEqualStrings("a.json", listed.names[0]);
+        try testing.expectEqualStrings("old/", listed.names[1]);
+        try testing.expectEqualStrings("one.json", listed.names[2]);
+    }
+    try app.removeFile("user://slots/old");
+    try app.removeFile("user://slots/a.json");
+    try testing.expect(!app.fileExists("user://slots/a.json"));
+    try testing.expectError(error.FileNotFound, app.removeFile("user://slots/a.json"));
+
+    // The project's own files are read the same way.
+    try files.tmp.dir.writeFile(testing.io, .{ .sub_path = "notes.txt", .data = "hello" });
+    const notes = try app.readText(testing.allocator, "res://notes.txt");
+    defer testing.allocator.free(notes);
+    try testing.expectEqualStrings("hello", notes);
+}
+
+test "a project's actions are the game's, over the built-in ones, and the player's changes are kept apart" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    try files.tmp.dir.writeFile(testing.io, .{ .sub_path = Project.file_name, .data =
+        \\{ "fluxion_project": 2, "application": { "name": "Keys" },
+        \\  "input": { "actions": [
+        \\    { "name": "jump", "bindings": [ { "type": "key", "key": "space" }, { "type": "pad_button", "button": "a" } ] },
+        \\    { "name": "ui_accept", "bindings": [ { "type": "key", "key": "j" } ] } ] } }
+    });
+    const saves = try std.fs.path.join(testing.allocator, &.{ try files.at(), "saves" });
+    defer testing.allocator.free(saves);
+
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = try files.at(), .user_root = saves });
+    defer app.destroy();
+    try testing.expectEqual(@as(usize, 2), app.input.actions.get("jump").?.bindings.len);
+    try testing.expect(app.input.actions.get("ui_accept").?.bindings[0].eql(.keyOf(.j)));
+
+    app.input.apply(.{ .key = .{ .window = .none, .key = .space, .scancode = @enumFromInt(0), .action = .press, .mods = .{} } });
+    _ = try app.step();
+    try testing.expect(app.actionDown("jump"));
+    try testing.expect(app.actionJustPressed("jump"));
+    try testing.expectEqualStrings("Space", app.describeAction("jump"));
+    _ = try app.step();
+    try testing.expect(app.actionDown("jump"));
+    try testing.expect(!app.actionJustPressed("jump"));
+
+    // The player moves jump to W, and that is kept in a file of its own.
+    try testing.expect(!try app.loadInputMap("user://input.json"));
+    try testing.expect(app.input.actions.unbindAll("jump"));
+    try app.input.actions.bind(testing.allocator, "jump", .keyOf(.w));
+    try app.saveInputMap("user://input.json");
+
+    const again = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = try files.at(), .user_root = saves });
+    defer again.destroy();
+    try testing.expect(again.input.actions.get("jump").?.bindings[0].eql(.keyOf(.space)));
+    try testing.expect(try again.loadInputMap("user://input.json"));
+    try testing.expectEqual(@as(usize, 1), again.input.actions.get("jump").?.bindings.len);
+    try testing.expect(again.input.actions.get("jump").?.bindings[0].eql(.keyOf(.w)));
+
+    // A program whose keys are its own has the built-in actions alone.
+    const editor = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = try files.at(), .project_input = false });
+    defer editor.destroy();
+    try testing.expect(editor.input.actions.get("jump") == null);
+    try testing.expect(editor.input.actions.get("ui_accept").?.bindings[0].eql(.keyOf(.enter)));
+}
+
+test "a config file keeps a game's settings in user://, and is empty until there is one" {
+    var files: Files = try .init();
+    defer files.tmp.cleanup();
+    const app = try files.app();
+    defer app.destroy();
+    app.project.user_root = try std.fs.path.join(testing.allocator, &.{ try files.at(), "saves" });
+
+    var config = try ConfigFile.load(app, "user://settings.cfg");
+    defer config.deinit();
+    try testing.expectEqual(@as(usize, 0), config.sections().len);
+    try config.set("audio", "music", 0.5);
+    try config.save(app, "user://settings.cfg");
+
+    var again = try ConfigFile.load(app, "user://settings.cfg");
+    defer again.deinit();
+    try testing.expectEqual(@as(f64, 0.5), again.getFloat("audio", "music", 1));
 }
 
 test "a program in the background runs no systems until it is back, but for the frame it left in" {
@@ -5501,8 +8712,9 @@ test "a label's corners are the box its lines are laid out in" {
 
     const one = try app.world.spawnWith(.{
         components.Transform2D.at(100, 50),
-        components.Text2D.of("Hello"),
+        components.Text2D{},
     });
+    try app.setText(one, components.Text2D, "text", "Hello");
     const corners = app.textCorners(one).?;
     // The transform is the top left of the first line, and the box goes
     // right and down from it.
@@ -5517,8 +8729,9 @@ test "a label's corners are the box its lines are laid out in" {
     // words.
     const two = try app.world.spawnWith(.{
         components.Transform2D.at(100, 50),
-        components.Text2D.of("Hello\nHello"),
+        components.Text2D{},
     });
+    try app.setText(two, components.Text2D, "text", "Hello\nHello");
     const taller = app.textCorners(two).?;
     try testing.expectApproxEqAbs(width, taller[2].x - taller[0].x, 0.001);
     try testing.expectApproxEqAbs(height * 2, taller[2].y - taller[0].y, 0.01);
@@ -5528,7 +8741,7 @@ test "a label's corners are the box its lines are laid out in" {
         components.Transform2D.at(100, 50),
         components.Text2D{ .alignment = .center },
     });
-    app.world.get(middle, components.Text2D).?.set("Hello");
+    try app.setText(middle, components.Text2D, "text", "Hello");
     const centred = app.textCorners(middle).?;
     try testing.expectApproxEqAbs(100 - width / 2, centred[0].x, 0.001);
     try testing.expectApproxEqAbs(100 + width / 2, centred[2].x, 0.001);
@@ -5537,7 +8750,7 @@ test "a label's corners are the box its lines are laid out in" {
     // not words either, which the renderer passes over as well.
     const empty = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Text2D{} });
     try testing.expect(app.textCorners(empty) == null);
-    app.world.get(empty, components.Text2D).?.set(&.{ 0xff, 0xfe });
+    try app.setText(empty, components.Text2D, "text", &.{ 0xff, 0xfe });
     try testing.expect(app.textCorners(empty) == null);
     try testing.expect(app.textCorners(.none) == null);
 }
@@ -5553,8 +8766,9 @@ test "an entity is outlined by whichever of the two it is drawn as" {
     });
     const written = try app.world.spawnWith(.{
         components.Transform2D.at(0, 0),
-        components.Text2D.of("Hello"),
+        components.Text2D{},
     });
+    try app.setText(written, components.Text2D, "text", "Hello");
     const neither = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
 
     const box = app.drawnCorners(drawn).?;
@@ -5624,9 +8838,9 @@ test "a parent's children keep the order they are put in, and a new one comes la
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const parent = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
-    const a = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 1, 0)});
-    const b = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 2, 0)});
-    const c = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 3, 0)});
+    const a = try app.world.spawnWith(.{ components.Transform2D.at(1, 0), components.Parent.of(parent) });
+    const b = try app.world.spawnWith(.{ components.Transform2D.at(2, 0), components.Parent.of(parent) });
+    const c = try app.world.spawnWith(.{ components.Transform2D.at(3, 0), components.Parent.of(parent) });
     var found: [8]ecs.Entity = undefined;
 
     // Never placed: the order the handles were given out in.
@@ -5643,7 +8857,7 @@ test "a parent's children keep the order they are put in, and a new one comes la
     try testing.expectEqualSlices(ecs.Entity, &.{ c, b, a }, app.childrenOf(parent, &found));
 
     // A child made afterwards comes after the ones placed.
-    const d = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 4, 0)});
+    const d = try app.world.spawnWith(.{ components.Transform2D.at(4, 0), components.Parent.of(parent) });
     try testing.expectEqualSlices(ecs.Entity, &.{ c, b, a, d }, app.childrenOf(parent, &found));
 
     // The roots are a family of their own, untouched.
@@ -5666,9 +8880,9 @@ test "the order of a parent's children goes through a scene and back" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
     const parent = try app.world.spawnWith(.{components.Transform2D.at(0, 0)});
-    const first = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 1, 0)});
-    const second = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 2, 0)});
-    const third = try app.world.spawnWith(.{components.Transform2D.childOf(parent, 3, 0)});
+    const first = try app.world.spawnWith(.{ components.Transform2D.at(1, 0), components.Parent.of(parent) });
+    const second = try app.world.spawnWith(.{ components.Transform2D.at(2, 0), components.Parent.of(parent) });
+    const third = try app.world.spawnWith(.{ components.Transform2D.at(3, 0), components.Parent.of(parent) });
     try app.setName(first, "first");
     try app.setName(second, "second");
     try app.setName(third, "third");
@@ -5691,11 +8905,11 @@ test "the order of a parent's children goes through a scene and back" {
 
     var found: [8]ecs.Entity = undefined;
     const copied_parent = copy.findUuid(app.uuidOf(parent).?).?;
-    const children = copy.childrenOf(copied_parent, &found);
-    try testing.expectEqual(@as(usize, 3), children.len);
-    try testing.expectEqualStrings("third", copy.nameOf(children[0]).?);
-    try testing.expectEqualStrings("second", copy.nameOf(children[1]).?);
-    try testing.expectEqualStrings("first", copy.nameOf(children[2]).?);
+    const family = copy.childrenOf(copied_parent, &found);
+    try testing.expectEqual(@as(usize, 3), family.len);
+    try testing.expectEqualStrings("third", copy.nameOf(family[0]).?);
+    try testing.expectEqualStrings("second", copy.nameOf(family[1]).?);
+    try testing.expectEqualStrings("first", copy.nameOf(family[2]).?);
     const roots = copy.childrenOf(.none, &found);
     try testing.expect(roots[0].eql(before));
 
@@ -5704,4 +8918,24 @@ test "the order of a parent's children goes through a scene and back" {
     const again = try scene.write(copy, testing.allocator, .{});
     defer testing.allocator.free(again);
     try testing.expectEqualStrings(bytes, again);
+}
+
+test "the game's chance is the same from the same seed, and keeps to the ranges it is given" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .random_seed = 7 });
+    defer app.destroy();
+    var first: [8]i64 = undefined;
+    for (&first) |*n| n.* = app.randomInt(1, 6);
+    app.seedRandom(7);
+    for (first) |n| try testing.expectEqual(n, app.randomInt(6, 1));
+    for (0..200) |_| {
+        const x = app.randomRange(-2, 3);
+        try testing.expect(x >= -2 and x < 3);
+        const i = app.randomIndex(4);
+        try testing.expect(i >= 0 and i < 4);
+        const f = app.randomFloat();
+        try testing.expect(f >= 0 and f < 1);
+    }
+    try testing.expectEqual(@as(i64, 0), app.randomIndex(0));
+    try testing.expect(!app.randomChance(0));
+    try testing.expect(app.randomChance(1));
 }

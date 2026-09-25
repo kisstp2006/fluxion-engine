@@ -2,8 +2,8 @@
 
 //! What is inside each `Area2D`: the shape pairs the physics found, the
 //! signals that say one began or ended, and the questions a game asks
-//! instead of listening. Godot's Area2D monitoring, with its shape indices
-//! replaced by the colliders' entities.
+//! instead of listening. A shape is named by its collider's entity rather
+//! than by an index.
 //!
 //! Every sensor pair an area is in is kept here, beside the world as the
 //! bodies' handles are, whether it is reported or not: what an area says is
@@ -120,9 +120,9 @@ fn lost(self: *Areas, app: *App, local: Entity, other: Entity) !void {
     if (gone.value.reported) try self.parted(app, gone.value, local, other);
 }
 
-/// Whether the shape `mine` is told about the shape `theirs`: Godot 3's
-/// rule, the one its physics touches by, where either side's mask having
-/// the other's layer is enough.
+/// Whether the shape `mine` is told about the shape `theirs`: the rule the
+/// physics touches by, where either side's mask having the other's layer is
+/// enough.
 fn told(mine: Collider2D, theirs: Collider2D) bool {
     return (mine.collision_mask & theirs.collision_layer) != 0 or (theirs.collision_mask & mine.collision_layer) != 0;
 }
@@ -164,7 +164,7 @@ fn joined(self: *Areas, app: *App, between: Between, local: Entity, other: Entit
     held.value_ptr.shapes += 1;
     const first = held.value_ptr.shapes == 1;
 
-    // The object first and then the shape, as Godot says them.
+    // The object first and then the shape.
     if (between.is_area) {
         if (first) try app.emit(between.area, Area2D, .area_entered, .{ .area = between.object });
         try app.emit(between.area, Area2D, .area_shape_entered, .{ .area = between.object, .area_shape = other, .local_shape = local });
@@ -185,7 +185,7 @@ fn parted(self: *Areas, app: *App, between: Between, local: Entity, other: Entit
     }
     if (last) _ = self.objects.swapRemove(key);
 
-    // The shape first and then the object, as Godot says them.
+    // The shape first and then the object.
     if (between.is_area) {
         try app.emit(between.area, Area2D, .area_shape_exited, .{ .area = between.object, .area_shape = other, .local_shape = local });
         if (last) try app.emit(between.area, Area2D, .area_exited, .{ .area = between.object });
@@ -224,7 +224,7 @@ pub fn overlaps(self: *Areas, app: *App, area: Entity, object: Entity) bool {
 }
 
 /// Whether an area answers questions at all, with a word about one that does
-/// not - once for each, where Godot says it every time.
+/// not - once for each area, not at every question.
 fn watching(self: *Areas, app: *App, area: Entity) bool {
     const held = app.world.get(area, Area2D) orelse return false;
     if (held.monitoring) return true;

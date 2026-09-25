@@ -23,9 +23,12 @@
 //! frame is one draw call however many of them there are. `Region.cell`
 //! turns "the third picture along" into the four numbers the shader wants.
 //!
-//! **An `Animation` is the sheet and a rate.** The engine steps it and writes
-//! the cell into the sprite; nothing in this file touches `Sprite.region`
-//! after the creature is spawned.
+//! **An `AnimatedSprite2D` plays a set of sprite frames.** The frames are
+//! cells of the sheet, named and timed - `app.addGridFrames` makes them in
+//! code, a `.frames` file is the same thing on disc. The engine steps each
+//! sprite and puts the cell in the `Sprite` beside it, at the cell's size;
+//! nothing in this file touches `Sprite.region` after the creature is
+//! spawned.
 //!
 //! **A transform's `parent` is how one thing rides on another.** Each creature
 //! is five entities - a body, two eyes, a shadow and a name - and only the
@@ -35,9 +38,11 @@
 //! parent's space, so `-4` above the eyes means four above the body wherever
 //! the body has got to.
 //!
-//! **A `Text2D` carries its own words.** The name over each creature is a
-//! child entity like an eye is, and the line in the corner is a child of the
-//! *camera* - which is the whole of what a heads-up display is here. Every
+//! **A `Text2D` is words at a transform**, and the words are the app's:
+//! `app.setText` once, `app.printText` every frame for the line that
+//! changes. The name over each creature is a child entity like an eye is,
+//! and the line in the corner is a child of the *camera* - which is the
+//! whole of what a heads-up display is here. Every
 //! letter of both comes out of one glyph atlas, so all the text in the window
 //! is one more draw call and not one per label.
 //!
@@ -56,10 +61,10 @@
 //!
 //! **The camera and the player are found by name.** `app.setName(camera,
 //! "camera")` once, when it is spawned, and `app.find("camera")` in every
-//! system that wants it. The name belongs to the entity, as a Unity
-//! GameObject's does, and is not a component - so naming the camera does not
-//! move it to another table, and `find` hands back the one thing called that
-//! rather than the first thing a query happened to reach.
+//! system that wants it. The name belongs to the entity, and is not a
+//! component - so naming the camera does not move it to another table, and
+//! `find` hands back the one thing called that rather than the first thing a
+//! query happened to reach.
 //!
 //! **The world can be written down.** `--save-scene` writes everything in it
 //! when the run ends - every entity, its name, and its components, the
@@ -79,9 +84,10 @@ const std = @import("std");
 const fx = @import("fluxion_engine");
 
 const Transform2D = fx.Transform2D;
+const Parent = fx.Parent;
 const Sprite = fx.Sprite;
 const Camera2D = fx.Camera2D;
-const Animation = fx.Animation;
+const AnimatedSprite2D = fx.AnimatedSprite2D;
 const Text2D = fx.Text2D;
 const Color = fx.Color;
 const App = fx.App;
@@ -119,7 +125,6 @@ const cell_size = 32;
 /// animation; the second row is the pieces that do not move.
 const cell = struct {
     const body_first = 0;
-    const body_frames = 4;
     const eye = 4;
     const shadow = 5;
     const ring = 6;
@@ -182,9 +187,18 @@ const peek_reach: f32 = 180;
 // Setting the table
 // -------------------------------------------------------------------------
 
-fn spawn(app: *App) !void {
-    const world = &app.world;
+/// The walk, played from `at` of the way through it: from nought to one.
+fn walking(frames: fx.SpriteFramesHandle, at: f32) AnimatedSprite2D {
+    var sprite: AnimatedSprite2D = .autoplaying(frames, "walk");
+    const into = at * 4;
+    sprite.frame = @intFromFloat(@min(@floor(into), 3));
+    sprite.frame_progress = into - @floor(into);
+    return sprite;
+}
 
+/// The sheet, and the walk made of its first row. A scene read with
+/// `--scene` names both, so they are made before it is read as well.
+fn sheetAndFrames(app: *App) !struct { sheet: fx.TextureHandle, frames: fx.SpriteFramesHandle } {
     const sheet = app.assets.loadTexture(atlas_path, .{ .filter = .nearest }) catch |err| blk: {
         // A fresh checkout has no PNG in it until somebody writes one, and a
         // missing file should not be the difference between a program that
@@ -198,6 +212,20 @@ fn spawn(app: *App) !void {
             .{ .filter = .nearest, .label = "atlas" },
         );
     };
+
+    // Four cells of the first row, at eight a second: the walk every
+    // creature shows.
+    const frames = try app.addGridFrames("examples/creature.frames", sheet, atlas_columns, atlas_rows, &.{
+        .{ .name = "walk", .cells = &.{ cell.body_first, cell.body_first + 1, cell.body_first + 2, cell.body_first + 3 }, .speed = 8 },
+    });
+    return .{ .sheet = sheet, .frames = frames };
+}
+
+fn spawn(app: *App) !void {
+    const world = &app.world;
+    const made = try sheetAndFrames(app);
+    const sheet = made.sheet;
+    const frames = made.frames;
 
     openFont(app);
 
@@ -214,15 +242,12 @@ fn spawn(app: *App) !void {
     // A line of text pinned to the camera rather than to the world, which is
     // what a heads-up display is: a child of the camera, so it slides along
     // with it and stays the same size on screen whatever the world does.
-    var heading: Text2D = .of("");
-    heading.size = 15;
-    heading.color = theme.heading;
-    heading.layer = 50;
+    const heading: Text2D = .{ .size = 15, .color = theme.heading, .layer = 50 };
 
     _ = try world.spawnWith(.{
         // Where in the camera's space it goes is worked out every frame by
         // `pinHeading`; this only says whose corner it is.
-        Transform2D{ .parent = camera, .inherit_rotation = false },
+        Transform2D{ .inherit_rotation = false }, Parent.of(camera),
         heading,
         Heading{},
     });
@@ -256,23 +281,10 @@ fn spawn(app: *App) !void {
                 40 + rand.float(f32) * (field_width - 80),
                 40 + rand.float(f32) * (field_height - 80),
             ).interpolated(),
-            Sprite{
-                .texture = sheet,
-                .tint = tint,
-                .width = 34,
-                .height = 34,
-                .layer = 0,
-            },
-            // Four cells of the first row, at eight a second, each creature
-            // starting somewhere else in the loop.
-            Animation{
-                .first = cell.body_first,
-                .length = cell.body_frames,
-                .columns = atlas_columns,
-                .rows = atlas_rows,
-                .fps = 8,
-                .time = rand.float(f32),
-            },
+            // Its picture, size and pivot are the walk's to say.
+            Sprite{ .tint = tint, .layer = 0 },
+            // Each creature starting somewhere else in the walk.
+            walking(frames, rand.float(f32)),
             Wander{
                 .dx = @cos(angle),
                 .dy = @sin(angle),
@@ -290,7 +302,7 @@ fn spawn(app: *App) !void {
             // A ring round the one being driven, so it can be found in a
             // crowd. Parented, so it never has to be moved.
             _ = try world.spawnWith(.{
-                Transform2D{ .parent = body, .inherit_rotation = false },
+                Transform2D{ .inherit_rotation = false }, Parent.of(body),
                 Sprite{
                     .texture = sheet,
                     .region = .cell(cell.ring, atlas_columns, atlas_rows),
@@ -305,7 +317,7 @@ fn spawn(app: *App) !void {
         // The shadow does not inherit the body's rotation: a shadow on the
         // ground stays flat however much the thing above it leans.
         _ = try world.spawnWith(.{
-            Transform2D{ .x = 0, .y = 15, .parent = body, .inherit_rotation = false },
+            Transform2D{ .x = 0, .y = 15, .inherit_rotation = false }, Parent.of(body),
             Sprite{
                 .texture = sheet,
                 .region = .cell(cell.shadow, atlas_columns, atlas_rows),
@@ -319,7 +331,7 @@ fn spawn(app: *App) !void {
         // Two eyes, which do turn with it - that is the whole point of them.
         for ([_]f32{ -7, 7 }) |offset| {
             _ = try world.spawnWith(.{
-                Transform2D.childOf(body, offset, -4),
+                Transform2D.at(offset, -4), Parent.of(body),
                 Sprite{
                     .texture = sheet,
                     .region = .cell(cell.eye, atlas_columns, atlas_rows),
@@ -335,16 +347,11 @@ fn spawn(app: *App) !void {
         // has to be moved - and not inheriting the lean, because a name plate
         // that tips over with the thing it names is a name plate nobody can
         // read.
-        var plate: Text2D = .of(names[i % names.len]);
-        plate.size = 13;
-        plate.color = theme.name;
-        plate.alignment = .center;
-        plate.layer = 2;
-
-        _ = try world.spawnWith(.{
-            Transform2D{ .x = 0, .y = -32, .parent = body, .inherit_rotation = false },
-            plate,
+        const plate = try world.spawnWith(.{
+            Transform2D{ .x = 0, .y = -32, .inherit_rotation = false }, Parent.of(body),
+            Text2D{ .size = 13, .color = theme.name, .alignment = .center, .layer = 2 },
         });
+        try app.setText(plate, Text2D, "text", names[i % names.len]);
     }
 }
 
@@ -464,8 +471,9 @@ const Headings = fx.Query(.{ Text2D, Heading, Transform2D });
 
 /// Write what is going on into the pinned label, and hold it in the corner.
 ///
-/// `print` formats straight into the component, which is what a score, a
-/// timer and a frame counter all are: a number that changed since last frame.
+/// `printText` formats the words it keeps beside the label, which is what a
+/// score, a timer and a frame counter all are: a number that changed since
+/// last frame.
 ///
 /// In `.late` and after the camera has been moved, because where the corner
 /// of the screen *is* depends on where the camera ended up and how far in it
@@ -480,8 +488,8 @@ fn pinHeading(app: *App) !void {
 
     var it = try Headings.over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(Text2D), chunk.slice(Heading), chunk.slice(Transform2D)) |*label, pinned, *place| {
-            label.print("{d} creatures  {d} fps", .{
+        for (chunk.entities, chunk.slice(Heading), chunk.slice(Transform2D)) |label, pinned, *place| {
+            try app.printText(label, Text2D, "text", "{d} creatures  {d} fps", .{
                 herd,
                 @as(u32, @intFromFloat(app.time.fps())),
             });
@@ -560,8 +568,8 @@ fn followPlayer(app: *App) !void {
     const half_view_y = height / (2 * zoom);
 
     // Where it wants to be: over the player, pushed by however far the view
-    // has been dragged, and held inside the field - which is Godot's camera
-    // limits and the difference between a game and a demonstration. Without
+    // has been dragged, and held inside the field - the camera's limits, and
+    // the difference between a game and a demonstration. Without
     // it, a player walking into a corner is looking at half a screen of
     // nothing.
     const want_x = insideField(looking_at.x + follow.peek_x, half_view_x, field_width);
@@ -743,8 +751,9 @@ pub fn main(init: std.process.Init) !void {
 
     if (flags.scene) |path| {
         openFont(app);
+        _ = try sheetAndFrames(app);
         var diagnostics: fx.json.Diagnostics = .{};
-        const loaded = app.loadScene(path, .{ .diagnostics = &diagnostics }) catch |err| {
+        const loaded = app.readScene(path, .{ .diagnostics = &diagnostics }) catch |err| {
             try out.print("{f}\n", .{diagnostics});
             try out.flush();
             return err;

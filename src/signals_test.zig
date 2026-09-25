@@ -117,7 +117,7 @@ test "an emit is heard when the emitting system returns, with its arguments" {
     _ = try app.step();
     try testing.expect(!Emitter.inside_query);
     try testing.expectEqual(@as(usize, 2), Heard.len);
-    // In the order they were connected, Godot 4's.
+    // In the order they were connected.
     try testing.expectEqual(@as(u8, 1), Heard.calls[0].who);
     try testing.expectEqual(@as(u8, 2), Heard.calls[1].who);
     try testing.expectEqual(@as(f32, 5), Heard.calls[0].damage);
@@ -444,7 +444,7 @@ test "a bare name two components declare is kept as written, and never heard" {
     defer app.destroy();
     const text =
         \\{
-        \\  "fluxion_scene": 2,
+        \\  "fluxion_scene": 3,
         \\  "entities": [
         \\    { "uuid": "00000000-0000-4000-8000-000000000001", "Health": {}, "Armour": {} },
         \\    { "uuid": "00000000-0000-4000-8000-000000000002" }
@@ -656,7 +656,7 @@ test "a connection this build knows nothing of is kept through a load and a save
     defer app.destroy();
     const text =
         \\{
-        \\  "fluxion_scene": 2,
+        \\  "fluxion_scene": 3,
         \\  "entities": [
         \\    { "uuid": "00000000-0000-4000-8000-000000000001", "name": "chest" },
         \\    { "uuid": "00000000-0000-4000-8000-000000000002", "name": "hud" }

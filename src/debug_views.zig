@@ -99,6 +99,20 @@ fn drawColliders(app: *App) void {
                 // A spoke, so a rolling ball is seen to roll.
                 app.debug.line2d(centre, centre.add(pose.turn(.init(circle.radius, 0))), colour);
             },
+            .capsule => |capsule| {
+                // Its two ends, and its two sides between them.
+                const a = pose.apply(capsule.center1);
+                const b = pose.apply(capsule.center2);
+                app.debug.circle2d(a, capsule.radius, colour);
+                app.debug.circle2d(b, capsule.radius, colour);
+                const along = b.sub(a);
+                const len = along.len();
+                if (len > 0) {
+                    const side = Vec2.init(-along.y, along.x).scale(capsule.radius / len);
+                    app.debug.line2d(a.add(side), b.add(side), colour);
+                    app.debug.line2d(a.sub(side), b.sub(side), colour);
+                }
+            },
         }
     }
 }
@@ -119,12 +133,13 @@ fn drawBodies(app: *App) void {
 fn drawTransforms(app: *App) !void {
     var it = try ecs.Query(.{Transform2D}).over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.entities, chunk.slice(Transform2D)) |e, local| {
+        for (chunk.entities) |e| {
             const placed = app.drawnTransform(e) orelse continue;
             const at: Vec2 = .init(placed.x, placed.y);
             app.debug.axes2d(at, placed.rotation, reach);
-            if (local.parent.isNone()) continue;
-            const parent = app.drawnTransform(local.parent) orelse continue;
+            const above = app.parentOf(e);
+            if (above.isNone()) continue;
+            const parent = app.drawnTransform(above) orelse continue;
             app.debug.line2d(at, .init(parent.x, parent.y), .gray);
         }
     }
@@ -142,7 +157,7 @@ fn drawSprites(app: *App) !void {
 }
 
 fn drawCameras(app: *App) !void {
-    const view: View = .of(&app.world, &app.snapshots, @floatFromInt(app.width), @floatFromInt(app.height));
+    const view = app.currentView();
     app.debug.polygon2d(&.{
         view.toWorld(.init(0, 0)),
         view.toWorld(.init(view.width, 0)),
@@ -298,7 +313,7 @@ test "the transform view draws each entity's axes and a line to its parent" {
     defer app.destroy();
     app.debug_views.transforms = true;
     const tank = try app.world.spawnWith(.{Transform2D.at(10, 10)});
-    _ = try app.world.spawnWith(.{Transform2D.childOf(tank, 20, 0)});
+    _ = try app.world.spawnWith(.{ Transform2D.at(20, 0), components.Parent.of(tank) });
 
     _ = try app.step();
     try testing.expectEqual(@as(u32, 2 + 2 + 1), linesDrawn(app));

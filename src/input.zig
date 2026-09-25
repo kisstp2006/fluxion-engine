@@ -29,6 +29,10 @@
 //!
 //! Files let go over the window and the answers to file dialogs are input
 //! too, each there for one frame: see `dropped` and `dialogAnswers`.
+//!
+//! A game asks for its actions rather than its keys - `actionDown("jump")`
+//! - and a project says which keys, buttons and sticks they are: see
+//! `actions` and `updateActions`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -36,8 +40,14 @@ const testing = std.testing;
 const platform = @import("fluxion_platform");
 const math = @import("fluxion_math");
 
+const actions_mod = @import("actions.zig");
 const dialog = @import("dialog.zig");
 const pointer_mod = @import("pointer.zig");
+
+pub const Action = actions_mod.Action;
+pub const Actions = actions_mod.Actions;
+pub const Binding = actions_mod.Binding;
+pub const Device = actions_mod.Device;
 
 const Vec2 = math.Vec2;
 
@@ -60,6 +70,19 @@ pressed: Keys = .initEmpty(),
 /// Keys that came up during this frame.
 released: Keys = .initEmpty(),
 
+/// The same keys by what the layout calls them: `KeyEvent.virtual`. What an
+/// action bound to a key that is not `physical` reads.
+virtual_down: Keys = .initEmpty(),
+virtual_pressed: Keys = .initEmpty(),
+
+/// The game's actions, and where each one stands this frame. Freed with
+/// `deinit`; `App` fills it from the project.
+actions: Actions = .{},
+
+/// What the player last pressed something on: the keyboard and the mouse,
+/// or a controller. What `describeAction` names an action by.
+last_device: Device = .keyboard,
+
 /// Mouse buttons, the same three ways.
 button_down: Buttons = .initEmpty(),
 button_pressed: Buttons = .initEmpty(),
@@ -76,6 +99,13 @@ fixed_button_released: Buttons = .initEmpty(),
 /// second set of functions, so a `.fixed` system calling `justPressed` is
 /// simply right. `App` sets it around the fixed stage; nothing else should.
 clock: Clock = .frame,
+
+/// Where on the window the frame is shown, and how many of its pixels one of
+/// the window's is: what turns every pointer position and movement this
+/// reads from the window's pixels into the frame's. The identity until a
+/// project stretches its game to the window; see `stretch.zig`.
+frame_origin: math.Vec2 = .zero,
+frame_ratio: f32 = 1,
 
 /// Where the pointer is, in pixels from the top left of the content area,
 /// and how far it moved this frame.
@@ -101,6 +131,13 @@ pointer_still: f32 = 0,
 /// that may mean an edit.
 typed: [typed_capacity]Typed = undefined,
 typed_len: usize = 0,
+
+/// Every key that went down, came up or repeated this frame, in order: what
+/// a script's `input` is handed. One given between frames is the next
+/// frame's, as a pointer event is.
+key_events: [typed_capacity]platform.event.KeyEvent = undefined,
+key_events_len: usize = 0,
+key_events_seen: usize = 0,
 
 /// Everything the pointer did this frame, in order: what picking hands
 /// to whatever is under it, and what a game reads for itself. See
@@ -164,7 +201,7 @@ pub const Happening = enum { suspended, resumed, low_memory };
 pub const typed_capacity = 32;
 
 /// The least time the pointer's velocity is worked out over, so a frame
-/// with no motion in it does not read as a stop. Godot's tracker.
+/// with no motion in it does not read as a stop.
 const velocity_window = 0.1;
 /// How long the pointer stands still before its velocity is nought.
 const velocity_forgets = 3.0;
@@ -199,6 +236,10 @@ pub const max_pads = platform.gamepad.max_devices;
 
 /// The fifteen buttons a mapped controller has, one bit each.
 const PadButtons = std.StaticBitSet(platform.GamepadButton.count);
+
+/// How far a stick or a trigger goes before the player counts as using the
+/// controller: a resting stick's drift does not.
+const device_threshold = 0.5;
 
 /// One controller slot, as it stood at the top of this frame. Built by
 /// `readPads`, with the same levels and edges as a key.
@@ -408,123 +449,6 @@ pub const AxisBinding = extern struct {
     }
 };
 
-/// A button's keyboard and controller inputs, as plain data. `no_key` and
-/// `no_pad_input` mean no second input.
-pub const ButtonBinding = extern struct {
-    keys: [2]i32 = @splat(no_key),
-    pad: u8 = any_pad,
-    buttons: [2]u8 = @splat(no_pad_input),
-
-    pub const no_key: i32 = -1;
-    pub const any_pad: u8 = 0xFF;
-    pub const no_pad_input: u8 = 0xFF;
-
-    pub fn key(value: platform.Key) ButtonBinding {
-        return .{ .keys = .{ @intFromEnum(value), no_key } };
-    }
-
-    pub fn orKey(self: ButtonBinding, value: platform.Key) ButtonBinding {
-        var out = self;
-        out.keys[1] = @intFromEnum(value);
-        return out;
-    }
-
-    pub fn withPad(self: ButtonBinding, slot: u8, button: platform.GamepadButton) ButtonBinding {
-        var out = self;
-        out.pad = slot;
-        out.buttons[0] = @intFromEnum(button);
-        return out;
-    }
-
-    pub fn orPad(self: ButtonBinding, button: platform.GamepadButton) ButtonBinding {
-        var out = self;
-        out.buttons[1] = @intFromEnum(button);
-        return out;
-    }
-};
-
-/// A game's named controls. The names and bindings live in parallel arrays:
-/// changing one never changes another action's storage or identity.
-pub const ActionMap = struct {
-    names: std.ArrayList([]const u8) = .empty,
-    bindings: std.ArrayList(Binding) = .empty,
-
-    pub const Binding = union(enum) {
-        button: ButtonBinding,
-        axis: AxisBinding,
-    };
-
-    pub fn deinit(self: *ActionMap, gpa: std.mem.Allocator) void {
-        for (self.names.items) |name| gpa.free(name);
-        self.names.deinit(gpa);
-        self.bindings.deinit(gpa);
-    }
-
-    pub fn bindButton(self: *ActionMap, gpa: std.mem.Allocator, name: []const u8, binding: ButtonBinding) !void {
-        try self.bind(gpa, name, .{ .button = binding });
-    }
-
-    pub fn bindAxis(self: *ActionMap, gpa: std.mem.Allocator, name: []const u8, binding: AxisBinding) !void {
-        try self.bind(gpa, name, .{ .axis = binding });
-    }
-
-    pub fn remove(self: *ActionMap, gpa: std.mem.Allocator, name: []const u8) bool {
-        const index = self.indexOf(name) orelse return false;
-        gpa.free(self.names.orderedRemove(index));
-        _ = self.bindings.orderedRemove(index);
-        return true;
-    }
-
-    pub fn bindingOf(self: *const ActionMap, name: []const u8) ?Binding {
-        const index = self.indexOf(name) orelse return null;
-        return self.bindings.items[index];
-    }
-
-    pub fn down(self: *const ActionMap, input: *const Input, name: []const u8) bool {
-        const binding = self.bindingOf(name) orelse return false;
-        return switch (binding) {
-            .button => |button| input.buttonBindingDown(button),
-            .axis => |action_axis| input.axisOf(action_axis) != 0,
-        };
-    }
-
-    pub fn justPressed(self: *const ActionMap, input: *const Input, name: []const u8) bool {
-        const binding = self.bindingOf(name) orelse return false;
-        return switch (binding) {
-            .button => |button| input.buttonBindingJustPressed(button),
-            .axis => false,
-        };
-    }
-
-    pub fn axis(self: *const ActionMap, input: *const Input, name: []const u8) f32 {
-        const binding = self.bindingOf(name) orelse return 0;
-        return switch (binding) {
-            .button => |button| if (input.buttonBindingDown(button)) 1 else 0,
-            .axis => |action_axis| input.axisOf(action_axis),
-        };
-    }
-
-    fn bind(self: *ActionMap, gpa: std.mem.Allocator, name: []const u8, binding: Binding) !void {
-        if (self.indexOf(name)) |index| {
-            self.bindings.items[index] = binding;
-            return;
-        }
-        const owned = try gpa.dupe(u8, name);
-        errdefer gpa.free(owned);
-        try self.names.ensureUnusedCapacity(gpa, 1);
-        try self.bindings.ensureUnusedCapacity(gpa, 1);
-        self.names.appendAssumeCapacity(owned);
-        self.bindings.appendAssumeCapacity(binding);
-    }
-
-    fn indexOf(self: *const ActionMap, name: []const u8) ?usize {
-        for (self.names.items, 0..) |stored, index| {
-            if (std.mem.eql(u8, stored, name)) return index;
-        }
-        return null;
-    }
-};
-
 /// Which edges the questions answer from. See `clock`.
 pub const Clock = enum {
     /// Since the top of this frame. What every stage but `.fixed` sees.
@@ -539,9 +463,8 @@ pub const Pointer = struct {
     dx: f32 = 0,
     dy: f32 = 0,
     /// How fast it is moving, in pixels a second, worked out over at
-    /// least the last tenth of a second: Godot's
-    /// `get_last_mouse_velocity`. Nought once it has been still for
-    /// three seconds. Set by `Input.trackPointer`.
+    /// least the last tenth of a second. Nought once it has been still
+    /// for three seconds. Set by `Input.trackPointer`.
     velocity: math.Vec2 = .zero,
     /// Whether the pointer is over the window at all.
     inside: bool = true,
@@ -636,26 +559,6 @@ pub fn axisOf(self: *const Input, binding: AxisBinding) f32 {
     return std.math.clamp(sum, -1, 1);
 }
 
-fn buttonBindingDown(self: *const Input, binding: ButtonBinding) bool {
-    if (self.anyKeyOf(binding.keys) != 0) return true;
-    const controller = if (binding.pad == ButtonBinding.any_pad) self.anyPad() else self.pad(binding.pad);
-    for (binding.buttons) |raw| {
-        if (raw < platform.GamepadButton.count and controller.down(@enumFromInt(raw))) return true;
-    }
-    return false;
-}
-
-fn buttonBindingJustPressed(self: *const Input, binding: ButtonBinding) bool {
-    for (binding.keys) |raw| {
-        if (raw >= 0 and raw < key_span and self.justPressed(@enumFromInt(raw))) return true;
-    }
-    const controller = if (binding.pad == ButtonBinding.any_pad) self.anyPad() else self.pad(binding.pad);
-    for (binding.buttons) |raw| {
-        if (raw < platform.GamepadButton.count and controller.justPressed(@enumFromInt(raw))) return true;
-    }
-    return false;
-}
-
 /// One if any of these keys is down: two keys for the same end of an axis
 /// count once.
 fn anyKeyOf(self: *const Input, keys: [2]i32) f32 {
@@ -663,6 +566,174 @@ fn anyKeyOf(self: *const Input, keys: [2]i32) f32 {
         if (self.isDown(@enumFromInt(raw))) return 1;
     }
     return 0;
+}
+
+// -------------------------------------------------------------------------
+// Actions
+// -------------------------------------------------------------------------
+
+/// Whether the action is down: any of its inputs is, or `pressAction` holds
+/// it. False for an action there is none of.
+pub fn actionDown(self: *const Input, name: []const u8) bool {
+    const entry = self.actions.findConst(name) orelse return false;
+    return entry.state.down;
+}
+
+/// Whether it went down this frame - or, in a `.fixed` system, since the
+/// last fixed step. Pressing a second key while the first is held is no new
+/// press.
+pub fn actionJustPressed(self: *const Input, name: []const u8) bool {
+    const entry = self.actions.findConst(name) orelse return false;
+    return if (self.clock == .fixed) entry.state.fixed_pressed else entry.state.pressed;
+}
+
+/// Whether it came up this frame - or since the last fixed step.
+pub fn actionJustReleased(self: *const Input, name: []const u8) bool {
+    const entry = self.actions.findConst(name) orelse return false;
+    return if (self.clock == .fixed) entry.state.fixed_released else entry.state.released;
+}
+
+/// How far down it is, from nought to one: one for a key, and for a stick
+/// or a trigger how far past its dead zone it is.
+pub fn actionStrength(self: *const Input, name: []const u8) f32 {
+    const entry = self.actions.findConst(name) orelse return 0;
+    return entry.state.strength;
+}
+
+/// Two actions as one axis, from -1 to 1: `actionAxis("move_left",
+/// "move_right")`.
+pub fn actionAxis(self: *const Input, negative: []const u8, positive: []const u8) f32 {
+    return self.actionStrength(positive) - self.actionStrength(negative);
+}
+
+/// Four actions as a direction, no longer than one, up negative as the
+/// world's `y` is: what a character walks by.
+pub fn actionVector(self: *const Input, left: []const u8, right: []const u8, up: []const u8, down_name: []const u8) Vec2 {
+    const toward: Vec2 = .init(self.actionAxis(left, right), self.actionAxis(up, down_name));
+    const length = toward.len();
+    return if (length > 1) toward.scale(1 / length) else toward;
+}
+
+/// Hold an action down from code, at `strength` from nought to one - what a
+/// button on a touch screen does - until `releaseAction`. It goes down at
+/// once, with its edge, if nothing held it; and it is down while either
+/// holds it, the code or an input. `error.NoSuchAction` for one there is none
+/// of.
+pub fn pressAction(self: *Input, name: []const u8, strength: f32) error{NoSuchAction}!void {
+    const entry = self.actions.find(name) orelse return error.NoSuchAction;
+    entry.state.forced = if (std.math.isNan(strength)) 1 else std.math.clamp(strength, 0.001, 1);
+    self.evaluate(entry);
+}
+
+/// Let go of what `pressAction` held. It comes up at once, with its edge,
+/// unless an input still holds it.
+pub fn releaseAction(self: *Input, name: []const u8) error{NoSuchAction}!void {
+    const entry = self.actions.find(name) orelse return error.NoSuchAction;
+    entry.state.forced = 0;
+    self.evaluate(entry);
+}
+
+/// What the player presses for an action, in words, in `buffer`: `Space`,
+/// `Pad A` - its first input on what the player last used, the keyboard or
+/// a controller, or else its first. Empty for an action with none, or none
+/// of that name. For "Press E to open".
+pub fn describeAction(self: *const Input, buffer: []u8, name: []const u8) []const u8 {
+    const entry = self.actions.findConst(name) orelse return "";
+    const bindings = entry.bindings.items;
+    if (bindings.len == 0) return "";
+    var chosen = bindings[0];
+    for (bindings) |binding| {
+        if (binding.device() == self.last_device) {
+            chosen = binding;
+            break;
+        }
+    }
+    return std.fmt.bufPrint(buffer, "{f}", .{chosen}) catch buffer[0..0];
+}
+
+/// Work out where every action stands from this frame's keys, buttons and
+/// controllers, and give it its edges. Called by `App` once a frame, after
+/// the events and before the first system; a test that feeds events calls
+/// it itself.
+pub fn updateActions(self: *Input) void {
+    for (self.actions.entries.items) |*entry| self.evaluate(entry);
+}
+
+/// One action, against what its inputs say now. Edges only ever add to
+/// what the frame and the fixed step have heard: `beginFrame` and
+/// `endFixedStep` clear them.
+fn evaluate(self: *Input, entry: *Actions.Entry) void {
+    var strength: f32 = 0;
+    var off_keys: f32 = 0;
+    var tapped = false;
+    for (entry.bindings.items) |binding| {
+        const reading = self.read(binding, entry.deadzone);
+        strength = @max(strength, reading.strength);
+        if (binding.device() != .keyboard or binding == .mouse_button) off_keys = @max(off_keys, reading.strength);
+        tapped = tapped or reading.tapped;
+    }
+    const state = &entry.state;
+    strength = @max(strength, state.forced);
+    off_keys = @max(off_keys, state.forced);
+
+    const was = state.down;
+    const down = strength > 0;
+    const pressed = !was and (down or tapped);
+    // A tap inside one frame is its release as well.
+    const released = (was and !down) or (!was and !down and tapped);
+    state.down = down;
+    state.strength = strength;
+    state.strength_off_keys = off_keys;
+    state.pressed = state.pressed or pressed;
+    state.released = state.released or released;
+    state.fixed_pressed = state.fixed_pressed or pressed;
+    state.fixed_released = state.fixed_released or released;
+}
+
+const Reading = struct { strength: f32 = 0, tapped: bool = false };
+
+/// What one input says now: how far down it is, and whether it went down
+/// this frame.
+fn read(self: *const Input, binding: Binding, deadzone: f32) Reading {
+    switch (binding) {
+        .key => |held| {
+            const i = indexOf(held.key) orelse return .{};
+            const level = if (held.physical) &self.down else &self.virtual_down;
+            const edges = if (held.physical) &self.pressed else &self.virtual_pressed;
+            return .{ .strength = if (level.isSet(i)) 1 else 0, .tapped = edges.isSet(i) };
+        },
+        .mouse_button => |held| {
+            const i = @intFromEnum(held.button);
+            if (i >= button_span) return .{};
+            return .{ .strength = if (self.button_down.isSet(i)) 1 else 0, .tapped = self.button_pressed.isSet(i) };
+        },
+        .pad_button => |held| {
+            const i = @intFromEnum(held.button);
+            var reading: Reading = .{};
+            for (self.padStates(held.pad)) |state| {
+                if (state.down.isSet(i)) reading.strength = 1;
+                if (state.pressed.isSet(i)) reading.tapped = true;
+            }
+            return reading;
+        },
+        .pad_axis => |held| {
+            const sign: f32 = if (held.direction == .negative) -1 else 1;
+            var furthest: f32 = 0;
+            for (self.padStates(held.pad)) |state| {
+                if (!state.connected) continue;
+                furthest = @max(furthest, state.axes[@intFromEnum(held.axis)] * sign);
+            }
+            if (furthest <= deadzone) return .{};
+            return .{ .strength = @min((furthest - deadzone) / (1 - deadzone), 1) };
+        },
+    }
+}
+
+/// One controller's slot, or every slot for null.
+fn padStates(self: *const Input, pad_slot: ?u8) []const PadState {
+    const slot = pad_slot orelse return &self.pads;
+    if (slot >= max_pads) return &.{};
+    return self.pads[slot .. slot + 1];
 }
 
 /// Whether anything at all is held down.
@@ -701,8 +772,8 @@ pub fn pointerEvents(self: *const Input) []const pointer_mod.InputEvent {
     return self.pointer_events[0..self.pointer_events_len];
 }
 
-/// Which buttons are held now: Godot's `get_mouse_button_mask`. The
-/// wheel is in an event's own mask, never here.
+/// Which buttons are held now, as a mask. The wheel is in an event's own
+/// mask, never here.
 pub fn buttonMask(self: *const Input) pointer_mod.ButtonMask {
     var mask: pointer_mod.ButtonMask = .none;
     for (0..button_span) |i| {
@@ -713,8 +784,7 @@ pub fn buttonMask(self: *const Input) pointer_mod.ButtonMask {
 }
 
 /// Take this frame's pointer: picking stops there, and a system that
-/// asks `isHandled` leaves it alone. Godot's
-/// `Viewport.set_input_as_handled`, and what an `.input` system calls to
+/// asks `isHandled` leaves it alone. What an `.input` system calls to
 /// keep a click from the world behind it.
 pub fn setAsHandled(self: *Input) void {
     self.handled = true;
@@ -726,6 +796,11 @@ pub fn isHandled(self: *const Input) bool {
 }
 
 /// What was typed this frame, oldest first.
+/// Every key event of this frame, releases and repeats too, oldest first.
+pub fn keyEvents(self: *const Input) []const platform.event.KeyEvent {
+    return self.key_events[0..self.key_events_len];
+}
+
 pub fn typedThisFrame(self: *const Input) []const Typed {
     return self.typed[0..self.typed_len];
 }
@@ -810,6 +885,11 @@ pub fn anyPad(self: *const Input) Pad {
 pub fn beginFrame(self: *Input) void {
     self.pressed = .initEmpty();
     self.released = .initEmpty();
+    self.virtual_pressed = .initEmpty();
+    for (self.actions.entries.items) |*entry| {
+        entry.state.pressed = false;
+        entry.state.released = false;
+    }
     self.button_pressed = .initEmpty();
     self.button_released = .initEmpty();
     self.button_double = .initEmpty();
@@ -825,6 +905,11 @@ pub fn beginFrame(self: *Input) void {
 
     // The pointer events a whole frame has had go; one given between
     // frames stays for this one, as a dialog's answer does.
+    const keys_unseen = self.key_events_len - self.key_events_seen;
+    std.mem.copyForwards(platform.event.KeyEvent, self.key_events[0..keys_unseen], self.key_events[self.key_events_seen..self.key_events_len]);
+    self.key_events_len = keys_unseen;
+    self.key_events_seen = 0;
+
     const unseen = self.pointer_events_len - self.pointer_events_seen;
     std.mem.copyForwards(pointer_mod.InputEvent, self.pointer_events[0..unseen], self.pointer_events[self.pointer_events_seen..self.pointer_events_len]);
     self.pointer_events_len = unseen;
@@ -854,6 +939,7 @@ pub fn endFrame(self: *Input) void {
     self.answers_seen = self.answers_len;
     self.drops_seen = self.drops_len;
     self.pointer_events_seen = self.pointer_events_len;
+    self.key_events_seen = self.key_events_len;
     self.happened_seen = self.happened;
 }
 
@@ -872,6 +958,10 @@ pub fn answerDialog(self: *Input, answer: dialog.Answer) void {
 pub fn endFixedStep(self: *Input) void {
     self.fixed_pressed = .initEmpty();
     self.fixed_released = .initEmpty();
+    for (self.actions.entries.items) |*entry| {
+        entry.state.fixed_pressed = false;
+        entry.state.fixed_released = false;
+    }
     self.fixed_button_pressed = .initEmpty();
     self.fixed_button_released = .initEmpty();
     for (&self.pads) |*state| {
@@ -899,6 +989,10 @@ pub fn readPads(self: *Input, devices: []const platform.Gamepad) void {
 
         const pressed = down.differenceWith(state.down);
         const released = state.down.differenceWith(down);
+        if (pressed.count() != 0) self.last_device = .pad;
+        for (axes, 0..) |value, i| {
+            if (@abs(value) > device_threshold and @abs(state.axes[i]) <= device_threshold) self.last_device = .pad;
+        }
         state.pressed.setUnion(pressed);
         state.released.setUnion(released);
         state.fixed_pressed.setUnion(pressed);
@@ -913,6 +1007,15 @@ pub fn readPads(self: *Input, devices: []const platform.Gamepad) void {
 /// Fold one platform event in. Events that are not input are ignored, so a
 /// caller may hand over everything the queue produced. A dialog's answer is
 /// input too: see `dialogAnswers`.
+/// A point across the window, in the frame's pixels.
+fn frameX(self: *const Input, x: f64) f32 {
+    return (@as(f32, @floatCast(x)) - self.frame_origin.x) * self.frame_ratio;
+}
+
+fn frameY(self: *const Input, y: f64) f32 {
+    return (@as(f32, @floatCast(y)) - self.frame_origin.y) * self.frame_ratio;
+}
+
 pub fn apply(self: *Input, ev: platform.Event) void {
     if (comptime dialog.available) {
         switch (ev) {
@@ -934,6 +1037,7 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                         self.down.set(i);
                         self.pressed.set(i);
                         self.fixed_pressed.set(i);
+                        self.last_device = .keyboard;
                     },
                     .release => {
                         self.down.unset(i);
@@ -943,7 +1047,19 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                     .repeat => {},
                 }
             }
+            if (indexOf(k.virtual)) |i| switch (k.action) {
+                .press => {
+                    self.virtual_down.set(i);
+                    self.virtual_pressed.set(i);
+                },
+                .release => self.virtual_down.unset(i),
+                .repeat => {},
+            };
             if (k.action.down()) self.pushTyped(.{ .key = k });
+            if (self.key_events_len < self.key_events.len) {
+                self.key_events[self.key_events_len] = k;
+                self.key_events_len += 1;
+            }
         },
         .char => |c| {
             self.mods = c.mods;
@@ -953,8 +1069,8 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             self.mods = b.mods;
             // A locked pointer has no position to report.
             if (!self.pointer.locked) {
-                self.pointer.x = @floatCast(b.x);
-                self.pointer.y = @floatCast(b.y);
+                self.pointer.x = self.frameX(b.x);
+                self.pointer.y = self.frameY(b.y);
             }
             const i = @intFromEnum(b.button);
             if (i >= button_span) return;
@@ -964,6 +1080,7 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                     self.button_pressed.set(i);
                     self.fixed_button_pressed.set(i);
                     if (b.double_click) self.button_double.set(i);
+                    self.last_device = .keyboard;
                 },
                 .release => {
                     self.button_down.unset(i);
@@ -989,23 +1106,24 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 // in the background, the hand on the mouse is using another
                 // program.
                 if (self.focused) {
-                    self.pointer.dx += @floatCast(m.dx);
-                    self.pointer.dy += @floatCast(m.dy);
+                    self.pointer.dx += @as(f32, @floatCast(m.dx)) * self.frame_ratio;
+                    self.pointer.dy += @as(f32, @floatCast(m.dy)) * self.frame_ratio;
                 }
                 return;
             }
-            self.pointer.x = @floatCast(m.x);
-            self.pointer.y = @floatCast(m.y);
-            self.pointer.dx += @floatCast(m.dx);
-            self.pointer.dy += @floatCast(m.dy);
-            self.pushMotion(.init(@floatCast(m.dx), @floatCast(m.dy)));
+            self.pointer.x = self.frameX(m.x);
+            self.pointer.y = self.frameY(m.y);
+            const moved: math.Vec2 = .init(@as(f32, @floatCast(m.dx)) * self.frame_ratio, @as(f32, @floatCast(m.dy)) * self.frame_ratio);
+            self.pointer.dx += moved.x;
+            self.pointer.dy += moved.y;
+            self.pushMotion(moved);
         },
         .cursor_enter => |s| self.pointer.inside = s.value,
         .scroll => |w| {
             self.wheel.x += @floatCast(w.x);
             self.wheel.y += @floatCast(w.y);
-            // A notch is a press and a release of a wheel button, as
-            // Godot reports one.
+            // A notch is reported as a press and a release of a wheel
+            // button.
             if (w.y != 0) self.pushWheel(if (w.y > 0) .wheel_up else .wheel_down, @floatCast(@abs(w.y)), w.mods);
             if (w.x != 0) self.pushWheel(if (w.x > 0) .wheel_right else .wheel_left, @floatCast(@abs(w.x)), w.mods);
         },
@@ -1021,8 +1139,8 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             const point = comptime @hasField(platform.event.DropEvent, "x");
             self.dropFiles(.{
                 .paths = d.paths,
-                .x = if (point) @floatCast(d.x) else self.pointer.x,
-                .y = if (point) @floatCast(d.y) else self.pointer.y,
+                .x = if (point) self.frameX(d.x) else self.pointer.x,
+                .y = if (point) self.frameY(d.y) else self.pointer.y,
             });
         },
         .suspended => {
@@ -1053,6 +1171,7 @@ pub fn releaseEverything(self: *Input) void {
         self.fixed_button_released.set(i);
     }
     self.down = .initEmpty();
+    self.virtual_down = .initEmpty();
     self.button_down = .initEmpty();
 }
 
@@ -1064,7 +1183,7 @@ fn pushPointer(self: *Input, event: pointer_mod.InputEvent) void {
 }
 
 /// Motion, added to the last event when that is motion too: a frame's
-/// moving is one event, as Godot's accumulated input gives.
+/// moving is one event.
 fn pushMotion(self: *Input, by: math.Vec2) void {
     const at: math.Vec2 = .init(self.pointer.x, self.pointer.y);
     if (self.pointer_events_len != 0) {
@@ -1113,6 +1232,11 @@ fn pushTyped(self: *Input, item: Typed) void {
     if (self.typed_len == self.typed.len) return;
     self.typed[self.typed_len] = item;
     self.typed_len += 1;
+}
+
+/// Give back what the actions hold.
+pub fn deinit(self: *Input, gpa: std.mem.Allocator) void {
+    self.actions.deinit(gpa);
 }
 
 fn keyEvent(key: platform.Key, action: platform.Action) platform.Event {
@@ -1168,27 +1292,6 @@ test "two keys for one end of an axis count once" {
     // A and the left arrow together are still -1, not -2.
     input.apply(keyEvent(.a, .press));
     try testing.expectEqual(@as(f32, -1), input.axisOf(walk));
-}
-
-test "an action map keeps named bindings together and lets one change" {
-    var map: ActionMap = .{};
-    defer map.deinit(testing.allocator);
-    try map.bindButton(testing.allocator, "jump", ButtonBinding.key(.space).withPad(ButtonBinding.any_pad, .a));
-    try map.bindAxis(testing.allocator, "move", AxisBinding.keys(.a, .d));
-
-    var input: Input = .{};
-    input.apply(keyEvent(.space, .press));
-    try testing.expect(map.down(&input, "jump"));
-    try testing.expect(map.justPressed(&input, "jump"));
-    try testing.expectEqual(@as(f32, 0), map.axis(&input, "move"));
-
-    try map.bindButton(testing.allocator, "jump", ButtonBinding.key(.enter));
-    try testing.expectEqual(@as(usize, 2), map.names.items.len);
-    try testing.expect(!map.down(&input, "jump"));
-    input.apply(keyEvent(.enter, .press));
-    try testing.expect(map.down(&input, "jump"));
-    try testing.expect(map.remove(testing.allocator, "jump"));
-    try testing.expect(!map.down(&input, "jump"));
 }
 
 test "losing focus lets go of everything" {
@@ -1603,4 +1706,170 @@ test "a window without a surface is one until it has a surface again" {
     try testing.expect(input.surface_lost);
     input.apply(.{ .surface_created = .{ .window = .none, .width = 1080, .height = 2400 } });
     try testing.expect(!input.surface_lost);
+}
+
+fn virtualKeyEvent(key: platform.Key, virtual: platform.Key, action: platform.Action) platform.Event {
+    var event = keyEvent(key, action);
+    event.key.virtual = virtual;
+    return event;
+}
+
+/// An input with actions, and a frame begun: what the action tests start
+/// from.
+fn withActions(project: []const Action) !Input {
+    var input: Input = .{};
+    try input.actions.reset(testing.allocator, project);
+    input.beginFrame();
+    return input;
+}
+
+test "an action is down while any of its inputs is, and its edges are the action's own" {
+    var input = try withActions(&.{.{ .name = "jump", .bindings = &.{ .keyOf(.space), .keyOf(.w) } }});
+    defer input.deinit(testing.allocator);
+
+    input.apply(keyEvent(.space, .press));
+    input.updateActions();
+    try testing.expect(input.actionDown("jump"));
+    try testing.expect(input.actionJustPressed("jump"));
+    try testing.expectEqual(@as(f32, 1), input.actionStrength("jump"));
+
+    // The second key is no new press, and letting go of the first no release.
+    input.beginFrame();
+    input.apply(keyEvent(.w, .press));
+    input.updateActions();
+    try testing.expect(!input.actionJustPressed("jump"));
+    input.beginFrame();
+    input.apply(keyEvent(.space, .release));
+    input.updateActions();
+    try testing.expect(input.actionDown("jump"));
+    try testing.expect(!input.actionJustReleased("jump"));
+
+    input.beginFrame();
+    input.apply(keyEvent(.w, .release));
+    input.updateActions();
+    try testing.expect(!input.actionDown("jump"));
+    try testing.expect(input.actionJustReleased("jump"));
+
+    // A tap inside one frame is a press and a release.
+    input.beginFrame();
+    input.apply(keyEvent(.space, .press));
+    input.apply(keyEvent(.space, .release));
+    input.updateActions();
+    try testing.expect(!input.actionDown("jump"));
+    try testing.expect(input.actionJustPressed("jump"));
+    try testing.expect(input.actionJustReleased("jump"));
+
+    // An action there is none of is never down.
+    try testing.expect(!input.actionDown("fly"));
+}
+
+test "an action's press waits for a fixed step, and only one step hears it" {
+    var input = try withActions(&.{.{ .name = "jump", .bindings = &.{.keyOf(.space)} }});
+    defer input.deinit(testing.allocator);
+    input.apply(keyEvent(.space, .press));
+    input.updateActions();
+
+    input.beginFrame();
+    input.updateActions();
+    try testing.expect(!input.actionJustPressed("jump"));
+    input.clock = .fixed;
+    try testing.expect(input.actionJustPressed("jump"));
+    input.endFixedStep();
+    try testing.expect(!input.actionJustPressed("jump"));
+}
+
+test "a key bound by its letter follows the layout, and one by its place does not" {
+    var input = try withActions(&.{
+        .{ .name = "undo", .bindings = &.{.{ .key = .{ .key = .z, .physical = false } }} },
+        .{ .name = "left", .bindings = &.{.keyOf(.a)} },
+    });
+    defer input.deinit(testing.allocator);
+    // On a German layout Z is where Y is on a US one; A is where A is.
+    input.apply(virtualKeyEvent(.y, .z, .press));
+    input.apply(virtualKeyEvent(.q, .a, .press));
+    input.updateActions();
+    try testing.expect(input.actionDown("undo"));
+    try testing.expect(!input.actionDown("left"));
+}
+
+test "a stick past an action's dead zone reads from nought to one, and four actions make a direction" {
+    var input = try withActions(&.{
+        .{ .name = "left", .deadzone = 0.2, .bindings = &.{ .padAxisOf(.left_x, .negative), .keyOf(.a) } },
+        .{ .name = "right", .deadzone = 0.2, .bindings = &.{ .padAxisOf(.left_x, .positive), .keyOf(.d) } },
+        .{ .name = "up", .bindings = &.{.keyOf(.w)} },
+        .{ .name = "down", .bindings = &.{.keyOf(.s)} },
+    });
+    defer input.deinit(testing.allocator);
+    var slots = emptySlots();
+
+    lean(&slots[0], .left_x, 0.1);
+    input.readPads(&slots);
+    input.updateActions();
+    try testing.expect(!input.actionDown("right"));
+
+    lean(&slots[0], .left_x, 0.6);
+    input.beginFrame();
+    input.readPads(&slots);
+    input.updateActions();
+    try testing.expect(input.actionJustPressed("right"));
+    try testing.expectApproxEqAbs(@as(f32, 0.5), input.actionStrength("right"), 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), input.actionAxis("left", "right"), 0.0001);
+    try testing.expectEqual(Device.pad, input.last_device);
+
+    // A key and the stick at once are no faster than one of them.
+    lean(&slots[0], .left_x, 0);
+    input.beginFrame();
+    input.readPads(&slots);
+    input.apply(keyEvent(.d, .press));
+    input.apply(keyEvent(.s, .press));
+    input.updateActions();
+    const toward = input.actionVector("left", "right", "up", "down");
+    try testing.expectApproxEqAbs(@as(f32, 1), toward.len(), 0.0001);
+    try testing.expect(toward.x > 0 and toward.y > 0);
+    try testing.expectEqual(Device.keyboard, input.last_device);
+}
+
+test "a controller's button counts on the pad it is bound to, or on any" {
+    var input = try withActions(&.{
+        .{ .name = "any", .bindings = &.{.padButtonOf(.a)} },
+        .{ .name = "second", .bindings = &.{.{ .pad_button = .{ .button = .a, .pad = 1 } }} },
+    });
+    defer input.deinit(testing.allocator);
+    var slots = emptySlots();
+    hold(&slots[0], .a, true);
+    input.readPads(&slots);
+    input.updateActions();
+    try testing.expect(input.actionDown("any"));
+    try testing.expect(!input.actionDown("second"));
+}
+
+test "code holds an action down until it lets go, with the edges an input gives" {
+    var input = try withActions(&.{.{ .name = "fire", .bindings = &.{.keyOf(.f)} }});
+    defer input.deinit(testing.allocator);
+    try input.pressAction("fire", 0.5);
+    try testing.expect(input.actionDown("fire"));
+    try testing.expect(input.actionJustPressed("fire"));
+    try testing.expectEqual(@as(f32, 0.5), input.actionStrength("fire"));
+
+    // Held by the key as well, the code letting go does not let go of it.
+    input.beginFrame();
+    input.apply(keyEvent(.f, .press));
+    input.updateActions();
+    try input.releaseAction("fire");
+    try testing.expect(input.actionDown("fire"));
+    try testing.expect(!input.actionJustReleased("fire"));
+    try testing.expectError(error.NoSuchAction, input.pressAction("fly", 1));
+}
+
+test "an action is named by its input on what the player last used" {
+    var input = try withActions(&.{.{ .name = "open", .bindings = &.{ .padButtonOf(.x), .keyOf(.e) } }});
+    defer input.deinit(testing.allocator);
+    var buffer: [32]u8 = undefined;
+    try testing.expectEqualStrings("E", input.describeAction(&buffer, "open"));
+    var slots = emptySlots();
+    hold(&slots[0], .x, true);
+    input.readPads(&slots);
+    try testing.expectEqualStrings("Pad X", input.describeAction(&buffer, "open"));
+    try testing.expectEqualStrings("", input.describeAction(&buffer, "fly"));
+    try testing.expectEqualStrings("Pad A", input.describeAction(&buffer, "ui_accept"));
 }

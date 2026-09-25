@@ -14,19 +14,20 @@ pub fn build(b: *std.Build) void {
     const shader = b.dependency("fluxion_shader", .{ .target = target, .optimize = optimize });
     const math = b.dependency("fluxion_math", .{ .target = target, .optimize = optimize });
     const id = b.dependency("fluxion_id", .{ .target = target, .optimize = optimize });
-    // Without its renderer: that module's rhi and shader are paths to the
-    // repositories beside it, which a fetched copy has not got.
+    // Without its renderer, which is built below from its source with this
+    // package's rhi and shader.
     const debugdraw = b.dependency("fluxion_debugdraw", .{ .target = target, .optimize = optimize, .renderer = false });
     const ui = b.dependency("fluxion_ui", .{ .target = target, .optimize = optimize });
     const json = b.dependency("fluxion_json", .{ .target = target, .optimize = optimize });
     const physics = b.dependency("fluxion_physics", .{ .target = target, .optimize = optimize });
     const reflect = b.dependency("fluxion_reflect", .{ .target = target, .optimize = optimize });
     const script = b.dependency("fluxion_script", .{ .target = target, .optimize = optimize });
+    const audio = b.dependency("fluxion_audio", .{ .target = target, .optimize = optimize });
 
     // The two renderers below are built from their packages' source with this
     // package's rhi, font and shader, so that a `Device` stays one type:
-    // fluxion-ui pins its own rhi and font, at commits of its choosing, and
-    // fluxion-debugdraw names them by path.
+    // fluxion-ui and fluxion-debugdraw pin their own, at commits of their
+    // choosing, which need not be this package's.
     const ui_rhi = b.createModule(.{
         .root_source_file = ui.path("src/render/rhi.zig"),
         .target = target,
@@ -76,6 +77,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "fluxion_physics", .module = physics.module("fluxion_physics") },
             .{ .name = "fluxion_reflect", .module = reflect.module("fluxion_reflect") },
             .{ .name = "fluxion_script", .module = script.module("fluxion_script") },
+            .{ .name = "fluxion_audio", .module = audio.module("fluxion_audio") },
         },
     });
 

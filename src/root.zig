@@ -22,7 +22,7 @@
 //! }
 //! ```
 //!
-//! A scene is a world and a node is an entity: Godot's shape, with
+//! A scene is a world and a node is an entity, with
 //! [Fluxion ECS](https://github.com/kisstp2006/fluxion-ecs) in the middle.
 //! Three layers - 3D, 2D, interface - are drawn back to front into one
 //! target; the 2D layer and the interface are written, the 3D one is not. This
@@ -52,18 +52,17 @@ pub const DebugViews = @import("debug_views.zig");
 /// `app.setState`, `app.addSystemIn`, `app.onEnter`.
 pub const States = @import("states.zig");
 
-/// Godot's signals, on components: `pub const signals` on one, and
-/// `app.signal`, `connect`, `emit`. The table is `app.signals`.
+/// Signals, on components: `pub const signals` on one, and `app.signal`,
+/// `connect`, `emit`. The table is `app.signals`.
 pub const signals = @import("signals.zig");
 
-/// A signal of one entity: Godot 4's `Signal`. See `App.signal`.
+/// A signal of one entity. See `App.signal`.
 pub const Signal = signals.Signal;
 
-/// What a signal calls: a method by name, or a Zig function. Godot's
-/// `Callable`.
+/// What a signal calls: a method by name, or a Zig function.
 pub const Callable = signals.Callable;
 
-/// Godot's `ConnectFlags`.
+/// How a connection is heard and kept: deferred, persist, one shot.
 pub const ConnectFlags = signals.Flags;
 
 /// How a connection is made: flags, unbinds, binds.
@@ -91,8 +90,8 @@ pub const Events = events.Events;
 /// A place in the events of one type, reading each once.
 pub const EventReader = events.Reader;
 
-/// Flux scripts on entities, the way Godot puts a script on a node:
-/// `app.useScripts`, `app.loadScript`, and a `Script` on the entity.
+/// Flux scripts on entities: `app.useScripts`, `app.loadScript`, and a
+/// `Script` on the entity.
 pub const script = @import("script.zig");
 
 /// A script on an entity: a `.flux` file, and which struct in it.
@@ -106,9 +105,18 @@ pub const ScriptHandle = script.ScriptHandle;
 /// with `flux.service` and `app.scriptSetup()`.
 pub const flux = script.flux;
 
-/// Where a game's files are: `res://` paths from the project's root, and
-/// files known by the UUID in the `.uid` file beside them: `app.project`.
+/// Where a game's files are: `res://` paths from the project's root, files
+/// known by the UUID in the `.uid` file beside them, and the player's own
+/// under `user://`: `app.project`. `app.readText`, `app.writeText` and the
+/// rest take any of them.
 pub const Project = @import("Project.zig");
+/// Settings a game keeps for itself, in sections of keys that need no
+/// declaring: the player's volume, in `user://settings.cfg`.
+pub const ConfigFile = @import("config.zig").ConfigFile;
+/// A file of settings in sections, read and written from the struct that
+/// describes it: what `project.fluxion` is, and what an editor keeps its own
+/// settings with.
+pub const settings_file = @import("settings_file.zig");
 
 /// File and folder dialogs, the system's own: `app.openFileDialog`,
 /// `app.openFolderDialog`, and the answer in `app.input.dialogAnswer`.
@@ -121,6 +129,7 @@ pub const Uuid = @import("fluxion_id").Uuid;
 
 pub const assets = @import("assets.zig");
 pub const components = @import("components.zig");
+pub const control = @import("control.zig");
 pub const color = @import("color.zig");
 pub const schedule = @import("schedule.zig");
 
@@ -139,6 +148,10 @@ pub const render = struct {
     pub const sprite = @import("render/sprite.zig");
     /// What the camera sees, and where the pointer is in the world.
     pub const view = @import("render/view.zig");
+    /// A `.shader` file's fragment stage, with the engine's part after it.
+    pub const material = @import("render/material.zig");
+    /// The frame, drawn where it can be read.
+    pub const screen = @import("render/screen.zig");
 };
 
 /// Every glyph the game has drawn, in one texture.
@@ -148,6 +161,7 @@ pub const text = struct {
 
 /// Where a thing is, how big, and which way round.
 pub const Transform2D = components.Transform2D;
+pub const Parent = components.Parent;
 
 /// A picture drawn at a transform.
 pub const Sprite = components.Sprite;
@@ -162,7 +176,6 @@ pub const Text2D = components.Text2D;
 pub const FontHandle = assets.FontHandle;
 
 /// A sprite that walks through the cells of its own texture.
-pub const Animation = components.Animation;
 
 /// What the 2D pass looks through.
 pub const Camera2D = components.Camera2D;
@@ -174,8 +187,50 @@ pub const RigidBody2D = components.RigidBody2D;
 pub const Collider2D = components.Collider2D;
 
 /// A place that tells what is in it and pushes nothing: a trigger, a
-/// pickup, a hurtbox. Godot's Area2D.
+/// pickup, a hurtbox.
 pub const Area2D = components.Area2D;
+
+/// A grid of tiles from a `TileSet`. Its cells live in `TileChunk`s the
+/// map owns; `App.setTile` paints one.
+pub const TileMap = @import("tilemap.zig").TileMap;
+pub const TileChunk = @import("tilemap.zig").TileChunk;
+/// One tile of a map: which tile of which source, and how it is turned.
+pub const Cell = @import("tilemap.zig").Cell;
+pub const tile_chunk_side = @import("tilemap.zig").chunk_side;
+
+pub const tileset = @import("tileset.zig");
+/// What a map's cells name their tiles in: a `.tileset` file.
+pub const TileSet = tileset.TileSet;
+pub const TileSetHandle = tileset.TileSetHandle;
+
+pub const theme = @import("theme.zig");
+/// What a `Control` is drawn from: a `.theme` file.
+pub const Theme = theme.Theme;
+pub const ThemeHandle = theme.ThemeHandle;
+
+pub const Control = control.Control;
+pub const CanvasLayer = control.CanvasLayer;
+pub const Viewport = control.Viewport;
+pub const BoxContainer = control.BoxContainer;
+pub const MarginContainer = control.MarginContainer;
+pub const CenterContainer = control.CenterContainer;
+pub const ScrollContainer = control.ScrollContainer;
+pub const PanelContainer = control.PanelContainer;
+pub const Label = control.Label;
+pub const Button = control.Button;
+pub const CheckBox = control.CheckBox;
+pub const ThemeOverride = control.ThemeOverride;
+pub const LineEdit = control.LineEdit;
+pub const Slider = control.Slider;
+pub const ProgressBar = control.ProgressBar;
+pub const ColorRect = control.ColorRect;
+pub const Focus = control.Focus;
+pub const RichText = control.RichText;
+pub const Popup = control.Popup;
+pub const StyleBox = control.StyleBox;
+pub const TabContainer = control.TabContainer;
+pub const TextureRect = control.TextureRect;
+pub const NinePatchRect = control.NinePatchRect;
 
 /// What the pointer did, as an `input_event` signal is handed it.
 pub const pointer = @import("pointer.zig");
@@ -183,7 +238,7 @@ pub const pointer = @import("pointer.zig");
 /// One thing the pointer did: `fx.pointer.InputEvent`.
 pub const InputEvent = pointer.InputEvent;
 
-/// A button of the pointer, the wheel among them. Godot's `MouseButton`.
+/// A button of the pointer, the wheel among them.
 pub const PointerButton = pointer.PointerButton;
 
 /// Which pointer buttons are held: `app.input.buttonMask()`.
@@ -204,6 +259,10 @@ pub const Contact = Bodies.Contact;
 
 /// What `App.castRay` hit.
 pub const RayHit = Bodies.RayHit;
+/// Bodies the game moves: see `App.moveAndSlide`.
+pub const character = @import("character.zig");
+pub const CharacterBody2D = components.CharacterBody2D;
+pub const Collision = character.Collision;
 
 /// What a camera sees, as a point, a zoom, a turn and a size: what
 /// `App.drawWorld` draws the world through.
@@ -234,20 +293,61 @@ pub const GamepadAxis = platform.GamepadAxis;
 /// The keys, stick and d-pad that move one axis, as component data.
 pub const AxisBinding = Input.AxisBinding;
 
-/// A game's named keyboard and controller actions, held as data and rebound
-/// without changing the systems that ask for them.
-pub const ButtonBinding = Input.ButtonBinding;
-pub const ActionMap = Input.ActionMap;
+/// A game's actions - `jump`, `ui_accept` - and the keys, buttons and
+/// sticks that set them off: named in the project, asked for with
+/// `app.input.actionDown`, and rebound as the game runs. See `actions.zig`.
+pub const actions = @import("actions.zig");
+pub const Action = actions.Action;
+pub const Binding = actions.Binding;
 
-/// Godot's Timer: a component that counts down and says `timeout`. See
-/// `timer.zig`.
+/// A component that counts down and says `timeout`. See `timer.zig`.
 pub const Timer = @import("timer.zig").Timer;
+/// Sound: clips, the players that play them, and the project's buses. See
+/// `audio.zig`.
+pub const audio = @import("audio.zig");
+/// A property of an entity named by text - `Appearance.modulate.a` - which
+/// tweens and animations move. See `property.zig`.
+pub const property = @import("property.zig");
+pub const Property = property.Property;
+pub const Tween = @import("tween.zig").Tween;
+/// Animation libraries - `.anim` - and the players that play them. See
+/// `animation.zig`.
+pub const animation = @import("animation.zig");
+pub const AnimationPlayer = animation.AnimationPlayer;
+pub const AnimationLibraryHandle = animation.AnimationLibraryHandle;
+/// Animations of pictures - `.frames` - and the sprites that play them. See
+/// `sprite_frames.zig`.
+pub const sprite_frames = @import("sprite_frames.zig");
+pub const AnimatedSprite2D = sprite_frames.AnimatedSprite2D;
+pub const SpriteFrames = sprite_frames.SpriteFrames;
+pub const SpriteFramesHandle = sprite_frames.SpriteFramesHandle;
+pub const AudioPlayer = audio.AudioPlayer;
+pub const AudioSpatial2D = audio.AudioSpatial2D;
+pub const AudioListener2D = audio.AudioListener2D;
+pub const AudioClipHandle = audio.AudioClipHandle;
+pub const scenes = @import("scenes.zig");
+pub const SceneHandle = scenes.SceneHandle;
+pub const data = @import("data.zig");
+pub const DataHandle = data.DataHandle;
+pub const background = @import("background.zig");
+pub const inherited = @import("inherited.zig");
+pub const Processing = inherited.Processing;
+pub const Appearance = inherited.Appearance;
 
 /// A point or a direction in the plane.
 pub const Vec2 = math.Vec2;
 
 /// A colour, four floats from zero to one.
 pub const Color = color.Color;
+
+/// Whole-number points, and boxes of either kind.
+pub const geometry = @import("geometry.zig");
+pub const Vec2i = geometry.Vec2i;
+pub const Rect2 = geometry.Rect2;
+pub const Rect2i = geometry.Rect2i;
+
+/// The kinds of file a game is made of, and the handle each is held by.
+pub const AssetKind = @import("asset_kind.zig").AssetKind;
 
 /// What a `Sprite` points at.
 pub const TextureHandle = assets.TextureHandle;
@@ -296,6 +396,19 @@ pub const reflect = @import("fluxion_reflect");
 /// an angle, a unit, layers, several lines, a value behind a getter and a
 /// setter. `reflect.attr`'s five and five more, in one namespace.
 pub const attr = @import("attr.zig");
+/// The words components keep beside them: see `App.textOf`.
+pub const texts = @import("texts.zig");
+/// Shaders from `.shader` files, and what a `Material` gives one: see
+/// `App.loadShader`.
+pub const shaders = @import("shaders.zig");
+pub const Material = shaders.Material;
+/// The picture each `RenderView` draws: see `App.viewTexture`.
+pub const views = @import("views.zig");
+pub const RenderView = components.RenderView;
+pub const ViewTexture = components.ViewTexture;
+/// A game made at one size, shown in a window of any: see `App.frame`.
+pub const stretch = @import("stretch.zig");
+pub const ShaderHandle = shaders.ShaderHandle;
 
 /// A physical key, by its position on a US layout.
 pub const Key = platform.Key;
@@ -310,9 +423,15 @@ pub const Entity = ecs.Entity;
 pub const Query = ecs.Query;
 
 test {
+    _ = geometry;
+    _ = @import("asset_kind.zig");
+    _ = control;
+    _ = tileset;
+    _ = @import("tilemap.zig");
     _ = App;
     _ = Window;
     _ = Input;
+    _ = actions;
     _ = Time;
     _ = Interface;
     _ = Clipboard;
@@ -328,9 +447,35 @@ test {
     _ = @import("areas_test.zig");
     _ = @import("picking_test.zig");
     _ = @import("timer.zig");
+    _ = @import("inherited.zig");
+    _ = @import("scenes.zig");
+    _ = @import("exports.zig");
+    _ = @import("file_table.zig");
+    _ = @import("data.zig");
+    _ = @import("audio.zig");
+    _ = @import("property.zig");
+    _ = @import("tween.zig");
+    _ = @import("texts.zig");
+    _ = @import("shaders.zig");
+    _ = @import("shader_edit.zig");
+    _ = @import("render/material.zig");
+    _ = @import("render/screen.zig");
+    _ = @import("render_test.zig");
+    _ = @import("stretch.zig");
+    _ = @import("character_test.zig");
+    _ = @import("ui_test.zig");
+    _ = @import("animation.zig");
+    _ = @import("sprite_frames.zig");
+    _ = @import("sprite_frames_test.zig");
+    _ = @import("animation_test.zig");
+    _ = @import("audio_test.zig");
+    _ = @import("background.zig");
+    _ = @import("scenes_test.zig");
     _ = @import("script.zig");
     _ = @import("script_test.zig");
     _ = Project;
+    _ = settings_file;
+    _ = @import("config.zig");
     _ = dialog;
     _ = attr;
     _ = assets;

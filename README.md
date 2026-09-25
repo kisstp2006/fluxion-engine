@@ -15,7 +15,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Zig-0.16-F7A41D?logo=zig&logoColor=white" alt="Zig 0.16">
   <img src="https://img.shields.io/badge/licence-BSD--3--Clause-blue" alt="Licence: BSD-3-Clause">
-  <img src="https://img.shields.io/badge/renderer-OpenGL%20%7C%20Direct3D%2011-5c6bc0" alt="Renderer: OpenGL or Direct3D 11">
+  <img src="https://img.shields.io/badge/renderer-OpenGL%20%7C%20Direct3D%2011%20%7C%20Direct3D%2012%20%7C%20Vulkan-5c6bc0" alt="Renderer: OpenGL, Direct3D 11, Direct3D 12 or Vulkan">
   <img src="https://img.shields.io/badge/tests-no%20window%2C%20no%20GPU-2ea44f" alt="Tests run with no window and no GPU">
   <img src="https://img.shields.io/badge/status-early%20development-orange" alt="Status: early development">
 </p>
@@ -38,7 +38,7 @@
 | `schedule` | When a game's systems run. |
 | `components` | What the renderer knows how to read. |
 | `assets` | What the GPU is holding, and the handles that name it. |
-| `Input` | What the keyboard, the mouse and the controllers did. |
+| `Input` | What the keyboard, the mouse and the controllers did, and the game's actions they set off. |
 | `Time` | How long the last frame took, and the fixed step. |
 | `color` | A colour, and the three ways to write one down. |
 | `Window` | The window and the event queue. |
@@ -53,7 +53,8 @@
 | `dialog` | The system's file and folder dialogs: what `app.openFileDialog` asks for, and the answer `app.input` holds for a frame. |
 | `Commands` | Spawns, despawns, adds and removes that wait for the system asking for them to return. |
 | `States` | A game's own states, each an enum with one value at a time, and the systems that run in them. |
-| `Project` | Where a game's files are: `res://` paths from the project's root, the UUIDs in the `.uid` files beside them, and `project.fluxion`, whose renderer chooses the backend. |
+| `Project` | Where a game's files are: `res://` paths from the project's root, the UUIDs in the `.uid` files beside them, the player's own under `user://`, and `project.fluxion`, whose renderer chooses the backend. |
+| `ConfigFile` | Settings a game keeps for itself, in sections of keys: the player's volume in `user://settings.cfg`. |
 | `DebugViews` | What the engine draws into `app.debug` by itself: colliders, bodies, transforms, sprites, cameras, stats. |
 | `attr` | What a component's field means, for an inspector to show it by: a range, an angle, a unit, layers, several lines, a value behind a getter and a setter. |
 
@@ -86,9 +87,9 @@ fn move(app: *fx.App) !void {
 }
 ```
 
-**A scene is a world, and a node is an entity.** The shape is Godot's - open a
-window, put things in a scene, give them behaviour, draw - and the thing in
-the middle is an ECS rather than a tree of objects with virtual methods on
+**A scene is a world, and a node is an entity.** A game goes: open a window,
+put things in a scene, give them behaviour, draw - and the thing in the
+middle is an ECS rather than a tree of objects with virtual methods on
 them. Everything of one shape lives in one table, so a system is a loop over
 plain slices with no branch in it asking what this one is. That is
 [Fluxion ECS](https://github.com/kisstp2006/fluxion-ecs)' doing, not this
@@ -104,6 +105,13 @@ what layering costs - no extra textures, no compositing pass. What
 
 Today **the 2D layer and the interface are written**. The 3D pass has its
 place in `App.drawLayers` and nothing in it.
+
+A frame something reads - a shader of a material's that reads what is drawn
+under it - or a game stretched to its window is drawn into a texture of its
+own instead, copied where it is read, and put on the window last: see
+[Shaders and materials](#-shaders-and-materials) and
+[Made at one size](#-made-at-one-size). Every other frame is drawn straight
+on the window, as before.
 
 ## 🔁 The frame
 
@@ -158,7 +166,7 @@ fn hits(app: *fx.App) !void {
             if (!struck(app, place)) continue;
             try app.commands.despawn(bullet);                    // when this system returns
             const spark = try app.commands.spawn(.{ place, Spark{} });
-            _ = try app.commands.spawn(.{ fx.Transform2D.childOf(spark, 0, -8), Glow{} });
+            _ = try app.commands.spawn(.{ fx.Transform2D.at(0, -8), fx.Parent.of(spark), Glow{} });
         }
     }
 }
@@ -223,6 +231,38 @@ if (app.state(Mode) == .game_over) showScore(app);
   // and back to Play.paused from the frame it ran in
   ```
 
+## ⏸️ Pause
+
+```zig
+app.setPaused(true);                                           // the game waits
+try app.world.add(pause_menu, fx.Processing{ .mode = .when_paused });
+try app.addSystemAlways(.input, "pause key", togglePause);     // runs paused or not
+try app.addSystemWhenPaused(.ui, "pause screen", drawPauseScreen);
+
+if (app.isPaused()) ...
+if (app.isProcessing(door)) ...
+```
+
+- **Paused, only what asked to run runs.** Everything else waits where it
+  is: its script's `fixed` and `update`, its timers, its `await wait(...)`,
+  its animation, its buttons and the pointer over it, and the game's
+  systems. The physics stops for everything - there is one physics.
+- **What an entity does is a `Processing`**, or the nearest one above it:
+  `.pausable` - what a root with none is - `.when_paused`, `.always`, or
+  `.disabled`, which never runs. So a pause menu says `.when_paused` once,
+  at its top, and every button in it answers while the game waits.
+- **A system runs while the game runs**, unless it was added with
+  `addSystemAlways` - the key that pauses and unpauses - or
+  `addSystemWhenPaused`. `.startup`, `.shutdown` and the systems run on a
+  change of state run either way.
+- **Time goes on.** A paused game still ticks, so a pause menu can fade in
+  and a `.when_paused` timer counts; `time.scale` at nought is the other
+  thing, a world held still, which is what an editor does to the scene it
+  edits.
+- **Worked out once a part of the frame**, as it is asked: see
+  `inherited.zig`. A system that changes a `Processing` is heard from the
+  next part - the next fixed step, the update, the drawing - on.
+
 ## 📨 Events
 
 ```zig
@@ -243,7 +283,7 @@ fn hurt(app: *fx.App) !void {
 ```
 
 - **An event is a value of any type**, and whoever reads that type hears it:
-  the sender names no receiver and the reader no sender. Bevy's events.
+  the sender names no receiver and the reader no sender.
 - **Sending only appends**, so a system can send from inside its own query's
   loop. Only from its own thread, though: a parallel `Query.each` worker
   cannot send.
@@ -266,8 +306,8 @@ try app.addMethod("_on_player_hit", onPlayerHit);
 fn onPlayerHit(app: *fx.App, self: fx.Entity, damage: f32, by: fx.Entity) !void { ... }
 fn shake(app: *fx.App, args: struct { damage: f32, by: fx.Entity }) !void { ... }
 
-const hit = app.signal(player, Health, .hit);                        // Godot: player.hit
-try hit.connect(.method(hud, "_on_player_hit"), .{});                // Callable(hud, "_on_player_hit")
+const hit = app.signal(player, Health, .hit);                        // the player's hit
+try hit.connect(.method(hud, "_on_player_hit"), .{});                // a method of hud's, by name
 try hit.connectFn(shake, .{ .flags = .{ .one_shot = true } });       // a lambda
 try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked as it is compiled
 ```
@@ -287,30 +327,31 @@ try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked 
   `signal.connections` list them, and `app.connectionCount` counts them.
 - **An emit is heard when the emitting system returns.** The calls run at the
   same sync point as `app.commands`, in the order the connections were
-  made, and never under the emitting system's query. **This is where it
-  differs from Godot**, whose emit calls at once.
+  made, and never under the emitting system's query. **No handler runs at
+  the emit itself.**
   - The arguments are copied as the emit happens, text included, so a
     handler reads what was said.
   - What a handler emits is heard in the same round.
   - Ten thousand calls in one round is taken as a loop: it is stopped and
     returns `error.TooManyCalls`.
 - **A `.deferred` connection is heard at the end of the frame**, after
-  `.late`, which is Godot's idle time.
-- **The rest of the flags are Godot's too**:
+  `.late`.
+- **The rest of the flags**:
   - `.persist`: saved with the scene;
   - `.one_shot`: gone as it is emitted;
   - `.reference_counted`: a second connect counts up, and each disconnect
     counts down;
-  - `.append_source`, from 4.5.
+  - `.append_source`: the emitting entity is handed after the emitted
+    arguments and before the binds.
 
-  `unbinds` and `binds` are `Callable.unbind` and `Callable.bind`, and an
-  `fx.Bind` is a bool, an integer, a float, text, a `Vec2`, a colour or an
-  entity.
+  `unbinds` is how many of the emitted arguments, from the last, the method
+  is not handed, and `binds` are handed to it after the rest. An `fx.Bind`
+  is a bool, an integer, a float, text, a `Vec2`, a colour or an entity.
 - **A method is found by name when it is called, not when it is connected.**
   The engine looks first among the methods the target's components list in
-  `reflect_methods`, then among those the game gave `app.addMethod`. Godot's
-  connect does not check either, and that is what lets a tool connect to
-  methods it cannot see.
+  `reflect_methods`, then among those the game gave `app.addMethod`. A
+  connect checks neither, and that is what lets a tool connect to methods it
+  cannot see.
   - A failed call is logged, counted in `app.signals.failures`, and the other
     connections are still heard. A call fails when the method is missing,
     the arguments are wrong, or the method returns an error.
@@ -320,8 +361,8 @@ try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked 
 - **Death undoes connections.** A call to an entity that has died since the
   emit is not made. The connections from and to the dead go at the end of
   the frame.
-- **A Zig function is never saved**, as Godot's lambdas are not.
-  `connectFn` with `.persist` returns `error.NotPersistable`.
+- **A Zig function is never saved**: `connectFn` with `.persist` returns
+  `error.NotPersistable`.
 - **By name, for code that was not compiled against the game** - an editor, a
   console, a scene:
   - `app.signalNamed(entity, "hit")`, `app.emitNamed`, `app.hasSignal`;
@@ -332,8 +373,7 @@ try app.emit(player, Health, .hit, .{ .damage = 5, .by = sword });   // checked 
   - `app.hasMethod` and `app.callMethodOn`.
 - **An editor turns them off.** With `app.signals.dispatch = false`, every
   connection is kept, saved and listed, and none is called.
-  `app.setBlockSignals(entity, true)` silences one entity, as Godot's
-  `set_block_signals` does.
+  `app.setBlockSignals(entity, true)` silences one entity.
 
 A scene keeps the connections made with `.persist`, by UUID, in a list of
 their own:
@@ -360,6 +400,63 @@ editor without the game's components must not lose the game's connections.
   the same way, and heard by neither.
 - **One whose `from` or `to` is nowhere** is passed over, and counted in
   `loaded.connections_skipped`.
+
+## 🕹️ Actions
+
+```zig
+if (app.input.actionJustPressed("jump")) jump();
+const walk = app.input.actionVector("move_left", "move_right", "move_up", "move_down");
+var words: [32]u8 = undefined;
+const key = app.input.describeAction(&words, "interact");   // "E", or "Pad X" on a controller
+
+try app.input.actions.bind(gpa, "jump", .keyOf(.j));         // the player's own keys
+try app.saveInputMap("user://input.json");                   // kept, and read back with loadInputMap
+```
+
+```json
+"input": { "actions": [
+  { "name": "jump", "bindings": [ { "type": "key", "key": "space" }, { "type": "pad_button", "button": "a" } ] },
+  { "name": "move_left", "deadzone": 0.2, "bindings": [ { "type": "key", "key": "a" }, { "type": "pad_axis", "axis": "left_x", "direction": "negative" } ] }
+] }
+```
+
+- **A game asks for what the player means, not for a key.** An action is a
+  name and the inputs that set it off - keys, mouse buttons, a controller's
+  buttons, a way a stick or a trigger is pushed - in the project file's
+  `input` section, which the editor's Input Map tab writes. A key is bound
+  where it sits on a US layout, which is what WASD wants, or with
+  `"physical": false` by the letter the player's layout puts on it; a
+  controller's input on any controller, or with `"pad"` on one.
+- **An action is down while any of its inputs is.** Its edges are its own:
+  a second key pressed while the first is held is no new press, and letting
+  go of one of two is no release. A tap inside one frame is a press and a
+  release, and a `.fixed` system hears each exactly once, as it does a key's.
+- **How far, as well as whether**: `actionStrength` is one for a key, and
+  for a stick or a trigger how far past the action's dead zone it is, from
+  nought to one. `actionAxis` makes two actions an axis, and `actionVector`
+  four of them a direction no longer than one, up negative.
+- **Held from code**: `pressAction("fire", 1)` holds an action down, with its
+  edge, until `releaseAction` - what a button on a touch screen does.
+- **Six are always there**: `ui_accept`, `ui_cancel`, `ui_left`,
+  `ui_right`, `ui_up` and `ui_down`, what the interface moves by. A
+  project's action of the same name takes the place of one.
+- **The player can change them.** `app.input.actions` is where the game's
+  actions stand as it runs - `bind`, `unbind`, `unbindAll`, `setDeadzone`,
+  `add`, `rename` - and `saveInputMap` keeps them in a file of the player's
+  own. `loadInputMap` takes what it says of the actions the game still has,
+  and passes over the rest, so a save from before an update still reads.
+- **Named as the player last used them**: `describeAction` says the input on
+  the keyboard or the controller, whichever was pressed last, for "Press E to
+  open".
+- **From a script**: `app.actionDown`, `actionJustPressed`,
+  `actionJustReleased`, `actionStrength`, `actionAxis`, `actionVector`,
+  `pressAction`, `releaseAction`, `describeAction`, `saveInputMap` and
+  `loadInputMap`. Inside the quotes of any of them, the language service
+  `app.scriptSetup()` sets up offers the project's actions by name, each
+  with its inputs - so an editor completes `app.actionDown("ju` to `jump`.
+- **A program whose keys are its own** - an editor - leaves
+  `Options.project_input` off, and moves round its interface with the six
+  alone.
 
 ## 🎮 Controllers and the pointer
 
@@ -392,7 +489,7 @@ const turn = app.input.pointer.dx;
   allows. While locked, `input.pointer` holds still where it was and only
   `dx` and `dy` move; `.confined_hidden` keeps saying where it is.
 - **The pointer's shape is the system's**, `app.setCursorShape(.pointing_hand)`
-  and the rest of Godot's seventeen, or a picture of the game's own with
+  or any other of the seventeen, or a picture of the game's own with
   `app.setCursorImage(.{ .pixels = rgba, .width = 32, .height = 32, .hot_x = 4, .hot_y = 2 })`.
   A browser quietly keeps its arrow past 128 by 128, so a cursor a page
   will see should be small.
@@ -426,7 +523,13 @@ if (app.resized) layOutAgain(app.width, app.height);
   the systems hear about it too, instead of keeping last frame's size to
   compare with.
 - **Sizes are the content area, in the units of `Options.width` and
-  `height`**: pixels, on every backend there is today.
+  `height`**: pixels, on every backend there is today. `app.windowSize()` is
+  the size now - what `setWindowSize` asked for, once it has arrived - for a
+  settings menu to show.
+- **`setFullscreen` takes a choice**: `.windowed`, `.borderless` - what a
+  game should use - or a video mode of its own; from a script, a choice
+  with nothing to carry is its name: `app.setFullscreen("borderless")`, and
+  `app.fullscreen()` reads back as one.
 - **A fullscreen, maximised or minimised window is made an ordinary one
   before it is sized or moved**, because none of them has a size of its own.
   `.normal` means the window's own size even for one that was maximised
@@ -439,9 +542,39 @@ if (app.resized) layOutAgain(app.width, app.height);
   straight RGBA rows in as many sizes as a game has, and the system takes
   the one it wants. An empty list puts the system's own back. Wayland has
   none - a window's picture comes from its desktop file there.
+- **The close button can ask rather than close.** With
+  `Options.ask_before_closing`, pressing it - or Alt+F4 - only sets
+  `app.close_pressed`, and the run goes on until the program calls `quit`:
+  an editor asks about work not saved first. A game leaves it off and closes
+  at once.
 - **`Options.resizable` and `Options.maximized`** say what can only be said
   when the window is made. Without a window - headless - all of this is
-  nothing, and says so without failing.
+  nothing, and says so without failing. The project's `display.min_width`
+  and `min_height` are the least the player may drag the window to.
+
+## 📐 Made at one size
+
+```json
+"display": { "width": 640, "height": 360, "stretch_mode": "canvas", "stretch_aspect": "keep" }
+```
+
+- **`stretch_mode` fits a game made at one size to a window of any.**
+  `disabled` is the window as it is: a bigger one shows more. `canvas` lays
+  the world and the interface out at the project's `width` and `height` and
+  draws them at the window's, scaled - text stays sharp at any size.
+  `picture` draws everything at the project's size, into a picture of its
+  own, and scales the picture - pixel art stays pixels, sampled as
+  `rendering.default_texture_filter` says.
+- **`stretch_aspect` says what the spare room is.** `keep` keeps the
+  project's shape and fills the rest with bars; `expand` shows more of the
+  game the long way, the project's size the least of it.
+- **What the game sees is the frame**: `app.frame` - its `width` and
+  `height`, what the interface is laid out in and the camera's view is
+  sized by, and its `scale` - and the pointer in the frame's pixels, turned
+  from the window's as it comes, so `pointerInWorld` and a click on a
+  control need nothing. `app.width` and `app.height` are still the window's.
+- **An editor's window is its own**: `Options.stretch = .{}` is the window
+  itself, whatever the project says.
 
 ## 📋 The clipboard
 
@@ -536,8 +669,12 @@ for (app.input.dropped()) |drop| {
 ```zig
 try app.setVsync(false);
 app.time.max_fps = 144;                     // null is no cap
-if (!app.input.focused) pause(app);
+if (!app.input.focused) app.setPaused(true);
 ```
+
+- **A project caps its frames with `application.max_fps`** - nought for no
+  cap - and a game's `Options.max_fps` overrules it. A settings menu sets it
+  with `app.setMaxFps(60)` and reads it with `maxFps()`, from a script too.
 
 - **The cap keeps a schedule**, so a late frame is caught up with and the
   average holds; after a stall longer than `time.max_delta` it starts again.
@@ -561,20 +698,161 @@ const fuse = try app.createTimer(1.5);         // one to connect to and forget
 try app.signal(fuse, fx.Timer, .timeout).connectFn(explode, .{});
 ```
 
-- **Godot 3's Timer, as a component.**
+- **A timer is a component.**
   - `wait_time`, `one_shot`, `autostart`, `paused` and `time_left`.
   - `start`, `stop` and `isStopped`.
   - The `timeout` signal, and it is saved with a scene.
 - **Counted by the engine**: once a frame before the `.update` systems, or
-  with `process_mode = .physics` once a fixed step before `.fixed`, so a
-  game's pause is the same length on every machine.
+  with `clock = .fixed` once a fixed step before `.fixed`, so a wait the
+  game's simulation depends on is the same length on every machine.
   - What it says is heard before that stage's systems run.
   - A repeating timer keeps what a frame ran past, so it keeps its rhythm.
-- **No time, no count.** A paused game's timers wait, and an editor, which
-  gives its world no time, starts none in the scene it edits. A timer read
-  back from a scene saved while it ran goes on from where it was.
-- **`app.createTimer(seconds)`** is Godot's `create_timer`: a one-shot timer
-  on an entity of its own, which goes once it has said `timeout`.
+- **Counted while its entity runs.** A paused game's timers wait - but for
+  those whose `Processing` runs while it is paused - and a frame with no
+  time counts nothing: an editor, which gives its world no time, starts none
+  in the scene it edits. A timer read back from a scene saved while it ran
+  goes on from where it was.
+- **`app.createTimer(seconds)`** makes a one-shot timer on an entity of its
+  own, which goes once it has said `timeout`.
+
+## 🔊 Sound
+
+```zig
+const door = try app.loadAudio("res://sounds/door.ogg");       // .wav, .ogg or .mp3
+const creak = try app.world.spawnWith(.{ fx.Transform2D.at(400, 300), fx.AudioPlayer{ .clip = door }, fx.AudioSpatial2D{} });
+app.world.get(creak, fx.AudioPlayer).?.play(0);                 // from the start, at the next audio pass
+try app.signal(creak, fx.AudioPlayer, .finished).connect(.method(creak, "_on_creak_finished"), .{});
+_ = app.setBusVolumeDb("Music", app.linearToDb(0.5));            // a settings screen's slider
+```
+
+- **A sound is a file**: `loadAudio` reads a WAV, an Ogg Vorbis or an MP3
+  once and gives an `AudioClipHandle`, which a component holds and a scene
+  writes as its path. Vorbis and MP3 are decoded as they play, so a long piece
+  of music is never all samples at once; an MP3's encoder silence is left
+  out, so one that loops goes round without a gap. `audioLength(clip)` says
+  how long one is.
+- **An `AudioPlayer` plays one**, and is data: `clip`, `volume_db`, `pitch`
+  (faster and higher above 1, as a record sped up - cheap enough for a
+  sound a little different each time), `bus`, `autoplay`, `loop` and
+  `paused`. `play(from)`, `stop()` and `seek(to)` ask the engine's audio
+  pass, once a frame after the game's `.late` systems; `playing` and
+  `position` say what it found; `finished` is said when a sound that does not
+  loop comes to its end.
+- **It plays while its entity runs.** A paused game's sounds are held where
+  they are - but for those whose `Processing` runs while it is paused, a pause
+  menu's music - and a frame with no time starts none: an editor never plays
+  the scene it edits. A player read back from a save made while it played
+  goes on from where it was.
+- **In the world**, with an `AudioSpatial2D` beside it, a player is quieter
+  the farther it is from the listener, to silence at `max_distance`, and
+  panned to its side. The listener is the `AudioListener2D` that is
+  `current`, or the middle of what the camera shows.
+- **Buses** are the project file's `audio.buses`: each with its volume in
+  decibels, muted or not, and the bus it sends into; `Master` is always there
+  and everything ends in it. `setBusVolumeDb`, `busVolumeDb`, `setBusMute`,
+  `isBusMuted`, and `linearToDb` and `dbToLinear` for a slider - from Zig and
+  from Flux.
+- **On the machine's sound card** - WASAPI on Windows, ALSA on Linux,
+  OpenSL ES on Android - through
+  [Fluxion Audio](https://github.com/kisstp2006/fluxion-audio). With none,
+  and always headless, each frame's sound is mixed and heard nowhere, so
+  `finished` and `position` are the same everywhere and a test can listen to
+  how loud a frame was; `Options.audio = .silent` asks for that on purpose.
+
+## 🎞️ Tweens and animations
+
+```zig
+// A tween: steps one after another, or together once tweenParallel says so.
+const fade = try app.tween(panel);
+try app.tweenProperty(fade, panel, "Appearance.modulate.a", .{ .number = 0 }, 0.3);
+_ = app.tweenEase(fade, "quad_out");
+try app.tweenParallel(fade, true);
+try app.tweenProperty(fade, panel, "Transform2D.x,y", .{ .vec2 = .{ 0, -40 } }, 0.3);
+try app.signal(fade, fx.Tween, .finished).connectFn(closed, .{});
+
+// Keyed animations, made in the editor's Animation panel.
+const menu = try app.loadAnimations("res://ui/menu.anim");
+const ui = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.AnimationPlayer{ .library = menu } });
+app.world.get(ui, fx.AnimationPlayer).?.play("open");
+
+// Pictures in turn, in the Sprite beside it.
+const hero = try app.loadSpriteFrames("res://art/hero.frames");
+const walker = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.Sprite{}, fx.AnimatedSprite2D.autoplaying(hero, "walk") });
+app.world.get(walker, fx.AnimatedSprite2D).?.play("run", 1, false);
+```
+
+- **A property is a path**: a component's scene name and a field in it -
+  `Transform2D.rotation`, `Appearance.modulate`, `Control.offset_left` - or two
+  number fields with a comma between, `Transform2D.x,y`, moved as one pair.
+  `fx.Property.compile` finds it once, and `read` and `write` go straight to
+  the component's bytes. A number, an integer, a flag, a vector, a colour and
+  a name kept in a `[N]u8` - `AnimatedSprite2D.animation` - can be moved:
+  numbers and vectors and colours slide, flags and names jump. In a `.anim`
+  file a name is a string, and a string that reads as a colour, `"#ff8800"`,
+  is a colour.
+- **A tween is an entity** with a `Tween` component, made with
+  `app.tween(owner)` under its owner, and its steps are the app's:
+  `tweenProperty(tween, entity, path, to, seconds)` from wherever the field
+  is when the step starts, `tweenInterval` a wait, `tweenParallel(tween,
+  true)` the steps after it each with the one before, and `tweenEase` the
+  curve of the step before - any of `fx.math.ease`'s thirty-one. `speed`,
+  `loops` - nought is for ever - and `paused` are its own; it says `finished` and goes when it is done, and
+  despawning it is killing it. It runs while its entity runs, so a pause
+  holds it, and Flux calls all of it by the same names.
+- **An animation library is a `.anim` file** of named animations: a length,
+  a loop - once, round again, or back and forth - and tracks. A track moves
+  one property of the player's own entity, or of one under it by name or by
+  path (`Panel/Title`), from key to key; each key says the curve it is got to
+  by, and a `discrete` track jumps to each key as it comes.
+- **An `AnimationPlayer` plays one**, and is data as an `AudioPlayer` is:
+  `library`, `autoplay`, `speed` and `paused`; `play(name)`, `stop()`,
+  `seek(to)` and `queue(name)` - the one after this - ask the engine's pass,
+  once a frame before the `.update` systems; `current`, `playing` and
+  `position` say what it found. `animation_started` and
+  `animation_finished` say so with the animation's name. A frame with no
+  time moves nothing: an editor poses a scene with `fx.animation.pose`.
+- **Sprite frames are a `.frames` file** of named animations, each a
+  `speed` in frames a second - 5 unless it says -, a `loop` - `linear`,
+  round again; `pingpong`, back and forth; `none`, once - and its frames: a
+  texture, or a `region` of one in texels, shown for as many of the
+  animation's frames as its `duration` says. A frame with no texture shows
+  nothing. `SpriteFrames` answers `addAnimation`, `addFrame`,
+  `addFrameRegion`, `clear`, `clearAll`, `duplicateAnimation`,
+  `getAnimationNames` (in the order of the alphabet), `getAnimationSpeed`,
+  `getFrameCount`, `getFrameDuration`, `getFrameTexture`, `getFrameRegion`,
+  `hasAnimation`, `removeAnimation`, `removeFrame`, `renameAnimation`,
+  `setFrame` and the loop and speed setters; `app.newSpriteFrames()` makes a
+  set with one animation, `"default"`, and `app.saveSpriteFrames(frames,
+  path)` writes it. `app.addGridFrames` makes them from the cells of a sheet,
+  as the `creatures` example does.
+- **An `AnimatedSprite2D` plays them in the `Sprite` beside it**: the
+  Sprite's texture, region - mirrored by `flip_h` and `flip_v` -, size, which
+  is the frame's in texels, and pivot, which `centered` and `offset` say, are
+  its to write; the Sprite's tint, layer and blend stay the Sprite's.
+  - `play(name, custom_speed, from_end)` plays an animation - with no name
+    the one it has, on from where `pause()` held it - at `speed_scale` times
+    `custom_speed` its own speed, backwards below nought; `playBackwards(name)`
+    is `play(name, -1, true)`, `stop()` holds it on its first frame, and
+    `isPlaying`, `getPlayingSpeed` and `setFrameAndProgress` say and set the
+    rest. Flux leaves the last arguments out: `sprite.play("run")`.
+  - A frame shows while `frame_progress` goes from 0 to 1, and every new
+    frame says `frame_changed`. At the end a loop goes round and says
+    `animation_looped`, a ping-pong turns round and says the same, and a
+    one-shot stays on its last frame, paused, and says `animation_finished`.
+  - Writing `animation` starts it from its first frame (its last, backwards)
+    and says `animation_changed`; writing `frame` shows that frame from its
+    beginning and says `frame_changed`; other `sprite_frames` stop it and say
+    `sprite_frames_changed`. A script's write goes through the setter at once,
+    and any other write - an inspector's, a track's - is made the same at the
+    engine's next pass, where the signals are said.
+  - `autoplay` starts by itself the first time the game runs its entity; an
+    editor's frames, which have no time, show the frame and play nothing.
+  - What it works out while it plays - whether it plays, `play`'s own speed -
+    is `attr.Unsaved`: never written to a scene.
+  - In Flux, `sprite.sprite_frames` is a `SpriteFrames` value with the calls
+    above by the same names and `resource_path`; a path is taken as well:
+    `sprite.sprite_frames = "res://art/hero.frames"`. Inside `play("` the
+    code editor offers the names of the animations read.
 
 ## 📱 In the background
 
@@ -606,6 +884,65 @@ fn keep(app: *fx.App) !void {
   canvas's pixels - exact for a canvas that fills the page, which is what a
   game is, and an over-estimate for one with a page above it.
 
+## 🌳 One tree
+
+```zig
+const tank = try app.world.spawnWith(.{ fx.Transform2D.at(100, 100), fx.Sprite.of(hull) });
+const turret = try app.world.spawnWith(.{ fx.Transform2D.at(0, -6), fx.Parent.of(tank), fx.Sprite.of(gun) });
+try app.setName(turret, "turret");
+const reload = try app.world.spawnWith(.{ fx.Timer{ .wait_time = 2 }, fx.Parent.of(turret) });  // no transform: a clock
+try app.addToGroup(tank, "enemies");
+
+const barrel = app.findPath(tank, "turret/barrel");   // null until there is one
+try app.callGroup("enemies", "alert");
+```
+
+- **`Parent` is the one link between entities.** Whatever an entity is - a
+  sprite, a control, a timer, something with only a script - it hangs from
+  its `Parent`, or it is a root. A transform's numbers are in the space of the
+  transform above it, a control is laid out in the control above it, and a
+  timer or a sound belongs to what it hangs from. **What hangs from something
+  goes with it**: despawn the tank and the turret goes at the end of the
+  frame, and the clock on the turret with it - or all of it at once, with
+  `app.despawnTree`.
+- **`app.setParent(entity, parent, keep_global)` moves an entity in the
+  tree**, `.none` for the roots, last among its new siblings. With
+  `keep_global` it stays where it is in the world, its own transform written
+  to land there; without, its numbers stay and it moves with the new parent.
+  A loop - the entity itself, or something under it - is `error.Loop`.
+  `app.parentOf` and `app.hangsFrom` read it. A `Parent` written straight
+  into the component is seen after the next spawn, despawn or change of
+  components, and renames nothing, so an inspector shows it read-only and
+  leaves the move to `setParent`.
+- **A parent's children keep an order**: `app.childrenOf(parent, &buf)` in
+  it - `.none` for the roots - `app.childCount` and `app.childAt` one at a
+  time, `app.siblingIndex(entity)` for one's place, and
+  `app.setSiblingIndex(entity, i)` to move one, the ones from there on moving
+  along. A child never placed comes after the ones that were, in the order it
+  was made. A scene writes its list in this order and a read keeps it, so the
+  tree comes back as it was, after whatever was in the world already.
+  `app.siblingBefore` sorts siblings a caller has grouped itself. The
+  families are an index kept beside the world and built again when the world
+  changes shape, so asking every frame is a lookup, not a walk over the world.
+- **A name is its siblings' own.** Two children of one parent - or two roots
+  - cannot share one: `app.setName` says `error.NameTaken`, and
+  `app.setFreeName` takes the first free one after it, "Rock 2", which is
+  what a scene read into a family and `setParent` do. Two copies of a scene
+  keep the names inside them. `app.find(name)` answers with the first living
+  entity given it; `app.findPath(from, "Arm/Hand")` follows names down, `..`
+  up and a leading `/` from the roots; `app.findIn(root, name)` looks
+  anywhere under a root.
+- **A group is a name many entities are put under**, wherever they are in the
+  tree: `addToGroup`, `removeFromGroup`, `isInGroup`, `groupMembers`,
+  `groupSize` and `groupMember`, `groupsOf`, and `callGroup(group, method)`,
+  which calls a method - a component's, the script's, or one `addMethod` gave
+  - on every member that has it. Groups are kept beside the world, as names
+  are, because one entity is in any number of them; a scene writes them with
+  each entity, and the dead leave at the end of the frame.
+- **All of it is a script's too**: `app.setParent(self.entity,
+  app.find("ship"), true)`, `app.findPath(self.entity, "../Door")`,
+  `app.callGroup("lights", "flicker")`.
+
 ## 🎨 The 2D layer
 
 One quad in a vertex buffer and a second buffer stepping once per instance
@@ -619,6 +956,16 @@ _ = try world.spawnWith(.{
 });
 ```
 
+- **An `Appearance` shows what hangs from it.** `visible` false hides the
+  entity and everything under it; `modulate` is multiplied into its own
+  colour - a sprite's `tint`, a label's `color`, a tile map's `tint` - and
+  into everything under it; `z` raises the layer it and everything under it
+  is drawn on, added to the one it inherits unless `z_relative` is off. It is
+  optional, as `Processing` is: an entity without one is shown as its parent
+  is. A control takes the alpha and the visibility: see
+  [Controls and themes](#-controls-and-themes). `render_layers` puts it and
+  everything under it on render layers of its own, which only a camera whose
+  `cull_mask` has them sees: see [Render views](#-render-views).
 - **Sorted back to front, blended, with no depth test.** A depth buffer and
   half-transparent pixels disagree about what is behind what. The sort is by
   `layer`, then `order`, then blend mode, then texture, then the order the
@@ -647,38 +994,31 @@ _ = try world.spawnWith(.{
   One pipeline, no branch in the shader, no artwork for a health bar.
 - **A sprite with no size is the size of its own artwork**, so most sprites
   need no size at all.
-- **A transform's `parent` attaches one entity to another**, so a turret rides
-  on a tank and a health bar rides over an enemy. The numbers in a transform
-  are *local* - in the parent's space, and in the world's only when there is
-  no parent - which is Unity's `Transform` and Godot's `Node2D`.
+- **A transform's numbers are *local*** - in the space of the transform it
+  hangs from through its `Parent`, so a turret rides on a tank and a health
+  bar rides over an enemy, and in the world's only when there is none above.
   `app.worldTransform(entity)` is the other one, and it costs a walk up the
   chain rather than a field read. `inherit_rotation = false` is the shadow
-  that does not tip over. **What hangs from something goes with it**: despawn
-  the tank and the turret goes at the end of the frame, and the barrel on the
-  turret with it - Unity's rule and Godot's.
-- **Godot's Node2D calls work through the chain**, on the app:
+  that does not tip over. See [One tree](#-one-tree).
+- **Calls on the app work through the chain**:
   - `globalPosition`, `globalRotation`, `globalScale` and `worldTransform` read where an entity is in the world, and their `set` twins put it there under the parents it keeps.
   - `globalTranslate` moves it by an amount in the world, and `toLocal`/`toGlobal` take a point in and out of its space.
   - `lookAt` turns its `+x` to a point, and `getAngleTo` says how far that is.
   - `moveLocalX`/`moveLocalY`, `rotate` and `applyScale` change its own numbers along its own axes.
   - `getRelativeTransformToParent` says where it is in an ancestor's space.
   - These are where the entity is. What an entity that `interpolate`s is drawn at between two steps is `drawnTransform`.
-- **A parent's children keep an order**: `app.childrenOf(parent, &buf)` in
-  it - `.none` for the roots - `app.siblingIndex(entity)` for one's place, and
-  `app.setSiblingIndex(entity, i)` to move one, the ones from there on moving
-  along: Godot's `get_children`, `get_index` and `move_child`. A child never
-  placed comes after the ones that were, in the order it was made. A scene
-  writes its list in this order and a read keeps it, so the tree comes back as
-  it was, after whatever was in the world already. `app.siblingBefore` sorts
-  siblings a caller has grouped itself.
-- **An `Animation` is a sheet and a rate**, and the engine writes the cell it
-  lands on into `Sprite.region` once a frame. One sheet holds a walk, an idle
-  and an attack; swapping between them is writing two numbers.
+- **An `AnimatedSprite2D` plays sprite frames**: a `.frames` file of named
+  animations, each a run of textures or pieces of them at a speed. The
+  engine puts the frame it is on in the `Sprite` beside it - texture, region,
+  size and pivot - once a frame; `play("attack")` swaps one for another. See
+  [Tweens and animations](#%EF%B8%8F-tweens-and-animations).
 - **A `Text2D` is words at a transform**, drawn through the same pass as
   everything else: each glyph is a quad out of a glyph atlas, so a label sorts
   against sprites by the same `layer` and `order` and all the text in one font
-  is one draw call. The text lives *in* the component, in a fixed buffer, and
-  `label.print("{d} points", .{score})` is what a game actually does with it.
+  is one draw call. The words are the app's, kept beside the component as
+  long as they are - `app.setText(label, fx.Text2D, "text", "Score")` - and
+  `app.printText(label, fx.Text2D, "text", "{d} points", .{score})` is what a
+  game actually does with them. See [Controls and themes](#-controls-and-themes).
 - **A font is a file, or one font of a collection.** `app.assets.loadFont`
   opens a `.ttf` or an `.otf`, and `.member = n` the nth font of a `.ttc`,
   which is what Windows ships its Chinese, Japanese and Korean fonts in.
@@ -698,7 +1038,9 @@ _ = try world.spawnWith(.{
   coordinate system the interface layer uses, so a game that has not thought
   about cameras yet can lay things out in screen coordinates. A game designed
   at one size says so - `Camera2D.fitting(640, 360)` - and the whole of that
-  area is on screen in any window, with `zoom` multiplying it.
+  area is on screen in any window, with `zoom` multiplying it - or the
+  project's stretch fits the whole game to the window at once: see
+  [Made at one size](#-made-at-one-size).
 - **The pointer is found in the world through the same camera.**
   `app.pointerInWorld()`, `app.screenToWorld(x, y)` and
   `app.worldToScreen(x, y)` run the view the renderer draws with, forwards
@@ -716,10 +1058,185 @@ _ = try world.spawnWith(.{
   only the background and the interface, and a texture is the one place the
   world appears. Drawn into on OpenGL, a texture comes out with its bottom row
   first, and `app.drawnUpsideDown()` says when a picture of it wants turning.
+  `app.drawControlPreview(texture, view, picked)` draws the interface over
+  it as the game lays it out: at `gameSize()` - the project's
+  `display.width` and `height` - with the screen's top left at the world's
+  origin, as big as the view shows the world. A tree with no root of its
+  own is shown over that screen too, to be laid out.
 - **The shader is written once**, in
   [Fluxion Shader](https://github.com/kisstp2006/fluxion-shader)'s language,
   and comes out as GLSL and as HLSL. Two hand-written copies would drift, and
-  the drift shows up as one backend drawing correctly and the other not.
+  the drift shows up as one backend drawing correctly and the other not. A
+  sprite with no material is drawn with the plainest material there is -
+  its picture times its colour - through the same vertex stage as every
+  other.
+
+## ✨ Shaders and materials
+
+```
+// res://shaders/crt.shader
+uniform Crt : 1 {
+    float lines = 180.0;
+    float darkness = 0.35;
+}
+
+fragment {
+    vec4 under = sample(SCREEN_TEXTURE, SCREEN_UV);
+    float scan = step(0.5, fract(SCREEN_UV.y * lines));
+    target = vec4(under.rgb * mix(1.0, scan, darkness), 1.0) * COLOR;
+}
+```
+
+```zig
+const crt = try app.loadShader("res://shaders/crt.shader");
+try app.world.add(screen, fx.Material{ .shader = crt });
+try app.setShaderParam(screen, "darkness", &.{0.6});
+```
+
+- **A `.shader` file is a fragment stage**, in Fluxion Shader's language:
+  functions, constants, one `uniform` block of its own at slot 1, and a
+  `fragment` block. The engine writes the rest after it - the vertex stage
+  that places the quad, and what a material reads - so a line a message
+  names is the file's own. It reads `UV`, `COLOR` and `TEXTURE` for its
+  picture, `SCREEN_UV`, `SCREEN_TEXTURE` and `SCREEN_PIXEL_SIZE` for what is
+  drawn under it, and `TIME`, the seconds since the game started.
+- **A `Material` beside a `Sprite`, a `ColorRect` or a `TextureRect` draws
+  it through the shader.** A colour rect's picture is white and its colour
+  its own; a texture rect's is its texture. A control's box is left by the
+  interface for the shader and drawn in its place among the other controls:
+  a CRT on a canvas layer over everything is a colour rect with a material,
+  the size of the screen, that reads the screen.
+- **The block's fields are the material's numbers**, and a field says what
+  it starts as - `float darkness = 0.35;` - until a material gives it its
+  own: `app.setShaderParam(e, "darkness", &.{0.6})`, `app.shaderParam`,
+  and from a script as the material's own field,
+  `self.entity.get("Material").darkness = 0.6`. A `vec4` is a colour to a
+  script, a `vec2` and a `vec3` vectors. The numbers are the app's, kept
+  under the entity, and a scene writes them as the material's `params`.
+- **Materials batch as sprites do.** Sprites with the same shader, giving
+  it the same numbers, are one draw call; each set of numbers is a uniform
+  buffer of its own.
+- **Reading the screen costs a copy.** A frame with a material that reads
+  `SCREEN_TEXTURE` is drawn into a texture of its own, and what is drawn so
+  far is copied just before it - once, and again only when more has been
+  drawn since. A frame without one is drawn as it always was.
+- **A file that does not compile keeps its handle**, says why in the log at
+  its own lines - `3:14: cannot assign a vec3 ...` - and draws what names it
+  as though it named none. `app.shaderOf(handle).problems` keeps the words,
+  and `app.reloadShader` reads the file again. A name the engine's part
+  declares, written again in the file, is said to clash with "the engine's
+  part". Each message has where it is under it, `--> res://crt.shader:3:14`,
+  as a script's does.
+- **An editor asks `fx.shaders.edit`** about a file being written, as it is
+  compiled - its text, then the engine's part: `analyze` gives its colours,
+  every name coloured by what it names, and what is wrong at the file's own
+  places; `complete`, `signature` and `hover` know the engine's names too,
+  `UV` to `TIME`, with the doc written above each, and leave out what the
+  file never reads. `app.previewShader(handle, text)` draws with text not yet
+  saved, as it is typed: one that does not compile keeps what last did
+  drawing, and `reloadShader` goes back to the file.
+- **Not here yet**: textures of a material's own besides its picture and the
+  screen's, a vertex stage of the file's, and materials on tile maps and on
+  a `Text2D`.
+
+## 📺 Render views
+
+```zig
+const arcade = try app.world.spawnWith(.{
+    fx.Transform2D.at(5000, 0),
+    fx.Camera2D{ .cull_mask = 0b10 },
+    fx.RenderView{ .width = 256, .height = 224 },
+});
+_ = try app.world.spawnWith(.{ fx.Transform2D.at(400, 200), fx.Sprite{}, fx.ViewTexture{ .view = arcade } });
+```
+
+- **A `RenderView` is a camera that draws into a picture** rather than on
+  the screen: a game in an arcade cabinet, a minimap, a monitor on a wall.
+  It sits beside a `Camera2D`, which says how close it is and what it sees,
+  and a `Transform2D`, which says where it looks. It is drawn every frame
+  it is `active`, before the screen, at its `width` and `height`, cleared to
+  its `clear_color`; the screen is never looked at through it.
+- **A `ViewTexture` shows the picture** in place of a `Sprite`'s or a
+  `TextureRect`'s own texture, at the picture's size unless the sprite says
+  one: `app.viewTexture(view)` is the picture's handle, for anything else a
+  texture goes on. A picture is never drawn into itself, and one drawn on
+  OpenGL is turned over as it is shown.
+- **Render layers keep a world out of the screen.** An `Appearance`'s
+  `render_layers` puts a branch on layers of its own, and a camera's
+  `cull_mask` says which layers it sees: the game in the cabinet on the
+  second layer, the main camera seeing only the first. Nought is the
+  parent's, and the top is on the first. `layer_names.render_2d` names them.
+- **The picture goes with its view**, at the end of the frame the view dies
+  in or loses its `RenderView`.
+
+## 🧱 Tile maps
+
+```zig
+const set = try app.loadTileSet("res://tiles/terrain.tileset");
+const map = try app.world.spawnWith(.{ fx.Transform2D{}, fx.TileMap{ .tile_set = set } });
+_ = try app.setTile(map, 3, 2, .at(0, 1, 0));                          // source 0, column 1, row 0
+_ = try app.setTile(map, 4, 2, fx.Cell.at(0, 1, 0).with(fx.Cell.flip_h, true));
+const hurts = app.tileDataAt(map, app.pointerInWorld(), "damage");     // what the tile set says of it
+```
+
+- **A `TileMap` is a grid of cells over a tile set**, drawn with the sprites
+  of its `layer` and sorted by its `order`, tinted, and stopping what its
+  `collision_layer` and `collision_mask` say.
+- **A cell is four bytes**: which source of the set, the column and row of
+  the tile in it, and whether it is flipped across, flipped over or turned -
+  `Cell.flip_h`, `flip_v` and `transpose`, three of which make every quarter
+  turn. A tile added to the sheet later leaves every painted cell where it
+  was, since a cell names its tile by place and not by number.
+- **Cells live in chunks of sixteen by sixteen**, entities of their own that
+  a map owns: a level larger than the screen is a handful of instanced draws,
+  and the camera drops the chunks it cannot see. `app.setTile` and
+  `app.tileAt` go through an index, not a walk of the world. The chunks are
+  the engine's - a scene writes the map's cells under the map itself,
+  `"cells": { "0,0": "<base64>" }`, and builds the chunks again when it reads
+  them.
+- **What stops at a tile is the tile set's word**: the whole tile - whole
+  tiles side by side are merged into as few boxes as cover them - or a shape
+  of up to eight corners, turned and flipped the way its cell is. A map's
+  solid tiles are one static body per chunk.
+- **A tile set is a file**, `.tileset`, read once however many maps name
+  it, and kept by a handle as a texture is. A source is a sheet cut into a
+  grid past its margin and between its gaps; a source with no texture is one
+  tile of the white texel, which a map's tint colours - a level blocked out
+  before its art exists.
+
+  ```json
+  {
+    "fluxion_tileset": 1,
+    "tile_size": [16, 16],
+    "data_layers": [{ "name": "damage", "type": "int" }, { "name": "water", "type": "bool" }],
+    "sources": [{
+      "id": 0, "texture": "res://art/terrain.png", "margin": [0, 0], "separation": [0, 0],
+      "tiles": [
+        { "at": [0, 0], "collision": "full" },
+        { "at": [2, 0], "collision": "polygon", "polygon": [[0, 16], [16, 0], [16, 16]] },
+        { "at": [1, 0], "probability": 0.5, "data": { "damage": 2 } }
+      ]
+    }]
+  }
+  ```
+
+  `tiles` lists only the tiles with something to say. What a tile does not
+  say is its default, and is not written back.
+- **Data layers are values a tile carries under a name** - how much it
+  hurts, whether it is water - whole numbers, numbers or truths, eight at
+  most. `app.tileData(map, x, y, "damage")` asks a cell,
+  `app.tileDataAt(map, point, "damage")` the cell under a point of the world,
+  and a Flux script gets the number or the truth itself:
+  `app.tileDataAt(ground, vec2(x, y + 20.0), "water") == true`.
+- **`probability`** is how often a random brush picks the tile against the
+  others it picks among: an editor's, since a game places its own tiles.
+- **Where a map is**: `app.cellAt(map, point)` is the cell a point of the
+  world is in, and `app.usedCells(map)` the smallest rectangle holding every
+  painted cell.
+- **A tile set's file can be written back**: `app.tile_sets.textOf` and
+  `save` are what an editor keeps undo steps with and saves, and
+  `reloadTileSet` reads one again - everything built from it, a map's body
+  included, is built again.
 
 ## 🔘 The interface
 
@@ -762,11 +1279,14 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   system can ask `app.ui.wantsPointer()` and `wantsKeyboard()` about this
   frame. The wheel goes to the list under the pointer first, and only what the
   interface did not use reaches `input.wheel`.
-- **The keys it takes.** Tab always moves the focus. The arrows, a d-pad and
-  the left stick move it only once something has it, so a game keeps them
-  until a menu takes the focus with `app.ui.setFocus`. Enter, Space and a
-  pad's A press what has it, and typing and the editing keys reach a text
-  input that has it. Ctrl+C, Ctrl+X and Ctrl+V go through the system
+- **The keys it takes.** Tab always moves the focus. The `ui_left`,
+  `ui_right`, `ui_up` and `ui_down` actions - the arrows, a d-pad and the
+  left stick, unless the project says otherwise - move it, held to repeat,
+  only once something that takes the focus has it, so a game keeps them
+  until a menu takes the focus with `app.ui.setFocus`. While a text input
+  has it, only a controller moves it on. `ui_accept` - Enter, Space and a
+  pad's A - presses what has it, and typing and the editing keys reach a
+  text input that has it. Ctrl+C, Ctrl+X and Ctrl+V go through the system
   clipboard - see [the clipboard](#-the-clipboard) - so text moves between a
   text input and every other program. AltGr is never Ctrl: AltGr and V types
   `@` on a Hungarian keyboard, and Ctrl+Alt+V still pastes.
@@ -776,7 +1296,8 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   nothing in it.
 - **It is the size the display asks for.** `app.interface.scale`, what it is
   laid out at, is the game's own `app.interface.zoom` - an interface-size
-  setting - times the scale of the display the window is on: 1.25 or 2 on a
+  setting, `app.setInterfaceZoom(1.25)` and `interfaceZoom()` from a
+  script - times the scale of the display the window is on: 1.25 or 2 on a
   HiDPI screen, followed as the window is dragged to another monitor.
   `follow_display = false` sizes it by the window alone. `safe_area` keeps it
   clear of a television's edges, and a picture on an element names one of
@@ -794,6 +1315,153 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   zoom wants.
 - **Without a `.ui` system none of this happens.** Nothing is fed, laid out or
   drawn, and a game that never asks for an interface runs as it did.
+
+## 🔲 Controls and themes
+
+```zig
+try app.useControlNodes();
+const ui_theme = try app.loadTheme("res://ui/game.theme");
+const root = try app.world.spawnWith(.{ fx.Control{ .theme = ui_theme, .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, fx.CanvasLayer{} });
+const play = try app.world.spawnWith(.{ fx.Control{}, fx.Parent.of(root), fx.Button{} });
+try app.setText(play, fx.Button, "text", "Play");
+try app.signal(play, fx.Button, .pressed).connect(.method(menu, "start"), .{});   // menu: an entity whose script has start()
+app.grabFocus(play);                                                             // a pad can press it at once
+```
+
+- **Controls are components.** A `Control` is the box - its size as fit,
+  fixed, grow, a share or a ratio, and in the flow of the control it hangs
+  from or anchored in it. What it is comes beside it: `Label`, `Button`,
+  `CheckBox`, `LineEdit`, `Slider`, `ProgressBar`, `TabContainer`,
+  `TextureRect`, `NinePatchRect`, `ColorRect`, `RichText`, `Popup`, and the
+  containers `PanelContainer`, `BoxContainer`, `MarginContainer`,
+  `CenterContainer` and `ScrollContainer`. A root is a `Control` with a
+  `CanvasLayer` over the screen, or a `Viewport` placed in the world.
+  `app.useControlNodes()` lays them out into the interface every frame.
+- **Anchored, a control is held between two points of its parent on each
+  axis**: `anchor_left` and `anchor_right` across, `anchor_top` and
+  `anchor_bottom` down, each a part of the parent from nought to one. Two
+  that differ **stretch** it - its edges are its `offset_*` from them, and it
+  resizes with its parent: a bar along the bottom, a backdrop over it all.
+  Two that are the same **pin** it: it keeps its own size, `offset_left` and
+  `offset_top` from the point, growing away from it the way
+  `grow_horizontal` and `grow_vertical` say. `setAnchorsPreset` - on the
+  control, or `app.setAnchorsPreset(e, .bottom_right)` - puts it in a
+  corner, an edge's middle, the middle, along an edge or over the whole.
+- **Their words are the app's**, kept beside them as long as they are: a
+  label's, a button's, a field's and its placeholder, a rich text's, a
+  control's tooltip. `app.setText(e, fx.Label, "text", "Paused")`,
+  `app.textOf` and `app.printText` from Zig; `label.text = "Paused"` from a
+  script; a field of the component's in a scene and in an editor's
+  inspector. Any component can keep some - an `attr.Text` on its type says
+  which - and they go with the entity. See `texts.zig`.
+- **The focus is the keyboard's and a pad's**: a button, a box and a slider
+  take it from a press, Tab and the arrows, and a field always does. A
+  `Focus` beside a control says otherwise - `none`, `click` for a press and
+  nothing else, `all` - and where the arrows, Tab and Shift+Tab go from it
+  when not to the nearest or the next declared. `app.grabFocus(e)`,
+  `hasFocus` and `releaseFocus`, from Flux too.
+- **A tooltip** is a control's `tooltip_text`, shown by the pointer once it
+  has rested there the project's `gui.tooltip_delay`, in the theme's
+  `Tooltip` style.
+- **A `RichText`** is words with styles written into them - every tag
+  fluxion-ui's markup reads, and `{b|heavy}`, `{size=24|large}` and
+  `{img=res://icons/key.png|}` - wrapping between words, each word in its
+  own size and weight. With `reveal()` its letters show one after another at
+  `reveal_speed` a second, each keeping its room, and `revealed` is said when
+  the last shows: credits, and a line of dialogue.
+- **A `Popup`** is a box over everything while it is `open` - `popup()` and
+  `hide()` - in the middle of the screen or where its place says. Modal,
+  what is under it takes no press, behind a veil; a press outside it or the
+  `ui_cancel` action closes it, and `closed` says so. An editor, which draws
+  it without answering anything, shows one that is shut open while it or
+  something in it is picked, to be laid out - `drawControlPreview`'s
+  `editing`.
+- **The pointer** is a control's as its `mouse_filter` says: `stop` takes it
+  there, and what the control is in hears nothing; `pass`, the default, is
+  heard there and by what it is in, and not by what is behind; `ignore` goes
+  through to what is behind, as if the control were not there - a fade to
+  black over the buttons - while what is inside it still answers. A layer's
+  root covers the screen whatever is on it, so it passes the pointer on to
+  the layers under it unless it is `stop`.
+- **A `ColorRect`** is a box of one colour: a backdrop, a fade to black.
+- **They fade, tint and pop.** A control's `Appearance` - and whatever is
+  above its tree, controls or not - colours it and everything in it by its
+  `modulate`, times what is above, and hides it with `visible`: a menu
+  faded out, a title flashed red, a scene dimmed by a gamma setting. Its
+  `scale` draws it and
+  everything in it bigger or smaller about its middle, and the layout does
+  not move. A paused game's controls do not answer the pointer, unless their
+  `Processing` says so. See [Pause](#️-pause).
+- **They say what happened as signals**: `pressed` and
+  `toggled` on a button, `toggled` on a check box, `text_changed` and
+  `text_submitted` on a line edit, `value_changed` on a slider,
+  `tab_changed` on tabs, `revealed` on a rich text, `closed` on a popup -
+  connected in code or kept in a scene.
+- **A button is one thing**: its words, its icon, whether it stays down,
+  and whether it is down - not a button with a label inside it.
+- **Words sit where they are told.** A label's `horizontal_alignment` -
+  `left`, `center`, `right` - and `vertical_alignment` - `top`, `center`,
+  `bottom` - place its words, and each line among the others, in its box; a
+  button's `alignment` places its face across it.
+- **A slider with the focus steps** by its `step` - a hundredth of its range
+  without one - with the arrows and a pad, held as they repeat, and keeps
+  the focus along its own way: a volume row a pad can play.
+- **Where a control was laid out** is `app.controlRect(e)`, in the units its
+  anchors and offsets are in, from a script too: what a panel slides in by.
+- **How they look is a file**, `.theme`:
+
+  ```json
+  {
+    "fluxion_theme": 1,
+    "base": "res://ui/base.theme",
+    "font": "res://fonts/ui.ttf",
+    "font_size": 16,
+    "types": {
+      "Button": {
+        "font_color": "#F2EEF8",
+        "styles": {
+          "normal":  { "background": "#6B4FC8", "corners": 6, "padding": [10, 5] },
+          "hover":   { "background": "#8F72E8" },
+          "pressed": { "background": "#4E3899" },
+          "focus":   { "border": 2, "border_color": "#F5B942" }
+        }
+      },
+      "Danger": { "base_type": "Button", "styles": { "normal": { "background": "#C8434F" } } },
+      "Header": { "base_type": "Label", "font_size": 20, "font_color": "#F5B942" }
+    }
+  }
+  ```
+
+  A type is a kind of control - `Panel`, `Button`, `CheckBox`, `LineEdit`,
+  `Slider` and `SliderFill`, `ProgressBar` and `ProgressBarFill`, `Tab` and
+  `TabActive`, `Focus`, `Label`, `Tooltip` - or a name of the game's own built on one,
+  which a control asks for with `type_variation`: one `Danger` button among
+  many. A style says a background, a border, corners, padding, a texture cut
+  in nine with its tint, and the text's colour, font and size; the states
+  are `normal`, `hover`, `pressed`, `disabled` and `focus`.
+- **A theme says only what it changes.** What a control is drawn with is
+  looked up in layers: the engine's own look; every theme's word on the
+  normal look - the project's, its base themes, the control's own theme and
+  its base themes, the nearer over the further, a variation over the type it
+  is built on; then what the control says of itself; then every theme's word
+  on the state it is in. So a state a theme does not mention looks as
+  `normal` does, and a `Danger` button's hover is its `Button`'s until it
+  says one of its own: a style is found by its state's name.
+- **A control's theme is the nearest one named up its tree**, and under
+  all of them is the project's: `"gui": { "theme": "res://ui/game.theme" }`
+  in `project.fluxion`, which `app.projectTheme()` reads the first time it is
+  asked and again when the file names another.
+- **One control's own look is a `ThemeOverride`**: its text's font, colour
+  and size, its background, border, corners and padding, each with a switch
+  beside it - what is switched off stays the theme's. It lies over every
+  theme's normal look and under what they say of hovering and pressing, so a
+  button of its own colour still answers the pointer. It changes the part
+  the control is - a slider's track, not its fill - and none of its children.
+  A script changes it as one value too: `var box = look.styleBox()`, change
+  its fields, and `look.setStyleBox(box)`, which switches all of them on.
+- **A theme's file can be written back** - `app.themes.textOf` and `save`,
+  as a tile set's - and `app.themes.styleOf` is the lookup the game draws
+  with, for an editor's preview to draw with too.
 
 ## 🐞 Debug drawing
 
@@ -898,21 +1566,23 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   a compound shape is a body and a few children.
 - **A collider with no size is its sprite's**, pivot and all, and the
   transform's scale scales it. `.rectangle(half_width, half_height)` says
-  otherwise, in half sizes as Godot's `extents`, and so does `.circle(r)`.
-- **Godot 3's names and rules.**
+  otherwise, in half sizes, and so do `.circle(r)` and `.capsule(r, height)`.
+  A capsule stands along the entity's `y`, round at both ends: what a
+  character is, sliding over a step's edge and the seams of a floor of tiles
+  rather than catching on them.
+- **Names and rules.**
   - Two colliders touch when either one's `collision_mask` has the other's `collision_layer`: 32 bits, one for each layer. The project file names them.
   - A pair's `friction` is the smaller of the two, and its `bounce` the two added, no more than one.
   - A body's `linear_damp` and `angular_damp` of minus one take the project's.
   - `continuous_cd` sweeps a fast body against other moving bodies too; the level stops one either way.
 - **A platform to jump up through** is a collider with `one_way_collision`.
   - What comes onto it from its entity's `-y`, up the screen, stands on it; what comes from below or the side goes through.
-  - It is decided when the two first touch and kept while they touch, as Godot 3.6 decides it.
+  - It is decided when the two first touch and kept while they touch.
   - Turn the entity, or the collider's `rotation`, and the side turns with it.
 - **`disabled` takes a collider out** until it is turned back on: nothing
   touches it, and what stood on it falls.
 - **Two bodies can be kept apart by name**:
-  `app.addCollisionExceptionWith(a, b)`, Godot's collision exception, whatever
-  their layers say.
+  `app.addCollisionExceptionWith(a, b)`, whatever their layers say.
   - Counted: `removeCollisionExceptionWith` takes one back.
   - `collisionExceptionsOf(body, &buffer)` lists them.
   - It lasts through a body made anew and goes with either entity.
@@ -932,13 +1602,56 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   may name a despawned entity - often that is why it ended.
 - **The three questions, answered in entities**: `app.castRay(from, to, .{})`,
   `app.overlapPoint(point)` and `app.overlapBox(min, max, &buffer)`.
-- **How the world moves is the project's**: `physics_2d` in `project.fluxion`,
-  or `Options.physics_2d` for a game with none.
-  - Godot 3's numbers by default: gravity 98 down the screen, damping 0.1 and 1.
+- **How the world moves is the project's**: `physics_2d` in `project.fluxion`
+  - and its layers' names, `layer_names.physics_2d` - or `Options.physics_2d`
+  for a game with none.
+  - By default, gravity is 98 down the screen, and damping 0.1 and 1.
   - A game of a hundred pixels to the metre that wants Earth's gravity says `.default_gravity = 981`.
 - **Everything else is `app.physics`**: settings, and joints between the
   handles `app.bodyIdOf` gives. `Options.physics` starts at a hundred units a
   metre, which scales the physics' tolerances.
+
+### 🏃 Characters: bodies the game moves
+
+```zig
+fn walk(app: *fx.App) !void {                          // a .fixed system
+    const body = app.world.get(player, fx.CharacterBody2D).?;
+    body.velocity.x = app.input.actionAxis("move_left", "move_right") * 180;
+    body.velocity.y += 900 * app.time.delta;
+    if (body.on_floor and app.input.actionJustPressed("jump")) body.velocity.y = -420;
+    _ = try app.moveAndSlide(player);
+}
+```
+
+- **A `CharacterBody2D` is moved by the game**, never pushed: a player, a
+  guard on a corridor, a mouse in a maze. Its shapes are its colliders, as a
+  rigid body's are, and the physics holds it as a body that goes where its
+  transform goes - what it walks into, it pushes.
+- **`app.moveAndSlide(e)` moves it by its `velocity` for the step**, in as
+  many as `max_slides` pieces: each goes until something is `safe_margin`
+  away, and what is left slides along what it met. What went into a wall or
+  a floor is taken off the velocity, so landing stops the fall and a wall
+  stops the walking into it.
+- **What it met is said after.** Seen from the side (`motion_mode =
+  .grounded`) it is a floor when it faces `up_direction` within
+  `floor_max_angle`, a ceiling when it faces away as nearly, and a wall
+  otherwise: `on_floor`, `on_wall`, `on_ceiling`, `floor_normal` and
+  `wall_normal`, and `app.isOnFloor(e)` for a character is its own word.
+  Seen from above (`.floating`), everything is a wall.
+- **A floor keeps it.** Standing on a slope it stays where it is
+  (`floor_stop_on_slope`); walking off the top of one or down a step no
+  higher than `floor_snap_length`, it goes down with the floor rather than
+  off into the air. A one-way platform holds it from above and lets it jump
+  up through.
+- **Pushed into something, it comes out.** A door that closed on it, a
+  platform that rose into it: before it moves it is put back out,
+  `safe_margin` clear.
+- **`app.moveAndCollide(e, motion)` moves it once**, and says what stopped
+  it - the collider, where, the way out of it, how far it went and what was
+  left - for a game that does its own sliding, or its own bouncing.
+- **From a script** it is the same two calls:
+  `app.moveAndSlide(self.entity)`, with `self.entity.get("CharacterBody2D")`
+  for its velocity and what it stands on.
 
 **When the bodies catch up.** Before every fixed step the engine compares
 each body and collider with what it last made, and on a paused frame - and
@@ -966,12 +1679,12 @@ if (app.hasOverlappingBodies(door)) open(app, door);
 ```
 
 - **An `Area2D` is a place that tells what is in it and pushes nothing**:
-  Godot's Area2D. A trigger, a pickup, a hurtbox, a door's threshold. Its
-  shapes are its own `Collider2D` and the ones hanging from it, every one of
-  them a sensor whatever its collider says, and in the physics it is a
-  kinematic body that goes where its transform goes.
-- **It says eight things**, Godot's, with shape indices replaced by the
-  colliders' entities: `body_entered` and `body_exited`,
+  a trigger, a pickup, a hurtbox, a door's threshold. Its shapes are its own
+  `Collider2D` and the ones hanging from it, every one of them a sensor
+  whatever its collider says, and in the physics it is a kinematic body that
+  goes where its transform goes.
+- **It says eight things**, naming each collider by its entity:
+  `body_entered` and `body_exited`,
   `area_entered` and `area_exited`, and a `*_shape_entered` and
   `*_shape_exited` for each, which name the two colliders as well.
   `body_entered` comes once for a body however many of its shapes are in
@@ -981,8 +1694,8 @@ if (app.hasOverlappingBodies(door)) open(app, door);
   when that has an `Area2D` or a `RigidBody2D`, else the nearest one above
   it that has, else itself, being its own static body.
 - **Who is told is the asking side's business.** An area reports what its
-  own shape's `mask` takes, whatever the other side's mask says, so Godot's
-  hitbox and hurtbox work: a hitbox is on the hitboxes layer and asks for
+  own shape's `mask` takes, whatever the other side's mask says, so a
+  hitbox and a hurtbox work: a hitbox is on the hitboxes layer and asks for
   nothing, a hurtbox asks for hitboxes and is on no layer, and only the
   hurtbox is told. An area is reported to another area only while its
   `monitorable` is true.
@@ -990,7 +1703,7 @@ if (app.hasOverlappingBodies(door)) open(app, door);
   `app.overlappingAreas(area, &buf)`, `app.hasOverlappingBodies(area)`,
   `app.hasOverlappingAreas(area)`, `app.overlapsBody(area, body)` and
   `app.overlapsArea(area, other)`. With `monitoring` off they are empty and
-  say so in the log once, where Godot errors every time.
+  say so in the log once.
 - **`monitoring` turned off leaves what was in it with an exit**, and turning
   it on again finds what is in it and says so. So do a mask changed, an area
   that becomes monitorable, and a component taken away: what an area says is
@@ -999,11 +1712,11 @@ if (app.hasOverlappingBodies(door)) open(app, door);
   that has died, as an ended contact does.
 - **The signals are emitted after the step and heard before the systems of
   the next one**, so a `.fixed` system that moves a player sees the doors it
-  opened on its next turn. Godot flushes them at the start of the next tick.
+  opened on its next turn.
 - **An entity is an area or a body, not both.** One with an `Area2D` and a
   `RigidBody2D` is a body, its area does nothing, and the log says so once.
-- **Godot's `priority`, its gravity and damping overrides and its audio bus
-  are not here**: this is what overlaps, not a place that changes physics.
+- **An area has no `priority`, no gravity or damping overrides and no audio
+  bus**: this is what overlaps, not a place that changes physics.
   `input_pickable` is here and does nothing yet; picking comes next.
 
 ### 🖱️ Picking: what the pointer is on
@@ -1012,7 +1725,7 @@ if (app.hasOverlappingBodies(door)) open(app, door);
 const lamp = try app.world.spawnWith(.{
     fx.Transform2D.at(200, 120),
     fx.Sprite.of(bulb),
-    fx.Area2D{},            // input_pickable is true, as Godot's is
+    fx.Area2D{},            // input_pickable is true on an area
     fx.Collider2D{},        // the sprite's size
 });
 try app.addMethod("_on_input_event", onLampInput);
@@ -1028,10 +1741,10 @@ fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.En
 
 - **Once a frame, after the `.input` stage and before the first fixed step.**
   A game's own `.input` system sees the pointer first and can keep it with
-  `app.input.setAsHandled()`; picking then does nothing at all. Godot picks
-  at the next physics tick, so ours has no lag.
+  `app.input.setAsHandled()`; picking then does nothing at all. It does not
+  wait for a physics tick, so it has no lag.
 - **What can be picked** is an `Area2D` or a `RigidBody2D` with
-  `input_pickable` - true on an area and false on a body, as in Godot -
+  `input_pickable` - true on an area and false on a body -
   through a collider that holds the point, is on a layer (a `collision_layer`
   of nought is never picked, and there is no picking mask), and whose object,
   if it is drawn at all, is visible. A lone `Collider2D`, which is its own
@@ -1043,29 +1756,27 @@ fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.En
   is the same list, for a game that would rather read it itself, and
   `app.input.buttonMask()` says what is held.
 - **What is on top hears first**: higher `Sprite.layer`, then higher
-  `Sprite.order`, then the later entity. Godot leaves the order to its
-  broadphase unless asked; ours sorts unless
+  `Sprite.order`, then the later entity. It sorts unless
   `app.physics_object_picking_sort` is false.
-- **Each shape under the point hears**, as Godot does, so an object with two
+- **Each shape under the point hears**, so an object with two
   colliders under the pointer hears twice, with `shape` saying which. With
   `app.physics_object_picking_first_only` only the first hears.
-- **A handler stops the rest** by calling `app.input.setAsHandled()`, which
-  is Godot 4.2's behaviour: the objects under it hear nothing of that event.
+- **A handler stops the rest** by calling `app.input.setAsHandled()`: the
+  objects under it hear nothing of that event.
   The handlers run as each object is told, so the next one sees it.
 - **`mouse_entered` and `mouse_exited`** come with the pointer, and
   `mouse_shape_entered` and `mouse_shape_exited` for each collider. Hover is
   worked out on every frame, event or no event, so a thing that moves under
   a still pointer is entered; a thing that dies under it drops out
-  silently, as Godot's freed object does; and one that stops being pickable
-  is left at the next pass.
+  silently; and one that stops being pickable is left at the next pass.
 - **Nothing is picked** while picking is off, while the cursor is `.locked`,
   while the pointer is outside the window, or while the interface wants it -
-  `app.ui.wantsPointer()`, which is Godot's STOP control. In each case what
-  was hovered is left with its exits.
+  `app.ui.wantsPointer()`. In each case what was hovered is left with its
+  exits.
 - **An editor turns it off** with `app.physics_object_picking = false`,
   beside `app.signals.dispatch = false`.
-- **`event.position` is in the window's pixels**, as Godot's viewport
-  coordinates are. `app.screenToWorld(x, y)` takes it into the world.
+- **`event.position` is in the window's pixels**. `app.screenToWorld(x, y)`
+  takes it into the world.
 
 Not here yet: polygons, joints as components, and a view of the colliders in
 `debug`.
@@ -1082,19 +1793,19 @@ const font = try app.assets.loadFont("C:/Windows/Fonts/segoeui.ttf", .{}); // th
 game --root ../my-game          # or App.Options.root; the working directory otherwise
 ```
 
-- **A `res://` path is the project's**, as in Godot: `res://art/hero.png` is
+- **A `res://` path is the project's**: `res://art/hero.png` is
   `art/hero.png` under the project's root, whichever directory the program
   was started in. Any other path is the operating system's, as it always
   was - a system font, where a screenshot goes - and every call that takes a
-  path takes both: `loadTexture`, `loadFont`, `loadScene`, `saveScene`,
-  `saveCapture`.
+  path takes both: `loadTexture`, `loadFont`, `loadScene`, `readScene`,
+  `saveScene`, `saveCapture`.
 - **A file inside the root is kept by its `res://` path however it was
   asked for** - `art/hero.png` from the root, its absolute path, `art\hero.png`
   - so `textureSource` gives the project's name for it, `findTexture` finds
   it by any spelling, and a scene never holds one machine's directories. A
   `res://` path that climbs out with `..` is `error.OutsideProject`.
 - **A file can have a UUID**, kept beside it in a `.uid` file -
-  `art/hero.png.uid`, one line, `uid://...` - as Godot 4 keeps its.
+  `art/hero.png.uid`, one line, `uid://...`.
   Saving a scene gives one to every loaded file of the project's that has
   none, and a scene names each file by its UUID as well as its path; reading
   goes by the UUID first, so a texture moved or renamed together with its
@@ -1107,6 +1818,21 @@ game --root ../my-game          # or App.Options.root; the working directory oth
   again after files moved while the program ran.
 - **The root is `Options.root`**, or `--root` among the engine's flags - the
   folder, or the `project.fluxion` in it - or else the working directory.
+
+```zig
+const kind = fx.AssetKind.ofPath("res://ui/game.theme").?;                    // .theme
+const set = try app.loadAsset(fx.TileSetHandle, "res://tiles/terrain.tileset"); // read once, found after
+const path = app.assetSource(sprite.texture) orelse "made in memory";          // the file a handle holds
+```
+
+- **Every kind of file is one entry in `fx.AssetKind`**: textures, fonts,
+  scenes, scripts, tile sets, themes, data files and sounds - what each is called, the endings
+  of its files, and the handle a component holds one by
+  (`AssetKind.Handle(.texture)`, `AssetKind.of(fx.TextureHandle)`).
+  `app.assetSource`, `app.loadAsset` and `app.findAsset` take any handle
+  type. A scene writes and reads every handle through them, a project
+  setting names a file of a kind with `attr.ProjectFile{ .kind = .scene }`,
+  and an editor draws a field for each kind the list has.
 
 ```zig
 try app.moveFile("res://art/hero.png", "res://art/people/ada.png"); // with its .uid, and what was read from it
@@ -1140,55 +1866,127 @@ _ = try app.assets.reloadFile("res://art/hero.png");                 // changed 
 
 ```json
 {
-  "fluxion_project": 1,
-  "name": "Meadow",
-  "description": "",
-  "icon": "res://icon.png",
-  "renderer": "compatibility",
-  "main_scene": "",
-  "tags": ["2d"]
+  "fluxion_project": 2,
+  "application": { "name": "Meadow", "icon": "res://icon.png", "main_scene": "res://levels/meadow.json", "tags": ["2d"] },
+  "display": { "width": 1600, "height": 900, "mode": "maximized", "stretch_mode": "canvas" },
+  "physics_2d": { "default_gravity": 420 },
+  "layer_names": { "physics_2d": ["world", "player"] },
+  "gui": { "theme": "res://ui/game.theme" },
+  "my_game": { "lives": 3 }
 }
 ```
 
 ```zig
 var settings = try fx.Project.readSettings(gpa, io, "games/meadow", &diagnostics);  // no App, no GPU
 defer settings.deinit();
-try fx.Project.create(gpa, io, "games/pasture", .{ .name = "Pasture" });           // error.ProjectExists over one
+try fx.Project.create(gpa, io, "games/pasture", .{ .application = .{ .name = "Pasture" } });  // error.ProjectExists over one
 try fx.Project.writeSettings(gpa, io, "games/pasture", renamed);                    // written beside, then moved over
+const mine = try settings.section(MyGame, "my_game", arena);                          // a game's own section
 ```
 
-- **`project.fluxion` is a project's folder**, as `project.godot` is Godot's.
+- **`project.fluxion` marks a project's folder.**
   A game and an editor read the same file: `App.create` reads the one at the
   root - `app.project.settings` - before anything opens, and a project
   manager lists projects with `Project.readSettings`. A root without one
   starts as it always did, with `settings` null.
-- **`name` is all it must have.** The rest are optional: `description`,
-  `icon` and `main_scene` (a `res://` or `uid://` path, or empty), `tags`,
-  and the renderer. The name is the window's title when the game gives none.
-- **What is wrong is said, with its line and column**, and stops the start
-  rather than being guessed round: another version, a renderer with no name
-  here, a path that is not the project's, no name. `Options.project_diagnostics`
-  is where it is said; without one it is said in the log. A key the engine
-  does not know is passed over with a warning, so a hand's addition does not
-  stop a game.
+- **Settings are data.** A section is a plain struct - `Application`,
+  `Display`, `Rendering`, `Physics2D`, `LayerNames`, `Gui` - and a setting
+  a field of it, with its default and its description in `reflect_fields`:
+  `attr.Doc`, `attr.Range`, and `attr.ProjectFile`, `attr.Required`,
+  `attr.Advanced` and `attr.Restart` for what a setting is besides its value.
+  `fx.settings_file` reads and writes any such struct, and an editor draws
+  its Project Settings from the same fields: a new setting is a new field.
+- **A file says only what differs**: a setting at its
+  default is not written, nor a section all of whose settings are. A key
+  naming no section of this build - a newer one's, or a game's own - is kept
+  and written back; the game reads its own with `settings.section`. A key
+  inside a section that no setting reads is passed over with a warning.
+- **The project says how the game opens**: the window's `width`, `height`,
+  `resizable`, `mode` (`windowed`, `maximized`, `fullscreen`) and `vsync`,
+  how the game is fitted to it - `stretch_mode`, `stretch_aspect` - and the
+  least it may be dragged to, the `clear_color` and the
+  `default_texture_filter`, the `ticks_per_second` of the fixed step, and the
+  `icon` on the window. What the game's own `App.Options` say overrules it,
+  field by field; what neither says is the sections' defaults, so a folder
+  with no project file opens as it always did.
+- **`application.name` is all it must have.** The name is the window's
+  title when the game gives none.
+- **What is wrong is said, with where it is**, and stops the start rather
+  than being guessed round: another version - version 1, the flat file
+  before sections, is refused, and says it was written for an older
+  Fluxion - a value of the wrong kind, with its line, a path that is not the
+  project's, and no name, each by its key: `application.icon`.
+  `Options.project_diagnostics` is where it is said; without one it is said
+  in the log.
 
 ### The renderer chooses the backend
 
-| Renderer | APIs | Windows | Linux, macOS, Android | Browser |
-| --- | --- | --- | --- | --- |
-| `compatibility` | Direct3D 11, OpenGL 3.3 | Direct3D 11, then OpenGL | OpenGL | WebGL 2 |
-| `modern` | Direct3D 12, Vulkan | not built yet | not built yet | not built yet |
+| Renderer | APIs | Windows | Linux, Android | macOS | Browser |
+| --- | --- | --- | --- | --- | --- |
+| `compatibility` | Direct3D 11, OpenGL 3.3 | Direct3D 11, then OpenGL | OpenGL | OpenGL | WebGL 2 |
+| `modern` (experimental) | Direct3D 12, Vulkan | Direct3D 12, then Vulkan | Vulkan | none | none |
 
 - **`Backend.auto` opens the best of the project's renderer** - the first of
   `Renderer.backends(os)` - and a folder with no project file is drawn with
   the compatibility renderer. So on Windows a game opens Direct3D 11 unless
-  asked otherwise, examples and editor included.
-- **A renderer that is not built opens nothing**: a `modern` project stops
-  with `error.RendererNotBuilt` and says to choose `compatibility`, rather
-  than being drawn with something it will not look like.
-- **`--backend` wins over the project**, so one game can be checked on every
-  backend of its renderer - `--backend gl` on Windows - and one outside it is
-  allowed, and said in the log.
+  asked otherwise, examples and editor included, and a `modern` one
+  Direct3D 12.
+- **The modern renderer is experimental.** It draws everything the engine
+  does, and the same picture - a scene, its interface, its shaders, the
+  editor - but its backends are newer, slower, and less proven, and the log
+  says so when one opens (`Backend.experimental`).
+- **A renderer with nothing to draw with here opens nothing**: a `modern`
+  project in a browser or on macOS stops with `error.RendererNotBuilt` and
+  says to choose `compatibility`, rather than being drawn with something it
+  will not look like.
+- **`--backend` wins over the project** - `gl`, `d3d11`, `d3d12`, `vulkan` -
+  so one game can be checked on every backend of its renderer, and one
+  outside it is allowed, and said in the log.
+- **Nothing in the engine asks which backend it is on.** It draws through
+  fluxion-rhi, hands every shader over in every language fluxion-shader
+  writes it in, describes its window once - its handle, and its way to make
+  a Vulkan surface - and asks the device what it draws the other way up.
+  Choosing the backend is the one place it is named.
+
+## 💾 Saves and settings
+
+```zig
+try app.writeText("user://slots/one.json", text);           // written beside, then put in place
+const again = try app.readText(gpa, "user://slots/one.json"); // error.FileNotFound before the first save
+const slots = try app.listDir(gpa, "user://slots");          // sorted; a folder's name ends with "/"
+defer slots.deinit(gpa);
+
+var config = try fx.ConfigFile.load(app, "user://settings.cfg"); // empty on the first run
+defer config.deinit();
+const music = config.getFloat("audio", "music", 0.8);
+try config.set("display", "fullscreen", true);
+try config.save(app, "user://settings.cfg");
+```
+
+- **`user://` is the player's folder**, one of the game's own under the one
+  the system keeps for programs' data: `%APPDATA%` on Windows,
+  `~/.local/share` on Linux, `~/Library/Application Support` on a Mac. It is
+  named after the project's `application.name`, or the title a game gives
+  with no project, and made when the first file is written in it.
+  `Options.user_root` puts it somewhere else: a test's folder, or beside a
+  game kept on a stick. A `user://` path that climbs out with `..` is
+  `error.OutsideProject`, as a `res://` one is.
+- **Files by any path.** `readText`, `writeText`, `fileExists`, `makeDir`,
+  `listDir` and `removeFile` take `res://`, `user://`, `uid://` and the
+  system's own paths. `writeText` makes the folders on the way and writes
+  the new text beside the old before putting it in place, so a game that
+  stops halfway through a save leaves the last one whole. `removeFile` takes
+  a file, or a folder with nothing in it.
+- **A config file needs no declaring.** `ConfigFile` is sections of keys, a
+  JSON object of objects to read and to edit by hand, with comments allowed.
+  A key is whatever it was last set to - a bool, a number, text - read with
+  `getFloat`, `getInt`, `getBool` and `getString` and a default for one it
+  has not got. What the file holds that the game does not ask for, written
+  by a newer build or by hand, is kept and saved back. A game whose
+  settings have a shape of their own reads them into a struct with
+  `fx.settings_file` instead, as the project file is read.
+- **A script saves the same way**, with `files` and the language's `json`
+  module: see [Scripts](#️-scripts).
 
 ## 🆔 UUIDs
 
@@ -1212,28 +2010,115 @@ try app.setUuid(respawned, uuid);                      // an editor's undo bring
   the same scene is loaded twice, and then a new one (`loaded.reassigned`);
   references inside the scene still find their own.
 
+## 🎲 Chance, points and boxes
+
+```zig
+const roll = app.randomInt(1, 6);                // either end can come up
+if (app.randomChance(0.25)) try spawnRat(app);   // one time in four
+app.seedRandom(1234);                            // a replay draws the same numbers again
+
+const cell = app.cellAt(map, app.pointerInWorld()).?;  // an fx.Vec2i
+const used = app.usedCells(map).?;                      // an fx.Rect2i
+if (used.hasPoint(cell)) try paint(app, cell);
+
+const red = fx.Color.parse("#C8434F").?;         // #RGB, #RGBA, #RRGGBB, #RRGGBBAA
+```
+
+- **The game's chance is its own**, apart from what UUIDs are drawn from:
+  `randomFloat`, `randomRange`, `randomInt`, `randomChance` and
+  `randomIndex` (a place in a list, to pick one of it). The operating system
+  seeds it when the app is made, `Options.random_seed` or `seedRandom`
+  instead, so a run seeded the same draws the same; `randomize` seeds it
+  from the system again. A script calls the same:
+  `app.randomInt(1, 6)`. Not for secrets.
+- **`fx.Vec2i` is a point of a grid** - a cell, a pixel, a window's place -
+  and `fx.Rect2` and `fx.Rect2i` are boxes by where they start and how big
+  they are, with fractions and without. `end` is the first point past a
+  box, so two boxes side by side share no point; `hasPoint`, `intersection`,
+  `merge`, `grow`, `expandTo`, and for cells `fromCells` and `last`. A map's
+  cells are `Vec2i`s and its used cells a `Rect2i`, from Zig and from a
+  script alike.
+- **A colour reads from text** with `fx.Color.parse`, as a theme file and a
+  colour field write one.
+
 ## 🎬 Scenes
 
 ```zig
 try app.registerComponents(.{ Wander, Player });                       // the game's own
 try app.saveScene("res://levels/meadow.json", .{});                    // to read, diff and edit
 try app.saveScene("res://levels/meadow.scene", .{ .format = .cbor });  // the same, in fewer bytes
-const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either: it can tell
+const loaded = try app.readScene("res://levels/meadow.scene", .{});    // either: it can tell
+
+const bat = try app.loadScene("res://enemies/bat.json");               // a scene to make things of
+const one = try app.instantiate(bat, cave);                            // its root, under cave
+app.changeScene(try app.loadScene("res://levels/two.json"));          // at the end of the frame
 ```
+
+### Scenes as things a game makes
+
+- **A scene is a file a game holds**: `loadScene` reads it once and gives a
+  `SceneHandle`, which a component can hold like a texture, and
+  `readScene` reads a file straight into the world, beside what is there -
+  what an editor opens one with.
+- **`instantiate(scene, parent)` makes one**: the scene's one root, under
+  `parent`, with the rest of it under the root. Each instance's entities get
+  UUIDs of their own, made from the instance's and the file's - so two are
+  never confused, and something that names an entity inside one finds it
+  again every time the file is read. A scene of more than one root is
+  `error.NotOneRoot`: `saveScene(path, .{ .root = branch })` saves a branch,
+  with nothing it hangs from, as a scene of one. `makeLocal(root)` makes an
+  instance the world's own.
+- **A scene can hold an instance of another.** Its entry is the instance's
+  root: its UUID, its parent, its name and groups, `"instance"` - the file
+  it is of - and what its root has that the file does not give it: a
+  field that differs, a component it was given, and in `"removed"` a
+  component it has not. The rest is made from the file each time it is
+  read, so an edit of the file reaches every instance of it, and a scene
+  saved with an instance in it writes it the same way. A scene that is an
+  instance of itself, however deep, is a mistake rather than a loop.
+
+  ```json
+  { "uuid": "…", "parent": "…", "name": "Big bat", "instance": "res://enemies/bat.json",
+    "Transform2D": { "x": 50.0 }, "Area2D": {}, "removed": ["Sprite"] }
+  ```
+
+- **The scene the game plays** is changed with `changeScene` at the end of
+  the frame - `openScene` now - and `currentScene` says which it is. What
+  it brought goes with everything that hangs from it, and what is not its
+  own stays: an autoload, what the game spawned itself at the top of the
+  tree.
+- **A project opens itself**: `openProject` - or `Options.open_project`, at
+  `startup` - shows its `application.boot_splash`, makes its
+  `application.autoload` list - scenes and scripts, each an entity named
+  after its file that a scene change leaves - and opens its
+  `application.main_scene`.
+- **A scene can be read in the background**: `loadInBackground(path)` reads
+  its file and decodes the pictures it names on a thread of its own - on a
+  page, which has none, a piece a frame - and `loadProgress(path)` says how
+  far it has got, from nought to one. `loadScene` of the same path - or a
+  script's `changeScene` to it - takes it once it is done, making the
+  pictures textures, without a pause; asked sooner, it waits for it. A
+  loading screen's bar, from a script as from Zig.
+- **What is playing**: `currentScene()` is its file, and
+  `currentSceneRoot()` the first entity at its top - the one root of a scene
+  that has one - where a settings menu's gamma or a fade goes.
 
 ```json
 {
-  "fluxion_scene": 2,
+  "fluxion_scene": 3,
   "entities": [
     {
       "uuid": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c",
       "name": "player",
+      "groups": ["heroes"],
       "Transform2D": { "x": 320.0, "y": 180.0 },
       "Sprite": { "texture": "res://art/hero.png", "width": 48.0, "height": 48.0 }
     },
     {
       "uuid": "5c2d7e9f-0a1b-4c3d-8e5f-6a7b8c9d0e1f",
-      "Transform2D": { "y": -6.0, "parent": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c" },
+      "parent": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c",
+      "name": "turret",
+      "Transform2D": { "y": -6.0 },
       "Sprite": { "texture": "res://art/turret.png" }
     }
   ],
@@ -1245,12 +2130,13 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
 ```
 
 - **An entity is an object of its components**, each under its type's name,
-  with the entity's UUID and name beside them. A field that holds its default
+  with the entity's UUID, its parent, its name and its groups beside them. A
+  name taken among the siblings it is read into becomes the next free one. A field that holds its default
   is left out, so the file says what is particular about each thing - and a
   field added to a component later reads as its default from every scene
   written before it.
 - **What a handle points at is written, not the handle.** An entity in a
-  field - a transform's `parent`, a game's `leader` - is that entity's UUID,
+  field - an entity's `parent`, a game's `leader` - is that entity's UUID,
   so adding one at the top changes no other line of the file. A texture or a
   font is its file's `res://` path - `{ "file": ..., "member": 1 }` for a
   font of a collection past its first - and in `assets` its UUID and, for a
@@ -1259,9 +2145,10 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   world, so one scene can name an entity another brought - and loads the
   files or finds them already loaded. A texture made from pixels has no
   file, and is written as `null`.
-- **Only version 2 is read.** A version 1 scene - references by their place
-  in the list, paths from the scene file's own directory - is refused with a
-  message that says so, and so is a newer one.
+- **Only version 3 is read.** An older scene - a version 2 one with its
+  parent inside a `Transform2D` or a `Control`, or a version 1 one with
+  references by their place in the list - is refused with a message that says
+  so, and so is a newer one.
 - **JSON and CBOR are one scene in two spellings.**
   [Fluxion JSON](https://github.com/kisstp2006/fluxion-json) writes and reads
   both, and loading tells them apart by the bytes CBOR starts with. CBOR is
@@ -1280,13 +2167,13 @@ const loaded = try app.loadScene("res://levels/meadow.scene", .{});    // either
   and the path to the value - and leaves the world as it was:
 
   ```
-  meadow.json:3:32: no entity in this scene or in the world has the UUID 77777777-7777-4777-8777-777777777777 (at /entities/1/Transform2D/parent)
+  meadow.json:3:32: no entity in this scene or in the world has the UUID 77777777-7777-4777-8777-777777777777 (at /entities/1/parent)
   ```
 
 - **A scene that is wrong is an error, never a crash**, so an editor shows it
   and goes on. Numbers no hand would give still load - JSON5 keeps NaN and the
-  infinities - and the frames after them do not stop either: an animation of
-  no columns or an endless rate shows its first cell, a collider with a NaN in
+  infinities - and the frames after them do not stop either: an animated
+  sprite at an endless speed starts again, a collider with a NaN in
   its shape gets no shape, a label's size is held to what its atlas can keep.
 
 - **A load goes beside what is there.** A level over another is
@@ -1344,11 +2231,11 @@ as data, and the engine hands its components and its calls out through it.
   `/s`); `Layers` on a collider's layer and mask, a toggle a bit named from
   the project's list; `Extents` and `Radius` on its size and `Placement` on
   the collider itself, for an editor's handles; a `Doc`
-  for a zero that is not zero ("zero is the sprite's width"); `Hidden` on
-  `Text2D`'s buffer, whose words are a `Property` instead - `text`, read
-  with its method `slice` and written with `set`, which keeps the length and
-  the UTF-8 right and is `Multiline`; `ReadOnly` on an animation's
-  `finished`, which only the engine sets. A descriptor is made at compile
+  for a zero that is not zero ("zero is the sprite's width"); a `Text` on
+  a type for the words it keeps beside it - a label's `text`, a field's
+  `placeholder_text`, `multiline` or not - which are the app's and not in
+  the component, read and written by that name; `ReadOnly` on an animation
+  player's `position`, which only the engine sets. A descriptor is made at compile
   time and kept in the binary: nothing is registered or allocated to have
   one.
 - **A component is found by the name a scene gives it**, so a scene, an
@@ -1385,6 +2272,12 @@ as data, and the engine hands its components and its calls out through it.
   is checked when the component is registered: a getter or a setter it
   names that `reflect_methods` does not list, or a getter that does not
   return what the setter takes, stops the build.
+- **A component says how an editor's scene treats what has it.**
+  `fx.attr.Pickable{ .by_default = false }` in its `reflect_attributes` has
+  a click in the scene pass over an entity that has it, until the editor
+  is told otherwise for that entity. `Control`'s says so, so that a UI over
+  the whole screen does not take every click meant for the world; an editor
+  reads it with `app.componentsOf` and `Type.attribute`.
 - **`App` is described by its calls, not its insides.** `App.reflect_methods`
   lists the ones that take and give plain values - names, the window, the
   clipboard, scenes, components and states by name - and `app.callNamed`
@@ -1410,9 +2303,9 @@ as data, and the engine hands its components and its calls out through it.
 
 ## ✍️ Scripts
 
-Flux scripts on entities, the way Godot puts a script on a node. A `Script`
-component names a `.flux` file and a struct in it, and the entity gets an
-instance of that struct with itself in it as `self.entity`.
+Flux scripts go on entities. A `Script` component names a `.flux` file and a
+struct in it, and the entity gets an instance of that struct with itself in
+it as `self.entity`.
 
 ```zig
 try app.useScripts(.{});
@@ -1437,8 +2330,9 @@ struct Door {
 
 - **What is called, and when.**
   - `ready(self)` comes first.
-  - `physics(self, dt)` runs every fixed step, before the game's `.fixed` systems.
+  - `fixed(self, dt)` runs every fixed step, before the game's `.fixed` systems.
   - `update(self, dt)` runs every frame, before its `.update` systems.
+  - Both only while the entity runs: see [Pause](#️-pause). A task a script starts - a call of a function that `await`s - is the entity's, and its waits stand still while the entity does not run. When the entity dies, or loses its script, its tasks stop where they wait, after its `exit`.
   - `exit(self)` runs at the end of the frame in which the entity dies, or its `Script` is taken off or turned off, and when the world is cleared.
 
   A method the struct does not declare is not called. One with the wrong parameters is said once in the log and not called.
@@ -1450,9 +2344,11 @@ struct Door {
 - **What a script reaches.** `app` is the engine, with the calls
   `App.reflect_methods` lists. `self.entity` has `alive()`, `name()`,
   `uuid()`, `has(name)`, `get(name)`, `add(name)` and `remove(name)`.
+  `files` reads the game's files and reads and writes the player's - see
+  below.
   - A component from `get` is looked up again each time the script uses it, so keeping it in a field is safe while the world's rows move.
   - Once it is gone, using it stops the script with a panic saying so.
-  - An entity is one handle wherever a script is handed it: `self.entity`, `app.find("door")`, a field such as `Transform2D.parent`, a signal's argument. So `app.find("door") == self.entity` says whether it is this one, and none is null.
+  - An entity is one handle wherever a script is handed it: `self.entity`, `app.find("door")`, a field such as `Parent.entity`, a signal's argument. So `app.find("door") == self.entity` says whether it is this one, and none is null.
   - Where a call or a field wants an entity, `app.nameOf(app.find("door"))`, the script gives that handle, a scripted entity's instance, or null. Anything else stops it with a panic saying what it gave.
 - **A script cannot stop the game.**
   - Each call has a budget of loop rounds, `Options.budget`, ten million by default, and a call that runs past it is stopped.
@@ -1471,6 +2367,25 @@ struct Door {
   - A signal from a component, or another script's, calls a method the target's script declares, listed by `app.methodsOf`.
   - An `Entity` argument arrives as the entity's handle, and the script's instance or its entity's handle goes back to the engine as an `Entity`.
   - A connection made while its script did not compile is heard once it does.
+- **A script keeps a save in the player's folder, and reaches no other.**
+  `files.readText(path)`, `writeText(path, text)`, `exists(path)`,
+  `makeDir(path)`, `list(path)` and `remove(path)` read under `res://` and
+  `user://`, and write under `user://` only. Any other path is
+  `error.NotAllowed`, so a script neither reads the player's documents nor
+  breaks the game it came with. A call that fails gives an error to `catch`:
+
+  ```zig
+  const json = @import("json");
+
+  fn save(slot: any) {
+      files.writeText("user://save.json", json.stringify(slot, 2)) catch |e| print("not saved:", e.name);
+  }
+
+  fn load() any {
+      const text = files.readText("user://save.json") catch return null;
+      return json.parse(text) catch null;
+  }
+  ```
 - **In a scene**, a `Script` is its file's path and its struct, and once the
   scene is saved, the file's UUID as well. Reading the scene loads the file:
   `"Script": { "source": "res://scripts/door.flux", "struct_name": "Door" }`
@@ -1478,10 +2393,113 @@ struct Door {
   `app.scriptSetup()` gives the language service's `flux.service.Options`
   with `app` and `self.entity` declared. This is for completions and
   diagnostics, and it needs no `useScripts`.
+- **The engine's calls are known as a script is compiled.** `app`,
+  `self.entity`, an entity a call gives, a component got by its name -
+  `self.entity.get("AnimatedSprite2D")` - and a sprite's `sprite_frames` are
+  known by their types: a call of their methods is checked for how many
+  arguments it has, the last ones left out where the method has defaults,
+  and for a number, a string or a flag where nothing else will do; an
+  editor offers their fields and methods after the dot, with signatures and
+  docs. A `var` holding one is offered and not checked, since it may be
+  given another value.
 - **An editor has the scripts and runs none of them**, with
   `useScripts(.{ .run = false })`.
-  - Each file is compiled and never run: not its top level, a default, `ready` or `update`. So a script cannot change the scene being edited, as Godot's editor runs only `tool` scripts.
+  - Each file is compiled and never run: not its top level, a default, `ready` or `update`. So a script cannot change the scene being edited.
   - Its structs' signals and methods are still listed and connected to, and the scene still writes the script.
+
+### The engine, from a script
+
+```zig
+fn looked() { print("the guard looks around"); }
+fn reloaded() { print("reloaded"); }
+
+struct Guard {
+    /// How much it takes.
+    @export @range(0, 100) var hp: int = 10;
+    @group("Patrol")
+    @export var path: [vec2];
+    @export @entity var post: any = null;
+
+    fn ready(self) {
+        const timer = app.createTimer(2);
+        timer.timeout.connect(looked);                  // the engine's signal, as the script's own
+        await self.entity.get("Area2D").body_entered;   // or waited for
+        await app.nextFrame();
+        const bolt = app.instantiate("res://bolt.json", self.entity) catch return;
+        app.callDeferred(reloaded) catch {};
+    }
+
+    fn input(self, event: any) {
+        if (event.isActionPressed("jump")) app.setInputAsHandled();
+    }
+}
+```
+
+- **The engine's signals are the script's own.** A component's signal is a
+  member of the component a script reaches - `timer.timeout`,
+  `self.entity.get("Area2D").body_entered` - or of its entity, by name. It
+  is a signal of the script's: `connect`, `once`, `disconnect` and `await`
+  are the language's, and its arguments arrive as the engine's do. The first
+  use connects it to the engine's table with a `Callable.script`, never
+  saved; it goes with its entity, and with `clearWorld`.
+- **`app.nextFrame()`** is a signal emitted once a frame: `await
+  app.nextFrame()` goes on in the next one, even from `ready`.
+- **Making and unmaking.** `app.spawn(parent)` makes an empty entity -
+  `null` for the top of the tree - and `entity.despawn()` takes one away
+  with everything under it, at once. `app.instantiate("res://…", parent)`
+  and `app.changeScene("res://…")` take a scene by its path.
+  `app.callDeferred(fn)` calls a function at the end of the frame, after
+  the systems and the signals.
+- **One script asks another.** `entity.script()` is the instance its
+  `Script` made - `app.find("Loader").?.script().open("res://menu.json")` -
+  called and read as any value, and null while there is none. A task of an
+  entity that dies stops where it waits.
+- **A script imports another.** `@import("save.flux")` is the file beside
+  it, `@import("res://lib/save.flux")` one anywhere in the project; the same
+  file is one module however it is spelt.
+- **Colours are the language's own**: a component's colour reads as a
+  `color`, and takes one - `look.modulate = color(1, 0.4, 0.4, 1)` - or
+  `"#ff6666"`.
+- **A file is its path.** Where a call or a field wants a scene, a texture,
+  a font, a tile set, a theme, a script or a data file, a script gives
+  `"res://…"`, and the file is read if nothing has read it yet. The same
+  handle reads back as its path.
+- **`@export` marks what a scene gives a value.** A scene writes an
+  entity's values beside its components, as `"exports": { "hp": 20 }`, and
+  `app.exports` holds them. They are set on the instance when it is made,
+  before its `ready`: a number, a bool and text as themselves, a vector as
+  its numbers, a colour as `"#rrggbbaa"`, an enum's member by its name, an
+  entity by its UUID (`@entity`), a list as a list. A field the struct no
+  longer has, or a value it cannot hold, is said in the log and passed over.
+  - `app.exportedFields(entity, &buffer)` lists the fields, made or not, with their kind, default, doc comment and annotations (`@range`, `@multiline`, `@group`, `@file`, `@entity`, …): what an editor draws.
+  - `script.jsonOf` writes a default as a scene would.
+- **Input, as events.** `input(self, event)` hears each key, mouse button,
+  motion, wheel and pad button of the frame, before the game's `.input`
+  systems; `unhandled_input(self, event)` hears what nothing took - not a
+  script's `app.setInputAsHandled()`, and not the interface, which takes a
+  key while a field has the keys and the pointer over what it draws.
+  - The event has `kind`, `pressed`, `echo`, `key` and `virtual_key`, `button` and `double_click`, `pad_button` and `pad`, `position`, `relative`, `wheel`, and `shift`, `control` and `alt`.
+  - `event.isAction("jump")`, `isActionPressed`, `isActionReleased` and `describe()` say it by the project's actions.
+  - `app.bindAction("jump", event)` binds what was pressed to an action, and `app.clearAction("jump")` unbinds it: a key-remapping screen, saved with `app.saveInputMap()`.
+
+### Data files
+
+A `.data` file holds values for a Flux struct's `@export`s: a line of
+dialogue, an enemy's stats. It is written as a scene writes `"exports"`:
+
+```json
+{ "fluxion_data": 1, "script": "res://dialogue/line.flux", "struct": "Line",
+  "values": { "speaker": "Guard", "text": "Halt!", "mood": "angry" } }
+```
+
+```zig
+const line = app.readData("res://dialogue/intro.data") catch return;
+print(line.speaker, ":", line.text);
+```
+
+- `app.readData(path)` makes the struct anew each time, with the file's values; a field not given one keeps its default. An empty `"struct"` is the one named after the script's file, as a `Script`'s is.
+- From Zig, `loadData`, `findData`, `dataSource`, `reloadData` and `unloadData` keep the file by a `DataHandle`, which a component can hold; `fx.data.read` and `fx.data.write` read and write one.
+- `app.structFields(script, name, &buffer)` lists what an editor shows of one.
 
 ## 🧪 It runs with no window and no GPU
 
@@ -1594,8 +2612,8 @@ zig build example-creatures
 zig build example-creatures -- --frames 300 --capture creatures.png
 ```
 
-**`creatures`** is the renderer's half: one sprite sheet, an `Animation` over
-its cells, and fourteen creatures each made of five entities - a body, two
+**`creatures`** is the renderer's half: one sprite sheet, a walk of four of
+its cells as sprite frames, and fourteen creatures each made of five entities - a body, two
 eyes, a shadow and a name - where only the body is ever moved. Arrows, WASD
 or a controller's left stick steer the one with the ring, and so does holding
 the left mouse button where it should go: that is `app.pointerInWorld()` at
@@ -1641,10 +2659,10 @@ Here, and checked by the tests:
   clock moved on by one step.
 - Events of any type, sent from inside a query and read once by each
   reader over the two frames they live.
-- Signals on components, as Godot 4 has them:
+- Signals on components:
   - connections to methods by name or to Zig functions, heard when the
     emitting system returns or, deferred, at the end of the frame;
-  - Godot's flags, unbinds and binds;
+  - flags, unbinds and binds;
   - loops stopped, failures counted, and the dead let go;
   - everything by name for an editor;
   - connections kept in scenes, including ones this build does not know.
@@ -1652,13 +2670,17 @@ Here, and checked by the tests:
   edges that a fixed step hears exactly once.
 - Controls as data: an `AxisBinding` holds two keys, a second two, a stick
   and a d-pad, lives in a component and saves with the world.
-- Godot's Timer as a component, with `timeout` and `app.createTimer`;
+- Actions: named in the project, their edges their own, strengths past a
+  dead zone, held from code, rebound and kept in the player's own file, and
+  the interface moved by six built-in ones.
+- A timer as a component, with `timeout` and `app.createTimer`;
   `app.single` for the component there is
   one of, and engine shortcuts for quitting and fullscreen, off unless asked
   for.
 - Names that belong to the entity rather than to a component:
-  `app.setName`, `app.find` and `app.nameOf`, one living entity to a name,
-  and the name free again the moment its entity dies.
+  `app.setName`, `app.find` and `app.nameOf`, unique among siblings, found by
+  a path of them, and free again the moment their entity dies; and groups, one
+  entity in any number, called together.
 - The engine's command-line flags, read into a struct by name with room for
   a game's own, and captures that are the same picture on every machine.
 - Controllers: sixteen slots, levels and edges, round dead zones, any pad or
@@ -1686,25 +2708,59 @@ Here, and checked by the tests:
   drawn until the program is back, and the system's call for memory.
 - Frame pacing: vsync switched while running, a frame cap that holds its
   average, and a minimised window that sleeps instead of drawing.
+- A pause that stops what did not ask to run - systems, scripts and their
+  tasks, timers, animation, controls, the pointer and the physics - with
+  `Processing` inherited down the tree, and an `Appearance` that hides,
+  colours and raises everything under it.
 - Every system timed, under the name it was added with: its time over the
   last frame, and the whole schedule printable with `{f}`.
-- Textures loaded from PNG, handed out as generational handles, and a white
-  texel for everything untextured.
+- Textures loaded from PNG or JPEG - told apart by their first bytes, not
+  their names - handed out as generational handles, and a white texel for
+  everything untextured. A photo stored on its side comes in as Exif says it
+  was taken.
 - The 2D pass: transforms, regions, tints, pivots, layers, order within a
   layer, visibility, additive blending, textures that repeat, interpolation
   between fixed steps, and a camera with zoom, rotation and an area it always
   fits to the window.
-- Parenting, one entity to another, resolved where it is needed rather than
-  cached into a second component, and taken down with its parent.
-- Sprite animation over a sheet, looping or one-shot.
+- One tree of every entity through `Parent`, whatever the entity is: placing
+  resolved where it is needed rather than cached into a second component, the
+  families in an index built again when the world changes shape, and what
+  hangs from something taken down with it.
+- Tweens as entities, keyed animations in `.anim` files played by an
+  `AnimationPlayer` on its entity and those under it, and sprite frames in
+  `.frames` files an `AnimatedSprite2D` plays - all of it moving a component's
+  fields by a path, from Zig and from Flux.
 - Text: a shelf-packed glyph atlas per font, kerning, several lines, three
-  alignments, and a label that formats into itself. Not here yet: wrapping, an
-  outline, more than sixty-three bytes in one label, and more than one font in
-  one label.
+  alignments, and words of any length kept beside the component, formatted
+  into from Zig and written from Flux. Not here yet, for a `Text2D`: wrapping,
+  an outline, and more than one font in one label - a `RichText` control has
+  those.
 - Fonts from a `.ttf`, an `.otf`, or one font of a `.ttc` collection, and
   the system's own interface font and its monospaced one, as the system
   names them.
 - Culling against the camera, sprites and labels alike.
+- Materials: `.shader` files that are a fragment stage with the engine's
+  part after them, their block's first values and a material's own numbers
+  kept by entity, in scenes and from Flux; sprites, colour rects and texture
+  rects drawn through them, batched by shader and numbers; the frame copied
+  for what reads what is under it, at every place it is read.
+- Render views: cameras that draw into pictures a view texture shows,
+  render layers a camera's mask sees, and pictures let go of with their view.
+- A game made at one size, fitted to any window as a canvas or a picture,
+  keeping its shape or showing more, with the pointer in its pixels.
+- Tile maps: four-byte cells turned and flipped, in chunks found through an
+  index, written compactly in scenes; `.tileset` files with sheets, shapes
+  the physics stops at, probabilities and data layers asked for from Zig and
+  from Flux.
+- Controls as components, laid out into the interface with containers and
+  signals, and drawn from `.theme` files: types, variations,
+  states, base themes, a project theme under all and a control's own
+  overrides over them, changed from Flux as one style box too. Anchors that
+  stretch or pin, and sixteen presets; focus by press, Tab, arrows and
+  declared neighbours; tooltips; colour boxes, rich text revealed letter by
+  letter, and popups.
+- Words of any length kept beside a component, keyed by entity and name,
+  written in scenes and from Flux as the component's own field.
 - The interface: fluxion-ui laid out by `.ui` systems into one root, drawn
   over the 2D layer, fed from the keyboard, the mouse and the pads before the
   game's systems, keeping the wheel it used, and setting the pointer's shape;
@@ -1714,13 +2770,14 @@ Here, and checked by the tests:
   colliders, bodies, transforms, sprites, cameras and frame stats the engine
   draws itself; one switch for all of it, and a key for the switch.
 - Physics: bodies and colliders as components, made, changed and taken away
-  with them; boxes and circles sized by their sprites; compound bodies from
+  with them; capsules; characters moved and slid by the game, with what they
+  stand on; boxes and circles sized by their sprites; compound bodies from
   children; places and speeds written back after each step; contacts once per
   frame or per step; rays, points and boxes asked in entities.
-- Areas: what is in a place, as Godot has it - the eight overlap signals,
+- Areas: what is in a place - the eight overlap signals,
   the shapes forced to sensors, the asking side's mask deciding who is
   told, monitoring turned off and on again, and the six questions.
-- Picking: what the pointer is on and what it did there, as Godot has it -
+- Picking: what the pointer is on and what it did there -
   `input_event`, `mouse_entered` and their shape pairs, the topmost first,
   a handler that stops the rest, hover worked out every frame, and the
   pointer's own events with the wheel as buttons.
@@ -1738,22 +2795,31 @@ Here, and checked by the tests:
   away from, `uid://` for a file by the UUID beside it, files moved with
   their `.uid` files found where they went, and entities' UUIDs kept beside
   the world as names are.
+- The player's own files under `user://`, written whole or not at all, a
+  `ConfigFile` of sections that keeps what it does not know, and scripts
+  that save there and reach nowhere else.
 - Files moved, copied and thrown away as an editor does it: UUIDs moved
   along and copies given their own, what was loaded following its file, the
   system's trash, and textures and fonts read again in place when their
   files change.
-- `project.fluxion`: read with no App for a project manager, made and
-  rewritten in place, read by every game as it starts, and its renderer
-  choosing the backend - Direct3D 11 first on Windows - with `--backend`
+- `project.fluxion`: sections of settings as plain structs, read and
+  written by one generic reader that writes only what differs and keeps what
+  it does not know; read with no App for a project manager, read by every
+  game as it starts - its window, clear colour, fixed step and icon - and its
+  renderer choosing the backend - Direct3D 11 first on Windows, Direct3D 12
+  for the experimental modern renderer, Vulkan elsewhere - with `--backend`
   still over it.
 - Reflection: every component described - fields, defaults, ranges, units -
   and found on an entity by its scene name, read and written in place, added
   and taken off; the engine's calls and a game's states made by name, errors
   and all.
-- Flux scripts on entities: `ready`, `physics`, `update` and `exit`,
-  `self.entity` and its components found again at each use, a budget and a
-  log for what goes wrong, code read again into running instances, scripts
-  in scenes, and an editor's checking set up as the game's.
+- Flux scripts on entities: `ready`, `fixed`, `update`, `exit`, `input` and
+  `unhandled_input`, `self.entity` and its components found again at each
+  use, a budget and a log for what goes wrong, code read again into running
+  instances, scripts in scenes, and an editor's checking set up as the
+  game's. The engine's signals heard and awaited from a script, entities and
+  scenes made and taken away, `@export`s a scene gives values, and `.data`
+  files made into their struct.
 - The world drawn into a texture through a view of its own, and a window
   that shows only the interface: an editor's scene panel, or a minimap.
 - Headless everything, and `capture` for a picture without a screen.
@@ -1764,33 +2830,14 @@ In order, and the order is an argument rather than a wish list: each of these
 either unblocks the one after it or is the thing most missed by somebody
 trying to finish a game with what is here.
 
-### 1. Controls a player can change
-
-The keys are written into the game today - `pong` puts them in a component,
-which is better than most and still means the game knows what a key is. What
-belongs in the engine is an action map: a name, the keys and buttons and stick
-axes bound to it, and `input.action("jump")`. The controllers are read
-already, and an `AxisBinding` takes a stick and a d-pad beside its keys; what
-is missing is the name between a control and what it does, and a way for the
-player to change it.
-
-### 2. Tilemaps
-
-A `Tilemap` component holding a grid of indices into one sheet, drawn in
-chunks so a level larger than the screen is a handful of instanced draws
-rather than one per tile - and its solid tiles one static body of many
-shapes, which the physics compares as one entity rather than thousands. It
-wants nothing that is not already here, and it is what makes the difference
-between demonstrations and levels.
-
-### 3. Interface anchored to the world
+### 1. Interface anchored to the world
 
 The layer is here. What a game's interface still wants from fluxion-ui is
 interface floating over a point in the world - health bars, name plates -
 which needs an id scope so forty of them can share one declaration, state per
 element so a menu can animate, and nine-slice pictures.
 
-### 4. The 3D pass
+### 2. The 3D pass
 
 Meshes, a depth attachment, a `Camera3D`, and the pass drawn before the 2D one
 into the same target. The place it goes is marked in `App.drawLayers`, and
@@ -1799,8 +2846,6 @@ before this package existed - the seam was cut for it deliberately.
 
 ## 💭 Not on the list yet
 
-- **Audio.** There is no `fluxion-audio`, and it is a library and a set of
-  platform backends rather than an afternoon in this repository.
 - **Resources** - a typed store for state that is not a component. A singleton
   entity is the answer today - `app.single(Score)` finds it - it saves and
   loads with the world for free, and the case for a second mechanism has not
@@ -1816,27 +2861,29 @@ before this package existed - the seam was cut for it deliberately.
 
 ## 🧩 What counts as a component
 
-Eight: `Transform2D`, `Sprite`, `Text2D`, `Animation`, `Camera2D`,
-`RigidBody2D`, `Collider2D` and `Area2D`. Each one is something a person
-making a game would name, which is the test.
+`Parent`, `Processing` and `Appearance`, which every entity may have. In 2D: `Transform2D`, `Sprite`,
+`Text2D`, `AnimatedSprite2D`, `Camera2D`, `RigidBody2D`, `Collider2D`, `Area2D`
+and `TileMap`; `Timer`, `Tween` and `AnimationPlayer`; `AudioPlayer`,
+`AudioSpatial2D` and `AudioListener2D`; and the interface's `Control` with what goes beside it -
+see [Controls and themes](#-controls-and-themes). Each one is something a
+person making a game would name, which is the test. A map's chunks are
+entities of the engine's own, which a scene never writes.
 
-Two things that used to be on that list are not any more, and the reason is
-the same for both. `Parent` was a component holding a link and an offset; it
-is a field of `Transform2D` now, because parenting is what a transform *does* -
-Unity puts it on `Transform`, Godot puts it in the tree - and nobody building
-a scene thinks "I will add a Parent to this". `Previous2D` held where
-something was a step ago; that is the engine's own bookkeeping and a game
-should never have to declare it, so it is a flag on the transform and a table
-beside the world.
+`Parent` is on the list because what something hangs from is not a
+transform's business alone: a timer, a sound or a control belongs somewhere
+in the tree too, with no transform, and one link for all of them is one tree
+rather than one for things in the world and another for the interface.
+`Previous2D` is not on it: it held where something was a step ago, which is
+the engine's own bookkeeping and a game should never have to declare, so it
+is a flag on the transform and a table beside the world.
 
 The rule that falls out: **a component is a thing, not a mechanism.** If it
 exists so that the engine can do its job rather than so that the game can say
 what something is, it belongs inside another component or beside the world.
 
-**A name is not a component either**, although Bevy makes it one. It is what
-an entity is called rather than something it has - Unity's `GameObject.name` -
-so the engine keeps it beside the world, the way it keeps where things were a
-step ago:
+**A name is not a component either.** It is what an entity is called rather
+than something it has, so the engine keeps it beside the world, the way it
+keeps where things were a step ago:
 
 ```zig
 fn spawn(app: *fx.App) !void {
@@ -1852,9 +2899,9 @@ fn pan(app: *fx.App) !void {
 ```
 
 Naming something does not move it into another table or change which queries
-match it. And a name picks out one living entity at a time - a second one is
-`error.NameTaken` - because a `find` that had to choose between two would
-sometimes choose the wrong one. Many things of one kind are a component and a
+match it. A name picks out one child of a parent - a sibling with it already
+is `error.NameTaken` - so a path of names leads to one thing, and two copies
+of a scene keep the names inside them. Many things of one kind are a component and a
 query; a name is for the camera, the player, the door to the next room.
 
 **Nor is a body's handle.** `RigidBody2D` says that something falls and

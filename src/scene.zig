@@ -7,12 +7,12 @@
 //! try app.registerComponents(.{ Wander, Player });
 //! try app.saveScene("res://levels/meadow.json", .{});
 //! try app.saveScene("res://levels/meadow.scene", .{ .format = .cbor });
-//! const loaded = try app.loadScene("res://levels/meadow.scene", .{});
+//! const loaded = try app.readScene("res://levels/meadow.scene", .{});
 //! ```
 //!
 //! ```json
 //! {
-//!   "fluxion_scene": 2,
+//!   "fluxion_scene": 3,
 //!   "entities": [
 //!     {
 //!       "uuid": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c",
@@ -22,7 +22,10 @@
 //!     },
 //!     {
 //!       "uuid": "5c2d7e9f-0a1b-4c3d-8e5f-6a7b8c9d0e1f",
-//!       "Transform2D": { "y": -6.0, "parent": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c" },
+//!       "parent": "0b8e3c1a-5f2d-4c6e-9a7b-1d2e3f4a5b6c",
+//!       "name": "turret",
+//!       "groups": ["guns"],
+//!       "Transform2D": { "y": -6.0 },
 //!       "Sprite": { "texture": "res://art/turret.png" }
 //!     }
 //!   ],
@@ -83,6 +86,7 @@ const signals = @import("signals.zig");
 const Assets = @import("assets.zig");
 const Project = @import("Project.zig");
 const components = @import("components.zig");
+const attr = @import("attr.zig");
 
 const Entity = ecs.Entity;
 const World = ecs.World;
@@ -90,31 +94,81 @@ const ComponentId = ecs.component.Id;
 const TextureHandle = Assets.TextureHandle;
 const FontHandle = Assets.FontHandle;
 const Text2D = components.Text2D;
+const texts_mod = @import("texts.zig");
+const Label = @import("control.zig").Label;
+const LineEdit = @import("control.zig").LineEdit;
+const Button = @import("control.zig").Button;
+const Control = @import("control.zig").Control;
+const Material = @import("shaders.zig").Material;
 const ScriptHandle = @import("script.zig").ScriptHandle;
 const Script = @import("script.zig").Script;
+const tilemap = @import("tilemap.zig");
+const TileMap = tilemap.TileMap;
+const TileChunk = tilemap.TileChunk;
+const TileSetHandle = @import("tileset.zig").TileSetHandle;
+const ThemeHandle = @import("theme.zig").ThemeHandle;
+const AssetKind = @import("asset_kind.zig").AssetKind;
+const SceneHandle = @import("scenes.zig").SceneHandle;
 const Uuid = @import("fluxion_id").Uuid;
 const math = @import("fluxion_math");
 const Color = @import("color.zig").Color;
 
 /// The version this writes, and the only one it reads.
-pub const version = 2;
+pub const version = 3;
 
 pub const SaveOptions = struct {
     format: json.Format = .json,
     /// Spaces per level of JSON. CBOR has no layout.
     indent: u8 = 2,
+    /// Only this entity and what hangs from it, with no parent written for
+    /// it: a branch saved as a scene of its own, which is then a scene to
+    /// make instances of. Null writes the whole world.
+    root: ?Entity = null,
 };
 
 pub const LoadOptions = struct {
     /// Where reading went wrong and why: a line and a column, or a byte of
     /// CBOR, and the path to the value, such as `/entities/3/Sprite/texture`.
     diagnostics: ?*json.Diagnostics = null,
+    /// What the scene's roots - its entities with no parent in it - hang
+    /// from: `.none` for the top of the tree.
+    parent: Entity = .none,
+    /// Read as an instance: its one root is given this UUID, and every other
+    /// entity one made of this and the one the file gives it - the same each
+    /// time for this instance, and others for another. See
+    /// `App.instantiate`. A scene read so has one root, or it is a mistake.
+    instance: ?Uuid = null,
+    /// Every entity made is added to it, the ones inside instances too. On a
+    /// mistake, the ones this read added are despawned again.
+    spawned: ?*std.ArrayList(Entity) = null,
+    /// The scenes being read around this one: a scene that is an instance
+    /// of itself, however deep, is a mistake rather than a loop.
+    within: ?*const Nesting = null,
+};
+
+/// A scene being read, and the one it is read inside.
+pub const Nesting = struct {
+    scene: SceneHandle,
+    outer: ?*const Nesting = null,
+
+    fn holds(self: ?*const Nesting, scene: SceneHandle) bool {
+        var at = self;
+        while (at) |nesting| : (at = nesting.outer) {
+            if (nesting.scene.eql(scene)) return true;
+        }
+        return false;
+    }
 };
 
 /// What a load did.
 pub const Loaded = struct {
-    /// How many entities it spawned.
+    /// How many entities it spawned, the ones inside instances too.
     entities: usize = 0,
+    /// Its entities with no parent in it: what hangs from `LoadOptions.parent`.
+    roots: usize = 0,
+    /// The one of them, when there is one: what an instance is. `.none` for
+    /// a scene of several.
+    root: Entity = .none,
     /// Components the file has that nothing here is registered as: kept
     /// with their entities, saved back as they were, and never run. An
     /// editor without the game's components meets these. See `Unknown`.
@@ -379,16 +433,18 @@ const TextureOptions = struct {
 /// by that.
 pub fn save(app: *App, io: std.Io, path: []const u8, options: SaveOptions) !void {
     try app.assets.ensureUids();
+    try app.tile_sets.ensureUids(&app.project);
+    try app.themes.ensureUids(&app.project);
     if (app.scripts) |scripts| try scripts.ensureUids();
     const file = try app.project.osPath(app.gpa, path);
     defer app.gpa.free(file);
-    return json.save(io, file, Document{ .app = app }, writeOptions(options));
+    return json.save(io, file, Document{ .app = app, .root = options.root }, writeOptions(options));
 }
 
 /// Write `app`'s world into fresh memory. A file with no UUID yet is named
 /// by its path alone: only `save` makes UUIDs for files. The caller frees it.
 pub fn write(app: *App, gpa: Allocator, options: SaveOptions) json.StringifyError![]u8 {
-    return json.stringify(gpa, Document{ .app = app }, writeOptions(options));
+    return json.stringify(gpa, Document{ .app = app, .root = options.root }, writeOptions(options));
 }
 
 /// A scene with nothing in it, into fresh memory: what a new level starts as,
@@ -419,10 +475,11 @@ const Empty = struct {
 /// The world as fluxion-json writes it.
 const Document = struct {
     app: *App,
+    root: ?Entity = null,
 
     pub fn toJson(self: Document, w: *json.Writer) json.Writer.Error!void {
         const gpa = self.app.gpa;
-        var s: Saving = .{ .app = self.app };
+        var s: Saving = .{ .app = self.app, .root = self.root };
         defer s.deinit(gpa);
         try s.placeAll();
 
@@ -435,6 +492,25 @@ const Document = struct {
         try s.writeConnections(w);
         try s.writeFiles(w);
         try w.endObject();
+    }
+};
+
+/// An entity's components as a scene writes them, every field of each, in
+/// compact JSON: what `App.keepInstance` keeps an instance's root as its
+/// scene made it by. Nothing else is given a UUID for it. The caller frees
+/// it.
+pub fn entityTemplate(app: *App, gpa: Allocator, entity: Entity) json.StringifyError![]u8 {
+    return json.stringify(gpa, Template{ .app = app, .entity = entity }, .{ .indent = 0, .non_finite = .literal });
+}
+
+const Template = struct {
+    app: *App,
+    entity: Entity,
+
+    pub fn toJson(self: Template, w: *json.Writer) json.Writer.Error!void {
+        var s: Saving = .{ .app = self.app, .every_field = true };
+        defer s.deinit(self.app.gpa);
+        try s.writeEntity(w, self.entity);
     }
 };
 
@@ -459,6 +535,13 @@ pub const EntityJson = struct {
 const Saving = struct {
     app: *App,
     every_field: bool = false,
+    /// See `SaveOptions.root`.
+    root: ?Entity = null,
+    /// What is written: its parent is named only when it is written too.
+    written: std.AutoHashMapUnmanaged(Entity, void) = .empty,
+    /// The entity being written, for a component whose value is kept beside
+    /// it: a map's tiles.
+    entity: Entity = .none,
     /// Every entity, in the order a scene lists them.
     order: std.ArrayList(Entity) = .empty,
     /// Every file written, under the name it was written by, for `assets`.
@@ -467,6 +550,7 @@ const Saving = struct {
     fn deinit(s: *Saving, gpa: Allocator) void {
         s.order.deinit(gpa);
         s.files.deinit(gpa);
+        s.written.deinit(gpa);
     }
 
     /// Every entity in the world, in the order a parent's children are in -
@@ -477,8 +561,37 @@ const Saving = struct {
     /// is the order, and a scene needs nothing more to keep it.
     fn placeAll(s: *Saving) Allocator.Error!void {
         const gpa = s.app.gpa;
-        for (s.app.world.archetypeSlice()) |*archetype| try s.order.appendSlice(gpa, archetype.entities.items);
+        for (s.app.world.archetypeSlice()) |*archetype| {
+            for (archetype.entities.items) |e| {
+                // A chunk is not a thing in the scene: its map writes its
+                // tiles, and reading them makes the chunks again.
+                if (s.app.world.has(e, TileChunk)) continue;
+                if (s.root) |root| if (!e.eql(root) and !s.app.hangsFrom(e, root)) continue;
+                try s.order.append(gpa, e);
+            }
+        }
         std.mem.sort(Entity, s.order.items, @as(*const App, s.app), App.siblingBefore);
+        for (s.order.items) |e| try s.written.put(gpa, e, {});
+        // What an instance holds is its scene's: the instance is written, and
+        // its insides are made again from the scene when it is read.
+        var hidden: std.AutoHashMapUnmanaged(Entity, void) = .empty;
+        defer hidden.deinit(gpa);
+        for (s.app.instances.keys(), s.app.instances.values()) |root, held| {
+            if (!s.written.contains(root)) continue;
+            for (held.members) |member| try hidden.put(gpa, member, {});
+        }
+        if (hidden.count() > 0) {
+            var kept: usize = 0;
+            for (s.order.items) |e| {
+                if (hidden.contains(e)) {
+                    _ = s.written.remove(e);
+                    continue;
+                }
+                s.order.items[kept] = e;
+                kept += 1;
+            }
+            s.order.shrinkRetainingCapacity(kept);
+        }
         for (s.order.items) |e| _ = s.app.ensureUuid(e) catch |err| switch (err) {
             error.NoSuchEntity => unreachable,
             error.OutOfMemory => return error.OutOfMemory,
@@ -487,12 +600,38 @@ const Saving = struct {
 
     fn writeEntity(s: *Saving, w: *json.Writer, e: Entity) json.Writer.Error!void {
         const app = s.app;
+        s.entity = e;
         try w.beginObject();
         if (app.uuidOf(e)) |uuid| {
             const text = uuid.toString();
             try w.field("uuid", @as([]const u8, &text));
         }
+        // What it hangs from, by the UUID it was written with: before the
+        // name, which is its own among its parent's children. A branch's
+        // root hangs from nothing written.
+        const parent = app.parentOf(e);
+        const named_parent = if (s.root) |root| !e.eql(root) else true;
+        if (!parent.isNone() and named_parent) if (app.uuidOf(parent)) |uuid| {
+            const text = uuid.toString();
+            try w.field("parent", @as([]const u8, &text));
+        };
         if (app.nameOf(e)) |name| try w.field("name", name);
+        var held: [32][]const u8 = undefined;
+        const groups = app.groupsOf(e, &held);
+        if (groups.len > 0) {
+            try w.key("groups");
+            try w.beginArray();
+            for (groups) |group| try w.writeString(group);
+            try w.endArray();
+        }
+        // What its script's `@export`s are given.
+        if (app.exports.of(e)) |values| try w.field("exports", values);
+        // An instance: the scene it is one of, and what differs from it.
+        if (!s.every_field) if (app.instances.getPtr(e)) |instance| {
+            try w.field("instance", app.sceneSource(instance.scene) orelse "");
+            try s.writeOverrides(w, e, instance.template);
+            return w.endObject();
+        };
         for (app.scene_components.entries.items) |entry| {
             const id = entry.findIdIn(&app.world) orelse continue;
             const cell = app.world.cellOf(e, id) orelse continue;
@@ -501,6 +640,78 @@ const Saving = struct {
         }
         try s.writeUnknown(w, e);
         try w.endObject();
+    }
+
+    /// What an instance's root has that its scene did not give it: the
+    /// fields that differ, the components it was given, and in `removed`
+    /// those it lost - `template` being the root as the scene made it.
+    fn writeOverrides(s: *Saving, w: *json.Writer, e: Entity, template: []const u8) json.Writer.Error!void {
+        const app = s.app;
+        var arena_state: std.heap.ArenaAllocator = .init(app.gpa);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const was = membersOf(arena, template) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.WriteFailed,
+        };
+
+        var removed: std.ArrayList([]const u8) = .empty;
+        for (app.scene_components.entries.items) |entry| {
+            const before = memberNamed(was, entry.name);
+            const id = entry.findIdIn(&app.world) orelse {
+                if (before != null) try removed.append(arena, entry.name);
+                continue;
+            };
+            const cell = app.world.cellOf(e, id) orelse {
+                if (before != null) try removed.append(arena, entry.name);
+                continue;
+            };
+            const had = before orelse {
+                // Given one its scene does not: written whole.
+                try w.key(entry.name);
+                try entry.write(s, w, cell);
+                continue;
+            };
+            // Every field of it as it is now, beside every field it was
+            // made with: what differs is written.
+            var now_text: std.Io.Writer.Allocating = .init(arena);
+            var now_writer: json.Writer = .init(&now_text.writer, .{ .non_finite = .literal });
+            const every = s.every_field;
+            s.every_field = true;
+            entry.write(s, &now_writer, cell) catch |err| {
+                s.every_field = every;
+                return err;
+            };
+            s.every_field = every;
+            const now = membersOf(arena, now_text.written()) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.WriteFailed,
+            };
+            const then = membersOf(arena, had) catch |err| return switch (err) {
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.WriteFailed,
+            };
+            var any = false;
+            for (now) |field| {
+                // A map's tiles are its scene's.
+                if (std.mem.eql(u8, field.name, "cells")) continue;
+                if (memberNamed(then, field.name)) |old| if (std.mem.eql(u8, old, field.value)) continue;
+                if (!any) {
+                    try w.key(entry.name);
+                    try w.beginObject();
+                    any = true;
+                }
+                try w.key(field.name);
+                try writeRaw(app.gpa, w, field.value);
+            }
+            if (any) try w.endObject();
+        }
+        if (removed.items.len > 0) {
+            try w.key("removed");
+            try w.beginArray();
+            for (removed.items) |name| try w.writeString(name);
+            try w.endArray();
+        }
     }
 
     /// The components the entity was read with that nothing here knows, as
@@ -523,8 +734,7 @@ const Saving = struct {
 
     /// `connections`: every one made with `persist` from an entity written,
     /// to one written, in the order each entity's are heard - known to this
-    /// build or not - and nothing at all when there are none. Godot's
-    /// `[connection]` lines.
+    /// build or not - and nothing at all when there are none.
     fn writeConnections(s: *Saving, w: *json.Writer) json.Writer.Error!void {
         var any = false;
         for (s.order.items) |source| {
@@ -636,21 +846,138 @@ const Saving = struct {
     }
 };
 
+/// One member of a JSON object, its value as compact JSON.
+const Member = struct {
+    name: []const u8,
+    value: []const u8,
+};
+
+/// The members of the JSON object in `text`, each value written compactly,
+/// so two written by different writers compare as text.
+fn membersOf(arena: Allocator, text: []const u8) ![]Member {
+    var reader: json.Reader = .init(arena, text, .{ .syntax = .json5 });
+    defer reader.deinit();
+    var out: std.ArrayList(Member) = .empty;
+    const opening = (try reader.next()) orelse return error.SyntaxError;
+    if (opening != .object_begin) return error.SyntaxError;
+    while (true) {
+        const token = (try reader.next()) orelse return error.SyntaxError;
+        const name = switch (token) {
+            .key => |held| try arena.dupe(u8, held),
+            .object_end => break,
+            else => return error.SyntaxError,
+        };
+        var value: std.Io.Writer.Allocating = .init(arena);
+        var w: json.Writer = .init(&value.writer, .{ .non_finite = .literal });
+        try copyValue(&reader, &w);
+        try out.append(arena, .{ .name = name, .value = value.written() });
+    }
+    return out.items;
+}
+
+fn memberNamed(members: []const Member, name: []const u8) ?[]const u8 {
+    for (members) |member| {
+        if (std.mem.eql(u8, member.name, name)) return member.value;
+    }
+    return null;
+}
+
+/// JSON already written, written again into `w`.
+fn writeRaw(gpa: Allocator, w: *json.Writer, text: []const u8) json.Writer.Error!void {
+    var reader: json.Reader = .init(gpa, text, .{ .syntax = .json5 });
+    defer reader.deinit();
+    copyValue(&reader, w) catch |err| return switch (err) {
+        error.OutOfMemory, error.WriteFailed, error.TooDeep, error.NonFiniteNumber => |held| held,
+        // Written by this file a moment ago, and it reads.
+        error.SyntaxError => unreachable,
+    };
+}
+
+/// How many bytes a chunk's cells are, and the text they become.
+const chunk_bytes = tilemap.tiles_per_chunk * @sizeOf(tilemap.Cell);
+const chunk_text_len = std.base64.standard.Encoder.calcSize(chunk_bytes);
+
+/// A map's tiles: one line of text a chunk, under the chunk's place.
+///
+/// A chunk at a time rather than one long line so that a change to a corner
+/// of a level is a change to one line of the file, and base64 rather than
+/// numbers because a chunk is a kilobyte of them and nobody reads a
+/// thousand numbers.
+fn writeCells(s: *Saving, w: *json.Writer) json.Writer.Error!void {
+    const app = s.app;
+    var any = false;
+    // In the order the chunks were made, which for a level painted left to
+    // right is the order it was painted: a scene saved again keeps its
+    // lines where they were.
+    var it = app.tile_chunks.iterator();
+    while (it.next()) |entry| {
+        if (!entry.key_ptr.map.eql(s.entity)) continue;
+        const chunk = app.world.getConst(entry.value_ptr.*, TileChunk) orelse continue;
+        if (chunk.isEmpty()) continue;
+        if (!any) {
+            try w.key("cells");
+            try w.beginObject();
+            any = true;
+        }
+        var name: [32]u8 = undefined;
+        var text: [chunk_text_len]u8 = undefined;
+        try w.key(std.fmt.bufPrint(&name, "{d},{d}", .{ chunk.x, chunk.y }) catch unreachable);
+        try w.writeString(std.base64.standard.Encoder.encode(&text, std.mem.asBytes(&chunk.cells)));
+    }
+    if (any) try w.endObject();
+}
+
 /// A component: an object of the fields that do not hold their defaults.
 fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
     if (@typeInfo(T) != .@"struct") return writeValue(s, w, T, value);
     try w.beginObject();
-    if (T == Text2D and (value.len > 0 or s.every_field)) try w.field("text", value.slice());
+    // Its words, which it keeps beside it: see `texts.zig`.
+    inline for (comptime texts_mod.declared(T)) |text| {
+        const said = s.app.textOf(s.entity, T, text.name);
+        if (said.len > 0 or s.every_field) try w.field(text.name, said);
+    }
+    if (T == Control and (value.variation_len > 0 or s.every_field)) try w.field("type_variation", value.variationSlice());
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const held = &@field(value.*, field.name);
-        const skip = (T == Text2D and comptime isTextBuffer(field.name)) or
+        const skip = (comptime T == Control and isVariationBuffer(field.name)) or
+            (comptime isUnsaved(T, field.name)) or
             (if (field.defaultValue()) |default| !s.every_field and std.meta.eql(held.*, default) else false);
         if (!skip) {
             try w.key(field.name);
-            if (comptime T == Script and std.mem.eql(u8, field.name, "struct_name")) {
-                try w.writeString(value.structName());
-            } else try writeValue(s, w, field.type, held);
+            try writeValue(s, w, field.type, held);
         }
+    }
+    if (T == TileMap) try writeCells(s, w);
+    if (T == Material) try writeParams(s, w);
+    try w.endObject();
+}
+
+/// Whether `T` keeps its field `name` out of every scene: `attr.Unsaved`.
+fn isUnsaved(comptime T: type, comptime name: []const u8) bool {
+    if (!@hasDecl(T, "reflect_fields") or !@hasField(@TypeOf(T.reflect_fields), name)) return false;
+    for (@field(T.reflect_fields, name)) |entry| {
+        if (@TypeOf(entry) == attr.Unsaved) return true;
+    }
+    return false;
+}
+
+/// A material's numbers, as an object by field: one number, or a list of
+/// them for a vector or a matrix. What it gives nothing is left out.
+fn writeParams(s: *Saving, w: *json.Writer) json.Writer.Error!void {
+    const given = s.app.shader_params.of(s.entity);
+    if (given.len == 0) return;
+    try w.key("params");
+    try w.beginObject();
+    for (given) |*param| {
+        try w.key(param.name);
+        const numbers = param.slice();
+        if (numbers.len == 1) {
+            try w.writeFloat(numbers[0]);
+            continue;
+        }
+        try w.beginArray();
+        for (numbers) |number| try w.writeFloat(number);
+        try w.endArray();
     }
     try w.endObject();
 }
@@ -664,31 +991,33 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
         const text = held.toString();
         return w.writeString(&text);
     }
-    if (T == TextureHandle) {
-        const texture = s.app.assets.get(value.*) orelse return w.writeNull();
-        if (texture.source.len == 0) return w.writeNull();
-        try s.files.put(s.app.gpa, texture.source, .{ .filter = texture.filter, .wrap = texture.wrap });
-        return w.writeString(texture.source);
-    }
-    if (T == ScriptHandle) {
-        const source = s.app.scriptSource(value.*) orelse return w.writeNull();
+    // A file is written as its path, and the path kept for `assets`.
+    if (comptime AssetKind.of(T)) |kind| {
+        const source = s.app.assetSource(value.*) orelse return w.writeNull();
         const kept = try s.files.getOrPut(s.app.gpa, source);
         if (!kept.found_existing) kept.value_ptr.* = .{};
+        switch (kind) {
+            // How a texture is sampled is the file's, and goes in `assets`.
+            .texture => {
+                const texture = s.app.assets.get(value.*).?;
+                kept.value_ptr.* = .{ .filter = texture.filter, .wrap = texture.wrap };
+            },
+            // The first font of a file is the file. Another font of a
+            // collection is an object that says which, so one scene can
+            // hold two of a file.
+            .font => {
+                const member = s.app.assets.fontMember(value.*);
+                if (member != 0) {
+                    try w.beginObject();
+                    try w.field("file", source);
+                    try w.key("member");
+                    try w.writeInt(member);
+                    return w.endObject();
+                }
+            },
+            else => {},
+        }
         return w.writeString(source);
-    }
-    if (T == FontHandle) {
-        const source = s.app.assets.fontSource(value.*) orelse return w.writeNull();
-        const kept = try s.files.getOrPut(s.app.gpa, source);
-        if (!kept.found_existing) kept.value_ptr.* = .{};
-        // The first font of a file is the file. Another font of a collection
-        // is an object that says which, so one scene can hold two of a file.
-        const member = s.app.assets.fontMember(value.*);
-        if (member == 0) return w.writeString(source);
-        try w.beginObject();
-        try w.field("file", source);
-        try w.key("member");
-        try w.writeInt(member);
-        return w.endObject();
     }
     switch (@typeInfo(T)) {
         .bool => try w.writeBool(value.*),
@@ -706,6 +1035,12 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
             try w.endObject();
         },
         .array => |info| {
+            // A name kept in the component - a `Script`'s struct, a player's
+            // bus - is the text before its first zero.
+            if (info.child == u8) {
+                const end = std.mem.indexOfScalar(u8, value, 0) orelse value.len;
+                return w.writeString(value[0..end]);
+            }
             try w.beginArray();
             for (value) |*item| try writeValue(s, w, info.child, item);
             try w.endArray();
@@ -733,12 +1068,6 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
         },
         else => @compileError("fluxion-engine: a scene cannot hold a " ++ @typeName(T)),
     }
-}
-
-/// The buffer and the length a `Text2D` keeps its words in, written as one
-/// string called `text` instead.
-fn isTextBuffer(comptime name: []const u8) bool {
-    return std.mem.eql(u8, name, "bytes") or std.mem.eql(u8, name, "len");
 }
 
 // -------------------------------------------------------------------------
@@ -779,9 +1108,17 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
 
-    var spawned: std.ArrayList(Entity) = .empty;
-    defer spawned.deinit(gpa);
-    errdefer for (spawned.items) |e| app.world.despawn(e);
+    // Every entity made, the instances' insides too: the caller's list, or
+    // this read's own. On a mistake what this read added goes again.
+    var own: std.ArrayList(Entity) = .empty;
+    defer own.deinit(gpa);
+    const made = options.spawned orelse &own;
+    const first = made.items.len;
+    errdefer for (made.items[first..]) |e| if (app.world.isAlive(e)) app.world.despawn(e);
+
+    // One a place in the file's list: an instance's is its root, once made.
+    var entities: std.ArrayList(Entity) = .empty;
+    defer entities.deinit(gpa);
 
     // What is in the world already keeps its place before the scene's.
     try app.placeTheRest();
@@ -790,16 +1127,21 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     {
         var reader: json.Reader = .init(gpa, bytes, readerOptions(options));
         defer reader.deinit();
-        var l: Loading = .{ .app = app, .reader = &reader, .arena = arena.allocator(), .diagnostics = options.diagnostics };
-        try l.shape(&spawned, &told);
+        var l: Loading = .{ .app = app, .reader = &reader, .arena = arena.allocator(), .diagnostics = options.diagnostics, .parent = options.parent };
+        try l.shape(&entities, made, &told);
+    }
+    if (options.instance != null and told.roots != 1) {
+        return failWhole(options, error.NotOneRoot, "a scene made as an instance has one root, which the rest of it hangs from, and this has {d}", .{told.roots});
     }
 
-    // Each entity the UUID the file gives it - unless an entity already in
-    // the world has that one, when it is given a new one, and the file's
-    // stays the scene's own name for it.
-    var loaded: Loaded = .{ .entities = spawned.items.len };
-    for (spawned.items, told.uuids.items) |e, given| {
-        const uuid = given orelse continue;
+    // Each entity the UUID the file gives it - an instance's made of its
+    // own and the file's - unless an entity already in the world has that
+    // one, when it is given a new one, and the file's stays the scene's own
+    // name for it.
+    var loaded: Loaded = .{ .roots = told.roots };
+    for (entities.items, 0..) |e, place| {
+        if (told.nested.contains(place)) continue;
+        const uuid = uuidAt(options, &told, place) orelse continue;
         if (app.findUuid(uuid) != null) {
             _ = try app.ensureUuid(e);
             loaded.reassigned += 1;
@@ -809,6 +1151,48 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
         };
     }
 
+    // Each instance in it made from its own scene, with the UUID the file
+    // gives it: its insides are named after that, so they are found by the
+    // same UUIDs every time the file is read.
+    var it = told.nested.iterator();
+    while (it.next()) |entry| {
+        const place = entry.key_ptr.*;
+        const path = entry.value_ptr.*;
+        const handle = app.loadScene(path) catch |err|
+            return failWhole(options, err, "cannot read the scene \"{s}\" an entity is an instance of: {t}", .{ path, err });
+        if (Nesting.holds(options.within, handle)) {
+            return failWhole(options, error.SceneHoldsItself, "\"{s}\" is an instance of itself, and would never end", .{path});
+        }
+        var uuid = uuidAt(options, &told, place) orelse app.newUuid();
+        if (app.findUuid(uuid) != null) {
+            uuid = app.newUuid();
+            loaded.reassigned += 1;
+        }
+        const nesting: Nesting = .{ .scene = handle, .outer = options.within };
+        const before = made.items.len;
+        // Its mistakes are said as its own file's.
+        var outer_file: [240]u8 = undefined;
+        var outer_len: usize = 0;
+        if (options.diagnostics) |d| {
+            outer_len = @min(d.file().len, outer_file.len);
+            @memcpy(outer_file[0..outer_len], d.file()[0..outer_len]);
+            d.setFile(app.sceneSource(handle) orelse path);
+        }
+        const inner = try read(app, app.scenes.get(handle).?.bytes, .{
+            .diagnostics = options.diagnostics,
+            .instance = uuid,
+            .spawned = made,
+            .within = &nesting,
+        });
+        if (options.diagnostics) |d| d.setFile(outer_file[0..outer_len]);
+        entities.items[place] = inner.root;
+        // What it is as its scene makes it, before this file says what is
+        // particular about this one.
+        try app.keepInstance(inner.root, handle, made.items[before..]);
+    }
+
+    var chunks: std.ArrayList(PendingChunk) = .empty;
+    defer chunks.deinit(gpa);
     {
         var reader: json.Reader = .init(gpa, bytes, readerOptions(options));
         defer reader.deinit();
@@ -817,18 +1201,48 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
             .reader = &reader,
             .arena = arena.allocator(),
             .diagnostics = options.diagnostics,
-            .entities = spawned.items,
+            .entities = entities.items,
             .told = &told,
+            .chunks = &chunks,
+            .parent = options.parent,
+            .instance = options.instance,
         };
         try l.fill();
         // The list is the order of every parent's children.
-        try app.placeInOrder(spawned.items);
+        try app.placeInOrder(entities.items);
         loaded.moved = l.moved;
         loaded.components_unknown = l.components_unknown;
         loaded.connections_unknown = l.connections_unknown;
         loaded.connections_skipped = l.connections_skipped;
     }
+
+    // Last of all: a chunk is an entity, and making one while the values
+    // above were being written would have moved the rows they went into.
+    for (chunks.items) |pending| {
+        const entity = try app.makeTileChunk(pending.map, pending.x, pending.y);
+        try made.append(gpa, entity);
+        const chunk = app.world.get(entity, TileChunk).?;
+        chunk.cells = pending.cells;
+    }
+    if (told.roots == 1) loaded.root = entities.items[told.root_place.?];
+    loaded.entities = made.items.len - first;
     return loaded;
+}
+
+/// The UUID the entity at `place` is given: the file's, or for an instance
+/// the instance's own for its root and one made of it and the file's for
+/// the rest. Null for one the file gives none.
+fn uuidAt(options: LoadOptions, told: *const Told, place: usize) ?Uuid {
+    const instance = options.instance orelse return told.uuids.items[place];
+    if (told.root_place == place) return instance;
+    const given = told.uuids.items[place] orelse return null;
+    return Uuid.fromName(instance, &given.bytes);
+}
+
+/// Say what is wrong with the scene as a whole, rather than at a token.
+fn failWhole(options: LoadOptions, err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
+    if (options.diagnostics) |d| d.setMessage(fmt, args);
+    return err;
 }
 
 /// What a scene says of itself, read without loading it: see `readInfo`.
@@ -839,6 +1253,9 @@ pub const Info = struct {
     format: json.Format,
     /// How many entities it lists.
     entities: usize = 0,
+    /// How many of them name no parent: a scene of one is one an instance
+    /// can be made of.
+    roots: usize = 0,
     /// The files its `assets` table lists, in the file's order: for a scene
     /// `save` wrote, every file of the project's that it names.
     files: []File = &.{},
@@ -929,8 +1346,8 @@ const Glance = struct {
                     }
                     _ = try g.next();
                     while (try g.peek() != .array_end) {
-                        try g.reader.skipValue();
                         g.said.entities += 1;
+                        if (!try g.parented()) g.said.roots += 1;
                     }
                     _ = try g.next();
                 },
@@ -948,6 +1365,21 @@ const Glance = struct {
                 },
             }
         }
+    }
+
+    /// Whether the entity next names a parent. The entity is passed over.
+    fn parented(g: *Glance) json.Reader.Error!bool {
+        if (try g.peek() != .object_begin) {
+            try g.reader.skipValue();
+            return false;
+        }
+        _ = try g.next();
+        var found_parent = false;
+        while (try g.key()) |name| {
+            if (std.mem.eql(u8, name, "parent")) found_parent = true;
+            try g.reader.skipValue();
+        }
+        return found_parent;
     }
 
     /// The UUID in what `assets` says of one file, when it says one that
@@ -999,6 +1431,13 @@ const Glance = struct {
 const Told = struct {
     /// Each entity's UUID in the file, at its place in the list.
     uuids: std.ArrayList(?Uuid) = .empty,
+    /// The places that are instances of another scene, with its path.
+    nested: std.AutoArrayHashMapUnmanaged(usize, []const u8) = .empty,
+    /// Whether the entity at a place names a parent.
+    parented: std.ArrayList(bool) = .empty,
+    /// How many name none, and where the first of them is.
+    roots: usize = 0,
+    root_place: ?usize = null,
     /// Each UUID's place in the list: what a reference inside the scene
     /// finds, whatever UUID the entity was given in the end.
     places: std.AutoHashMapUnmanaged(Uuid, usize) = .empty,
@@ -1024,10 +1463,26 @@ const Loading = struct {
     entities: []const Entity = &.{},
     /// What the first pass learnt. Null during it.
     told: ?*const Told = null,
-    /// Textures found or loaded already, by the path the file gives.
-    textures: std.StringHashMapUnmanaged(TextureHandle) = .empty,
+    /// Files found or loaded already, by their kind and the path the file
+    /// gives, as the eight bytes every handle is.
+    handles: std.StringHashMapUnmanaged(u64) = .empty,
+    /// Fonts the same, by the path and which font of the file.
     fonts: std.StringHashMapUnmanaged(FontHandle) = .empty,
-    scripts: std.StringHashMapUnmanaged(ScriptHandle) = .empty,
+    /// The entity being filled in, for a value kept beside its component:
+    /// a map's tiles.
+    entity: Entity = .none,
+    /// The chunks the maps' cells make, kept until the whole scene is read:
+    /// making an entity now would move the rows the values are being
+    /// written into.
+    chunks: ?*std.ArrayList(PendingChunk) = null,
+    /// What the scene's roots hang from: see `LoadOptions.parent`.
+    parent: Entity = .none,
+    /// The instance being read, when it is one: see `LoadOptions.instance`.
+    instance: ?Uuid = null,
+    /// Whether the entity being read is an instance, whose components are
+    /// its scene's and whose fields here say only what differs: a field
+    /// left out keeps what the scene gave it.
+    overriding: bool = false,
     /// Files found by their UUIDs somewhere other than the scene says.
     moved: usize = 0,
     /// See `Loaded`.
@@ -1039,7 +1494,7 @@ const Loading = struct {
     /// The first pass: an entity for every object in `entities`, with every
     /// registered component it has, each entity's UUID, and the tables of
     /// files.
-    fn shape(l: *Loading, spawned: *std.ArrayList(Entity), told: *Told) anyerror!void {
+    fn shape(l: *Loading, entities: *std.ArrayList(Entity), made: *std.ArrayList(Entity), told: *Told) anyerror!void {
         const app = l.app;
         var versioned = false;
         var listed = false;
@@ -1060,22 +1515,37 @@ const Loading = struct {
                 listed = true;
                 try l.open(.array_begin, "the list of entities");
                 while (try l.reader.peek() != .array_end) {
-                    const mark = l.path.push("entities/{d}", .{spawned.items.len});
+                    const place = entities.items.len;
+                    const mark = l.path.push("entities/{d}", .{place});
                     try l.open(.object_begin, "an entity, which is an object of its components");
                     var ids: [ecs.component.max_components]ComponentId = undefined;
                     var count: usize = 0;
                     var own: ?Uuid = null;
+                    var parented = false;
+                    var instance: ?[]const u8 = null;
                     while (try l.key()) |member| {
                         if (std.mem.eql(u8, member, "uuid")) {
                             const inner = l.path.push("uuid", .{});
                             const uuid = try l.readUuid();
                             if (told.places.contains(uuid)) return l.fail(error.DuplicateUuid, "another entity in this scene has this UUID already", .{});
-                            try told.places.put(l.arena, uuid, spawned.items.len);
+                            try told.places.put(l.arena, uuid, place);
                             own = uuid;
                             l.path.pop(inner);
                             continue;
                         }
-                        if (!std.mem.eql(u8, member, "name")) {
+                        if (std.mem.eql(u8, member, "instance")) {
+                            const inner = l.path.push("instance", .{});
+                            const token = try l.next();
+                            instance = switch (token) {
+                                .string => |text| try l.arena.dupe(u8, text),
+                                else => return l.wrong("the scene it is an instance of, which is a path", token),
+                            };
+                            l.path.pop(inner);
+                            continue;
+                        }
+                        if (std.mem.eql(u8, member, "parent")) {
+                            parented = true;
+                        } else if (!std.mem.eql(u8, member, "name") and !std.mem.eql(u8, member, "groups") and !std.mem.eql(u8, member, "removed") and !std.mem.eql(u8, member, "exports")) {
                             if (app.scene_components.find(member)) |entry| {
                                 if (count == ids.len) return error.TooManyComponents;
                                 ids[count] = try entry.idIn(&app.world);
@@ -1084,9 +1554,28 @@ const Loading = struct {
                         }
                         try l.reader.skipValue();
                     }
-                    try spawned.ensureUnusedCapacity(app.gpa, 1);
+                    if (!parented) {
+                        if (told.root_place == null) told.root_place = place;
+                        told.roots += 1;
+                    }
                     try told.uuids.append(l.arena, own);
-                    spawned.appendAssumeCapacity(try app.world.spawnRaw(distinct(ids[0..count])));
+                    try told.parented.append(l.arena, parented);
+                    try entities.ensureUnusedCapacity(app.gpa, 1);
+                    if (instance) |path| {
+                        // Made from its own scene once the list is read.
+                        try told.nested.put(l.arena, place, path);
+                        entities.appendAssumeCapacity(.none);
+                    } else {
+                        if (parented or !l.parent.isNone()) {
+                            if (count == ids.len) return error.TooManyComponents;
+                            ids[count] = try app.world.idOf(components.Parent);
+                            count += 1;
+                        }
+                        try made.ensureUnusedCapacity(app.gpa, 1);
+                        const e = try app.world.spawnRaw(distinct(ids[0..count]));
+                        made.appendAssumeCapacity(e);
+                        entities.appendAssumeCapacity(e);
+                    }
                     l.path.pop(mark);
                 }
                 _ = try l.next();
@@ -1161,22 +1650,66 @@ const Loading = struct {
             _ = try l.next();
             for (l.entities, 0..) |e, place| {
                 const entity_mark = l.path.push("entities/{d}", .{place});
+                l.entity = e;
+                l.overriding = l.told.?.nested.contains(place);
+                defer l.overriding = false;
+                // Given once the whole entity is read, when its parent is,
+                // since a name is its own among its parent's children.
+                var given: ?[]const u8 = null;
                 _ = try l.next();
                 while (try l.key()) |member| {
-                    if (std.mem.eql(u8, member, "uuid")) {
+                    if (std.mem.eql(u8, member, "uuid") or std.mem.eql(u8, member, "instance")) {
                         try l.reader.skipValue();
+                        continue;
+                    }
+                    if (std.mem.eql(u8, member, "removed")) {
+                        const mark = l.path.push("removed", .{});
+                        try l.open(.array_begin, "the components its scene gives it that it has not, which is a list of names");
+                        while (true) {
+                            const token = try l.next();
+                            switch (token) {
+                                .array_end => break,
+                                .string => |component| app.removeComponentNamed(e, component) catch {},
+                                else => return l.wrong("the name of a component", token),
+                            }
+                        }
+                        l.path.pop(mark);
                         continue;
                     }
                     if (std.mem.eql(u8, member, "name")) {
                         const token = try l.next();
-                        const text = switch (token) {
-                            .string => |text| text,
+                        given = switch (token) {
+                            .string => |text| try l.arena.dupe(u8, text),
                             else => return l.wrong("an entity's name", token),
                         };
-                        app.setName(e, text) catch |err| return switch (err) {
-                            error.NameTaken => l.fail(err, "\"{s}\" is the name of an entity already in the world", .{text}),
-                            else => err,
-                        };
+                        continue;
+                    }
+                    if (std.mem.eql(u8, member, "parent")) {
+                        const mark = l.path.push("parent", .{});
+                        var parent: Entity = .none;
+                        try readValue(l, Entity, &parent);
+                        try hang(app, e, parent);
+                        l.path.pop(mark);
+                        continue;
+                    }
+                    if (std.mem.eql(u8, member, "exports")) {
+                        const mark = l.path.push("exports", .{});
+                        try l.readExports(e);
+                        l.path.pop(mark);
+                        continue;
+                    }
+                    if (std.mem.eql(u8, member, "groups")) {
+                        const mark = l.path.push("groups", .{});
+                        try l.open(.array_begin, "the groups an entity is in, which is a list of names");
+                        while (true) {
+                            const token = try l.next();
+                            switch (token) {
+                                .array_end => break,
+                                .string => |group| try app.addToGroup(e, group),
+                                else => return l.wrong("the name of a group", token),
+                            }
+                        }
+                        l.path.pop(mark);
                         continue;
                     }
                     const entry = app.scene_components.find(member) orelse {
@@ -1184,10 +1717,18 @@ const Loading = struct {
                         continue;
                     };
                     const mark = l.path.push("{s}", .{entry.name});
+                    // An instance given a component its scene does not.
+                    if (l.overriding and app.componentOf(e, entry.name) == null) _ = try app.addComponentNamed(e, entry.name);
                     const cell = app.world.cellOf(e, entry.findIdIn(&app.world).?).?;
                     try entry.read(l, cell);
                     l.path.pop(mark);
                 }
+                // A root of the scene hangs from what it was read under.
+                if (!l.told.?.parented.items[place] and !l.parent.isNone()) try hang(app, e, l.parent);
+                // Another of its family with the name already - the same
+                // scene read twice beside itself - gives this one the first
+                // free one after it.
+                if (given) |text| try app.setFreeName(e, text);
                 l.path.pop(entity_mark);
             }
             // Past the list's end, for what comes after it: the connections.
@@ -1197,6 +1738,20 @@ const Loading = struct {
 
     /// A component nothing here is registered as, kept with its entity as
     /// the scene has it. See `Unknown`.
+    /// `exports`: what the entity's script's fields are given, an object of
+    /// them. See `exports.zig`.
+    fn readExports(l: *Loading, e: Entity) anyerror!void {
+        const gpa = l.app.gpa;
+        var text: std.Io.Writer.Allocating = .init(gpa);
+        defer text.deinit();
+        var w: json.Writer = .init(&text.writer, .{ .non_finite = .literal });
+        try copyValue(l.reader, &w);
+        var doc = try json.parse(gpa, text.written(), .{ .syntax = .json5 });
+        defer doc.deinit();
+        if (doc.root.asObject() == null) return l.fail(error.WrongType, "what a script's fields are given is an object, by field", .{});
+        try l.app.exports.setAll(gpa, e, doc.root);
+    }
+
     fn keepUnknown(l: *Loading, e: Entity, name: []const u8) anyerror!void {
         const gpa = l.app.gpa;
         // The reader's, until its next token.
@@ -1297,7 +1852,18 @@ const Loading = struct {
             else => |other| return l.wrong("an entity's UUID", other),
         };
         const uuid = Uuid.parse(text) catch return l.fail(error.WrongType, "an entity is named by its UUID, and \"{s}\" is not one", .{text});
+        return l.entityNamed(uuid);
+    }
+
+    /// The entity a UUID in the file names: one of the scene's own by the
+    /// file's name for it, else one inside an instance the scene holds -
+    /// named, as the file names it, after the instance - else one the world
+    /// had already.
+    fn entityNamed(l: *Loading, uuid: Uuid) ?Entity {
         if (l.told.?.places.get(uuid)) |place| return l.entities[place];
+        if (l.instance) |instance| {
+            if (l.app.findUuid(Uuid.fromName(instance, &uuid.bytes))) |inside| return inside;
+        }
         return l.app.findUuid(uuid);
     }
 
@@ -1383,25 +1949,23 @@ const Loading = struct {
         return .{ try l.arena.dupe(u8, now), info };
     }
 
-    fn texture(l: *Loading, path: []const u8) anyerror!TextureHandle {
-        if (l.textures.get(path)) |known| return known;
+    /// A file the scene names, read once however many things name it. A
+    /// texture is sampled as `assets` says. A script that does not compile,
+    /// a tile set or a theme that does not read, is still loaded, and the
+    /// scene opens with it: what uses it makes nothing, draws white squares
+    /// or draws with no theme, until a reload reads it.
+    fn asset(l: *Loading, comptime H: type, path: []const u8) anyerror!H {
+        const kind = comptime AssetKind.of(H).?;
+        const seen = try std.fmt.allocPrint(l.arena, "{t}\x00{s}", .{ kind, path });
+        if (l.handles.get(seen)) |known| return @bitCast(known);
         const where, const info = try l.file(path);
-        const assets = &l.app.assets;
-        const handle = assets.findTexture(where) orelse assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap }) catch |err|
-            return l.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err });
-        try l.textures.put(l.arena, try l.arena.dupe(u8, path), handle);
-        return handle;
-    }
-
-    /// A script the scene names. One that does not compile is still loaded,
-    /// and the scene opens with it: its `Script` makes nothing until a
-    /// reload compiles.
-    fn script(l: *Loading, path: []const u8) anyerror!ScriptHandle {
-        if (l.scripts.get(path)) |known| return known;
-        const where, _ = try l.file(path);
-        const handle = l.app.loadScript(where) catch |err|
-            return l.fail(err, "cannot read the script \"{s}\": {t}", .{ where, err });
-        try l.scripts.put(l.arena, try l.arena.dupe(u8, path), handle);
+        const handle: H = switch (kind) {
+            .texture => l.app.assets.findTexture(where) orelse l.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap }) catch |err|
+                return l.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err }),
+            else => l.app.loadAsset(H, where) catch |err|
+                return l.fail(err, "cannot read the {s} \"{s}\": {t}", .{ kind.label(), where, err }),
+        };
+        try l.handles.put(l.arena, seen, @bitCast(handle));
         return handle;
     }
 
@@ -1458,42 +2022,77 @@ fn distinct(ids: []ComponentId) []const ComponentId {
 }
 
 /// A component, from an object whose missing fields take their defaults.
+/// Give an entity its parent, whether it was made with room for one or not:
+/// an instance's root was made by its own scene, as a root.
+fn hang(app: *App, e: Entity, parent: Entity) !void {
+    if (app.world.get(e, components.Parent)) |held| {
+        held.* = .of(parent);
+    } else try app.world.add(e, components.Parent.of(parent));
+}
+
 fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
     if (@typeInfo(T) != .@"struct") return readValue(l, T, out);
     try l.open(.object_begin, "an object of the component's fields");
     const fields = @typeInfo(T).@"struct".fields;
     var seen: std.StaticBitSet(fields.len) = .initEmpty();
-    if (T == Text2D) {
-        out.bytes = @splat(0);
-        out.len = 0;
+    // An instance's field left out keeps what its scene gave it.
+    if (!l.overriding) {
+        // Words left out are none.
+        inline for (comptime texts_mod.declared(T)) |text| {
+            if (!l.entity.isNone()) try l.app.setText(l.entity, T, text.name, "");
+        }
+        if (T == Control) {
+            out.variation = @splat(0);
+            out.variation_len = 0;
+        }
+        // Numbers left out are the file's.
+        if (T == Material and !l.entity.isNone()) l.app.shader_params.clearOf(l.app.gpa, l.entity);
     }
     while (try l.key()) |name| {
-        if (T == Text2D and std.mem.eql(u8, name, "text")) {
-            try readText(l, out);
+        var said = false;
+        inline for (comptime texts_mod.declared(T)) |text| {
+            if (!said and std.mem.eql(u8, name, text.name)) {
+                said = true;
+                try readText(l, T, text.name);
+            }
+        }
+        if (said) continue;
+        if (T == TileMap and std.mem.eql(u8, name, "cells")) {
+            const mark = l.path.push("cells", .{});
+            try readCells(l);
+            l.path.pop(mark);
+            continue;
+        }
+        if (T == Control and std.mem.eql(u8, name, "type_variation")) {
+            try readVariation(l, out);
+            continue;
+        }
+        if (T == Material and std.mem.eql(u8, name, "params")) {
+            const mark = l.path.push("params", .{});
+            try readParams(l);
+            l.path.pop(mark);
             continue;
         }
         var matched = false;
         inline for (fields, 0..) |field, i| {
-            const hidden = T == Text2D and comptime isTextBuffer(field.name);
+            const hidden = comptime T == Control and isVariationBuffer(field.name);
             if (!hidden and !matched and std.mem.eql(u8, name, field.name)) {
                 matched = true;
                 seen.set(i);
                 const mark = l.path.push("{s}", .{field.name});
-                if (comptime T == Script and std.mem.eql(u8, field.name, "struct_name")) {
-                    try readStructName(l, out);
-                } else try readValue(l, field.type, &@field(out.*, field.name));
+                try readValue(l, field.type, &@field(out.*, field.name));
                 l.path.pop(mark);
             }
         }
         // A field the component no longer has: the scene is older than it.
         if (!matched) try l.reader.skipValue();
     }
-    try defaultTheRest(l, T, out, seen);
+    if (!l.overriding) try defaultTheRest(l, T, out, seen);
 }
 
 fn defaultTheRest(l: *Loading, comptime T: type, out: *T, seen: anytype) anyerror!void {
     inline for (@typeInfo(T).@"struct".fields, 0..) |field, i| {
-        const hidden = T == Text2D and comptime isTextBuffer(field.name);
+        const hidden = comptime T == Control and isVariationBuffer(field.name);
         if (!hidden and !seen.isSet(i)) {
             @field(out.*, field.name) = field.defaultValue() orelse
                 return l.fail(error.MissingField, "{s} has no {s}, and it has no default to take", .{ nameOf(T), field.name });
@@ -1501,26 +2100,118 @@ fn defaultTheRest(l: *Loading, comptime T: type, out: *T, seen: anytype) anyerro
     }
 }
 
-/// A `Script`'s struct name, written as the text it is.
-fn readStructName(l: *Loading, out: *Script) anyerror!void {
+/// A name kept in a component, written as the text it is.
+fn readName(l: *Loading, out: []u8) anyerror!void {
     const token = try l.next();
     const text = switch (token) {
         .string => |text| text,
-        else => return l.wrong("the name of a struct in the script", token),
+        else => return l.wrong("a name, as text", token),
     };
-    if (text.len > out.struct_name.len) return l.fail(error.OutOfRange, "a struct name is {d} bytes, and a Script holds {d}", .{ text.len, out.struct_name.len });
-    out.struct_name = @splat(0);
-    @memcpy(out.struct_name[0..text.len], text);
+    if (text.len > out.len) return l.fail(error.OutOfRange, "the name is {d} bytes, and {d} are kept", .{ text.len, out.len });
+    @memset(out, 0);
+    @memcpy(out[0..text.len], text);
 }
 
-fn readText(l: *Loading, out: *Text2D) anyerror!void {
+/// A material's numbers, by field: a number, a list of up to sixteen, or a
+/// colour written `"#rrggbb"`.
+fn readParams(l: *Loading) anyerror!void {
+    try l.open(.object_begin, "a material's numbers, which is an object of its shader's fields");
+    while (try l.key()) |name| {
+        var numbers: [16]f32 = undefined;
+        var len: usize = 0;
+        switch (try l.next()) {
+            .number => |n| {
+                numbers[0] = n.asFloat(f32);
+                len = 1;
+            },
+            .string => |text| {
+                const colour = Color.parse(text) orelse
+                    return l.fail(error.WrongType, "{s} is not a colour, which is written #rrggbb or #rrggbbaa", .{text});
+                numbers[0..4].* = .{ colour.r, colour.g, colour.b, colour.a };
+                len = 4;
+            },
+            .array_begin => while (true) {
+                switch (try l.next()) {
+                    .array_end => break,
+                    .number => |n| {
+                        if (len == numbers.len) return l.fail(error.OutOfRange, "{s} is more than sixteen numbers", .{name});
+                        numbers[len] = n.asFloat(f32);
+                        len += 1;
+                    },
+                    else => |other| return l.wrong("a number", other),
+                }
+            },
+            else => |other| return l.wrong("a number, a list of them or a colour", other),
+        }
+        if (!l.entity.isNone()) try l.app.setShaderParam(l.entity, name, numbers[0..len]);
+    }
+}
+
+/// One of a component's words, kept beside it for the entity being read.
+fn readText(l: *Loading, comptime T: type, comptime property: []const u8) anyerror!void {
     const token = try l.next();
     const text = switch (token) {
         .string => |text| text,
-        else => return l.wrong("the words of the text", token),
+        else => return l.wrong("words, as text", token),
     };
-    if (text.len > Text2D.capacity) return l.fail(error.OutOfRange, "this text is {d} bytes, and a Text2D holds {d}", .{ text.len, Text2D.capacity });
-    out.set(text);
+    if (!l.entity.isNone()) try l.app.setText(l.entity, T, property, text);
+}
+
+/// The name a control is drawn as, written as the text it is.
+fn readVariation(l: *Loading, out: *Control) anyerror!void {
+    const token = try l.next();
+    const text = switch (token) {
+        .string => |held| held,
+        else => return l.wrong("the name a control is drawn as", token),
+    };
+    if (text.len > Control.variation_capacity) return l.fail(error.OutOfRange, "this name is {d} bytes, and a Control holds {d}", .{ text.len, Control.variation_capacity });
+    out.setVariation(text);
+}
+
+/// The buffer and the length a `Control` keeps the name it is drawn as in,
+/// written as one string called `type_variation` instead.
+fn isVariationBuffer(comptime name: []const u8) bool {
+    return std.mem.eql(u8, name, "variation") or std.mem.eql(u8, name, "variation_len");
+}
+
+/// One chunk of a map's tiles, read and waiting for the scene to be over.
+const PendingChunk = struct {
+    map: Entity,
+    x: i32,
+    y: i32,
+    cells: [tilemap.tiles_per_chunk]tilemap.Cell,
+};
+
+/// A map's `cells`: a line of base64 under each chunk's place, as
+/// `writeCells` put them. The chunks themselves are made once every value in
+/// the scene has been written, by `read`.
+fn readCells(l: *Loading) anyerror!void {
+    try l.open(.object_begin, "the map's tiles, which is an object of its chunks");
+    while (try l.key()) |name| {
+        const mark = l.path.push("{s}", .{name});
+        const comma = std.mem.indexOfScalar(u8, name, ',') orelse
+            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+        const x = std.fmt.parseInt(i32, name[0..comma], 10) catch
+            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+        const y = std.fmt.parseInt(i32, name[comma + 1 ..], 10) catch
+            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+
+        const token = try l.next();
+        const text = switch (token) {
+            .string => |held| held,
+            else => return l.wrong("a chunk's tiles, which is a line of base64", token),
+        };
+        var pending: PendingChunk = .{ .map = l.entity, .x = x, .y = y, .cells = undefined };
+        const room = std.mem.asBytes(&pending.cells);
+        const size = std.base64.standard.Decoder.calcSizeForSlice(text) catch
+            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
+        if (size != room.len) return l.fail(error.OutOfRange, "a chunk is {d} bytes of tiles, and this is {d}", .{ room.len, size });
+        std.base64.standard.Decoder.decode(room, text) catch
+            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
+
+        if (l.chunks) |waiting| try waiting.append(l.app.gpa, pending);
+        l.path.pop(mark);
+    }
 }
 
 /// A value inside a component. A nested struct may leave fields out too.
@@ -1531,39 +2222,20 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
             .null => .none,
             .string => |text| blk: {
                 const uuid = Uuid.parse(text) catch return l.fail(error.WrongType, "an entity is named by its UUID, and \"{s}\" is not one", .{text});
-                if (l.told.?.places.get(uuid)) |place| break :blk l.entities[place];
-                break :blk l.app.findUuid(uuid) orelse
+                break :blk l.entityNamed(uuid) orelse
                     return l.fail(error.NoSuchEntity, "no entity in this scene or in the world has the UUID {s}", .{text});
             },
             else => return l.wrong("an entity's UUID, or null", token),
         };
         return;
     }
-    if (T == TextureHandle) {
+    if (comptime AssetKind.of(T)) |kind| {
         const token = try l.next();
         out.* = switch (token) {
             .null => .none,
-            .string => |path| try l.texture(path),
-            else => return l.wrong("the file it was read from, or null", token),
-        };
-        return;
-    }
-    if (T == ScriptHandle) {
-        const token = try l.next();
-        out.* = switch (token) {
-            .null => .none,
-            .string => |path| try l.script(path),
-            else => return l.wrong("the file it was read from, or null", token),
-        };
-        return;
-    }
-    if (T == FontHandle) {
-        const token = try l.next();
-        out.* = switch (token) {
-            .null => .none,
-            .string => |path| try l.font(path, 0),
-            .object_begin => try l.fontObject(),
-            else => return l.wrong("the file it was read from, its file and member, or null", token),
+            .string => |path| if (kind == .font) try l.font(path, 0) else try l.asset(T, path),
+            .object_begin => if (kind == .font) try l.fontObject() else return l.wrong("the file it was read from, or null", token),
+            else => return l.wrong(if (kind == .font) "the file it was read from, its file and member, or null" else "the file it was read from, or null", token),
         };
         return;
     }
@@ -1579,7 +2251,7 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
             try readValue(l, info.child, &inner);
             out.* = inner;
         },
-        .array => |info| try readItems(l, info.child, info.len, out),
+        .array => |info| if (info.child == u8) try readName(l, out) else try readItems(l, info.child, info.len, out),
         .vector => |info| {
             var items: [info.len]info.child = undefined;
             try readItems(l, info.child, info.len, &items);
@@ -1703,7 +2375,7 @@ const image = @import("fluxion_image");
 const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
 const Camera2D = components.Camera2D;
-const Animation = components.Animation;
+const AnimatedSprite2D = @import("sprite_frames.zig").AnimatedSprite2D;
 
 /// A game's own component, holding the kinds of thing a component can.
 const Wander = extern struct {
@@ -1736,9 +2408,8 @@ test "a scene reads as what it holds, and leaves out what is the default" {
 
     const camera = try app.world.spawnWith(.{ Transform2D.at(320, 180), Camera2D{} });
     try app.setName(camera, "camera");
-    var label: Text2D = .of("Hi");
-    label.size = 13;
-    const words = try app.world.spawnWith(.{ Transform2D.childOf(camera, 0, -6), label });
+    const words = try app.world.spawnWith(.{ Transform2D.at(0, -6), components.Parent.of(camera), Text2D{ .size = 13 } });
+    try app.setText(words, Text2D, "text", "Hi");
     const wanderer = try app.world.spawnWith(.{Wander{ .dx = 1, .mood = .cross, .leader = camera }});
     for ([_]Entity{ camera, words, wanderer }, fixed_uuids) |e, uuid| try app.setUuid(e, uuid);
 
@@ -1746,7 +2417,7 @@ test "a scene reads as what it holds, and leaves out what is the default" {
     defer testing.allocator.free(text);
     try testing.expectEqualStrings(
         \\{
-        \\  "fluxion_scene": 2,
+        \\  "fluxion_scene": 3,
         \\  "entities": [
         \\    {
         \\      "uuid": "00000000-0000-4000-8000-000000000001",
@@ -1756,10 +2427,8 @@ test "a scene reads as what it holds, and leaves out what is the default" {
         \\    },
         \\    {
         \\      "uuid": "00000000-0000-4000-8000-000000000002",
-        \\      "Transform2D": {
-        \\        "y": -6.0,
-        \\        "parent": "00000000-0000-4000-8000-000000000001"
-        \\      },
+        \\      "parent": "00000000-0000-4000-8000-000000000001",
+        \\      "Transform2D": { "y": -6.0 },
         \\      "Text2D": { "text": "Hi", "size": 13.0 }
         \\    },
         \\    {
@@ -1773,6 +2442,77 @@ test "a scene reads as what it holds, and leaves out what is the default" {
         \\  ]
         \\}
     , text);
+}
+
+test "a UI label keeps its words through a scene round trip, however long" {
+    const source = try headless();
+    defer source.destroy();
+    const words = try source.world.spawnWith(.{Label{ .outline_width = 2 }});
+    try source.setName(words, "words");
+    try source.setText(words, Label, "text", "Hello UI");
+    const field = try source.world.spawnWith(.{LineEdit{}});
+    try source.setName(field, "field");
+    const long = "Player " ** 100;
+    try source.setText(field, LineEdit, "text", long);
+    try source.setText(field, LineEdit, "placeholder_text", "Name");
+
+    const text = try write(source, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "\"text\": \"Hello UI\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"placeholder_text\": \"Name\"") != null);
+
+    const copy = try headless();
+    defer copy.destroy();
+    _ = try read(copy, text, .{});
+    const label = copy.find("words").?;
+    try testing.expectEqualStrings("Hello UI", copy.textOf(label, Label, "text"));
+    try testing.expectEqual(@as(u16, 2), copy.world.get(label, Label).?.outline_width);
+    const line = copy.find("field").?;
+    try testing.expectEqualStrings(long, copy.textOf(line, LineEdit, "text"));
+    try testing.expectEqualStrings("Name", copy.textOf(line, LineEdit, "placeholder_text"));
+}
+
+test "a map writes its tiles with itself, and its chunks are not in the scene" {
+    const source = try headless();
+    defer source.destroy();
+    const map = try source.world.spawnWith(.{ Transform2D{}, TileMap{} });
+    try source.setName(map, "level");
+    _ = try source.setTile(map, -2, 18, tilemap.Cell.at(1, 7, 3).with(tilemap.Cell.flip_h, true));
+    _ = try source.setTile(map, 0, 0, .at(0, 1, 1));
+
+    const text = try write(source, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    // Two chunks of tiles, and no entity of their own for either.
+    try testing.expect(std.mem.indexOf(u8, text, "\"cells\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"TileChunk\"") == null);
+    // A kilobyte of tiles is a line, not a thousand numbers.
+    try testing.expect(text.len < 4000);
+
+    const copy = try headless();
+    defer copy.destroy();
+    _ = try read(copy, text, .{});
+
+    const loaded = copy.find("level").?;
+    const cell = copy.tileAt(loaded, -2, 18);
+    try testing.expectEqual(@as(u8, 1), cell.source);
+    try testing.expectEqual(@as(u8, 7), cell.x);
+    try testing.expectEqual(@as(u8, 3), cell.y);
+    try testing.expect(cell.has(tilemap.Cell.flip_h));
+    try testing.expect(copy.tileChunkAt(loaded, -1, 1) != null);
+    try testing.expectEqual(@as(u8, 1), copy.tileAt(loaded, 0, 0).x);
+    try testing.expect(copy.tileAt(loaded, 5, 5).isEmpty());
+}
+
+test "a map keeps the tile set it was saved with" {
+    const source = try headless();
+    defer source.destroy();
+    const set = try source.addTileSet("res://terrain.tileset", "{ \"fluxion_tileset\": 1 }");
+    const map = try source.world.spawnWith(.{ Transform2D{}, TileMap{ .tile_set = set } });
+    try source.setName(map, "level");
+
+    const text = try write(source, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "res://terrain.tileset") != null);
 }
 
 test "every entity written is given a UUID, and keeps it" {
@@ -1796,14 +2536,14 @@ test "one entity is written as a scene writes it, or with every field for an ins
     defer app.destroy();
     const camera = try app.world.spawnWith(.{ Transform2D.at(4, 8), Camera2D{} });
     try app.setName(camera, "camera");
-    const child = try app.world.spawnWith(.{Transform2D.childOf(camera, 0, 2)});
+    const child = try app.world.spawnWith(.{ Transform2D.at(0, 2), components.Parent.of(camera) });
     try app.setUuid(camera, fixed_uuids[0]);
     try app.setUuid(child, fixed_uuids[1]);
 
     const brief = try json.stringify(testing.allocator, EntityJson{ .app = app, .entity = child }, .{});
     defer testing.allocator.free(brief);
     try testing.expectEqualStrings(
-        "{\"uuid\":\"00000000-0000-4000-8000-000000000002\",\"Transform2D\":{\"y\":2.0,\"parent\":\"00000000-0000-4000-8000-000000000001\"}}",
+        "{\"uuid\":\"00000000-0000-4000-8000-000000000002\",\"parent\":\"00000000-0000-4000-8000-000000000001\",\"Transform2D\":{\"y\":2.0}}",
         brief,
     );
 
@@ -1835,16 +2575,22 @@ test "a scene comes back as it went, from JSON and from CBOR" {
     const hero = try source.assets.loadTexture(png, .{ .filter = .linear });
     const typeface = source.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 }) catch FontHandle.none;
 
+    const strip = try source.addGridFrames("hero.frames", hero, 4, 2, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .speed = 8 }});
+    var walking: AnimatedSprite2D = .autoplaying(strip, "walk");
+    walking.frame = 2;
+    walking.flip_h = true;
+    // What the engine keeps while it plays is not saved.
+    walking.playing = true;
+    walking.frame_count = 4;
     const body = try source.world.spawnWith(.{
         Transform2D.at(10, 20).interpolated(),
         Sprite{ .texture = hero, .tint = .rgba(0.5, 0.25, 1, 0.75), .region = .cell(3, 4, 2), .blend = .additive },
-        Animation.strip(4, 8),
+        walking,
     });
     try source.setName(body, "hero");
-    _ = try source.world.spawnWith(.{ Transform2D.childOf(body, -7, -4), Sprite.solid(.white, 9, 9) });
-    var label: Text2D = .of("Zoë ✓");
-    label.font = typeface;
-    _ = try source.world.spawnWith(.{ Transform2D{ .parent = body, .inherit_rotation = false }, label });
+    _ = try source.world.spawnWith(.{ Transform2D.at(-7, -4), components.Parent.of(body), Sprite.solid(.white, 9, 9) });
+    const label = try source.world.spawnWith(.{ Transform2D{ .inherit_rotation = false }, components.Parent.of(body), Text2D{ .font = typeface } });
+    try source.setText(label, Text2D, "text", "Zoë ✓");
     _ = try source.world.spawnWith(.{Wander{
         .dx = 0.1,
         .dy = std.math.inf(f32),
@@ -1861,6 +2607,9 @@ test "a scene comes back as it went, from JSON and from CBOR" {
     const expected = try write(source, testing.allocator, .{});
     defer testing.allocator.free(expected);
     try testing.expect(std.mem.indexOf(u8, expected, "\"filter\": \"linear\"") != null);
+    try testing.expect(std.mem.indexOf(u8, expected, "\"autoplay\": \"walk\"") != null);
+    try testing.expect(std.mem.indexOf(u8, expected, "playing") == null);
+    try testing.expect(std.mem.indexOf(u8, expected, "frame_count") == null);
     try testing.expect(std.mem.indexOf(u8, expected, "\"uid\": \"uid://") != null);
 
     for ([_]json.Format{ .json, .cbor }) |format| {
@@ -1871,7 +2620,9 @@ test "a scene comes back as it went, from JSON and from CBOR" {
         const copy = try headless();
         defer copy.destroy();
         try copy.registerComponents(.{Wander});
-        const loaded = try copy.loadScene(path, .{});
+        // Made in code, as the source's were: no file to read them from.
+        _ = try copy.addGridFrames("hero.frames", .none, 4, 2, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .speed = 8 }});
+        const loaded = try copy.readScene(path, .{});
         try testing.expectEqual(@as(usize, 4), loaded.entities);
         try testing.expectEqual(@as(usize, 0), loaded.components_unknown);
 
@@ -1944,7 +2695,7 @@ test "a project's file is written by its res:// path and its UUID, and found by 
 
     const copy = try game.app();
     defer copy.destroy();
-    const loaded = try copy.loadScene("res://levels/meadow.json", .{});
+    const loaded = try copy.readScene("res://levels/meadow.json", .{});
     try testing.expectEqual(@as(usize, 1), loaded.moved);
     const sheet = copy.single(Sprite).?.texture;
     try testing.expectEqualStrings("res://art/people/ada.png", copy.assets.textureSource(sheet).?);
@@ -1957,15 +2708,15 @@ test "a version 1 scene is refused, and says so, rather than read another way" {
     try testing.expectError(error.UnsupportedVersion, read(app,
         \\{ "fluxion_scene": 1, "entities": [
         \\  { "name": "tank" },
-        \\  { "Transform2D": { "parent": 0 } }
+        \\  { "parent": 0, "Transform2D": {} }
         \\] }
     , .{ .diagnostics = &diagnostics }));
-    try testing.expectEqualStrings("this scene is version 1, an older one this engine no longer reads: it reads version 2", diagnostics.message());
+    try testing.expectEqualStrings("this scene is version 1, an older one this engine no longer reads: it reads version 3", diagnostics.message());
     try testing.expectEqual(@as(usize, 0), app.world.count());
 
     // Nor is an entity named by its place in the list any more.
     try testing.expectError(error.WrongType, read(app,
-        \\{ "fluxion_scene": 2, "entities": [{ "name": "tank" }, { "Transform2D": { "parent": 0 } }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "name": "tank" }, { "parent": 0, "Transform2D": {} }] }
     , .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("expected an entity's UUID, or null, found the number 0", diagnostics.message());
     try testing.expectEqual(@as(usize, 0), app.world.count());
@@ -1975,9 +2726,9 @@ test "a scene loaded twice gives the second copy UUIDs of its own, and its refer
     const app = try headless();
     defer app.destroy();
     const text =
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "uuid": "11111111-1111-4111-8111-111111111111", "name": "tank", "Transform2D": { "x": 1 } },
-        \\  { "uuid": "22222222-2222-4222-8222-222222222222", "Transform2D": { "parent": "11111111-1111-4111-8111-111111111111" } }
+        \\  { "uuid": "22222222-2222-4222-8222-222222222222", "parent": "11111111-1111-4111-8111-111111111111", "Transform2D": {} }
         \\] }
     ;
     const tank_uuid: Uuid = .parseComptime("11111111-1111-4111-8111-111111111111");
@@ -1990,21 +2741,20 @@ test "a scene loaded twice gives the second copy UUIDs of its own, and its refer
     try testing.expectEqual(@as(usize, 0), (try read(app, text, .{})).reassigned);
     const again = app.findUuid(tank_uuid).?;
 
-    // The same scene beside it: new UUIDs, and a child of its own tank.
-    var copy = text.*;
-    std.mem.replaceScalar(u8, &copy, 'k', 'q');
-    try testing.expectEqual(@as(usize, 2), (try read(app, &copy, .{})).reassigned);
+    // The same scene beside it: new UUIDs, a child of its own tank, and the
+    // next free name among the roots.
+    try testing.expectEqual(@as(usize, 2), (try read(app, text, .{})).reassigned);
     try testing.expect(app.findUuid(tank_uuid).?.eql(again));
-    const second_tank = app.find("tanq").?;
+    try testing.expect(app.find("tank").?.eql(again));
+    const second_tank = app.find("tank 2").?;
     try testing.expect(!app.uuidOf(second_tank).?.eql(tank_uuid));
 
     var parents: [2]Entity = undefined;
     var count: usize = 0;
-    var it = try ecs.Query(.{Transform2D}).over(&app.world);
+    var it = try ecs.Query(.{components.Parent}).over(&app.world);
     while (it.next()) |chunk| {
-        for (chunk.slice(Transform2D)) |place| {
-            if (place.parent.isNone()) continue;
-            parents[count] = place.parent;
+        for (chunk.slice(components.Parent)) |held| {
+            parents[count] = held.entity;
             count += 1;
         }
     }
@@ -2019,11 +2769,40 @@ test "an entity another scene brought is found by its UUID" {
     const door = try app.world.spawnWith(.{Transform2D.at(3, 4)});
     try app.setUuid(door, fixed_uuids[2]);
     _ = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [
-        \\  { "name": "handle", "Transform2D": { "parent": "00000000-0000-4000-8000-000000000003" } }
+        \\{ "fluxion_scene": 3, "entities": [
+        \\  { "name": "handle", "parent": "00000000-0000-4000-8000-000000000003", "Transform2D": {} }
         \\] }
     , .{});
-    try testing.expect(app.world.get(app.find("handle").?, Transform2D).?.parent.eql(door));
+    try testing.expect(app.parentOf(app.find("handle").?).eql(door));
+}
+
+test "parents, names and groups go through a scene and back" {
+    const app = try headless();
+    defer app.destroy();
+    const tank = try app.world.spawnWith(.{Transform2D.at(1, 2)});
+    try app.setName(tank, "tank");
+    try app.addToGroup(tank, "vehicles");
+    const turret = try app.world.spawnWith(.{ Transform2D.at(0, -6), components.Parent.of(tank) });
+    try app.setName(turret, "turret");
+    try app.addToGroup(turret, "guns");
+    try app.addToGroup(turret, "vehicles");
+    // A timer hangs in the tree with no transform of its own.
+    const reload = try app.world.spawnWith(.{ @import("timer.zig").Timer{}, components.Parent.of(turret) });
+    try app.setName(reload, "reload");
+
+    const saved = try write(app, testing.allocator, .{});
+    defer testing.allocator.free(saved);
+    app.clearWorld();
+    _ = try read(app, saved, .{});
+
+    const back = app.find("tank").?;
+    try testing.expect(app.findPath(back, "turret/reload") != null);
+    const gun = app.findPath(back, "turret").?;
+    try testing.expect(app.parentOf(gun).eql(back));
+    try testing.expect(app.isInGroup(gun, "guns"));
+    try testing.expect(app.isInGroup(gun, "vehicles"));
+    try testing.expect(app.isInGroup(back, "vehicles"));
+    try testing.expect(!app.isInGroup(back, "guns"));
 }
 
 test "a UUID given twice, or naming nothing, is a mistake that says where it is" {
@@ -2032,7 +2811,7 @@ test "a UUID given twice, or naming nothing, is a mistake that says where it is"
     var diagnostics: json.Diagnostics = .{};
 
     try testing.expectError(error.DuplicateUuid, read(app,
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "uuid": "11111111-1111-4111-8111-111111111111" },
         \\  { "uuid": "11111111-1111-4111-8111-111111111111" }
         \\] }
@@ -2041,15 +2820,15 @@ test "a UUID given twice, or naming nothing, is a mistake that says where it is"
     try testing.expectEqualStrings("/entities/1/uuid", diagnostics.path());
 
     try testing.expectError(error.NoSuchEntity, read(app,
-        \\{ "fluxion_scene": 2, "entities": [
-        \\  { "Transform2D": { "parent": "44444444-4444-4444-8444-444444444444" } }
+        \\{ "fluxion_scene": 3, "entities": [
+        \\  { "parent": "44444444-4444-4444-8444-444444444444", "Transform2D": {} }
         \\] }
     , .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("no entity in this scene or in the world has the UUID 44444444-4444-4444-8444-444444444444", diagnostics.message());
-    try testing.expectEqualStrings("/entities/0/Transform2D/parent", diagnostics.path());
+    try testing.expectEqualStrings("/entities/0/parent", diagnostics.path());
 
     try testing.expectError(error.WrongType, read(app,
-        \\{ "fluxion_scene": 2, "entities": [{ "uuid": "tank" }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "uuid": "tank" }] }
     , .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("\"tank\" is not a UUID", diagnostics.message());
     try testing.expectEqual(@as(usize, 0), app.world.count());
@@ -2059,7 +2838,7 @@ test "a component nothing here knows is kept, a field or a member nothing knows 
     const app = try headless();
     defer app.destroy();
     const loaded = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "name": "odd", "Transform2D": { "x": 5, "wobble": 3 }, "Mystery": { "a": [1, 2] } },
         \\  { "name": "empty" }
         \\], "future": true }
@@ -2075,7 +2854,7 @@ test "a component nothing here knows is kept, a field or a member nothing knows 
     const place = app.single(Transform2D).?;
     try testing.expectEqual(@as(f32, 5), place.x);
     try testing.expectEqual(@as(f32, 1), place.scale_x);
-    try testing.expect(place.parent.isNone());
+    try testing.expect(app.parentOf(app.find("odd").?).isNone());
     try testing.expect(app.find("empty") != null);
 }
 
@@ -2090,7 +2869,7 @@ test "a component nothing here knows is written back as it was read, from JSON a
     const app = try headless();
     defer app.destroy();
     const loaded = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "name": "odd", "Mystery": { "big": 18446744073709551615, "half": -0.5, "odd": NaN,
         \\      "text": "a \"quoted\"\nline ✓", "list": [true, false, null, { "deep": [[]] }] },
         \\    "Transform2D": { "x": 5 }, "Later": 7 },
@@ -2161,17 +2940,17 @@ test "a mistake in a scene says where it is, and leaves the world as it was" {
     _ = try app.world.spawnWith(.{Transform2D.at(1, 1)});
 
     const text =
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "name": "first", "Transform2D": { "x": 5 } },
-        \\  { "Transform2D": { "parent": "77777777-7777-4777-8777-777777777777" } }
+        \\  { "parent": "77777777-7777-4777-8777-777777777777", "Transform2D": {} }
         \\] }
     ;
     var diagnostics: json.Diagnostics = .{};
     try testing.expectError(error.NoSuchEntity, read(app, text, .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("no entity in this scene or in the world has the UUID 77777777-7777-4777-8777-777777777777", diagnostics.message());
-    try testing.expectEqualStrings("/entities/1/Transform2D/parent", diagnostics.path());
+    try testing.expectEqualStrings("/entities/1/parent", diagnostics.path());
     try testing.expectEqual(@as(u32, 3), diagnostics.line);
-    try testing.expectEqual(@as(u32, 32), diagnostics.column);
+    try testing.expectEqual(@as(u32, 15), diagnostics.column);
     try testing.expectEqual(@as(usize, 1), app.world.count());
     try testing.expect(app.find("first") == null);
 
@@ -2180,10 +2959,10 @@ test "a mistake in a scene says where it is, and leaves the world as it was" {
     defer testing.allocator.free(binary);
     try testing.expectError(error.NoSuchEntity, read(app, binary, .{ .diagnostics = &diagnostics }));
     try testing.expect(diagnostics.binary);
-    try testing.expectEqualStrings("/entities/1/Transform2D/parent", diagnostics.path());
+    try testing.expectEqualStrings("/entities/1/parent", diagnostics.path());
 
     try testing.expectError(error.WrongType, read(app,
-        \\{ "fluxion_scene": 2, "entities": [{ "Sprite": { "width": "wide" } }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "Sprite": { "width": "wide" } }] }
     , .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("expected a number, found the string \"wide\"", diagnostics.message());
     try testing.expectEqualStrings("/entities/0/Sprite/width", diagnostics.path());
@@ -2200,11 +2979,12 @@ test "numbers no hand would give load, and the frames after them do not crash" {
     const app = try headless();
     defer app.destroy();
     _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 }) catch {};
+    _ = try app.addGridFrames("strip.frames", .none, 4, 1, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .speed = 4 }});
     const loaded = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [
+        \\{ "fluxion_scene": 3, "entities": [
         \\  { "Transform2D": { "x": NaN, "y": Infinity, "scale_x": 0 }, "Sprite": { "width": NaN },
-        \\    "Animation": { "columns": 0, "rows": 0, "length": 4, "fps": 1e39, "time": NaN } },
-        \\  { "Transform2D": {}, "Sprite": {}, "Animation": { "columns": 0, "rows": 0, "length": 0, "fps": 1e39 } },
+        \\    "AnimatedSprite2D": { "speed_scale": 1e39, "frame_progress": NaN, "sprite_frames": "strip.frames", "autoplay": "walk" } },
+        \\  { "Transform2D": {}, "Sprite": {}, "AnimatedSprite2D": { "speed_scale": -1e39, "frame_progress": Infinity, "frame": -7, "sprite_frames": "strip.frames", "autoplay": "walk" } },
         \\  { "Transform2D": { "x": 1 }, "Camera2D": { "zoom": 0, "fit_width": NaN, "fit_height": Infinity } },
         \\  { "Transform2D": { "rotation": NaN }, "RigidBody2D": { "velocity": { "x": NaN, "y": 1 } },
         \\    "Collider2D": { "shape": "circle", "radius": -1 } },
@@ -2225,19 +3005,15 @@ test "numbers no hand would give load, and the frames after them do not crash" {
     // Words that are not UTF-8 never reach a label: a lone surrogate written
     // as an escape is read as U+FFFD, and a byte no UTF-8 has is a mistake.
     _ = try read(app,
-        \\{ "fluxion_scene": 2, "entities": [{ "name": "surrogate", "Transform2D": {}, "Text2D": { "text": "a\uD800b" } }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "name": "surrogate", "Transform2D": {}, "Text2D": { "text": "a\uD800b" } }] }
     , .{});
-    try testing.expectEqualStrings("a\u{FFFD}b", app.world.get(app.find("surrogate").?, Text2D).?.slice());
-    try testing.expectError(error.SyntaxError, read(app, "{ \"fluxion_scene\": 2, \"entities\": [{ \"Text2D\": { \"text\": \"a\xffb\" } }] }", .{}));
+    try testing.expectEqualStrings("a\u{FFFD}b", app.textOf(app.find("surrogate").?, Text2D, "text"));
+    try testing.expectError(error.SyntaxError, read(app, "{ \"fluxion_scene\": 3, \"entities\": [{ \"Text2D\": { \"text\": \"a\xffb\" } }] }", .{}));
 
-    // And a label's bytes written by hand, past UTF-8 and past its buffer,
-    // are neither drawn nor saved as they are.
-    var broken: Text2D = .of("ok");
-    broken.bytes[0] = 0xFF;
-    _ = try app.world.spawnWith(.{ Transform2D{}, broken });
-    var overlong: Text2D = .of("ok");
-    overlong.len = 200;
-    _ = try app.world.spawnWith(.{ Transform2D{}, overlong });
+    // And a label's words set from code that are not UTF-8 are not drawn,
+    // and are saved without falling over.
+    const broken = try app.world.spawnWith(.{ Transform2D{}, Text2D{} });
+    try app.setText(broken, Text2D, "text", &.{ 0xFF, 'o', 'k' });
     const saved = try write(app, testing.allocator, .{});
     testing.allocator.free(saved);
 
@@ -2257,8 +3033,11 @@ test "a file that is not a scene, or a newer one, is refused" {
     try testing.expectError(error.NotAScene, read(app, "{ \"entities\": [] }", .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("this is not a scene: it has no \"fluxion_scene\" version", diagnostics.message());
 
-    try testing.expectError(error.UnsupportedVersion, read(app, "{ \"fluxion_scene\": 3, \"entities\": [] }", .{ .diagnostics = &diagnostics }));
-    try testing.expectEqualStrings("this scene is version 3, newer than this engine, which reads version 2", diagnostics.message());
+    try testing.expectError(error.UnsupportedVersion, read(app, "{ \"fluxion_scene\": 4, \"entities\": [] }", .{ .diagnostics = &diagnostics }));
+    try testing.expectEqualStrings("this scene is version 4, newer than this engine, which reads version 3", diagnostics.message());
+
+    try testing.expectError(error.UnsupportedVersion, read(app, "{ \"fluxion_scene\": 2, \"entities\": [] }", .{ .diagnostics = &diagnostics }));
+    try testing.expectEqualStrings("this scene is version 2, an older one this engine no longer reads: it reads version 3", diagnostics.message());
 
     try testing.expectError(error.WrongType, read(app, "[1, 2]", .{ .diagnostics = &diagnostics }));
     try testing.expectEqualStrings("expected a scene, which is an object, found a list", diagnostics.message());
@@ -2268,7 +3047,7 @@ test "a scene says what it is and which files it names, without being loaded" {
     const text =
         \\{
         \\  // By hand, with what nothing here knows beside what it does.
-        \\  "fluxion_scene": 2,
+        \\  "fluxion_scene": 3,
         \\  "made_by": { "tool": "an editor", "entities": [1, 2, 3] },
         \\  "entities": [
         \\    { "uuid": "00000000-0000-4000-8000-000000000001", "Sprite": { "texture": "res://art/hero.png" } },
@@ -2284,7 +3063,7 @@ test "a scene says what it is and which files it names, without being loaded" {
     var said = (try readInfo(testing.allocator, text, null)).?;
     defer said.deinit(testing.allocator);
 
-    try testing.expectEqual(@as(u32, 2), said.version);
+    try testing.expectEqual(@as(u32, 3), said.version);
     try testing.expectEqual(json.Format.json, said.format);
     try testing.expectEqual(@as(usize, 2), said.entities);
     try testing.expectEqual(@as(usize, 3), said.files.len);
@@ -2423,12 +3202,12 @@ test "a font of a collection is written as its file and member, and read back as
     const first = try source.assets.loadFont(path, .{ .atlas = 64 });
     const second = try source.assets.loadFont(path, .{ .atlas = 64, .member = 1 });
 
-    var upright: Text2D = .of("a");
-    upright.font = first;
-    var other: Text2D = .of("b");
-    other.font = second;
-    try source.setName(try source.world.spawnWith(.{ Transform2D{}, upright }), "first");
-    try source.setName(try source.world.spawnWith(.{ Transform2D{}, other }), "second");
+    const upright = try source.world.spawnWith(.{ Transform2D{}, Text2D{ .font = first } });
+    try source.setName(upright, "first");
+    try source.setText(upright, Text2D, "text", "a");
+    const other = try source.world.spawnWith(.{ Transform2D{}, Text2D{ .font = second } });
+    try source.setName(other, "second");
+    try source.setText(other, Text2D, "text", "b");
 
     const text = try write(source, testing.allocator, .{});
     defer testing.allocator.free(text);
@@ -2450,6 +3229,6 @@ test "a font of a collection is written as its file and member, and read back as
 
     // An object with no file is a mistake that says so, not a crash.
     try testing.expectError(error.WrongType, read(copy,
-        \\{ "fluxion_scene": 2, "entities": [{ "Transform2D": {}, "Text2D": { "font": { "member": 1 } } }] }
+        \\{ "fluxion_scene": 3, "entities": [{ "Transform2D": {}, "Text2D": { "font": { "member": 1 } } }] }
     , .{}));
 }

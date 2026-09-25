@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! The components the engine itself reads: `Transform2D`, `Sprite`,
-//! `Text2D`, `Animation`, `Camera2D`, `RigidBody2D` and `Collider2D`. A game
+//! `Text2D`, `Camera2D`, `RigidBody2D` and `Collider2D`. A game
 //! declares its own beside them.
 //!
 //! ```zig
@@ -38,20 +38,40 @@ pub const Entity = ecs.Entity;
 /// A colour, four floats from zero to one. See `color`.
 pub const Color = @import("color.zig").Color;
 
-/// Where a thing is, how big, which way round, and what it hangs from.
+/// What an entity hangs from: the one tree every entity is in, whatever it
+/// is - where a sprite is placed from, which control holds a button, what a
+/// timer or a sound belongs to. An entity without one is a root.
 ///
 /// ```zig
 /// const tank = try world.spawnWith(.{ Transform2D.at(100, 100), Sprite.of(hull) });
-/// _ = try world.spawnWith(.{
-///     Transform2D.childOf(tank, 0, -6),
-///     Sprite.of(turret),
-/// });
+/// _ = try world.spawnWith(.{ Transform2D.at(0, -6), Parent.of(tank), Sprite.of(turret) });
 /// ```
 ///
-/// The numbers are local - in the parent's space, as with Unity's
-/// `Transform` and Godot's `Node2D` - and `App.worldTransform` gives the
-/// world's. The parent is a field rather than a component, so gaining one
-/// does not move the entity to another archetype.
+/// When the parent is despawned, so is this, at the end of that frame - and
+/// whatever hangs from this in turn. `App.setParent` hangs an entity from
+/// another, keeping names unique among siblings; the tree `App.childrenOf`
+/// walks is built again whenever an entity is spawned, despawned, or gains
+/// or loses a component, and at once after `setParent`. A parent written
+/// straight into the component is seen after the next of those, and keeps
+/// no name free: an inspector shows it and leaves the change to `setParent`.
+pub const Parent = extern struct {
+    entity: Entity = .none,
+
+    pub const reflect_name = "Parent";
+    pub const reflect_fields = .{
+        .entity = .{ attr.ReadOnly{}, attr.Doc{ .text = "Changed by moving the entity in the tree" } },
+    };
+
+    pub fn of(parent: Entity) Parent {
+        return .{ .entity = parent };
+    }
+};
+
+/// Where a thing is, how big and which way round.
+///
+/// The numbers are local - in the space of the entity it hangs from, its
+/// `Parent` - and `App.worldTransform` gives the world's. A parent with no
+/// `Transform2D` places nothing: the numbers are the world's.
 pub const Transform2D = extern struct {
     x: f32 = 0,
     y: f32 = 0,
@@ -59,14 +79,6 @@ pub const Transform2D = extern struct {
     rotation: f32 = 0,
     scale_x: f32 = 1,
     scale_y: f32 = 1,
-
-    /// Whose space `x` and `y` are in. `.none` is the world.
-    ///
-    /// When the parent is despawned, so is this, at the end of that frame -
-    /// and whatever hangs from this in turn. To keep it, write
-    /// `App.worldTransform` over it first. A living parent with no
-    /// `Transform2D` places nothing, and still owns what hangs from it.
-    parent: Entity = .none,
 
     /// Whether this turns with its parent. Its offset turns either way; off is
     /// for a shadow or a name plate that should not tip over.
@@ -87,18 +99,12 @@ pub const Transform2D = extern struct {
     pub const reflect_name = "Transform2D";
     pub const reflect_fields = .{
         .rotation = .{ attr.Angle{}, attr.Doc{ .text = "Clockwise on screen" } },
-        .parent = .{attr.Doc{ .text = "Whose space x and y are in; none is the world's" }},
     };
     pub const reflect_methods = .{.translate};
 
-    /// A transform at a point, unrotated, unscaled and unparented.
+    /// A transform at a point, unrotated and unscaled.
     pub fn at(x: f32, y: f32) Transform2D {
         return .{ .x = x, .y = y };
-    }
-
-    /// A transform at a point in something else's space.
-    pub fn childOf(parent: Entity, x: f32, y: f32) Transform2D {
-        return .{ .x = x, .y = y, .parent = parent };
     }
 
     /// Move by an amount, in whatever space this transform is in.
@@ -149,8 +155,7 @@ pub const Transform2D = extern struct {
         };
     }
 
-    /// Where `local` ends up, given where its parent ended up. The result has
-    /// no parent of its own.
+    /// Where `local` ends up, given where its parent ended up.
     pub fn compose(parent: Transform2D, local: Transform2D) Transform2D {
         const placed = parent.apply(local.x, local.y);
         return .{
@@ -168,7 +173,6 @@ pub const Transform2D = extern struct {
                 parent.scale_y * local.scale_y
             else
                 local.scale_y,
-            .parent = .none,
             .interpolate = local.interpolate,
         };
     }
@@ -286,119 +290,20 @@ pub const Sprite = extern struct {
     }
 };
 
-/// A sprite that walks through the cells of its own texture.
-///
-/// ```zig
-/// _ = try world.spawnWith(.{
-///     Transform2D.at(64, 64),
-///     Sprite.of(hero),
-///     Animation{ .length = 6, .columns = 6, .fps = 10 },
-/// });
-/// ```
-///
-/// The engine advances it once a frame and writes the cell into
-/// `Sprite.region`. The sheet is a grid counted left to right and then down,
-/// and `first` is where this animation starts, so one sheet can hold several.
-pub const Animation = extern struct {
-    /// The cell it starts at, counting across the whole sheet.
-    first: u16 = 0,
-    /// How many cells it runs for. One is a still picture.
-    length: u16 = 1,
-
-    /// The shape of the whole sheet, in cells.
-    columns: u16 = 1,
-    rows: u16 = 1,
-
-    /// Cells a second. Twelve is the usual hand-drawn rate.
-    fps: f32 = 12,
-
-    /// Seconds into the animation, rather than a frame number, so changing
-    /// `fps` part way through does not jump.
-    time: f32 = 0,
-
-    playing: bool = true,
-
-    /// Whether it starts again at the end. A one-shot stops on its last cell
-    /// and sets `finished`.
-    looping: bool = true,
-
-    /// Set when a one-shot reaches its end. Cleared by writing a new
-    /// animation over the component.
-    finished: bool = false,
-
-    pub const reflect_name = "Animation";
-    pub const reflect_fields = .{
-        .fps = .{ attr.Unit{ .text = "/s" }, attr.Doc{ .text = "Cells a second" } },
-        .time = .{ attr.Unit{ .text = "s" }, attr.Doc{ .text = "Into the animation" } },
-        .finished = .{attr.ReadOnly{}},
-    };
-    pub const reflect_methods = .{.frame};
-
-    /// The first `length` cells of a single row.
-    pub fn strip(length: u16, fps: f32) Animation {
-        return .{ .length = length, .columns = length, .rows = 1, .fps = fps };
-    }
-
-    /// Which cell of the sheet is showing. A time or a rate no clock reaches -
-    /// NaN, an infinity, more cells than a `u32` counts - shows the first.
-    pub fn frame(self: Animation) u32 {
-        if (self.length <= 1 or !(self.fps > 0)) return self.first;
-        const cells = @max(self.time, 0) * self.fps;
-        // Two to the 32nd, which an `f32` holds exactly; everything below it
-        // a `u32` holds.
-        if (!(cells < 4294967296.0)) return self.first;
-        const step: u32 = @intFromFloat(cells);
-        const within = if (self.looping)
-            step % self.length
-        else
-            @min(step, self.length - 1);
-        return self.first + within;
-    }
-
-    /// Move it on by `delta` seconds, and say which cell to show. The clock is
-    /// wound back by whole loops, so it stays precise however long it runs.
-    ///
-    /// Numbers no time passing could give - a clock of NaN or an infinity, a
-    /// rate so high a loop takes no time at all - come from a file, and start
-    /// the animation again rather than spinning here.
-    pub fn advance(self: *Animation, delta: f32) Region {
-        if (self.playing and self.length > 1 and self.fps > 0) {
-            self.time += delta;
-
-            const loop = @as(f32, @floatFromInt(self.length)) / self.fps;
-            if (!std.math.isFinite(self.time) or !(loop > 0)) {
-                self.time = 0;
-            } else if (self.looping) {
-                if (self.time >= loop) self.time = @mod(self.time, loop);
-            } else if (self.time >= loop) {
-                self.time = loop;
-                self.finished = true;
-                self.playing = false;
-            }
-        }
-        return .cell(self.frame(), self.columns, self.rows);
-    }
-};
-
 /// Words drawn at a transform, in a font the assets are holding.
 ///
 /// ```zig
-/// var label: Text2D = .of("Score");
-/// label.size = 24;
-/// _ = try world.spawnWith(.{ Transform2D.at(16, 16), label });
+/// const label = try world.spawnWith(.{ Transform2D.at(16, 16), Text2D{ .size = 24 } });
+/// try app.setText(label, Text2D, "text", "Score");
 ///
 /// // ... and later, from a system:
-/// text.print("{d} points", .{score});
+/// try app.printText(label, Text2D, "text", "{d} points", .{score});
 /// ```
 ///
-/// The text is inside the component, in a fixed buffer: a component may not
-/// own memory, and world text is short - a score, a name plate, "Press E".
-/// The transform is the top left of the first line, not the baseline.
+/// The words are the app's, kept beside the component as long as they are:
+/// see `texts.zig`. The transform is the top left of the first line, not the
+/// baseline.
 pub const Text2D = extern struct {
-    /// UTF-8. Not a slice: see above.
-    bytes: [capacity]u8 = @splat(0),
-    len: u8 = 0,
-
     /// `.none` is the default font, the first one loaded.
     font: assets.FontHandle = .none,
 
@@ -420,59 +325,13 @@ pub const Text2D = extern struct {
 
     visible: bool = true,
 
-    /// Bytes of text that fit: 63 and a length make the component 96 bytes.
-    pub const capacity = 63;
-
     pub const Alignment = enum(u8) { left, center, right };
 
-    /// The buffer is no field to show or to edit: the words are the
-    /// property `text`, read with `slice` and written with `set`, which keep
-    /// the length and the UTF-8 right - and may run over several lines.
     pub const reflect_name = "Text2D";
-    pub const reflect_attributes = .{attr.Property{ .name = "text", .get = "slice", .set = "set" }};
+    pub const reflect_attributes = .{attr.Text{ .name = "text", .multiline = true }};
     pub const reflect_fields = .{
-        .bytes = .{attr.Hidden{}},
-        .len = .{attr.Hidden{}},
         .size = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "Per em, before the transform's scale" } },
     };
-    pub const reflect_methods = .{
-        .set = .{attr.Multiline{}},
-        .slice = .{},
-    };
-
-    /// A label with this text in it, cut on a character boundary if it does
-    /// not fit.
-    pub fn of(run: []const u8) Text2D {
-        var self: Text2D = .{};
-        self.set(run);
-        return self;
-    }
-
-    /// Replace the text.
-    pub fn set(self: *Text2D, run: []const u8) void {
-        const room = @min(run.len, capacity);
-        // Back up to the start of a character rather than cut one in half. A
-        // continuation byte is `10xxxxxx`.
-        var cut = room;
-        while (cut > 0 and cut < run.len and run[cut] & 0xC0 == 0x80) cut -= 1;
-
-        @memcpy(self.bytes[0..cut], run[0..cut]);
-        self.len = @intCast(cut);
-    }
-
-    /// Format into the label. Cut short rather than failing: a number too long
-    /// to fit is no reason to stop the frame.
-    pub fn print(self: *Text2D, comptime format: []const u8, args: anytype) void {
-        var buffer: [capacity]u8 = undefined;
-        const written = std.fmt.bufPrint(&buffer, format, args) catch buffer[0..];
-        self.set(written);
-    }
-
-    /// The text, as a string. A length written by hand past the buffer is
-    /// taken as the whole buffer.
-    pub fn slice(self: *const Text2D) []const u8 {
-        return self.bytes[0..@min(self.len, capacity)];
-    }
 };
 
 /// What the 2D pass looks through. Its position is its entity's
@@ -499,8 +358,13 @@ pub const Camera2D = extern struct {
 
     active: bool = true,
 
+    /// The render layers it sees: what an `Appearance` puts on layers it
+    /// does not have is not drawn through it. See `Appearance.render_layers`.
+    cull_mask: u32 = 0xFFFF_FFFF,
+
     pub const reflect_name = "Camera2D";
     pub const reflect_fields = .{
+        .cull_mask = .{ attr.Layers{ .names = .render_2d }, attr.Doc{ .text = "The render layers it sees" } },
         .fit_width = .{attr.Doc{ .text = "Always shown whole; zero is no fit" }},
         .fit_height = .{attr.Doc{ .text = "Always shown whole; zero is no fit" }},
         .rotation = .{ attr.Angle{}, attr.Doc{ .text = "Clockwise on screen; the world turns the other way" } },
@@ -514,6 +378,47 @@ pub const Camera2D = extern struct {
     pub fn fitting(width: f32, height: f32) Camera2D {
         return .{ .fit_width = width, .fit_height = height };
     }
+};
+
+/// A camera that draws into a picture of its own rather than onto the
+/// screen: a game in an arcade cabinet, a minimap, a monitor on a wall.
+/// Beside a `Camera2D`, which says how close it is and what it sees, and a
+/// `Transform2D`, which says where it looks. The screen is never looked at
+/// through it.
+///
+/// What it draws is shown by a `ViewTexture` on a `Sprite` or a
+/// `TextureRect`, or by `App.viewTexture` from code: drawn every frame
+/// before the screen is, so what shows it shows this frame's.
+pub const RenderView = extern struct {
+    width: u32 = 320,
+    height: u32 = 180,
+    clear_color: Color = .black,
+    /// Nearest keeps a small picture's pixels square when it is shown
+    /// bigger; linear smooths it.
+    filter: Filter = .nearest,
+    /// Off, it keeps the last picture it drew.
+    active: bool = true,
+
+    pub const Filter = enum(u8) { nearest, linear };
+
+    pub const reflect_name = "RenderView";
+    pub const reflect_fields = .{
+        .width = .{ attr.Range{ .min = 1, .max = 4096, .step = 1 }, attr.Unit{ .text = "px" } },
+        .height = .{ attr.Range{ .min = 1, .max = 4096, .step = 1 }, attr.Unit{ .text = "px" } },
+        .clear_color = .{attr.Doc{ .text = "What the picture is cleared to before the world is drawn" }},
+        .active = .{attr.Doc{ .text = "Off, it keeps the last picture it drew" }},
+    };
+};
+
+/// Shows the picture a `RenderView` draws, in place of its own texture:
+/// beside a `Sprite` or a `TextureRect`.
+pub const ViewTexture = extern struct {
+    view: Entity = .none,
+
+    pub const reflect_name = "ViewTexture";
+    pub const reflect_fields = .{
+        .view = .{attr.Doc{ .text = "The entity whose RenderView's picture is shown" }},
+    };
 };
 
 /// Something that moves as a solid object: it falls, is pushed and bounces.
@@ -539,8 +444,7 @@ pub const RigidBody2D = extern struct {
     linear_velocity: math.Vec2 = .zero,
     /// Radians a second, clockwise on screen.
     angular_velocity: f32 = 0,
-    /// How much of its speed it loses a second, as Godot's: 0.1 slows it by
-    /// a tenth. Minus one takes the project's `default_linear_damp`.
+    /// How much of its speed it loses a second: 0.1 slows it by a tenth. Minus one takes the project's `default_linear_damp`.
     linear_damp: f32 = -1,
     /// The same for its spin; minus one is `default_angular_damp`.
     angular_damp: f32 = -1,
@@ -548,11 +452,11 @@ pub const RigidBody2D = extern struct {
     gravity_scale: f32 = 1,
     fixed_rotation: bool = false,
     can_sleep: bool = true,
-    /// Godot's continuous collision detection. Off, a fast body is still
+    /// Continuous collision detection. Off, a fast body is still
     /// stopped by the level; on, by the other moving bodies too.
     continuous_cd: ContinuousCd = .disabled,
 
-    /// Whether the pointer can pick it. Godot keeps it false on a body and
+    /// Whether the pointer can pick it: false on a body by default, and
     /// true on an `Area2D`; picking asks it of whichever object a collider
     /// belongs to.
     input_pickable: bool = false,
@@ -561,12 +465,12 @@ pub const RigidBody2D = extern struct {
     /// pushes it; dynamic is pushed by everything.
     pub const Type = physics.BodyType;
 
-    /// Godot's names: a ray and a shape cast are both one sweep here.
+    /// A ray and a shape cast are both one sweep here.
     pub const ContinuousCd = enum(u8) { disabled, cast_ray, cast_shape };
 
     /// What the pointer did over it, and which of its colliders it was
-    /// over: Godot's CollisionObject2D signals. A body is picked only with
-    /// `input_pickable`; see `App.physics_object_picking`.
+    /// over. A body is picked only with `input_pickable`; see
+    /// `App.physics_object_picking`.
     pub const signals = .{
         .input_event = struct { event: pointer.InputEvent, shape: Entity },
         .mouse_entered = struct {},
@@ -587,21 +491,22 @@ pub const RigidBody2D = extern struct {
     };
 };
 
-/// The shape a body collides with: Godot's CollisionShape2D. On an entity
-/// with a `RigidBody2D` it is that body's, and on one hanging from such an
-/// entity it is part of that body, where the entity is. Anywhere else it is
-/// a static body of its own: a wall, a floor tile.
+/// The shape a body collides with. On an entity with a `RigidBody2D` it is
+/// that body's, and on one hanging from such an entity it is part of that
+/// body, where the entity is. Anywhere else it is a static body of its own:
+/// a wall, a floor tile.
 ///
 /// Two colliders touch when either one's `collision_mask` has the other's
-/// `collision_layer`, as in Godot 3. A pair's friction is the smaller of
-/// the two, and its bounce the two added, no more than one.
+/// `collision_layer`. A pair's friction is the smaller of the two, and its
+/// bounce the two added, no more than one.
 pub const Collider2D = extern struct {
     shape: Shape = .rectangle,
-    /// Half a rectangle's width and height, before the transform's scale:
-    /// Godot's `extents`. Zero takes the sprite's size, and centres the
-    /// shape on the sprite.
+    /// Half a rectangle's width and height, before the transform's scale.
+    /// Zero takes the sprite's size, and centres the shape on the sprite. A
+    /// capsule's `y` is half its whole height, round ends and all.
     extents: math.Vec2 = .zero,
-    /// A circle's. Zero is half the sprite's width, centred on the sprite.
+    /// A circle's, and a capsule's round ends'. Zero is half the sprite's
+    /// width, centred on the sprite.
     radius: f32 = 0,
     /// From the entity's origin, before its scale.
     offset: math.Vec2 = .zero,
@@ -626,7 +531,9 @@ pub const Collider2D = extern struct {
     collision_layer: u32 = 1,
     collision_mask: u32 = 1,
 
-    pub const Shape = enum(u8) { rectangle, circle };
+    /// A capsule stands along the entity's `y`, round at both ends: what a
+    /// character is, sliding over a step's edge rather than catching on it.
+    pub const Shape = enum(u8) { rectangle, circle, capsule };
 
     pub const reflect_name = "Collider2D";
     pub const reflect_attributes = .{attr.Placement{ .offset = "offset", .rotation = "rotation" }};
@@ -643,7 +550,7 @@ pub const Collider2D = extern struct {
         .collision_mask = .{ attr.Layers{ .names = .physics_2d }, attr.Doc{ .text = "The layers it looks for" } },
     };
 
-    /// A rectangle of these half sizes: Godot's `extents`.
+    /// A rectangle of these half sizes, its `extents`.
     pub fn rectangle(half_width: f32, half_height: f32) Collider2D {
         return .{ .extents = .init(half_width, half_height) };
     }
@@ -651,10 +558,70 @@ pub const Collider2D = extern struct {
     pub fn circle(radius: f32) Collider2D {
         return .{ .shape = .circle, .radius = radius };
     }
+
+    /// A capsule `height` tall, round ends included, and `radius` round.
+    pub fn capsule(radius: f32, height: f32) Collider2D {
+        return .{ .shape = .capsule, .radius = radius, .extents = .init(radius, height / 2) };
+    }
 };
 
-/// Godot's Area2D: a place that tells what is in it, and pushes nothing. A
-/// trigger, a pickup, a hurtbox, a door's threshold.
+/// A body the game moves rather than the physics: a player, a guard walking
+/// a corridor. Its `velocity` is what `App.moveAndSlide` moves it by, a step
+/// at a time, stopping at what it meets and sliding along it; what it stands
+/// on and what it is against are said after. Its shapes are its
+/// `Collider2D`s, as a rigid body's are, and nothing pushes it. See
+/// `character.zig`.
+pub const CharacterBody2D = extern struct {
+    /// Units a second. What went into a wall or a floor is taken off it by a
+    /// move.
+    velocity: math.Vec2 = .zero,
+    /// Which way is up: a floor faces it, a ceiling faces away. Up the
+    /// screen.
+    up_direction: math.Vec2 = .init(0, -1),
+    motion_mode: MotionMode = .grounded,
+    /// The steepest slope that is still a floor.
+    floor_max_angle: f32 = std.math.pi / 4.0,
+    /// How far below it a floor is kept to, walking off the top of a slope
+    /// or down a step. Nought never keeps to one.
+    floor_snap_length: f32 = 4,
+    /// Standing on a slope, it stays: it slides down only what it walks.
+    floor_stop_on_slope: bool = true,
+    /// How far it keeps from what it touches.
+    safe_margin: f32 = 0.5,
+    /// How many times one move may stop and slide on.
+    max_slides: u32 = 4,
+    /// What the last move found.
+    on_floor: bool = false,
+    on_wall: bool = false,
+    on_ceiling: bool = false,
+    /// Out of the floor it stands on, and the wall it is against, when it
+    /// is.
+    floor_normal: math.Vec2 = .zero,
+    wall_normal: math.Vec2 = .zero,
+
+    /// Grounded: floors, walls and ceilings, for a game seen from the side.
+    /// Floating: everything it meets is a wall, for a game seen from above.
+    pub const MotionMode = enum(u8) { grounded, floating };
+
+    pub const reflect_name = "CharacterBody2D";
+    pub const reflect_fields = .{
+        .velocity = .{ attr.Unit{ .text = "/s" }, attr.Doc{ .text = "World units a second: what moveAndSlide moves it by" } },
+        .up_direction = .{attr.Doc{ .text = "A floor faces it, a ceiling away from it" }},
+        .motion_mode = .{attr.Doc{ .text = "Grounded has floors and ceilings; floating, seen from above, only walls" }},
+        .floor_max_angle = .{ attr.Angle{}, attr.Doc{ .text = "The steepest slope that is still a floor" } },
+        .floor_snap_length = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "How far below it a floor is kept to; nought never" } },
+        .floor_stop_on_slope = .{attr.Doc{ .text = "Standing on a slope, it does not slide down it" }},
+        .safe_margin = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "How far it keeps from what it touches" } },
+        .on_floor = .{attr.ReadOnly{}},
+        .on_wall = .{attr.ReadOnly{}},
+        .on_ceiling = .{attr.ReadOnly{}},
+        .floor_normal = .{attr.ReadOnly{}},
+        .wall_normal = .{attr.ReadOnly{}},
+    };
+};
+
+/// A place that tells what is in it, and pushes nothing. A trigger, a
+/// pickup, a hurtbox, a door's threshold.
 ///
 /// ```zig
 /// const trap = try world.spawnWith(.{ Transform2D.at(100, 0), Area2D{}, Collider2D.box(32, 32) });
@@ -667,16 +634,15 @@ pub const Collider2D = extern struct {
 /// carries its shapes. An entity may have an `Area2D` or a `RigidBody2D`,
 /// not both.
 ///
-/// Godot's `priority`, its gravity and damping overrides and its audio bus
-/// are not here: this is what overlaps, not a place that changes physics.
+/// It has no priority, no gravity or damping overrides and no audio bus:
+/// this is what overlaps, not a place that changes physics.
 pub const Area2D = extern struct {
     /// Whether it says what is in it. Off, it hears nothing and its
     /// questions are empty, and what was in it is left with an exit.
     monitoring: bool = true,
     /// Whether other areas see it. It is still seen by a body's contacts.
     monitorable: bool = true,
-    /// Whether the pointer can pick it. Godot's
-    /// `CollisionObject2D.input_pickable`, true for an area as there.
+    /// Whether the pointer can pick it; true for an area by default.
     input_pickable: bool = true,
 
     /// What it says. `body` is the entity of what came in - the collider's
@@ -742,7 +708,6 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Transform2D);
     ecs.component.check(Sprite);
     ecs.component.check(Camera2D);
-    ecs.component.check(Animation);
     ecs.component.check(Text2D);
     ecs.component.check(RigidBody2D);
     ecs.component.check(Collider2D);
@@ -760,11 +725,11 @@ test "what an inspector shows a field by is on the field" {
     try testing.expectEqualStrings("px", reflect.typeOf(Text2D).field("size").?.attribute(attr.Unit).?.text);
     try testing.expectEqual(@as(f64, 1), reflect.typeOf(Collider2D).field("bounce").?.attribute(attr.Range).?.max);
 
-    // The words of a label are its methods' to read and write, and they may
-    // run over several lines.
-    try testing.expect(reflect.typeOf(Text2D).field("bytes").?.attribute(attr.Hidden) != null);
-    try testing.expect(reflect.typeOf(Text2D).method("set").?.attribute(attr.Multiline) != null);
-    try testing.expect(reflect.typeOf(Text2D).method("slice").?.attribute(attr.Multiline) == null);
+    // The words of a label are kept beside it, and they may run over several
+    // lines.
+    try testing.expect(reflect.typeOf(Text2D).field("text") == null);
+    try testing.expect(reflect.typeOf(Text2D).attribute(attr.Text).?.multiline);
+    try testing.expectEqualStrings("text", reflect.typeOf(Text2D).attribute(attr.Text).?.name);
 }
 
 test "unapply takes a point back to where apply found it" {
@@ -803,82 +768,26 @@ test "scale multiplies down the chain" {
     try testing.expectEqual(@as(f32, 6), Transform2D.compose(parent, local).scale_x);
 }
 
-test "a composed transform has no parent left to apply" {
-    const parent: Transform2D = .at(5, 5);
-    const local: Transform2D = .childOf(.none, 1, 1);
-    try testing.expect(Transform2D.compose(parent, local).parent.isNone());
+test "a label's words are the app's, as long as they are, and gone with it" {
+    const App = @import("App.zig");
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const label = try app.world.spawnWith(.{ Transform2D.at(0, 0), Text2D{} });
+    try testing.expectEqualStrings("", app.textOf(label, Text2D, "text"));
+    try app.setText(label, Text2D, "text", "Score");
+    try testing.expectEqualStrings("Score", app.textOf(label, Text2D, "text"));
+    try app.printText(label, Text2D, "text", "{d} points", .{42});
+    try testing.expectEqualStrings("42 points", app.textOf(label, Text2D, "text"));
+
+    // Far longer than any buffer a component could hold.
+    const long = "é" ** 400;
+    try app.setText(label, Text2D, "text", long);
+    try testing.expectEqualStrings(long, app.textNamed(label, "Text2D", "text"));
+    try testing.expectError(error.NoSuchText, app.setTextNamed(label, "Text2D", "words", "no"));
+
+    app.world.despawn(label);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.texts.map.count());
+    try testing.expectError(error.NoSuchEntity, app.setText(label, Text2D, "text", "late"));
 }
 
-test "a label carries its own text" {
-    var label: Text2D = .of("Score");
-    try testing.expectEqualStrings("Score", label.slice());
-
-    label.print("{d} points", .{42});
-    try testing.expectEqualStrings("42 points", label.slice());
-}
-
-test "text too long is cut on a character boundary" {
-    // `é` is two bytes, so byte 63 is the middle of the thirty-second one:
-    // the cut has to back up to 62.
-    var label: Text2D = .of("é" ** 40);
-    try testing.expectEqual(@as(u8, 62), label.len);
-    try testing.expect(std.unicode.utf8ValidateSlice(label.slice()));
-}
-
-test "an empty label is empty rather than sixty-three zeroes" {
-    const label: Text2D = .{};
-    try testing.expectEqual(@as(usize, 0), label.slice().len);
-}
-
-test "an animation walks its cells and comes back round" {
-    var animation: Animation = .strip(4, 10);
-
-    try testing.expectEqual(@as(u32, 0), animation.frame());
-    _ = animation.advance(0.1);
-    try testing.expectEqual(@as(u32, 1), animation.frame());
-    _ = animation.advance(0.2);
-    try testing.expectEqual(@as(u32, 3), animation.frame());
-
-    // A whole loop is 0.4 seconds, so this is back at the start.
-    _ = animation.advance(0.1);
-    try testing.expectEqual(@as(u32, 0), animation.frame());
-}
-
-test "a one-shot stops on its last cell and says so" {
-    var animation: Animation = .strip(3, 10);
-    animation.looping = false;
-
-    _ = animation.advance(1);
-    try testing.expectEqual(@as(u32, 2), animation.frame());
-    try testing.expect(animation.finished);
-    try testing.expect(!animation.playing);
-}
-
-test "an animation whose numbers no clock could give neither stops the frame nor spins" {
-    // No cells to count, and a rate past what an `f32` holds.
-    var odd: Animation = .{ .length = 0, .columns = 0, .rows = 0, .fps = std.math.inf(f32) };
-    try testing.expectEqual(Region.cell(0, 1, 1), odd.advance(0.1));
-
-    var endless: Animation = .{ .length = 4, .columns = 4, .fps = std.math.inf(f32), .time = std.math.nan(f32) };
-    _ = endless.advance(0.1);
-    try testing.expectEqual(@as(u32, 0), endless.frame());
-    try testing.expectEqual(@as(f32, 0), endless.time);
-
-    // A clock a year of frames could not wind back one loop at a time.
-    var old: Animation = .{ .length = 4, .columns = 4, .fps = 10, .time = 1e30 };
-    const region = old.advance(0.1);
-    try testing.expect(old.time >= 0 and old.time < 0.4);
-    try testing.expect(std.math.isFinite(region.u0) and std.math.isFinite(region.u1));
-
-    // And one that is not playing, so nothing winds it back at all.
-    var stopped: Animation = .{ .first = 2, .length = 4, .columns = 4, .fps = 10, .time = 1e30, .playing = false };
-    _ = stopped.advance(0.1);
-    try testing.expectEqual(@as(u32, 2), stopped.frame());
-}
-
-test "an animation with one cell never moves" {
-    var animation: Animation = .{ .first = 5, .length = 1 };
-    const region = animation.advance(10);
-    try testing.expectEqual(@as(u32, 5), animation.frame());
-    try testing.expectEqual(Region.cell(5, 1, 1).u0, region.u0);
-}
