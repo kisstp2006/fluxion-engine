@@ -54,6 +54,7 @@ const Interface = @import("interface.zig");
 const Input = @import("input.zig");
 const Time = @import("time.zig");
 const Window = @import("window.zig");
+const ToolWindow = @import("tool_window.zig");
 const world_ui = @import("world_ui.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
@@ -436,6 +437,9 @@ image_textures: u32 = 0,
 
 /// Null when headless.
 window: ?Window = null,
+/// The program's other windows, each with an interface of its own: see
+/// `openToolWindow`.
+tool_windows: std.ArrayList(*ToolWindow) = .empty,
 device: rhi.Device,
 /// What the frame is drawn into: a swapchain image, or a texture when there
 /// is no window.
@@ -1182,6 +1186,8 @@ pub fn destroy(self: *App) void {
     self.commands.deinit();
     self.world.deinit();
 
+    while (self.tool_windows.pop()) |tool| self.dropToolWindow(tool);
+    self.tool_windows.deinit(gpa);
     if (self.offscreen) |t| self.device.destroyTexture(t);
     if (self.surface) |s| self.device.destroySurface(s);
     self.device.deinit();
@@ -1449,13 +1455,15 @@ pub fn step(self: *App) anyerror!bool {
     // A `defer`, so a loop that goes on after an error never reads a path
     // that is gone.
     defer self.input.endFrame();
+    for (self.tool_windows.items) |tool| tool.input.beginFrame();
+    defer for (self.tool_windows.items) |tool| tool.input.endFrame();
     self.schedule.beginFrame();
     // Last frame's events go, and this frame's become last frame's.
     for (self.event_channels.values()) |channel| channel.update(channel.events);
     self.resized = false;
 
     if (self.window) |*window| {
-        if (!window.pump(&self.input)) {
+        if (!window.pump(&self.input, .{ .context = self, .event = routeToTool })) {
             self.running = false;
             return false;
         }
@@ -1472,9 +1480,15 @@ pub fn step(self: *App) anyerror!bool {
             try self.adoptSize(window.width, window.height);
         }
     }
+    for (self.tool_windows.items) |tool| {
+        if (!tool.resized) continue;
+        tool.resized = false;
+        if (tool.surface) |surface| try self.device.resizeSurface(surface, tool.width, tool.height);
+    }
     // Every action from this frame's keys, buttons and sticks, for the
     // interface and the first system alike.
     self.input.updateActions();
+    for (self.tool_windows.items) |tool| tool.input.updateActions();
     self.fitFrame();
     self.fitInterface();
 
@@ -1624,10 +1638,12 @@ pub fn step(self: *App) anyerror!bool {
     // What the systems changed of how things show is seen by the drawing.
     self.inherited.forget();
     if (self.hasInterface()) try self.layOutInterface();
+    for (self.tool_windows.items) |tool| try self.layOutTool(tool);
 
     // Nothing to draw on while Android has taken the surface away.
     const minimized = self.windowState() == .minimized;
     if (!minimized and !self.input.surface_lost) try self.render();
+    for (self.tool_windows.items) |tool| try self.renderTool(tool);
 
     if (self.frames_left) |left| {
         if (left <= 1) {
@@ -1690,6 +1706,119 @@ fn feedInterface(self: *App) !void {
     try self.interface.feed(self.gpa, &self.ui, &self.input, &self.clipboard, self.time.unscaled_delta);
 }
 
+// -------------------------------------------------------------------------
+// Tool windows
+// -------------------------------------------------------------------------
+
+/// Another window, beside the main one, with an interface of its own that
+/// `ToolWindow.draw` lays out each frame: see `ToolWindow`. It draws with the
+/// main window's device and in the interface's fonts. Headless, it is drawn
+/// into a texture of its size.
+pub fn openToolWindow(self: *App, desc: ToolWindow.Desc) !*ToolWindow {
+    try self.tool_windows.ensureUnusedCapacity(self.gpa, 1);
+    const tool = try self.gpa.create(ToolWindow);
+    errdefer self.gpa.destroy(tool);
+    tool.* = .{ .handle = null, .ui = .init(self.gpa), .width = desc.width, .height = desc.height };
+    errdefer tool.deinit(self.gpa);
+    try tool.input.actions.reset(self.gpa, &.{});
+
+    if (self.window) |*window| {
+        const handle = try window.openBeside(.{
+            .title = desc.title,
+            .width = desc.width,
+            .height = desc.height,
+            .resizable = desc.resizable,
+        });
+        errdefer handle.destroy();
+        tool.handle = handle;
+        const size = handle.framebufferSize();
+        tool.width = @max(size[0], 1);
+        tool.height = @max(size[1], 1);
+        tool.content_scale = handle.contentScale()[0];
+        tool.focused = handle.isFocused();
+        // Two windows waiting for the display each frame would wait twice.
+        tool.surface = try self.device.createSurface(.{
+            .native_window = handle.native(),
+            .window = tool.surfaceHooks(window.has_gl_context),
+            .width = tool.width,
+            .height = tool.height,
+            .vsync = false,
+        });
+    } else {
+        tool.offscreen = try self.device.createTexture(.{
+            .width = tool.width,
+            .height = tool.height,
+            .usage = .{ .sampled = true, .render_target = true },
+            .label = "tool window",
+        });
+    }
+    tool.fit(&self.interface);
+    self.tool_windows.appendAssumeCapacity(tool);
+    return tool;
+}
+
+/// Close a tool window, and let go of all it had.
+pub fn closeToolWindow(self: *App, tool: *ToolWindow) void {
+    for (self.tool_windows.items, 0..) |held, i| if (held == tool) {
+        _ = self.tool_windows.orderedRemove(i);
+        break;
+    };
+    self.dropToolWindow(tool);
+}
+
+fn dropToolWindow(self: *App, tool: *ToolWindow) void {
+    if (tool.surface) |surface| self.device.destroySurface(surface);
+    if (tool.offscreen) |texture| self.device.destroyTexture(texture);
+    tool.deinit(self.gpa);
+    if (tool.handle) |handle| handle.destroy();
+    self.gpa.destroy(tool);
+}
+
+/// An event about a window other than the main one: a tool window's.
+fn routeToTool(context: *anyopaque, ev: platform.Event) void {
+    const self: *App = @ptrCast(@alignCast(context));
+    const about = ev.window();
+    for (self.tool_windows.items) |tool| {
+        const handle = tool.handle orelse continue;
+        if (handle.id == about) return tool.take(ev);
+    }
+}
+
+/// Its input into its interface, then its interface laid out by its `draw`,
+/// in the main interface's fonts; its pointer's shape and text input told.
+fn layOutTool(self: *App, tool: *ToolWindow) !void {
+    tool.fit(&self.interface);
+    if (self.interfaceFaces().len != 0) tool.ui.setMeasurer(Interface.measurer(&self.interface.faces));
+    try tool.interface.feed(self.gpa, &tool.ui, &tool.input, &self.clipboard, self.time.unscaled_delta);
+
+    tool.interface.commands = &.{};
+    tool.ui.begin(tool.interface.surface(@floatFromInt(tool.width), @floatFromInt(tool.height)));
+    {
+        tool.ui.open(.{ .width = .grow, .height = .grow });
+        defer tool.ui.close();
+        if (tool.draw) |draw| try draw.run(draw.context, tool);
+    }
+    tool.interface.commands = try tool.ui.end();
+    const handle = tool.handle orelse return;
+    tool.showCursor(switch (tool.ui.cursor()) {
+        inline else => |named| @field(CursorShape, @tagName(named)),
+    });
+    tool.interface.applyTextInput(&tool.ui, handle);
+}
+
+/// Its background, its interface over it, and shown.
+fn renderTool(self: *App, tool: *ToolWindow) !void {
+    if (tool.width == 0 or tool.height == 0) return;
+    if (tool.handle) |handle| if (handle.isIconified()) return;
+    const into = tool.target();
+    const cmd = self.device.begin();
+    try cmd.beginPass(.{ .color = .{ .target = into, .clear_color = tool.background } });
+    try cmd.endPass();
+    try self.device.submit();
+    try tool.interface.draw(self.gpa, &self.device, self.interfaceFaces(), into, @floatFromInt(tool.width), @floatFromInt(tool.height));
+    if (tool.surface) |surface| try self.device.present(surface);
+}
+
 fn layOutInterface(self: *App) !void {
     self.interface.commands = &.{};
     self.ui.begin(self.interface.surface(@floatFromInt(self.frame.width), @floatFromInt(self.frame.height)));
@@ -1705,7 +1834,7 @@ fn layOutInterface(self: *App) !void {
     self.cursor_wanted = self.wantedCursor();
     if (self.window) |*window| {
         self.applyCursor(window);
-        self.interface.applyTextInput(&self.ui, window);
+        self.interface.applyTextInput(&self.ui, window.handle);
     }
 }
 
@@ -8008,6 +8137,56 @@ test "world UI receives input through the regular interface" {
     _ = try app.step();
 
     try testing.expectEqual(@as(u32, 1), WorldPanel.released);
+}
+
+const Tool = struct {
+    var released: u32 = 0;
+
+    fn draw(_: *anyopaque, tool: *ToolWindow) anyerror!void {
+        tool.ui.open(.{ .id = "tool-button", .width = .fixed(100), .height = .fixed(50) });
+        if (tool.ui.justReleased()) released += 1;
+        tool.ui.close();
+        tool.ui.open(.{ .id = "tool-label" });
+        tool.ui.text("Code", .{ .font_size = 20 });
+        tool.ui.close();
+    }
+};
+
+test "a tool window lays out an interface of its own from input of its own, in the interface's fonts" {
+    Tool.released = 0;
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240, .io = testing.io });
+    defer app.destroy();
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch return error.SkipZigTest;
+    try app.startup();
+    const tool = try app.openToolWindow(.{ .width = 200, .height = 120 });
+    tool.draw = .{ .context = app, .run = Tool.draw };
+    _ = try app.step();
+    try testing.expectEqual(@as(f32, 100), tool.ui.boxOf("tool-button").?.width);
+    try testing.expect(tool.ui.boxOf("tool-label").?.width > 0);
+    try testing.expect(app.ui.boxOf("tool-button") == null);
+    // Drawn, its words in the main interface's face.
+    try testing.expect(tool.interface.renderer.?.instances.items.len >= 2);
+
+    // A press on the main window's input is not the tool window's; one on
+    // its own is.
+    app.input.apply(leftButton(true, 40, 20));
+    _ = try app.step();
+    app.input.apply(leftButton(false, 40, 20));
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), Tool.released);
+    tool.input.apply(leftButton(true, 40, 20));
+    _ = try app.step();
+    tool.input.apply(leftButton(false, 40, 20));
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), Tool.released);
+
+    // Its close button is the program's to answer.
+    tool.take(.{ .close = .none });
+    _ = try app.step();
+    try testing.expect(tool.close_pressed);
+    app.closeToolWindow(tool);
+    try testing.expectEqual(@as(usize, 0), app.tool_windows.items.len);
+    _ = try app.step();
 }
 
 test "every .ui system declares into one root the size of the window" {

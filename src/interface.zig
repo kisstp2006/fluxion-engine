@@ -386,7 +386,7 @@ fn rendererFor(self: *Interface, gpa: Allocator, device: *rhi.Device, first: *co
 /// method where the caret is, so its composition and its list of candidates
 /// sit beside the text rather than across it. Each only when it changes, and
 /// neither with `owns_text_input` off.
-pub fn applyTextInput(self: *Interface, layout: *ui.Ui, window: *Window) void {
+pub fn applyTextInput(self: *Interface, layout: *ui.Ui, window: platform.Window) void {
     if (!self.owns_text_input) return;
     const wanted = layout.wantsKeyboard();
     if (wanted != self.typing) {

@@ -266,6 +266,22 @@ pub fn scrollLines(self: *Window) platform.ScrollLines {
     return self.ctx.scrollLines();
 }
 
+/// Another window of this one's context, for a `ToolWindow`: with a GL
+/// context sharing this one's objects when this one has one.
+pub fn openBeside(self: *Window, desc: Desc) Error!platform.Window {
+    const made = try self.ctx.createWindow(.{
+        .title = desc.title,
+        .width = desc.width,
+        .height = desc.height,
+        .resizable = desc.resizable,
+        .gl = if (self.has_gl_context) .{ .major = 3, .minor = 3, .profile = .core } else null,
+        .share_gl_with = if (self.has_gl_context) self.handle else null,
+    });
+    // Whatever making it did, this window's context is the one drawn in.
+    if (self.has_gl_context) self.handle.makeContextCurrent() catch {};
+    return made;
+}
+
 /// Open the system's file dialog, in front of this window and modal to it.
 /// The answer comes through `pump`. See `dialog`.
 pub fn openFileDialog(self: *Window, options: dialog.FileOptions) Error!dialog.Id {
@@ -407,8 +423,16 @@ pub fn isAbsent(err: anyerror) bool {
     };
 }
 
+/// Where an event about another window of the context goes: a tool
+/// window's. See `ToolWindow`.
+pub const Route = struct {
+    context: *anyopaque,
+    event: *const fn (context: *anyopaque, ev: platform.Event) void,
+};
+
 /// Drain the queue into `input`, and say whether the game should carry on.
-pub fn pump(self: *Window, input: *Input) bool {
+/// An event about another window of the context goes to `route`.
+pub fn pump(self: *Window, input: *Input, route: ?Route) bool {
     self.ctx.pump() catch |err| {
         log.err("the event loop failed: {t}", .{err});
         return false;
@@ -422,7 +446,10 @@ pub fn pump(self: *Window, input: *Input) bool {
         // Only this window's events, and those about no window in particular:
         // a tool window a game opens must not feed the game's input.
         const about = ev.window();
-        if (about != .none and about != self.handle.id) continue;
+        if (about != .none and about != self.handle.id) {
+            if (route) |to| to.event(to.context, ev);
+            continue;
+        }
 
         input.apply(ev);
         switch (ev) {
@@ -493,7 +520,13 @@ pub fn hooks(self: *Window) rhi.GlHooks {
         .get_proc_address = getProcAddress,
         .swap_buffers = swapBuffers,
         .framebuffer_size = framebufferSize,
+        .make_current = makeCurrent,
     };
+}
+
+fn makeCurrent(context: *anyopaque) void {
+    const self: *Window = @ptrCast(@alignCast(context));
+    self.handle.makeContextCurrent() catch {};
 }
 
 fn getProcAddress(context: *anyopaque, name: [*:0]const u8) ?rhi.types.GlProc {

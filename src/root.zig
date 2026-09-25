@@ -36,6 +36,7 @@ pub const Input = @import("input.zig");
 pub const Time = @import("time.zig");
 pub const Assets = @import("assets.zig");
 pub const Interface = @import("interface.zig");
+pub const ToolWindow = @import("tool_window.zig");
 pub const WorldUi = @import("world_ui.zig");
 pub const Clipboard = @import("clipboard.zig");
 

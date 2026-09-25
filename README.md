@@ -571,6 +571,34 @@ if (app.resized) layOutAgain(app.width, app.height);
   nothing, and says so without failing. The project's `display.min_width`
   and `min_height` are the least the player may drag the window to.
 
+### 🗔 Tool windows: more than one window
+
+```zig
+const tool = try app.openToolWindow(.{ .title = "Code", .width = 900, .height = 700 });
+tool.draw = .{ .context = editor, .run = drawCode }; // lays out `tool.ui` each frame
+// each frame, somewhere other than its own `draw`:
+if (tool.close_pressed) app.closeToolWindow(tool);
+```
+
+- **A window beside the main one, with an interface of its own**: an
+  editor's panel torn off, a debug view on a second monitor. Its `input` is
+  fed with its own events and no other window's - a press in it is not the
+  game's - and its `ui` is laid out by `draw` after the `.ui` systems, in
+  the main interface's fonts, so a style's font index means the same in
+  both. It has a renderer of its own; the textures its images name are its
+  `interface.textures`.
+- **One device draws both.** On Direct3D and Vulkan the tool window is a
+  swapchain of its own; on OpenGL, a context of its own that shares the main
+  one's textures, buffers and shaders, which the renderer draws in and
+  presents with in turn. It does not wait for the display: one window per
+  frame does.
+- **Its close button asks**: `close_pressed` is set and the window stays
+  until `closeToolWindow`, called anywhere but its own `draw`. The engine
+  closes whatever is left when the run ends.
+- **Headless it is a texture** of its size, and a test hands its `input`
+  events itself - `tool.input.apply` - or `tool.take` for one the platform
+  would have sent.
+
 ## 📐 Made at one size
 
 ```json
