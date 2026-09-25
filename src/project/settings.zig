@@ -149,6 +149,10 @@ pub const Display = struct {
     /// The least the player may drag the window to; nought is no least.
     min_width: u32 = 0,
     min_height: u32 = 0,
+    /// A picture of the game's own for the pointer, and the point in it that
+    /// points: see `App.setCustomCursor`.
+    mouse_cursor: []const u8 = "",
+    mouse_cursor_hotspot: math.Vec2 = .init(0, 0),
 
     pub const Mode = enum {
         /// A window of `width` by `height`.
@@ -169,6 +173,8 @@ pub const Display = struct {
         .stretch_aspect = .{ attr.Restart{}, attr.Doc{ .text = "Keep: always this shape, with bars where the window has room to spare. Expand: the spare room shows more of the game." } },
         .min_width = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "The narrowest the window may be dragged to; nought is no least." } },
         .min_height = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "The lowest the window may be dragged to; nought is no least." } },
+        .mouse_cursor = .{ attr.ProjectFile{ .kind = .texture }, attr.Restart{}, attr.Doc{ .text = "A picture for the pointer, instead of the system's arrow: 256 pixels a side at most." } },
+        .mouse_cursor_hotspot = .{ attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "The pixel of the pointer's picture that points: the tip of an arrow, the middle of a crosshair." } },
     };
 };
 

@@ -488,11 +488,29 @@ const turn = app.input.pointer.dx;
   report movement with no edge to stop at, unaccelerated where the system
   allows. While locked, `input.pointer` holds still where it was and only
   `dx` and `dy` move; `.confined_hidden` keeps saying where it is.
-- **The pointer's shape is the system's**, `app.setCursorShape(.pointing_hand)`
-  or any other of the seventeen, or a picture of the game's own with
-  `app.setCursorImage(.{ .pixels = rgba, .width = 32, .height = 32, .hot_x = 4, .hot_y = 2 })`.
-  A browser quietly keeps its arrow past 128 by 128, so a cursor a page
-  will see should be small.
+- **The pointer's shape is the one the interface asks for** - the hand over
+  a button, the caret over text, what a control's `MouseCursor` names - and
+  the game's default everywhere else: the arrow, until
+  `app.setDefaultCursorShape(.crosshair)` says otherwise.
+  `app.currentCursorShape()` is the one it took in the last frame.
+- **Any shape can be a picture of the game's own**, with the pixel in it
+  that points:
+
+  ```zig
+  try app.setCustomCursor(try app.assets.loadTexture("res://ui/sword.png", .{}), .arrow, .init(2, 2));
+  try app.setCustomCursor(try app.assets.loadTexture("res://ui/hand.png", .{}), .pointing_hand, .init(8, 1));
+  try app.setCustomCursor(.none, .pointing_hand, .init(0, 0)); // the system's hand again
+  ```
+
+  From Flux, `app.setCustomCursor("res://ui/sword.png")` for the arrow, or
+  with a shape and a point: `app.setCustomCursor("res://ui/hand.png",
+  "pointing_hand", vec2(8, 1))`. `setCustomCursorFile(path, ...)` reads a
+  picture without making a texture of it, and `setCustomCursorPixels` takes
+  RGBA in memory. A side is 256 pixels at most (`error.CursorTooLarge`),
+  and a point outside the picture is moved to its edge. The project's
+  `display.mouse_cursor` and `mouse_cursor_hotspot` give the arrow its
+  picture from the start. A browser quietly keeps its arrow past 128 by 128,
+  so a cursor a page will see should be small.
 - **Where the pointer is, and how fast**: `input.pointer.x/y` in the
   framebuffer's pixels, `app.pointerInWorld()` through the camera,
   `app.pointerIn(entity)` in one entity's own space, and
@@ -1342,8 +1360,9 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   `@` on a Hungarian keyboard, and Ctrl+Alt+V still pastes.
 - **The pointer's shape is the interface's** once there is a `.ui` system: an
   I-beam over a text input, the arrows over a resize handle, and
-  `app.ui.setCursor` for a game that wants its own. A locked pointer points at
-  nothing in it.
+  `app.ui.setCursor` for a game that wants its own. Where it asks for the
+  arrow, the game's default shape shows - see `setDefaultCursorShape`. A
+  locked pointer points at nothing in it.
 - **It is the size the display asks for.** `app.interface.scale`, what it is
   laid out at, is the game's own `app.interface.zoom` - an interface-size
   setting, `app.setInterfaceZoom(1.25)` and `interfaceZoom()` from a
@@ -1433,6 +1452,10 @@ app.grabFocus(play);                                                            
   black over the buttons - while what is inside it still answers. A layer's
   root covers the screen whatever is on it, so it passes the pointer on to
   the layers under it unless it is `stop`.
+- **A `MouseCursor`** beside a control names the pointer's shape over it -
+  `resize_ew` on a splitter, `pointing_hand` on a card that can be picked up -
+  in place of the one its kind asks for. A control that lets the pointer
+  through (`ignore`) asks for nothing.
 - **A `ColorRect`** is a box of one colour: a backdrop, a fade to black.
 - **They fade, tint and pop.** A control's `Appearance` - and whatever is
   above its tree, controls or not - colours it and everything in it by its
@@ -1955,8 +1978,9 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   `resizable`, `mode` (`windowed`, `maximized`, `fullscreen`) and `vsync`,
   how the game is fitted to it - `stretch_mode`, `stretch_aspect` - and the
   least it may be dragged to, the `clear_color` and the
-  `default_texture_filter`, the `ticks_per_second` of the fixed step, and the
-  `icon` on the window. What the game's own `App.Options` say overrules it,
+  `default_texture_filter`, the `ticks_per_second` of the fixed step, the
+  `icon` on the window and the pointer's picture, `mouse_cursor` with its
+  `mouse_cursor_hotspot`. What the game's own `App.Options` say overrules it,
   field by field; what neither says is the sections' defaults, so a folder
   with no project file opens as it always did.
 - **`application.name` is all it must have.** The name is the window's

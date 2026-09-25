@@ -120,8 +120,6 @@ font_reloads: u32 = 0,
 /// This frame's, from `ui.end`.
 commands: []const ui.RenderCommand = &.{},
 
-/// The pointer shape last put on the window.
-shape: ui.CursorShape = .arrow,
 
 /// Unscaled seconds since the first frame: what animated text moves on.
 seconds: f64 = 0,
@@ -381,15 +379,6 @@ fn rendererFor(self: *Interface, gpa: Allocator, device: *rhi.Device, first: *co
     return &self.renderer.?;
 }
 
-/// Put the pointer shape the interface worked out on the window, when it
-/// changes.
-pub fn applyCursor(self: *Interface, layout: *ui.Ui, window: *Window) void {
-    const wanted = layout.cursor();
-    if (wanted == self.shape) return;
-    window.setCursorShape(platformShape(wanted)) catch return;
-    self.shape = wanted;
-}
-
 /// Turn the platform's text input on while one of the interface's text
 /// inputs has the keyboard - the soft keyboard on a phone or a page, and an
 /// input method's composition on a desktop - and off when none has, so an
@@ -436,12 +425,6 @@ fn caretArea(at: ui.BoundingBox) ?platform.text.Area {
         .y = @intFromFloat(@floor(at.y)),
         .width = @intFromFloat(@max(0, @ceil(at.width))),
         .height = @intFromFloat(@max(0, @ceil(at.height))),
-    };
-}
-
-fn platformShape(shape: ui.CursorShape) platform.CursorShape {
-    return switch (shape) {
-        inline else => |named| @field(platform.CursorShape, @tagName(named)),
     };
 }
 

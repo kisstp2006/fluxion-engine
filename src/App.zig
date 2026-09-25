@@ -210,6 +210,9 @@ pub const Options = struct {
     /// Put the project file's `application.icon` on the window. An editor,
     /// whose window is its own and not the game's, leaves it off.
     project_icon: bool = true,
+    /// Take the project file's `display.mouse_cursor` for the pointer. An
+    /// editor, drawing its own interface, leaves it off.
+    project_cursor: bool = true,
 
     /// Take the project file's actions, over the built-in ones. An editor,
     /// whose keys are its own and not the game's, leaves it off, and moves
@@ -466,6 +469,15 @@ data_files: data_mod.DataFiles = .{},
 audio: audio_mod.Audio,
 /// Each tween's steps: see `tween.zig` and `tween`.
 tweens: tween_mod.Tweens = .{},
+/// The pictures the game gave the pointer's shapes: see `setCustomCursor`.
+custom_cursors: [@typeInfo(CursorShape).@"enum".fields.len]?CustomCursor = @splat(null),
+/// What the pointer is where nothing asks for another shape.
+default_cursor_shape: CursorShape = .arrow,
+/// The shape the last frame's interface asked for, and what the window was
+/// last told, with the pictures as they were then.
+cursor_wanted: CursorShape = .arrow,
+cursor_shown: ?struct { shape: CursorShape, generation: u32 } = null,
+cursor_generation: u32 = 0,
 /// The game's own clocks: see `clocks.zig` and `newClock`.
 clocks: clocks_mod.Clocks = .{},
 /// The culture dates and times are written in, once asked for: see
@@ -885,6 +897,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         control.Slider,
         control.ProgressBar,
         control.Focus,
+        control.MouseCursor,
         control.ColorRect,
         control.RichText,
         control.Popup,
@@ -1014,6 +1027,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .linear => .linear,
     };
     if (options.project_icon) self.useProjectIcon();
+    if (options.project_cursor) self.useProjectCursor();
 
     self.sprites = try .init(gpa, &self.device);
     errdefer self.sprites.deinit(gpa);
@@ -1117,6 +1131,7 @@ pub fn destroy(self: *App) void {
     self.data_files.deinit(gpa);
     self.audio.deinit();
     self.tweens.deinit(gpa);
+    for (self.custom_cursors) |held| if (held) |custom| gpa.free(custom.pixels);
     self.clocks.deinit(gpa);
     if (self.culture_held) |held| held.close();
     if (self.locale_chosen) |chosen| gpa.free(chosen);
@@ -1681,8 +1696,9 @@ fn layOutInterface(self: *App) !void {
         try self.schedule.run(.ui, self);
     }
     self.interface.commands = try self.ui.end();
+    self.cursor_wanted = self.wantedCursor();
     if (self.window) |*window| {
-        self.interface.applyCursor(&self.ui, window);
+        self.applyCursor(window);
         self.interface.applyTextInput(&self.ui, window);
     }
 }
@@ -4410,141 +4426,144 @@ fn clockRuns(self: *App, owner: ?ecs.Entity) clocks_mod.Clocks.Runs {
 pub const reflect_name = "App";
 pub const reflect_opaque = true;
 pub const reflect_methods = .{
-    .quit,
-    .setName,
-    .setFreeName,
-    .nameOf,
-    .find,
-    .setParent,
-    .parentOf,
-    .hangsFrom,
-    .childCount,
-    .childAt,
-    .childNamed,
-    .findPath,
-    .findIn,
-    .addToGroup,
-    .removeFromGroup,
-    .isInGroup,
-    .groupSize,
-    .groupMember,
-    .callGroup,
-    .setPaused,
-    .isPaused,
-    .isProcessing,
-    .clearWorld,
-    .addComponentNamed,
-    .removeComponentNamed,
-    .stateNamed,
-    .setStateNamed,
-    .saveScene,
-    .readScene,
-    .loadInBackground,
-    .loadProgress,
-    .currentScene,
-    .currentSceneRoot,
-    .createTimer,
-    .randomFloat,
-    .randomRange,
-    .randomInt,
-    .randomChance,
-    .randomIndex,
-    .seedRandom,
-    .randomize,
-    .worldTransform,
-    .setWorldTransform,
-    .globalPosition,
-    .setGlobalPosition,
-    .globalRotation,
-    .setGlobalRotation,
-    .globalScale,
-    .setGlobalScale,
-    .globalTranslate,
-    .toLocal,
-    .toGlobal,
-    .getAngleTo,
-    .lookAt,
-    .getRelativeTransformToParent,
-    .moveLocalX,
-    .moveLocalY,
-    .rotate,
-    .applyScale,
-    .setInputAsHandled,
-    .bindAction,
-    .clearAction,
-    .spawn,
-    .instantiate,
-    .changeScene,
-    .readData,
-    .newSpriteFrames,
-    .loadSpriteFrames,
-    .saveSpriteFrames,
-    .tween,
-    .tweenProperty,
-    .tweenInterval,
-    .tweenParallel,
-    .tweenEase,
-    .grabFocus,
-    .hasFocus,
-    .releaseFocus,
-    .controlRect,
-    .setAnchorsPreset,
-    .audioLength,
-    .setBusVolumeDb,
-    .busVolumeDb,
-    .setBusMute,
-    .isBusMuted,
-    .linearToDb,
-    .dbToLinear,
-    .nextFrame,
-    .callDeferred,
-    .keyDown,
-    .keyAxis,
-    .actionDown,
-    .actionJustPressed,
-    .actionJustReleased,
-    .actionStrength,
-    .actionAxis,
-    .actionVector,
-    .pressAction,
-    .releaseAction,
-    .describeAction,
-    .saveInputMap,
-    .loadInputMap,
-    .isOnFloor,
-    .moveAndSlide,
-    .moveAndCollide,
-    .cellAt,
-    .tileData,
-    .tileDataAt,
-    .screenToWorld,
-    .worldToScreen,
-    .pointerInWorld,
-    .overlapPoint,
-    .addCollisionExceptionWith,
-    .removeCollisionExceptionWith,
-    .setFullscreen,
-    .fullscreen,
-    .toggleFullscreen,
-    .setWindowTitle,
-    .setWindowSize,
-    .windowSize,
-    .setWindowPosition,
-    .windowPosition,
-    .setWindowState,
-    .windowState,
-    .setVsync,
-    .vsync,
-    .setMaxFps,
-    .maxFps,
-    .setInterfaceZoom,
-    .interfaceZoom,
-    .setCursor,
-    .cursor,
-    .setCursorShape,
-    .setClipboardText,
-    .clipboardText,
-    .hasClipboardText,
+    .quit = .{},
+    .setName = .{},
+    .setFreeName = .{},
+    .nameOf = .{},
+    .find = .{},
+    .setParent = .{},
+    .parentOf = .{},
+    .hangsFrom = .{},
+    .childCount = .{},
+    .childAt = .{},
+    .childNamed = .{},
+    .findPath = .{},
+    .findIn = .{},
+    .addToGroup = .{},
+    .removeFromGroup = .{},
+    .isInGroup = .{},
+    .groupSize = .{},
+    .groupMember = .{},
+    .callGroup = .{},
+    .setPaused = .{},
+    .isPaused = .{},
+    .isProcessing = .{},
+    .clearWorld = .{},
+    .addComponentNamed = .{},
+    .removeComponentNamed = .{},
+    .stateNamed = .{},
+    .setStateNamed = .{},
+    .saveScene = .{},
+    .readScene = .{},
+    .loadInBackground = .{},
+    .loadProgress = .{},
+    .currentScene = .{},
+    .currentSceneRoot = .{},
+    .createTimer = .{},
+    .randomFloat = .{},
+    .randomRange = .{},
+    .randomInt = .{},
+    .randomChance = .{},
+    .randomIndex = .{},
+    .seedRandom = .{},
+    .randomize = .{},
+    .worldTransform = .{},
+    .setWorldTransform = .{},
+    .globalPosition = .{},
+    .setGlobalPosition = .{},
+    .globalRotation = .{},
+    .setGlobalRotation = .{},
+    .globalScale = .{},
+    .setGlobalScale = .{},
+    .globalTranslate = .{},
+    .toLocal = .{},
+    .toGlobal = .{},
+    .getAngleTo = .{},
+    .lookAt = .{},
+    .getRelativeTransformToParent = .{},
+    .moveLocalX = .{},
+    .moveLocalY = .{},
+    .rotate = .{},
+    .applyScale = .{},
+    .setInputAsHandled = .{},
+    .bindAction = .{},
+    .clearAction = .{},
+    .spawn = .{},
+    .instantiate = .{},
+    .changeScene = .{},
+    .readData = .{},
+    .newSpriteFrames = .{},
+    .loadSpriteFrames = .{},
+    .saveSpriteFrames = .{},
+    .tween = .{},
+    .tweenProperty = .{},
+    .tweenInterval = .{},
+    .tweenParallel = .{},
+    .tweenEase = .{},
+    .grabFocus = .{},
+    .hasFocus = .{},
+    .releaseFocus = .{},
+    .controlRect = .{},
+    .setAnchorsPreset = .{},
+    .audioLength = .{},
+    .setBusVolumeDb = .{},
+    .busVolumeDb = .{},
+    .setBusMute = .{},
+    .isBusMuted = .{},
+    .linearToDb = .{},
+    .dbToLinear = .{},
+    .nextFrame = .{},
+    .callDeferred = .{},
+    .keyDown = .{},
+    .keyAxis = .{},
+    .actionDown = .{},
+    .actionJustPressed = .{},
+    .actionJustReleased = .{},
+    .actionStrength = .{},
+    .actionAxis = .{},
+    .actionVector = .{},
+    .pressAction = .{},
+    .releaseAction = .{},
+    .describeAction = .{},
+    .saveInputMap = .{},
+    .loadInputMap = .{},
+    .isOnFloor = .{},
+    .moveAndSlide = .{},
+    .moveAndCollide = .{},
+    .cellAt = .{},
+    .tileData = .{},
+    .tileDataAt = .{},
+    .screenToWorld = .{},
+    .worldToScreen = .{},
+    .pointerInWorld = .{},
+    .overlapPoint = .{},
+    .addCollisionExceptionWith = .{},
+    .removeCollisionExceptionWith = .{},
+    .setFullscreen = .{},
+    .fullscreen = .{},
+    .toggleFullscreen = .{},
+    .setWindowTitle = .{},
+    .setWindowSize = .{},
+    .windowSize = .{},
+    .setWindowPosition = .{},
+    .windowPosition = .{},
+    .setWindowState = .{},
+    .windowState = .{},
+    .setVsync = .{},
+    .vsync = .{},
+    .setMaxFps = .{},
+    .maxFps = .{},
+    .setInterfaceZoom = .{},
+    .interfaceZoom = .{},
+    .setCursor = .{},
+    .cursor = .{},
+    .setCustomCursor = .{ attr.Params{ .names = &.{ "image", "shape", "hotspot" } }, attr.defaults(.{ CursorShape.arrow, math.Vec2.init(0, 0) }) },
+    .setDefaultCursorShape = .{attr.Params{ .names = &.{"shape"} }},
+    .defaultCursorShape = .{},
+    .currentCursorShape = .{},
+    .setClipboardText = .{},
+    .clipboardText = .{},
+    .hasClipboardText = .{},
 };
 
 /// Call one of the calls `reflect_methods` lists, by name, with values for
@@ -5639,25 +5658,112 @@ pub fn cursor(self: *const App) Cursor {
     return .normal;
 }
 
-/// Use one of the system's own pointer shapes over the window. Nothing
-/// without a window.
-pub fn setCursorShape(self: *App, shape: CursorShape) Window.Error!void {
-    if (self.window) |*window| try window.setCursorShape(shape);
-}
-
-/// A picture of the game's own for the pointer, with the point in it that
-/// does the pointing; null puts the shape back. Nothing without a window.
+/// A picture of the game's own for one of the pointer's shapes - `.arrow`
+/// is the pointer everywhere, `.pointing_hand` the one over a button, `.ibeam`
+/// over text - with `hotspot` the pixel in it that points; `.none` gives the
+/// shape back to the system. The picture is read from the texture's file,
+/// 256 pixels a side at most.
 ///
 /// ```zig
-/// const sword = app.assets.get(cursor_texture).?;
-/// try app.setCursorImage(.{ .pixels = pixels, .width = 32, .height = 32, .hot_x = 4, .hot_y = 2 });
+/// try app.setCustomCursor(try app.assets.loadTexture("res://ui/sword.png", .{}), .arrow, .init(2, 2));
+/// try app.setCustomCursor(try app.assets.loadTexture("res://ui/hand.png", .{}), .pointing_hand, .init(8, 1));
 /// ```
 ///
 /// A browser quietly keeps its own arrow past a size of its own - 128 by
 /// 128 in Chrome and Firefox - so a cursor a page will see should be small.
-pub fn setCursorImage(self: *App, picture: ?platform.CursorImage) Window.Error!void {
-    if (self.window) |*window| try window.setCursorImage(picture);
+pub fn setCustomCursor(self: *App, texture: Assets.TextureHandle, shape: CursorShape, hotspot: math.Vec2) !void {
+    if (texture.isNone()) return self.setCustomCursorPixels(null, shape);
+    const source = self.assets.textureSource(texture) orelse return error.NoFile;
+    return self.setCustomCursorFile(source, shape, hotspot);
 }
+
+/// The same from a picture's file - `res://`, `user://` or the system's -
+/// read without making a texture of it.
+pub fn setCustomCursorFile(self: *App, path: []const u8, shape: CursorShape, hotspot: math.Vec2) !void {
+    const io = self.io orelse return error.NoIo;
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    var decoded = try image.readFile(self.gpa, io, file, .{});
+    defer decoded.deinit(self.gpa);
+    const hot_x: u32 = @intFromFloat(std.math.clamp(@round(hotspot.x), 0, @as(f32, @floatFromInt(decoded.width -| 1))));
+    const hot_y: u32 = @intFromFloat(std.math.clamp(@round(hotspot.y), 0, @as(f32, @floatFromInt(decoded.height -| 1))));
+    try self.setCustomCursorPixels(.{ .pixels = decoded.pixels, .width = decoded.width, .height = decoded.height, .hot_x = hot_x, .hot_y = hot_y }, shape);
+}
+
+/// The same from pixels in memory - straight RGBA, row by row from the top
+/// - which are copied; null gives the shape back to the system.
+pub fn setCustomCursorPixels(self: *App, picture: ?platform.CursorImage, shape: CursorShape) !void {
+    const slot = &self.custom_cursors[@intFromEnum(shape)];
+    const given = picture orelse {
+        if (slot.*) |held| self.gpa.free(held.pixels);
+        slot.* = null;
+        self.cursor_generation +%= 1;
+        return;
+    };
+    if (given.width > platform.CursorImage.max_side or given.height > platform.CursorImage.max_side) return error.CursorTooLarge;
+    if (!given.valid()) return error.InvalidCursor;
+    const pixels = try self.gpa.dupe(u8, given.pixels);
+    if (slot.*) |held| self.gpa.free(held.pixels);
+    slot.* = .{ .pixels = pixels, .width = given.width, .height = given.height, .hot_x = given.hot_x, .hot_y = given.hot_y };
+    self.cursor_generation +%= 1;
+}
+
+/// The shape the pointer takes where nothing under it asks for another -
+/// over the game's world, over a control that leaves it to the game: the
+/// arrow, unless this says otherwise.
+pub fn setDefaultCursorShape(self: *App, shape: CursorShape) void {
+    self.default_cursor_shape = shape;
+}
+
+pub fn defaultCursorShape(self: *const App) CursorShape {
+    return self.default_cursor_shape;
+}
+
+/// The shape the pointer took in the last frame: what the control under it
+/// asked for, or the default.
+pub fn currentCursorShape(self: *const App) CursorShape {
+    return self.cursor_wanted;
+}
+
+/// The shape the interface asks for, the arrow being the game's default.
+fn wantedCursor(self: *App) CursorShape {
+    const asked: CursorShape = switch (self.ui.cursor()) {
+        inline else => |named| @field(CursorShape, @tagName(named)),
+    };
+    return if (asked == .arrow) self.default_cursor_shape else asked;
+}
+
+/// The window shows the wanted shape: the game's picture for it where it
+/// gave one, and the system's otherwise - told only of a change.
+fn applyCursor(self: *App, window: *Window) void {
+    const shape = self.cursor_wanted;
+    if (self.cursor_shown) |shown| {
+        if (shown.shape == shape and shown.generation == self.cursor_generation) return;
+    }
+    self.cursor_shown = .{ .shape = shape, .generation = self.cursor_generation };
+    if (self.custom_cursors[@intFromEnum(shape)]) |custom| {
+        window.setCursorImage(.{ .pixels = custom.pixels, .width = custom.width, .height = custom.height, .hot_x = custom.hot_x, .hot_y = custom.hot_y }) catch |err| {
+            log.warn("the pointer's picture was not taken: {t}", .{err});
+        };
+        return;
+    }
+    window.setCursorImage(null) catch {};
+    window.setCursorShape(shape) catch {};
+}
+
+/// The project file's `display.mouse_cursor` for the arrow. A picture that
+/// does not read is said, and the system's arrow stays.
+fn useProjectCursor(self: *App) void {
+    const settings = self.project.settings orelse return;
+    const path = settings.display.mouse_cursor;
+    if (path.len == 0) return;
+    self.setCustomCursorFile(path, .arrow, settings.display.mouse_cursor_hotspot) catch |err| {
+        log.warn("the project's pointer {s} was not taken: {t}", .{ path, err });
+    };
+}
+
+/// A picture the game gave one of the pointer's shapes.
+const CustomCursor = struct { pixels: []u8, width: u32, height: u32, hot_x: u32, hot_y: u32 };
 
 /// The window's own picture, in the title bar, the task switcher and the
 /// dock: several sizes at once, and the system takes the one it wants. An
@@ -6984,8 +7090,81 @@ test "a headless app has no pointer to hold, and says so without failing" {
     try app.setCursor(.locked);
     try testing.expect(app.cursor() == .normal);
     try testing.expect(!app.input.pointer.locked);
-    try app.setCursorShape(.pointing_hand);
+    app.setDefaultCursorShape(.crosshair);
     try testing.expectEqual(@as(usize, 0), try app.addGamepadMappings("not a mapping"));
+}
+
+fn pointerTo(x: f64, y: f64) platform.Event {
+    return .{ .cursor = .{ .window = .none, .x = x, .y = y, .dx = 0, .dy = 0 } };
+}
+
+test "the pointer takes the shape its control asks for, the game's default elsewhere, and the picture the game gave it" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100, .io = testing.io });
+    defer app.destroy();
+    try app.useControlNodes();
+    const root = try app.world.spawnWith(.{ control.Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, control.CanvasLayer{} });
+    const button = try app.world.spawnWith(.{
+        control.Control{ .width = .{ .mode = .fixed, .value = 60 }, .height = .{ .mode = .fixed, .value = 30 } },
+        components.Parent.of(root),
+        control.Button{},
+    });
+    const edge = try app.world.spawnWith(.{
+        control.Control{ .width = .{ .mode = .fixed, .value = 60 }, .height = .{ .mode = .fixed, .value = 30 } },
+        components.Parent.of(root),
+        control.PanelContainer{},
+        control.MouseCursor{ .shape = .resize_ew },
+    });
+    try app.startup();
+    _ = try app.step();
+
+    const Hover = struct {
+        fn over(a: *App, entity: ecs.Entity) !CursorShape {
+            const box = a.controlRect(entity).?;
+            a.input.apply(pointerTo(box.position.x + box.size.x / 2, box.position.y + box.size.y / 2));
+            _ = try a.step();
+            return a.currentCursorShape();
+        }
+        fn away(a: *App) !CursorShape {
+            a.input.apply(pointerTo(199, 99));
+            _ = try a.step();
+            return a.currentCursorShape();
+        }
+    };
+    try testing.expectEqual(CursorShape.arrow, try Hover.away(app));
+    try testing.expectEqual(CursorShape.pointing_hand, try Hover.over(app, button));
+    try testing.expectEqual(CursorShape.resize_ew, try Hover.over(app, edge));
+
+    // The game's default stands in for the arrow, and nowhere else.
+    app.setDefaultCursorShape(.crosshair);
+    try testing.expectEqual(CursorShape.crosshair, try Hover.away(app));
+    try testing.expectEqual(CursorShape.pointing_hand, try Hover.over(app, button));
+
+    // A control that lets the pointer through asks for nothing.
+    app.world.get(edge, control.Control).?.mouse_filter = .ignore;
+    try testing.expectEqual(CursorShape.crosshair, try Hover.over(app, edge));
+
+    // A picture from a file, its point kept inside it; a picture too large
+    // is refused and the one held stays.
+    var name: [128]u8 = undefined;
+    const path = try std.fmt.bufPrint(&name, ".zig-cache/tmp/{s}/sword.png", .{tmp.sub_path});
+    const pixels = [_]u8{ 255, 0, 0, 255 } ** (4 * 4);
+    try image.png.writeFile(testing.allocator, testing.io, path, .{ .width = 4, .height = 4, .pixels = &pixels, .row_pitch = 16 }, .{});
+    try app.setCustomCursorFile(path, .pointing_hand, .init(9, 1));
+    const held = app.custom_cursors[@intFromEnum(CursorShape.pointing_hand)].?;
+    try testing.expectEqual(@as(u32, 4), held.width);
+    try testing.expectEqual(@as(u32, 3), held.hot_x);
+    try testing.expectEqual(@as(u32, 1), held.hot_y);
+
+    const huge = try testing.allocator.alloc(u8, 257 * 1 * 4);
+    defer testing.allocator.free(huge);
+    try testing.expectError(error.CursorTooLarge, app.setCustomCursorPixels(.{ .pixels = huge, .width = 257, .height = 1 }, .pointing_hand));
+    try testing.expectEqual(@as(u32, 4), app.custom_cursors[@intFromEnum(CursorShape.pointing_hand)].?.width);
+
+    try app.setCustomCursorPixels(null, .pointing_hand);
+    try testing.expect(app.custom_cursors[@intFromEnum(CursorShape.pointing_hand)] == null);
+    try testing.expectError(error.FileNotFound, app.setCustomCursorFile("res://nowhere.png", .arrow, .init(0, 0)));
 }
 
 test "a headless app has no window to move or resize, and says so without failing" {
@@ -8094,7 +8273,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 44), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 45), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

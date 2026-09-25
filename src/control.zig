@@ -471,6 +471,29 @@ pub const ProgressBar = extern struct {
     pub const reflect_name = "ProgressBar";
 };
 
+/// The pointer's shape over the control it is on - the hand, the caret, a
+/// resize arrow - in place of the one its kind calls for: the hand over what
+/// can be pressed, the caret over text, the game's default elsewhere (see
+/// `App.setDefaultCursorShape`). A picture the game gave the shape is what
+/// shows: see `App.setCustomCursor`.
+pub const MouseCursor = extern struct {
+    shape: Shape = .arrow,
+
+    pub const Shape = enum(u8) {
+        arrow,
+        ibeam,
+        crosshair,
+        pointing_hand,
+        resize_ew,
+        resize_ns,
+        resize_nwse,
+        resize_nesw,
+        resize_all,
+        not_allowed,
+    };
+    pub const reflect_name = "MouseCursor";
+};
+
 /// How a control takes the keyboard's and a pad's focus, beside its
 /// `Control`: without one, a button, a box and a slider take it from a press,
 /// Tab and the arrows, and the rest do not; a field always does.
@@ -956,6 +979,9 @@ pub const Nodes = struct {
         if (pressable and control.mouse_filter != .ignore) {
             out.cursor = .pointing_hand;
             out.capture = true;
+        }
+        if (app.world.get(entity, MouseCursor)) |own| {
+            if (control.mouse_filter != .ignore) out.cursor = cursorShape(own.shape);
         }
         const asked: Focus = if (app.world.get(entity, Focus)) |own| own.* else .{ .mode = if (pressable) .all else .none };
         if (asked.mode != .none and control.mouse_filter != .ignore) {
@@ -1667,6 +1693,13 @@ fn ratio(app: *App, handle: Assets.TextureHandle) ?f32 {
 }
 
 const testing = std.testing;
+
+/// The interface's shape for a control's choice of pointer.
+fn cursorShape(choice: MouseCursor.Shape) ui.CursorShape {
+    return switch (choice) {
+        inline else => |named| @field(ui.CursorShape, @tagName(named)),
+    };
+}
 
 test "an editor reads from a control's type that a click in its scene passes over it" {
     const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240, .io = testing.io });

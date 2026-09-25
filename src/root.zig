@@ -225,6 +225,7 @@ pub const Slider = control.Slider;
 pub const ProgressBar = control.ProgressBar;
 pub const ColorRect = control.ColorRect;
 pub const Focus = control.Focus;
+pub const MouseCursor = control.MouseCursor;
 pub const RichText = control.RichText;
 pub const Popup = control.Popup;
 pub const StyleBox = control.StyleBox;
@@ -244,7 +245,7 @@ pub const PointerButton = pointer.PointerButton;
 /// Which pointer buttons are held: `app.input.buttonMask()`.
 pub const ButtonMask = pointer.ButtonMask;
 
-/// A picture of the game's own for the pointer: `App.setCursorImage`.
+/// A picture of the game's own for the pointer: `App.setCustomCursorPixels`.
 pub const CursorImage = platform.CursorImage;
 
 /// One size of a window's own picture: `App.setWindowIcon`.

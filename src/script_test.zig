@@ -1813,3 +1813,33 @@ test "a data file is its struct, made anew from Flux with the file's values" {
     try testing.expectEqualStrings("NoSuchStruct", globalText(app, reader, "refused"));
     try testing.expectEqualStrings("res://intro.data", app.dataSource(app.findData("res://intro.data").?).?);
 }
+
+test "a script gives the pointer a picture and a default shape" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var name: [160]u8 = undefined;
+    const pixels = [_]u8{ 0, 0, 255, 255 } ** (8 * 8);
+    try @import("fluxion_image").png.writeFile(testing.allocator, testing.io, try std.fmt.bufPrint(&name, "{s}/hand.png", .{root}), .{ .width = 8, .height = 8, .pixels = &pixels, .row_pitch = 32 }, .{});
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    const file = try app.addScript("pointer.flux",
+        \\var shape = "";
+        \\struct Pointer {
+        \\    fn ready(self) {
+        \\        app.setDefaultCursorShape("crosshair");
+        \\        shape = app.defaultCursorShape();
+        \\        app.setCustomCursor("res://hand.png", "pointing_hand", vec2(2, 1)) catch return;
+        \\        app.setCustomCursor("res://hand.png") catch return;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("crosshair", globalText(app, file, "shape"));
+    const hand = app.custom_cursors[@intFromEnum(App.CursorShape.pointing_hand)].?;
+    try testing.expectEqual(@as(u32, 2), hand.hot_x);
+    try testing.expect(app.custom_cursors[@intFromEnum(App.CursorShape.arrow)] != null);
+}
