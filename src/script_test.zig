@@ -530,6 +530,16 @@ test "a script imports the file beside it, and calls another entity's script" {
     try testing.expectEqual(@as(i64, 8), app.world.get(saver, Counter).?.value);
     const held = app.scripts.?.vm.getField(app.scripts.?.instanceOf(bank).?, "held").?;
     try testing.expectEqual(@as(i64, 6), held.asInt());
+
+    // An editor outside the engine names the file by where it is on the
+    // disk: what it imports is found beside it all the same.
+    const on_disk = try app.project.osPath(testing.allocator, "res://scripts/saver.flux");
+    defer testing.allocator.free(on_disk);
+    const text = try tmp.dir.readFileAlloc(testing.io, "scripts/saver.flux", testing.allocator, .limited(1 << 16));
+    defer testing.allocator.free(text);
+    const a = try flux.service.Analysis.init(testing.allocator, on_disk, text, app.scriptSetup());
+    defer a.deinit();
+    try testing.expectEqual(@as(usize, 0), a.diagnostics.items.items.len);
 }
 
 test "a script saved while the game runs is read again when the watch next looks" {

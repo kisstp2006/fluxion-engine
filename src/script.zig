@@ -3562,15 +3562,18 @@ pub fn serviceOptions(app: *App) flux.service.Options {
 
 /// A script's `@import("save.flux")`: the file beside the one importing it,
 /// or at a `res://` path, read from the project. The same file is the same
-/// module name however it is spelt.
+/// module name however it is spelt - and however the importing file is: an
+/// editor outside the engine names it by where it is on the disk.
 fn loadImport(context: ?*anyopaque, gpa: Allocator, from: []const u8, path: []const u8) anyerror!flux.Vm.Loader.Loaded {
     const app: *App = @ptrCast(@alignCast(context.?));
     const io = app.io orelse return error.NoIo;
+    const importing = try app.project.canonical(gpa, from);
+    defer gpa.free(importing);
     const wanted = if (std.mem.indexOf(u8, path, "://") != null)
         try gpa.dupe(u8, path)
-    else if (std.mem.lastIndexOfScalar(u8, from, '/')) |cut|
+    else if (std.mem.lastIndexOfScalar(u8, importing, '/')) |cut|
         // "res://Scripts/menu.flux" and "save.flux" are "res://Scripts/save.flux".
-        try std.mem.concat(gpa, u8, &.{ from[0 .. cut + 1], path })
+        try std.mem.concat(gpa, u8, &.{ importing[0 .. cut + 1], path })
     else
         try gpa.dupe(u8, path);
     defer gpa.free(wanted);
