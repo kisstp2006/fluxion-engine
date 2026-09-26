@@ -6520,14 +6520,6 @@ pub fn saveCapture(self: *App, path: []const u8) !void {
     }, .{});
 }
 
-/// Read the frame that was last drawn, as `width * height * 4` bytes the
-/// caller owns. Headless only: a swapchain image cannot be read back on every
-/// backend.
-pub fn readFrame(self: *App, gpa: Allocator) ![]u8 {
-    const texture = self.offscreen orelse return error.NotHeadless;
-    return self.device.readTexture(texture, gpa);
-}
-
 // -------------------------------------------------------------------------
 // Images
 // -------------------------------------------------------------------------

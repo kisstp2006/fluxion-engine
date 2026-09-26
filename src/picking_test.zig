@@ -9,7 +9,6 @@ const testing = std.testing;
 
 const ecs = @import("fluxion_ecs");
 const math = @import("fluxion_math");
-const platform = @import("fluxion_platform");
 
 const App = @import("App.zig");
 const components = @import("components.zig");
