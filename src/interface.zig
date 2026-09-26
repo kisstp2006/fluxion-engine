@@ -175,14 +175,17 @@ pub fn surface(self: *const Interface, width: f32, height: f32) ui.Surface {
 
 /// Hand this frame's input to the interface, before any system asks it
 /// anything. A wheel the interface scrolled with is taken out of `input`;
-/// one turned with Ctrl held is a zoom's, and is left for whoever zooms.
+/// one turned with Shift held scrolls sideways, and one turned with Ctrl
+/// held is a zoom's, left for whoever zooms.
 ///
 /// Tab moves the focus. The arrows, a d-pad and the left stick move it only
 /// once something has it, so a game keeps them until a menu takes the
 /// focus. Characters and editing keys reach a text input that has the focus,
 /// copying and pasting through `clipboard`; Enter, Space and a pad's A press
 /// whatever else has it. An element that takes every key (`Focus.keys =
-/// .all`, a code editor) keeps them all: nothing moves the focus from it.
+/// .all`: a code editor, a field that finishes a path on Tab) keeps them
+/// all: nothing moves the focus from it, and a text input among them is
+/// still edited.
 pub fn feed(
     self: *Interface,
     gpa: Allocator,
@@ -205,8 +208,10 @@ pub fn feed(
     for (input.typedThisFrame()) |typed| try receive(gpa, layout, clipboard, typed);
 
     if ((input.wheel.x != 0 or input.wheel.y != 0) and !input.mods.control) {
-        // The wheel counts up as positive, and a scroll moves the content.
-        const across, const up = self.wheelDistance(input.wheel.x, input.wheel.y, layout.surface.height);
+        // The wheel counts up as positive, and a scroll moves the content: a
+        // turn towards the reader goes on down, or with Shift to the right.
+        const x, const y = if (input.mods.shift and input.wheel.x == 0) .{ -input.wheel.y, 0 } else .{ input.wheel.x, input.wheel.y };
+        const across, const up = self.wheelDistance(x, y, layout.surface.height);
         if (layout.scrollHovered(across, -up)) input.wheel = .{};
     }
 
@@ -241,7 +246,7 @@ fn receive(gpa: Allocator, layout: *ui.Ui, clipboard: *Clipboard, typed: Input.T
         .key => |k| {
             if (k.key == .tab) {
                 _ = layout.navigate(if (k.mods.shift) .previous else .next);
-            } else if (layout.wantsKeyboard() and !layout.holdsEveryKey()) {
+            } else if (layout.wantsKeyboard()) {
                 try edit(gpa, layout, clipboard, k);
             }
         },
@@ -517,6 +522,15 @@ fn twoButtons(layout: *ui.Ui) void {
     layout.empty(.{ .id = "quit", .width = .fixed(80), .height = .fixed(20), .focus = .{} });
 }
 
+fn wideRow(layout: *ui.Ui) void {
+    layout.open(.{ .direction = .top_to_bottom });
+    defer layout.close();
+    layout.open(.{ .id = "row", .width = .fixed(100), .height = .fixed(20), .clip = .scrollX });
+    for (0..10) |_| layout.empty(.{ .width = .fixed(40), .height = .fixed(20), .background_color = .white });
+    layout.close();
+    longList(layout);
+}
+
 fn longList(layout: *ui.Ui) void {
     layout.open(.{ .id = "list", .width = .fixed(100), .height = .fixed(50), .clip = .scrollY, .direction = .top_to_bottom });
     defer layout.close();
@@ -534,6 +548,27 @@ test "typing reaches the text input that has the focus" {
     try fixture.frame(nameField);
 
     try testing.expectEqualStrings("hi", fixture.layout.textValueOf("name").?);
+}
+
+fn pathField(layout: *ui.Ui) void {
+    layout.textInput(.{ .id = "path", .width = .fixed(120), .focus = .{ .keys = .all } }, .{});
+    twoButtons(layout);
+}
+
+test "a text input that takes every key keeps Tab, and is edited as any other" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+
+    try fixture.frame(pathField);
+    fixture.layout.setFocus("path");
+    fixture.input.apply(character('a'));
+    fixture.input.apply(character('b'));
+    fixture.input.apply(keyDown(.tab, .{}));
+    fixture.input.apply(keyDown(.backspace, .{}));
+    try fixture.frame(pathField);
+
+    try testing.expect(fixture.layout.isFocused("path"));
+    try testing.expectEqualStrings("a", fixture.layout.textValueOf("path").?);
 }
 
 test "what Ctrl+C takes, Ctrl+V puts back" {
@@ -630,6 +665,27 @@ test "a wheel turned with Ctrl held is a zoom's: no list scrolls with it" {
     try fixture.frame(longList);
     fixture.input.apply(pointerAt(10, 10));
     fixture.input.apply(.{ .scroll = .{ .window = .none, .x = 0, .y = -1, .mods = .{ .control = true } } });
+    try fixture.feed(0);
+    try testing.expectEqual(@as(f32, -1), fixture.input.wheel.y);
+    try testing.expectEqual(@as(f32, 0), fixture.layout.scrollOf("list").?.position.y);
+}
+
+test "a wheel turned with Shift held scrolls sideways, and is left where nothing goes sideways" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+
+    try fixture.frame(wideRow);
+    const shifted: platform.Event = .{ .scroll = .{ .window = .none, .x = 0, .y = -1, .mods = .{ .shift = true } } };
+    fixture.input.apply(pointerAt(10, 10));
+    fixture.input.apply(shifted);
+    try fixture.feed(0);
+    try testing.expectEqual(@as(f32, 0), fixture.input.wheel.y);
+    try testing.expect(fixture.layout.scrollOf("row").?.position.x > 0);
+
+    // The list below scrolls only up and down.
+    fixture.input.beginFrame();
+    fixture.input.apply(pointerAt(10, 40));
+    fixture.input.apply(shifted);
     try fixture.feed(0);
     try testing.expectEqual(@as(f32, -1), fixture.input.wheel.y);
     try testing.expectEqual(@as(f32, 0), fixture.layout.scrollOf("list").?.position.y);
