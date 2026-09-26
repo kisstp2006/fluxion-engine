@@ -14,6 +14,12 @@
 //! | --- | --- |
 //! | `keep` | Always the project's shape: bars fill what the window has to spare. |
 //! | `expand` | The spare room shows more: the frame grows the long way, and the project's size is the least of it. |
+//! | `keep_width` | As wide as the project: a taller window shows more below, a wider one has bars. |
+//! | `keep_height` | As tall as the project: a wider window shows more at the sides, a taller one has bars. |
+//!
+//! `scale` draws it bigger on top of that - two shows half as much, twice
+//! the size - and an `integer` scale mode takes only whole scales, so every
+//! pixel of pixel art comes out the same size, with bars round what is left.
 //!
 //! What the game sees is the frame: what the interface is laid out in, what
 //! the camera's view is sized by, and where the pointer is - the window's
@@ -25,9 +31,30 @@ const testing = std.testing;
 
 const math = @import("fluxion_math");
 
-pub const Mode = enum { disabled, canvas, picture };
+pub const Mode = enum {
+    disabled,
+    canvas,
+    picture,
 
-pub const Aspect = enum { keep, expand };
+    pub const reflect_name = "StretchMode";
+};
+
+pub const Aspect = enum {
+    keep,
+    expand,
+    keep_width,
+    keep_height,
+
+    pub const reflect_name = "StretchAspect";
+};
+
+/// Whether the stretch takes any scale, or only whole ones.
+pub const ScaleMode = enum {
+    fractional,
+    integer,
+
+    pub const reflect_name = "StretchScaleMode";
+};
 
 /// What a project asks of the window, and the size it was made at.
 pub const Stretch = struct {
@@ -35,20 +62,30 @@ pub const Stretch = struct {
     aspect: Aspect = .keep,
     width: u32 = 0,
     height: u32 = 0,
+    /// How big it is drawn on top of the stretch: see the file's comment.
+    scale: f32 = 1,
+    scale_mode: ScaleMode = .fractional,
 
     /// The frame for a window `width` by `height` pixels.
     pub fn frameOf(self: Stretch, width: u32, height: u32) Frame {
         if (self.mode == .disabled or self.width == 0 or self.height == 0 or width == 0 or height == 0) return .window(width, height);
         const window_width: f32 = @floatFromInt(width);
         const window_height: f32 = @floatFromInt(height);
-        const base_width: f32 = @floatFromInt(self.width);
-        const base_height: f32 = @floatFromInt(self.height);
-        const scale = @min(window_width / base_width, window_height / base_height);
+        // Drawn `scale` times as big: as though made that much smaller.
+        const bigger = @max(self.scale, 0.01);
+        const base_width = @as(f32, @floatFromInt(self.width)) / bigger;
+        const base_height = @as(f32, @floatFromInt(self.height)) / bigger;
+        const across = window_width / base_width;
+        const down = window_height / base_height;
+        var scale = @min(across, down);
+        if (self.scale_mode == .integer and scale >= 1) scale = @floor(scale);
 
-        // What the game has room for, at its own size: the project's, or -
-        // expanded - that and what the window has to spare.
-        const room_width = if (self.aspect == .expand) window_width / scale else base_width;
-        const room_height = if (self.aspect == .expand) window_height / scale else base_height;
+        // What the game has room for, at its own size: the project's, or
+        // that and what the window has to spare, the way the aspect says.
+        const more_across = self.aspect == .expand or (self.aspect == .keep_height and across >= down);
+        const more_down = self.aspect == .expand or (self.aspect == .keep_width and down >= across);
+        const room_width = if (more_across) @max(base_width, window_width / scale) else base_width;
+        const room_height = if (more_down) @max(base_height, window_height / scale) else base_height;
         const shown_width = @round(room_width * scale);
         const shown_height = @round(room_height * scale);
         const shown: Rect = .{
@@ -116,6 +153,36 @@ pub const Frame = struct {
         return .init((point.x - self.shown.x) * r, (point.y - self.shown.y) * r);
     }
 };
+
+test "keeping the width, a taller window shows more below and a wider one has bars" {
+    const tall = (Stretch{ .mode = .canvas, .aspect = .keep_width, .width = 640, .height = 360 }).frameOf(1280, 1000);
+    try testing.expectEqual(@as(f32, 2), tall.scale);
+    try testing.expectEqual(@as(u32, 1280), tall.width);
+    try testing.expectEqual(@as(u32, 1000), tall.height);
+    const wide = (Stretch{ .mode = .canvas, .aspect = .keep_width, .width = 640, .height = 360 }).frameOf(1600, 720);
+    try testing.expectEqual(@as(u32, 1280), wide.width);
+    try testing.expectEqual(@as(f32, 160), wide.shown.x);
+}
+
+test "keeping the height, a wider window shows more at the sides and a taller one has bars" {
+    const wide = (Stretch{ .mode = .canvas, .aspect = .keep_height, .width = 640, .height = 360 }).frameOf(1600, 720);
+    try testing.expectEqual(@as(u32, 1600), wide.width);
+    try testing.expectEqual(@as(u32, 720), wide.height);
+    const tall = (Stretch{ .mode = .canvas, .aspect = .keep_height, .width = 640, .height = 360 }).frameOf(1280, 1000);
+    try testing.expectEqual(@as(u32, 720), tall.height);
+    try testing.expect(tall.shown.y > 0);
+}
+
+test "an integer scale is whole, with bars round what is left; a scale draws bigger" {
+    // Two and a half times would fit; twice does.
+    const whole_scale = (Stretch{ .mode = .picture, .width = 320, .height = 180, .scale_mode = .integer }).frameOf(800, 450);
+    try testing.expectEqual(@as(f32, 640), whole_scale.shown.width);
+    try testing.expectEqual(@as(f32, 80), whole_scale.shown.x);
+    // Twice as big: half as much of the game shows, at the same place.
+    const bigger = (Stretch{ .mode = .picture, .width = 640, .height = 360, .scale = 2 }).frameOf(1280, 720);
+    try testing.expectEqual(@as(u32, 320), bigger.width);
+    try testing.expectEqual(@as(f32, 1280), bigger.shown.width);
+}
 
 test "disabled, the frame is the window" {
     const frame = (Stretch{ .width = 640, .height = 360 }).frameOf(1280, 800);

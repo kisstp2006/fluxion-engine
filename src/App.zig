@@ -149,24 +149,44 @@ pub const BackendError = error{
 /// the best of `renderer`'s backends on `os`. A renderer with none is an
 /// error rather than a quiet fall back to another, which would hide what the
 /// game really looks like.
-pub fn chooseBackend(wanted: Backend, renderer: Project.Renderer, os: std.Target.Os.Tag) BackendError!Backend {
-    if (wanted != .auto) return wanted;
-    const choices = renderer.backends(os);
-    if (choices.len == 0) return error.RendererNotBuilt;
-    return choices[0];
+/// The backends a game is drawn with, the first to try first: the one asked
+/// for alone, never another, or the project's renderer's - see
+/// `Rendering.backendsFor`. Empty where its renderer has none here.
+pub fn backendsToTry(wanted: Backend, rendering: Project.Rendering, os: std.Target.Os.Tag, buffer: *[Project.Rendering.max_backends]Backend) []const Backend {
+    if (wanted != .auto) {
+        buffer[0] = wanted;
+        return buffer[0..1];
+    }
+    return rendering.backendsFor(os, buffer);
 }
 
-/// How the window fills the screen. See `Window.Fullscreen`.
-pub const Fullscreen = Window.Fullscreen;
+/// How the window is on the screen: windowed, minimised, maximised,
+/// fullscreen or exclusively so. See `Window.Mode`.
+pub const WindowMode = Window.Mode;
+
+/// How frames are shown against the display's refresh. See
+/// `Window.VsyncMode`.
+pub const VsyncMode = Window.VsyncMode;
+
+/// A display's resolution, bits and refresh: what `exclusive_fullscreen`
+/// switches it to. See `setVideoMode`.
+pub const VideoMode = platform.VideoMode;
+
+/// Where the window opens.
+pub const InitialPosition = enum {
+    /// In the middle of the screen the system calls its primary.
+    center_of_primary_screen,
+    /// In the middle of the screen `screen` names, counting from nought.
+    center_of_screen,
+    /// At `position`, the top left of its content, on the desktop.
+    absolute,
+};
 
 /// Where the pointer may go, and whether it shows. See `Window.Cursor`.
 pub const Cursor = Window.Cursor;
 
 /// One of the system's own pointer shapes.
 pub const CursorShape = platform.CursorShape;
-
-/// Whether the window is at its own size, maximised, or minimised.
-pub const WindowState = Window.State;
 
 /// How small and how large the player may drag the window.
 pub const WindowSizeLimits = Window.SizeLimits;
@@ -181,7 +201,9 @@ pub const Options = struct {
     width: ?u32 = null,
     height: ?u32 = null,
     backend: Backend = .auto,
-    vsync: ?bool = null,
+    /// How frames are shown against the refresh. Null is the project file's
+    /// `display.vsync_mode`: enabled, with none.
+    vsync_mode: ?VsyncMode = null,
     /// The most frames a second, slept down to. Null is what the project
     /// file's `application.max_fps` says - no limit, with nought or none.
     max_fps: ?f32 = null,
@@ -193,12 +215,28 @@ pub const Options = struct {
     /// either way.
     resizable: ?bool = null,
 
-    /// Open maximised. Only a resizable window can be.
-    maximized: ?bool = null,
+    /// How the window opens: a window, minimised, maximised, or filling the
+    /// screen. `width` and `height` are still the size of the window it
+    /// goes back to. Null is the project file's `display.mode`.
+    window_mode: ?WindowMode = null,
 
-    /// Open filling the screen. `width` and `height` are still the size of
-    /// the window it goes back to.
-    fullscreen: ?Fullscreen = null,
+    /// With no frame or title bar of the system's. Null is the project
+    /// file's `display.borderless`.
+    borderless: ?bool = null,
+
+    /// Kept over every window that is not kept so itself. Null is the
+    /// project file's `display.always_on_top`.
+    always_on_top: ?bool = null,
+
+    /// Where the window opens, the screen for `center_of_screen` and the
+    /// point for `absolute`. Null is the project file's `display`.
+    initial_position: ?InitialPosition = null,
+    screen: ?u16 = null,
+    position: ?geometry.Vec2i = null,
+
+    /// Keep the screen from blanking, and the machine from sleeping, while
+    /// the game runs. Null is the project file's `display.keep_screen_on`.
+    keep_screen_on: ?bool = null,
 
     /// How the frame fits the window. Null is the project file's
     /// `display.stretch_mode` and `stretch_aspect`, over its `width` and
@@ -324,6 +362,14 @@ pub const Flags = struct {
     /// `--width 1280`, `--height 720`: the window's size.
     width: ?u32 = null,
     height: ?u32 = null,
+    /// `--window-mode maximized`: how it opens. See `WindowMode`.
+    window_mode: ?WindowMode = null,
+    /// `--screen 1`: in the middle of that screen, counting from nought.
+    screen: ?u16 = null,
+    /// `--position-x 100 --position-y 80`: there, its content's top left
+    /// on the desktop. One of the two alone is nought for the other.
+    position_x: ?i32 = null,
+    position_y: ?i32 = null,
     /// `--frames 300`: stop after this many.
     frames: ?u32 = null,
     /// `--capture shot.png`: where `saveCapture` puts the last frame. See
@@ -344,6 +390,15 @@ pub const Flags = struct {
         if (self.backend) |backend| out.backend = backend;
         if (self.width) |width| out.width = width;
         if (self.height) |height| out.height = height;
+        if (self.window_mode) |mode| out.window_mode = mode;
+        if (self.screen) |screen| {
+            out.initial_position = .center_of_screen;
+            out.screen = screen;
+        }
+        if (self.position_x != null or self.position_y != null) {
+            out.initial_position = .absolute;
+            out.position = .init(self.position_x orelse 0, self.position_y orelse 0);
+        }
         if (self.frames) |frames| out.frames = frames;
         if (self.root) |root| out.root = root;
         if (self.capture != null) {
@@ -709,7 +764,13 @@ quit_key: ?platform.Key = null,
 fullscreen_key: ?platform.Key = null,
 debug_key: ?platform.Key = null,
 
-vsync_on: bool = true,
+/// How frames are shown against the refresh, as last asked: kept for a
+/// headless app too, which has no display to wait for.
+vsync_mode_now: VsyncMode = .enabled,
+
+/// The frame the window's close button was last pressed in: see
+/// `closeRequested`.
+close_frame: ?u64 = null,
 
 /// Cleared by `quit`, and by the frame counter running out.
 running: bool = true,
@@ -805,7 +866,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .open_project = options.open_project,
         .fullscreen_key = options.fullscreen_key,
         .debug_key = options.debug_key,
-        .vsync_on = options.vsync orelse true,
+        .vsync_mode_now = options.vsync_mode orelse .enabled,
         .running = true,
         .close_pressed = false,
         .frames_left = options.frames,
@@ -859,8 +920,13 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.height = resolved.height;
     self.stretch = resolved.stretch;
     self.fitFrame();
-    self.vsync_on = resolved.vsync;
+    self.vsync_mode_now = resolved.vsync_mode;
     self.time.fixed_delta = resolved.fixed_delta;
+    self.time.max_fixed_steps = resolved.max_fixed_steps;
+    self.interface.zoom = resolved.interface_zoom;
+    if (self.project.settings) |held| {
+        if (!held.application.quit_on_close) self.ask_before_closing = true;
+    }
     self.time.max_fps = resolved.max_fps;
     if (options.frame_time == null and (options.fixed_frame_time or options.io == null)) {
         self.time.source = .{ .fixed = resolved.fixed_delta };
@@ -923,105 +989,31 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         else => unreachable,
     };
 
-    // Headless opens no renderer, so the project's is not asked about.
-    const renderer: Project.Renderer = if (self.project.settings) |held| held.rendering.renderer else .compatibility;
-    const backend: Backend = if (options.headless) .none else chooseBackend(options.backend, renderer, builtin.os.tag) catch |err| {
-        log.err("the {t} renderer ({s}) has no backend here: set \"renderer\" to \"compatibility\" in {s}, or give --backend", .{ renderer, renderer.apis(), Project.file_name });
-        return err;
-    };
-    if (!options.headless and options.backend != .auto and std.mem.indexOfScalar(Backend, renderer.backends(builtin.os.tag), backend) == null) {
-        log.info("drawing with {t}, which is not one of the {t} renderer's here", .{ backend, renderer });
-    }
-
-    // The window comes first, and has to know whether to make an OpenGL
-    // context: no platform lets a window change its mind about that.
-    if (!options.headless) {
-        // Opened in place: its handle points at the context beside it.
-        self.window = @as(Window, undefined);
-        self.window.?.open(gpa, .{
-            .title = titleOf(options, self.project.settings),
-            .width = resolved.width,
-            .height = resolved.height,
-            .resizable = resolved.resizable,
-            .maximized = resolved.maximized,
-            .gl = backend == .gl,
-            .vsync = resolved.vsync,
-        }) catch |err| {
-            self.window = null;
-            if (Window.isAbsent(err)) return Error.NoDisplay;
-            return err;
-        };
-        self.clipboard.system = &self.window.?.ctx;
-        if (resolved.min_size[0] > 0 or resolved.min_size[1] > 0) {
-            self.window.?.setSizeLimits(.{ .min_width = resolved.min_size[0], .min_height = resolved.min_size[1] }) catch |err|
-                log.warn("the window's least size could not be set: {t}", .{err});
-        }
+    // Headless opens no renderer, so the project's is not asked about. The
+    // backends are tried in turn, the next where one will not open here.
+    const rendering: Project.Rendering = if (self.project.settings) |held| held.rendering else .{};
+    var buffer: [Project.Rendering.max_backends]Backend = undefined;
+    const candidates = if (options.headless) blk: {
+        buffer[0] = .none;
+        break :blk buffer[0..1];
+    } else backendsToTry(options.backend, rendering, builtin.os.tag, &buffer);
+    if (candidates.len == 0) {
+        log.err("the {t} renderer ({s}) has no backend here: set \"renderer\" to \"compatibility\" in {s}, or give --backend", .{ rendering.renderer, rendering.renderer.apis(), Project.file_name });
+        return error.RendererNotBuilt;
     }
     errdefer if (self.window) |*w| w.close();
-
-    // Before anything is sized from the window, so the swapchain is made at
-    // its final size. Not fatal: a game that cannot fill the screen still
-    // runs in a window.
-    if (self.window) |*w| {
-        if (resolved.fullscreen != .windowed) {
-            w.setFullscreen(resolved.fullscreen) catch |err| {
-                log.warn("could not open fullscreen: {t}", .{err});
-            };
+    for (candidates, 0..) |backend, attempt| {
+        self.openDisplay(gpa, options, resolved, backend) catch |err| {
+            if (err == Error.NoDisplay or attempt + 1 == candidates.len) return err;
+            log.warn("{t} did not open here ({t}): trying {t}", .{ backend, err, candidates[attempt + 1] });
+            continue;
+        };
+        if (!options.headless and options.backend == .auto and std.mem.indexOfScalar(Backend, rendering.renderer.backends(builtin.os.tag), backend) == null) {
+            log.warn("the {t} renderer did not open here: drawing with {t}, of the compatibility renderer", .{ rendering.renderer, backend });
         }
+        break;
     }
-
-    const width = if (self.window) |*w| w.width else resolved.width;
-    const height = if (self.window) |*w| w.height else resolved.height;
-    self.width = width;
-    self.height = height;
-    // The surface is about to be made at this size, so the first frame has
-    // nothing to resize; and the input starts out agreeing with the window
-    // about the keyboard.
-    if (self.window) |*w| {
-        w.resized = false;
-        self.input.focused = w.focused;
-    }
-    self.fitInterface();
-
-    self.device = try .init(gpa, .{
-        .backend = switch (backend) {
-            .gl => .gl,
-            .d3d11 => .d3d11,
-            .d3d12 => .d3d12,
-            .vulkan => .vulkan,
-            .webgl => .webgl,
-            .none => .none,
-            .auto => .auto,
-        },
-        // Only OpenGL wants the context; Direct3D takes the window handle at
-        // surface time instead.
-        .gl = if (backend == .gl and self.window != null) self.window.?.hooks() else null,
-    });
     errdefer self.device.deinit();
-    if (backend.experimental()) log.warn("drawing with {t} ({s}), which is experimental", .{ backend, self.device.info().renderer });
-
-    if (self.window) |*w| {
-        // The window as it is, whichever backend draws into it: its handle,
-        // and its hooks for a backend that makes its surface from it.
-        self.surface = try self.device.createSurface(.{
-            .native_window = w.nativeHandle(),
-            .window = w.surfaceHooks(),
-            .width = width,
-            .height = height,
-            // Told to the swapchain as well as the window: Direct3D keeps it
-            // on the swapchain, OpenGL on the context.
-            .vsync = resolved.vsync,
-        });
-    } else {
-        // No window, so the frame goes into a texture, through every draw
-        // call the real path makes.
-        self.offscreen = try self.device.createTexture(.{
-            .width = width,
-            .height = height,
-            .usage = .{ .sampled = true, .render_target = true },
-            .label = "headless target",
-        });
-    }
     errdefer if (self.surface) |s| self.device.destroySurface(s);
 
     self.jobs = try .init(gpa, .{
@@ -1058,6 +1050,123 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     return self;
 }
 
+/// The window, the device and what is drawn into, for one backend: the
+/// window kept from a backend tried before where it does for this one, and
+/// made again where it does not - no platform lets a window change its mind
+/// about an OpenGL context. What this attempt made is undone where it fails.
+fn openDisplay(self: *App, gpa: Allocator, options: Options, resolved: Resolved, backend: Backend) !void {
+    const wants_gl = backend == .gl;
+    if (self.window) |*w| if (w.has_gl_context != wants_gl) {
+        w.close();
+        self.window = null;
+    };
+    if (!options.headless and self.window == null) {
+        // Opened in place: its handle points at the context beside it.
+        self.window = @as(Window, undefined);
+        self.window.?.open(gpa, .{
+            .title = titleOf(options, self.project.settings),
+            .width = resolved.width,
+            .height = resolved.height,
+            .resizable = resolved.resizable,
+            .decorated = !resolved.borderless,
+            // Shown once it is in its place, so it is never seen elsewhere.
+            .visible = false,
+            .gl = wants_gl,
+            .present_mode = resolved.vsync_mode.present(),
+        }) catch |err| {
+            self.window = null;
+            if (Window.isAbsent(err)) return Error.NoDisplay;
+            return err;
+        };
+        self.clipboard.system = &self.window.?.ctx;
+        if (resolved.min_size[0] > 0 or resolved.min_size[1] > 0) {
+            self.window.?.setSizeLimits(.{ .min_width = resolved.min_size[0], .min_height = resolved.min_size[1] }) catch |err|
+                log.warn("the window's least size could not be set: {t}", .{err});
+        }
+        // Before anything is sized from the window, so the swapchain is made
+        // at its final size. None of it fatal: a game that cannot be put
+        // where it asks still runs, and says why.
+        placeWindow(&self.window.?, resolved);
+    }
+
+    const width = if (self.window) |*w| w.width else resolved.width;
+    const height = if (self.window) |*w| w.height else resolved.height;
+    self.width = width;
+    self.height = height;
+    // The surface is about to be made at this size, so the first frame has
+    // nothing to resize; and the input starts out agreeing with the window
+    // about the keyboard.
+    if (self.window) |*w| {
+        w.resized = false;
+        self.input.focused = w.focused;
+    }
+    self.fitInterface();
+
+    self.device = try .init(gpa, .{
+        .backend = switch (backend) {
+            .gl => .gl,
+            .d3d11 => .d3d11,
+            .d3d12 => .d3d12,
+            .vulkan => .vulkan,
+            .webgl => .webgl,
+            .none => .none,
+            .auto => .auto,
+        },
+        // Only OpenGL wants the context; Direct3D takes the window handle at
+        // surface time instead.
+        .gl = if (wants_gl and self.window != null) self.window.?.hooks() else null,
+    });
+    errdefer self.device.deinit();
+
+    if (self.window) |*w| {
+        // The window as it is, whichever backend draws into it: its handle,
+        // and its hooks for a backend that makes its surface from it.
+        self.surface = try self.device.createSurface(.{
+            .native_window = w.nativeHandle(),
+            .window = w.surfaceHooks(),
+            .width = width,
+            .height = height,
+            // Told to the swapchain as well as the window: Direct3D keeps it
+            // on the swapchain, OpenGL on the context.
+            .present_mode = resolved.vsync_mode.present(),
+        });
+    } else {
+        // No window, so the frame goes into a texture, through every draw
+        // call the real path makes.
+        self.offscreen = try self.device.createTexture(.{
+            .width = width,
+            .height = height,
+            .usage = .{ .sampled = true, .render_target = true },
+            .label = "headless target",
+        });
+    }
+    if (backend.experimental()) log.warn("drawing with {t} ({s}), which is experimental", .{ backend, self.device.info().renderer });
+}
+
+/// Put a window opened hidden where and how `resolved` says - its screen or
+/// its point, its frame, its stacking, its mode - and show it. Whatever the
+/// system will not do is said, and the rest done.
+fn placeWindow(w: *Window, resolved: Resolved) void {
+    const screens = w.screens();
+    switch (resolved.initial_position) {
+        .center_of_primary_screen => if (w.primaryScreen()) |primary| w.centerOn(primary) catch |err| log.info("the window could not be centred: {t}", .{err}),
+        .center_of_screen => {
+            const index: usize = if (resolved.screen < screens.len) resolved.screen else w.primaryScreen() orelse 0;
+            if (resolved.screen >= screens.len) log.warn("there is no screen {d}: the window opens on the primary one", .{resolved.screen});
+            w.centerOn(index) catch |err| log.info("the window could not be centred: {t}", .{err});
+        },
+        .absolute => w.setPosition(resolved.position.x, resolved.position.y) catch |err| log.info("the window could not be put at its position: {t}", .{err}),
+    }
+    if (resolved.always_on_top) w.setTopmost(true) catch |err| log.warn("the window cannot be kept on top here: {t}", .{err});
+    w.show();
+    if (resolved.window_mode != .windowed) w.setMode(resolved.window_mode) catch |err| log.warn("the window could not open {t}: {t}", .{ resolved.window_mode, err });
+    w.setKeepAwake(resolved.keep_screen_on) catch |err| switch (err) {
+        // A phone, a page and Wayland keep their screens as they will.
+        error.Unavailable => {},
+        else => log.warn("the screen could not be kept on: {t}", .{err}),
+    };
+}
+
 /// What the title bar says: the game's own title, or else its project's
 /// name, or else "fluxion".
 fn titleOf(options: Options, settings: ?Project.Settings) []const u8 {
@@ -1078,13 +1187,20 @@ const Resolved = struct {
     height: u32,
     stretch: stretch_mod.Stretch,
     min_size: [2]u32,
-    vsync: bool,
+    vsync_mode: VsyncMode,
     resizable: bool,
-    maximized: bool,
-    fullscreen: Fullscreen,
+    window_mode: WindowMode,
+    borderless: bool,
+    always_on_top: bool,
+    initial_position: InitialPosition,
+    screen: u16,
+    position: geometry.Vec2i,
+    keep_screen_on: bool,
     background: Color,
     fixed_delta: f32,
+    max_fixed_steps: u32,
     max_fps: ?f32,
+    interface_zoom: f32,
 
     const default_fixed_delta: f32 = 1.0 / @as(f32, @floatFromInt((Project.Physics2D{}).ticks_per_second));
 
@@ -1092,24 +1208,36 @@ const Resolved = struct {
         const display: Project.Display = if (settings) |held| held.display else .{};
         const rendering: Project.Rendering = if (settings) |held| held.rendering else .{};
         const application: Project.Application = if (settings) |held| held.application else .{};
+        const gui: Project.Gui = if (settings) |held| held.gui else .{};
         return .{
-            .width = options.width orelse display.width,
-            .height = options.height orelse display.height,
+            // The window's own size where the project gives one, and the
+            // size the game is made at where it does not.
+            .width = options.width orelse if (display.window_width > 0) display.window_width else display.width,
+            .height = options.height orelse if (display.window_height > 0) display.window_height else display.height,
             // Made at the project's size, whatever size the window opens.
             .stretch = options.stretch orelse .{
                 .mode = display.stretch_mode,
                 .aspect = display.stretch_aspect,
                 .width = display.width,
                 .height = display.height,
+                .scale = display.stretch_scale,
+                .scale_mode = display.stretch_scale_mode,
             },
             .min_size = options.min_size orelse .{ display.min_width, display.min_height },
-            .vsync = options.vsync orelse display.vsync,
+            .vsync_mode = options.vsync_mode orelse display.vsync_mode,
             .resizable = options.resizable orelse display.resizable,
-            .maximized = options.maximized orelse (display.mode == .maximized),
-            .fullscreen = options.fullscreen orelse if (display.mode == .fullscreen) .borderless else .windowed,
+            .window_mode = options.window_mode orelse display.mode,
+            .borderless = options.borderless orelse display.borderless,
+            .always_on_top = options.always_on_top orelse display.always_on_top,
+            .initial_position = options.initial_position orelse display.initial_position,
+            .screen = options.screen orelse display.screen,
+            .position = options.position orelse display.position,
+            .keep_screen_on = options.keep_screen_on orelse display.keep_screen_on,
             .background = options.background orelse rendering.clear_color,
             .fixed_delta = options.fixed_delta orelse 1.0 / @as(f32, @floatFromInt(@max(physics_2d.ticks_per_second, 1))),
+            .max_fixed_steps = @max(physics_2d.max_steps_per_frame, 1),
             .max_fps = options.max_fps orelse if (application.max_fps > 0) @floatFromInt(application.max_fps) else null,
+            .interface_zoom = if (gui.scale > 0) gui.scale else 1,
         };
     }
 };
@@ -1474,6 +1602,7 @@ pub fn step(self: *App) anyerror!bool {
                 return false;
             }
             self.close_pressed = true;
+            self.close_frame = self.time.frame;
         }
         if (window.resized) {
             window.resized = false;
@@ -1641,7 +1770,7 @@ pub fn step(self: *App) anyerror!bool {
     for (self.tool_windows.items) |tool| try self.layOutTool(tool);
 
     // Nothing to draw on while Android has taken the surface away.
-    const minimized = self.windowState() == .minimized;
+    const minimized = self.windowMode() == .minimized;
     if (!minimized and !self.input.surface_lost) try self.render();
     for (self.tool_windows.items) |tool| try self.renderTool(tool);
 
@@ -1742,7 +1871,7 @@ pub fn openToolWindow(self: *App, desc: ToolWindow.Desc) !*ToolWindow {
             .window = tool.surfaceHooks(window.has_gl_context),
             .width = tool.width,
             .height = tool.height,
-            .vsync = false,
+            .present_mode = .disabled,
         });
     } else {
         tool.offscreen = try self.device.createTexture(.{
@@ -4877,18 +5006,51 @@ pub const reflect_methods = .{
     .overlapPoint = .{attr.Params{ .names = &.{"point"} }},
     .addCollisionExceptionWith = .{attr.Params{ .names = &.{ "entity", "other" } }},
     .removeCollisionExceptionWith = .{attr.Params{ .names = &.{ "entity", "other" } }},
-    .setFullscreen = .{ attr.Params{ .names = &.{"mode"} }, script_mod.flux.GivesErrors{} },
-    .fullscreen = .{},
+    .setWindowMode = .{ attr.Params{ .names = &.{"mode"} }, script_mod.flux.GivesErrors{} },
+    .windowMode = .{},
     .toggleFullscreen = .{script_mod.flux.GivesErrors{}},
+    .setVideoMode = .{ attr.Params{ .names = &.{"mode"} }, script_mod.flux.GivesErrors{} },
+    .setWindowBorderless = .{ attr.Params{ .names = &.{"borderless"} }, script_mod.flux.GivesErrors{} },
+    .windowBorderless = .{},
+    .setWindowResizable = .{ attr.Params{ .names = &.{"resizable"} }, script_mod.flux.GivesErrors{} },
+    .windowResizable = .{},
+    .setWindowAlwaysOnTop = .{ attr.Params{ .names = &.{"on_top"} }, script_mod.flux.GivesErrors{} },
+    .windowAlwaysOnTop = .{},
+    .setKeepScreenOn = .{ attr.Params{ .names = &.{"on"} }, script_mod.flux.GivesErrors{} },
+    .keepScreenOn = .{},
+    .screenCount = .{},
+    .windowScreen = .{},
+    .setWindowScreen = .{ attr.Params{ .names = &.{"screen"} }, script_mod.flux.GivesErrors{} },
+    .centerWindow = .{script_mod.flux.GivesErrors{}},
+    .screenRect = .{attr.Params{ .names = &.{"screen"} }},
+    .screenUsableRect = .{attr.Params{ .names = &.{"screen"} }},
+    .screenScale = .{attr.Params{ .names = &.{"screen"} }},
+    .screenRefreshRate = .{attr.Params{ .names = &.{"screen"} }},
+    .videoModeCount = .{attr.Params{ .names = &.{"screen"} }},
+    .videoMode = .{attr.Params{ .names = &.{ "screen", "index" } }},
+    .closeRequested = .{},
+    .gameVersion = .{},
     .setWindowTitle = .{ attr.Params{ .names = &.{"title"} }, script_mod.flux.GivesErrors{} },
     .setWindowSize = .{ attr.Params{ .names = &.{ "width", "height" } }, script_mod.flux.GivesErrors{} },
     .windowSize = .{},
     .setWindowPosition = .{ attr.Params{ .names = &.{ "x", "y" } }, script_mod.flux.GivesErrors{} },
     .windowPosition = .{},
-    .setWindowState = .{ attr.Params{ .names = &.{"state"} }, script_mod.flux.GivesErrors{} },
-    .windowState = .{},
-    .setVsync = .{ attr.Params{ .names = &.{"enabled"} }, script_mod.flux.GivesErrors{} },
-    .vsync = .{},
+    .setVsyncMode = .{ attr.Params{ .names = &.{"mode"} }, script_mod.flux.GivesErrors{} },
+    .vsyncMode = .{},
+    .setStretchMode = .{attr.Params{ .names = &.{"mode"} }},
+    .stretchMode = .{},
+    .setStretchAspect = .{attr.Params{ .names = &.{"aspect"} }},
+    .stretchAspect = .{},
+    .setStretchScale = .{attr.Params{ .names = &.{"scale"} }},
+    .stretchScale = .{},
+    .setStretchScaleMode = .{attr.Params{ .names = &.{"mode"} }},
+    .stretchScaleMode = .{},
+    .setMaxPhysicsStepsPerFrame = .{attr.Params{ .names = &.{"steps"} }},
+    .maxPhysicsStepsPerFrame = .{},
+    .setPhysicsTicksPerSecond = .{attr.Params{ .names = &.{"ticks"} }},
+    .physicsTicksPerSecond = .{},
+    .rendererInUse = .{},
+    .backendInUse = .{},
     .setMaxFps = .{attr.Params{ .names = &.{"fps"} }},
     .maxFps = .{},
     .setInterfaceZoom = .{attr.Params{ .names = &.{"zoom"} }},
@@ -5888,25 +6050,183 @@ pub fn contactsEnded(self: *const App) []const Bodies.Contact {
 // The window
 // -------------------------------------------------------------------------
 
-/// Fill the screen, or go back to being a window, on the monitor the window
-/// is on. `.borderless` is what a game should use; see `Fullscreen`. The new
+/// Put the window in a mode: a window, minimised, maximised, filling the
+/// screen it is on, or filling it exclusively. See `WindowMode`. The new
 /// size arrives at the top of the next frame. Nothing without a window.
-pub fn setFullscreen(self: *App, wanted: Fullscreen) Window.Error!void {
-    if (self.window) |*window| try window.setFullscreen(wanted);
+pub fn setWindowMode(self: *App, mode: WindowMode) Window.Error!void {
+    if (self.window) |*window| try window.setMode(mode);
 }
 
-/// How the window fills the screen now. `.windowed` when there is no window.
-pub fn fullscreen(self: *const App) Fullscreen {
-    if (self.window) |*window| return window.fullscreen();
+/// Which of the five the window is in now. `.windowed` when there is none.
+pub fn windowMode(self: *const App) WindowMode {
+    if (self.window) |*window| return window.mode();
     return .windowed;
 }
 
-/// Borderless if it is a window, a window if it is not.
+/// Filling the screen if it is a window, a window if it fills the screen.
 pub fn toggleFullscreen(self: *App) Window.Error!void {
-    try self.setFullscreen(switch (self.fullscreen()) {
-        .windowed => .borderless,
-        else => .windowed,
+    try self.setWindowMode(switch (self.windowMode()) {
+        .fullscreen, .exclusive_fullscreen => .windowed,
+        else => .fullscreen,
     });
+}
+
+/// The display mode `exclusive_fullscreen` switches the window's screen to:
+/// one of its `videoMode`s, a lower resolution for a slow machine. Taken at
+/// once where the window is in that mode already. Nothing without a window.
+pub fn setVideoMode(self: *App, mode: VideoMode) Window.Error!void {
+    if (self.window) |*window| try window.setVideoMode(mode);
+}
+
+/// Give the window the system's frame and title bar, or take them away - a
+/// borderless window. `error.Unavailable` where the system decides: a
+/// phone, a page, Wayland. Nothing without a window.
+pub fn setWindowBorderless(self: *App, borderless: bool) Window.Error!void {
+    if (self.window) |*window| try window.setDecorated(!borderless);
+}
+
+/// Whether the window has no frame of the system's. False with none.
+pub fn windowBorderless(self: *const App) bool {
+    if (self.window) |*window| return !window.decorated();
+    return false;
+}
+
+/// Let the player drag the window's edges, or not. `setWindowSize` works
+/// either way. Nothing without a window.
+pub fn setWindowResizable(self: *App, resizable: bool) Window.Error!void {
+    if (self.window) |*window| try window.setResizable(resizable);
+}
+
+/// Whether the player may drag the window's edges. False with no window.
+pub fn windowResizable(self: *const App) bool {
+    if (self.window) |*window| return window.resizable();
+    return false;
+}
+
+/// Keep the window over every window that is not kept so itself.
+/// `error.Unavailable` on Wayland, a phone and a page. Nothing without a
+/// window.
+pub fn setWindowAlwaysOnTop(self: *App, on_top: bool) Window.Error!void {
+    if (self.window) |*window| try window.setTopmost(on_top);
+}
+
+/// Whether the window is kept on top. False with none.
+pub fn windowAlwaysOnTop(self: *const App) bool {
+    if (self.window) |*window| return window.topmost();
+    return false;
+}
+
+/// Keep the screen from blanking, and the machine from sleeping, while the
+/// game runs, or let them again: a game played with a pad. See
+/// `display.keep_screen_on`. `error.Unavailable` on a phone, a page and
+/// Wayland. Nothing without a window.
+pub fn setKeepScreenOn(self: *App, on: bool) Window.Error!void {
+    if (self.window) |*window| try window.setKeepAwake(on);
+}
+
+/// Whether the game keeps the screen on. False with no window.
+pub fn keepScreenOn(self: *const App) bool {
+    if (self.window) |*window| return window.keepAwake();
+    return false;
+}
+
+/// How many screens are attached. Nought with no window.
+pub fn screenCount(self: *App) u32 {
+    if (self.window) |*window| return @intCast(window.screens().len);
+    return 0;
+}
+
+/// Which screen the window is on, counting from nought, or null where the
+/// system does not say.
+pub fn windowScreen(self: *const App) ?u32 {
+    if (self.window) |*window| if (window.screen()) |index| return @intCast(index);
+    return null;
+}
+
+/// Put the window on a screen: in the middle of it as a window, or filling
+/// it where it fills the one it is on. `error.Unavailable` for a screen
+/// there is not, and on Wayland. Nothing without a window.
+pub fn setWindowScreen(self: *App, screen: u32) Window.Error!void {
+    const window = if (self.window) |*held| held else return;
+    const mode = window.mode();
+    const filling = mode == .fullscreen or mode == .exclusive_fullscreen;
+    if (filling) try window.setMode(.windowed);
+    try window.centerOn(screen);
+    if (filling) try window.setMode(mode);
+}
+
+/// Put the window in the middle of the screen it is on. Nothing without a
+/// window.
+pub fn centerWindow(self: *App) Window.Error!void {
+    const window = if (self.window) |*held| held else return;
+    try window.centerOn(window.screen() orelse window.primaryScreen() orelse return error.Unavailable);
+}
+
+/// A screen's place on the desktop and its size, in pixels. Null for a
+/// screen there is not.
+pub fn screenRect(self: *App, screen: u32) ?geometry.Rect2i {
+    const at = self.screenAt(screen) orelse return null;
+    return rectOf(at.bounds);
+}
+
+/// The part of a screen no taskbar or panel covers. Null for a screen there
+/// is not.
+pub fn screenUsableRect(self: *App, screen: u32) ?geometry.Rect2i {
+    const at = self.screenAt(screen) orelse return null;
+    return rectOf(at.work_area);
+}
+
+/// A screen's pixels per logical unit: 1 on an ordinary display, 1.5 or 2
+/// on a HiDPI one. One for a screen there is not.
+pub fn screenScale(self: *App, screen: u32) f32 {
+    const at = self.screenAt(screen) orelse return 1;
+    return at.scale_x;
+}
+
+/// How many times a second a screen refreshes, as its mode says; nought
+/// where it does not.
+pub fn screenRefreshRate(self: *App, screen: u32) f32 {
+    const at = self.screenAt(screen) orelse return 0;
+    return @floatFromInt(at.current.refresh_hz);
+}
+
+/// How many video modes a screen can be switched to. See `videoMode`.
+pub fn videoModeCount(self: *App, screen: u32) u32 {
+    const at = self.screenAt(screen) orelse return 0;
+    return @intCast(at.modes.len);
+}
+
+/// One of a screen's video modes - its resolution, bits and refresh - for a
+/// menu of resolutions to pass to `setVideoMode`. Null past the last.
+pub fn videoMode(self: *App, screen: u32, index: u32) ?VideoMode {
+    const at = self.screenAt(screen) orelse return null;
+    if (index >= at.modes.len) return null;
+    return at.modes[index];
+}
+
+fn screenAt(self: *App, screen: u32) ?*const platform.Monitor {
+    const window = if (self.window) |*held| held else return null;
+    const list = window.screens();
+    if (screen >= list.len) return null;
+    return &list[screen];
+}
+
+fn rectOf(rect: platform.monitor.Rect) geometry.Rect2i {
+    return .init(rect.x, rect.y, @intCast(rect.width), @intCast(rect.height));
+}
+
+/// True in the frame the window's close button - or Alt+F4 - was pressed,
+/// where the project's `application.quit_on_close` is off: the game asks
+/// whether to go, and goes with `quit`.
+pub fn closeRequested(self: *const App) bool {
+    return self.close_frame == self.time.frame;
+}
+
+/// What the project file's `application.version` says: "1.2.0", for a menu
+/// to show. Empty with none.
+pub fn gameVersion(self: *const App) []const u8 {
+    const held = self.project.settings orelse return "";
+    return held.application.version;
 }
 
 /// What the title bar says. Nothing without a window.
@@ -5952,27 +6272,106 @@ pub fn setWindowSizeLimits(self: *App, limits: WindowSizeLimits) Window.Error!vo
     if (self.window) |*window| try window.setSizeLimits(limits);
 }
 
-/// Maximise the window, minimise it, or put it back. Nothing without a
-/// window.
-pub fn setWindowState(self: *App, wanted: WindowState) Window.Error!void {
-    if (self.window) |*window| try window.setState(wanted);
+/// How frames are shown against the display's refresh, from the next one:
+/// see `VsyncMode`. One a backend has not is shown `enabled`.
+pub fn setVsyncMode(self: *App, mode: VsyncMode) (rhi.Error || Window.Error)!void {
+    self.vsync_mode_now = mode;
+    if (self.surface) |surface| try self.device.setPresentMode(surface, mode.present());
+    if (self.window) |*window| window.setPresentMode(mode.present()) catch {
+        // A driver without late swaps: the nearest it has.
+        if (mode == .adaptive) try window.setPresentMode(.enabled) else return error.Unavailable;
+    };
 }
 
-/// Whether the window is at its own size, maximised, or minimised. `.normal`
-/// when there is no window.
-pub fn windowState(self: *const App) WindowState {
-    if (self.window) |*window| return window.state();
-    return .normal;
+/// How frames are shown against the refresh, as last asked.
+pub fn vsyncMode(self: *const App) VsyncMode {
+    return self.vsync_mode_now;
 }
 
-pub fn setVsync(self: *App, on: bool) (rhi.Error || Window.Error)!void {
-    self.vsync_on = on;
-    if (self.surface) |surface| try self.device.setVsync(surface, on);
-    if (self.window) |*window| try window.setVsync(on);
+/// How the game, made at the project's size, is shown in a window of
+/// another: see `stretch.zig`. From the next frame.
+pub fn setStretchMode(self: *App, mode: stretch_mod.Mode) void {
+    self.stretch.mode = mode;
+    self.refitStretch();
 }
 
-pub fn vsync(self: *const App) bool {
-    return self.vsync_on;
+pub fn stretchMode(self: *const App) stretch_mod.Mode {
+    return self.stretch.mode;
+}
+
+/// What a window of another shape shows: bars, or more of the game.
+pub fn setStretchAspect(self: *App, aspect: stretch_mod.Aspect) void {
+    self.stretch.aspect = aspect;
+    self.refitStretch();
+}
+
+pub fn stretchAspect(self: *const App) stretch_mod.Aspect {
+    return self.stretch.aspect;
+}
+
+/// How big the game is drawn on top of its stretch: two shows half as much,
+/// twice the size.
+pub fn setStretchScale(self: *App, scale: f32) void {
+    self.stretch.scale = @max(scale, 0.01);
+    self.refitStretch();
+}
+
+pub fn stretchScale(self: *const App) f32 {
+    return self.stretch.scale;
+}
+
+/// Any scale, or only whole ones: every pixel of pixel art the same size.
+pub fn setStretchScaleMode(self: *App, mode: stretch_mod.ScaleMode) void {
+    self.stretch.scale_mode = mode;
+    self.refitStretch();
+}
+
+pub fn stretchScaleMode(self: *const App) stretch_mod.ScaleMode {
+    return self.stretch.scale_mode;
+}
+
+/// A stretch changed: the frame again, and the picture it is drawn into.
+fn refitStretch(self: *App) void {
+    self.fitFrame();
+    self.resized = true;
+}
+
+/// The most fixed steps one frame takes to catch up after a slow one.
+pub fn setMaxPhysicsStepsPerFrame(self: *App, steps: u32) void {
+    self.time.max_fixed_steps = @max(steps, 1);
+}
+
+pub fn maxPhysicsStepsPerFrame(self: *const App) u32 {
+    return self.time.max_fixed_steps;
+}
+
+/// How many fixed steps a second the physics and the fixed systems take.
+pub fn setPhysicsTicksPerSecond(self: *App, ticks: u32) void {
+    self.time.fixed_delta = 1.0 / @as(f32, @floatFromInt(@max(ticks, 1)));
+    if (self.time.source == .fixed) self.time.source = .{ .fixed = self.time.fixed_delta };
+}
+
+pub fn physicsTicksPerSecond(self: *const App) u32 {
+    return @intFromFloat(@round(1.0 / self.time.fixed_delta));
+}
+
+/// The family of graphics APIs the game is drawn with: the project's.
+pub fn rendererInUse(self: *const App) Project.Renderer {
+    const held = self.project.settings orelse return .compatibility;
+    return held.rendering.renderer;
+}
+
+/// The graphics API the game is drawn with, which the renderer chose - or
+/// fell back to. `.none` with no window.
+pub fn backendInUse(self: *App) Backend {
+    return switch (self.device.backendTag()) {
+        .gl => .gl,
+        .d3d11 => .d3d11,
+        .d3d12 => .d3d12,
+        .vulkan => .vulkan,
+        .webgl => .webgl,
+        .none, .other => .none,
+    };
 }
 
 /// Hold the frames to at most `fps` a second, nought for no cap: a
@@ -7507,13 +7906,25 @@ test "the pointer is found in the world through the camera" {
 }
 
 test "a headless app has no screen to fill, and says so without failing" {
-    const app = try App.create(testing.allocator, .{ .headless = true, .fullscreen = .borderless });
+    const app = try App.create(testing.allocator, .{ .headless = true, .window_mode = .fullscreen, .borderless = true, .always_on_top = true });
     defer app.destroy();
 
-    try testing.expect(app.fullscreen() == .windowed);
-    try app.setFullscreen(.borderless);
+    try testing.expect(app.windowMode() == .windowed);
+    for (std.enums.values(WindowMode)) |mode| try app.setWindowMode(mode);
     try app.toggleFullscreen();
-    try testing.expect(app.fullscreen() == .windowed);
+    try testing.expect(app.windowMode() == .windowed);
+    try app.setWindowBorderless(true);
+    try app.setWindowResizable(false);
+    try app.setWindowAlwaysOnTop(true);
+    try app.setKeepScreenOn(false);
+    try testing.expect(!app.windowBorderless() and !app.windowResizable() and !app.windowAlwaysOnTop() and !app.keepScreenOn());
+    // No screens to be on, and nothing to say of one.
+    try testing.expectEqual(@as(u32, 0), app.screenCount());
+    try testing.expect(app.windowScreen() == null);
+    try app.setWindowScreen(1);
+    try app.centerWindow();
+    try testing.expect(app.screenRect(0) == null and app.videoMode(0, 0) == null);
+    try testing.expectEqual(@as(u32, 0), app.videoModeCount(0));
 }
 
 /// A controller in slot zero with A held from the first frame on, handed over
@@ -7659,7 +8070,7 @@ test "a headless app has no window to move, and says so without failing; a size 
         .width = 320,
         .height = 240,
         .resizable = false,
-        .maximized = true,
+        .window_mode = .maximized,
     });
     defer app.destroy();
 
@@ -7667,10 +8078,10 @@ test "a headless app has no window to move, and says so without failing; a size 
     try app.setWindowSize(800, 600);
     try app.setWindowPosition(10, 20);
     try app.setWindowSizeLimits(.{ .min_width = 640, .min_height = 480 });
-    try app.setWindowState(.maximized);
+    try app.setWindowMode(.maximized);
 
     try testing.expect(app.windowPosition() == null);
-    try testing.expect(app.windowState() == .normal);
+    try testing.expect(app.windowMode() == .windowed);
     // What it draws into took the size.
     try testing.expectEqual(@as(u32, 800), app.width);
     try testing.expectEqual(@as(u32, 600), app.height);
@@ -8110,13 +8521,42 @@ test "a capture with nothing to write files with says so" {
     try testing.expectError(error.NoIo, app.saveCapture("nowhere.png"));
 }
 
-test "vsync is remembered, even with no display to wait for" {
-    const app = try App.create(testing.allocator, .{ .headless = true, .vsync = true });
+test "the vsync mode is remembered, even with no display to wait for" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .vsync_mode = .mailbox });
     defer app.destroy();
 
-    try testing.expect(app.vsync());
-    try app.setVsync(false);
-    try testing.expect(!app.vsync());
+    try testing.expectEqual(VsyncMode.mailbox, app.vsyncMode());
+    for (std.enums.values(VsyncMode)) |mode| {
+        try app.setVsyncMode(mode);
+        try testing.expectEqual(mode, app.vsyncMode());
+    }
+}
+
+test "a stretch, the physics' steps and the game's version change as a game says, and a close is asked of it" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 1280, .height = 720, .stretch = .{ .mode = .canvas, .width = 640, .height = 360 } });
+    defer app.destroy();
+    try testing.expectEqual(@as(u32, 1280), app.frame.width);
+
+    // Twice as big: half the game shows.
+    app.setStretchScale(2);
+    try testing.expectEqual(@as(f32, 2), app.stretchScale());
+    app.setStretchMode(.picture);
+    try testing.expectEqual(@as(u32, 320), app.frame.width);
+    app.setStretchScaleMode(.integer);
+    app.setStretchAspect(.keep_width);
+    try testing.expect(app.stretchMode() == .picture and app.stretchAspect() == .keep_width and app.stretchScaleMode() == .integer);
+
+    app.setMaxPhysicsStepsPerFrame(3);
+    try testing.expectEqual(@as(u32, 3), app.maxPhysicsStepsPerFrame());
+    app.setPhysicsTicksPerSecond(120);
+    try testing.expectEqual(@as(u32, 120), app.physicsTicksPerSecond());
+    try testing.expectEqualStrings("", app.gameVersion());
+
+    try testing.expect(!app.closeRequested());
+    app.close_frame = app.time.frame;
+    try testing.expect(app.closeRequested());
+    try testing.expectEqual(Backend.none, app.backendInUse());
+    try testing.expectEqual(Project.Renderer.compatibility, app.rendererInUse());
 }
 
 test "additive sprites get a draw of their own, and share it with each other" {
@@ -9071,32 +9511,42 @@ test "a project file that is wrong stops the start, and says what and where" {
 test "the window, the frame and the clock are the game's, then the project's, then the engine's" {
     const said: Project.Settings = .{
         .application = .{ .name = "Wide", .max_fps = 30 },
-        .display = .{ .width = 1600, .height = 900, .vsync = false, .mode = .fullscreen },
+        .display = .{ .width = 1600, .height = 900, .vsync_mode = .disabled, .mode = .fullscreen, .borderless = true, .initial_position = .absolute, .position = .init(40, 30), .keep_screen_on = false, .stretch_scale = 2, .stretch_scale_mode = .integer },
         .rendering = .{ .clear_color = .hex(0x102030) },
-        .physics_2d = .{ .ticks_per_second = 120 },
+        .physics_2d = .{ .ticks_per_second = 120, .max_steps_per_frame = 3 },
+        .gui = .{ .scale = 1.5 },
     };
     const project: Resolved = .of(.{}, &said, said.physics_2d);
     try testing.expectEqual(@as(u32, 1600), project.width);
     try testing.expectEqual(@as(u32, 900), project.height);
-    try testing.expect(!project.vsync);
-    try testing.expectEqual(Fullscreen.borderless, project.fullscreen);
+    try testing.expectEqual(VsyncMode.disabled, project.vsync_mode);
+    try testing.expectEqual(WindowMode.fullscreen, project.window_mode);
+    try testing.expect(project.borderless and !project.always_on_top and !project.keep_screen_on);
+    try testing.expectEqual(InitialPosition.absolute, project.initial_position);
+    try testing.expectEqual(geometry.Vec2i.init(40, 30), project.position);
+    try testing.expectEqual(@as(f32, 2), project.stretch.scale);
+    try testing.expectEqual(stretch_mod.ScaleMode.integer, project.stretch.scale_mode);
+    try testing.expectEqual(@as(u32, 3), project.max_fixed_steps);
+    try testing.expectEqual(@as(f32, 1.5), project.interface_zoom);
     try testing.expectEqual(Color.hex(0x102030), project.background);
     try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), project.fixed_delta, 1e-6);
     try testing.expectEqual(@as(?f32, 30), project.max_fps);
 
     // What the game says in code overrules its project, and only that.
-    const game: Resolved = .of(.{ .width = 800, .fullscreen = .windowed, .fixed_delta = 0.5 }, &said, said.physics_2d);
+    const game: Resolved = .of(.{ .width = 800, .window_mode = .windowed, .fixed_delta = 0.5 }, &said, said.physics_2d);
     try testing.expectEqual(@as(u32, 800), game.width);
     try testing.expectEqual(@as(u32, 900), game.height);
-    try testing.expectEqual(Fullscreen.windowed, game.fullscreen);
+    try testing.expectEqual(WindowMode.windowed, game.window_mode);
     try testing.expectEqual(@as(f32, 0.5), game.fixed_delta);
 
     // With no project file, the sections' own defaults.
     const bare: Resolved = .of(.{}, null, .{});
     try testing.expectEqual(@as(u32, 1280), bare.width);
     try testing.expectEqual(@as(u32, 720), bare.height);
-    try testing.expect(bare.vsync and bare.resizable and !bare.maximized);
-    try testing.expectEqual(Fullscreen.windowed, bare.fullscreen);
+    try testing.expect(bare.resizable and !bare.borderless and bare.keep_screen_on);
+    try testing.expectEqual(VsyncMode.enabled, bare.vsync_mode);
+    try testing.expectEqual(WindowMode.windowed, bare.window_mode);
+    try testing.expectEqual(InitialPosition.center_of_primary_screen, bare.initial_position);
     try testing.expectApproxEqAbs(@as(f32, 1.0 / 60.0), bare.fixed_delta, 1e-6);
     try testing.expect(bare.max_fps == null);
 
@@ -9113,21 +9563,37 @@ test "the window, the frame and the clock are the game's, then the project's, th
     try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), app.time.fixed_delta, 1e-6);
 }
 
-test "auto opens the best of the project's renderer, and a backend asked for wins" {
-    try testing.expectEqual(Backend.d3d11, try chooseBackend(.auto, .compatibility, .windows));
-    try testing.expectEqual(Backend.gl, try chooseBackend(.auto, .compatibility, .linux));
-    try testing.expectEqual(Backend.gl, try chooseBackend(.auto, .compatibility, .macos));
-    try testing.expectEqual(Backend.webgl, try chooseBackend(.auto, .compatibility, .emscripten));
-    try testing.expectEqual(Backend.gl, try chooseBackend(.gl, .compatibility, .windows));
+fn expectBackends(wanted: Backend, rendering: Project.Rendering, os: std.Target.Os.Tag, expected: []const Backend) !void {
+    var buffer: [Project.Rendering.max_backends]Backend = undefined;
+    try testing.expectEqualSlices(Backend, expected, backendsToTry(wanted, rendering, os, &buffer));
+}
 
-    // The modern renderer: Direct3D 12 first on Windows, Vulkan elsewhere.
-    try testing.expectEqual(Backend.d3d12, try chooseBackend(.auto, .modern, .windows));
-    try testing.expectEqual(Backend.vulkan, try chooseBackend(.auto, .modern, .linux));
+test "auto opens the best of the project's renderer and falls back through the rest, and a backend asked for is the only one" {
+    try expectBackends(.auto, .{}, .windows, &.{ .d3d11, .gl });
+    try expectBackends(.auto, .{}, .linux, &.{.gl});
+    try expectBackends(.auto, .{}, .macos, &.{.gl});
+    try expectBackends(.auto, .{}, .emscripten, &.{.webgl});
+    try expectBackends(.gl, .{}, .windows, &.{.gl});
+
+    // The modern renderer: Direct3D 12 first on Windows, Vulkan elsewhere,
+    // and where none of it opens, the compatibility renderer.
+    try expectBackends(.auto, .{ .renderer = .modern }, .windows, &.{ .d3d12, .vulkan, .d3d11, .gl });
+    try expectBackends(.auto, .{ .renderer = .modern }, .linux, &.{ .vulkan, .gl });
     try testing.expect(Backend.vulkan.experimental() and !Backend.d3d11.experimental());
 
-    // None here: refused, not drawn with something else - unless asked for.
-    try testing.expectError(error.RendererNotBuilt, chooseBackend(.auto, .modern, .macos));
-    try testing.expectEqual(Backend.d3d11, try chooseBackend(.d3d11, .modern, .windows));
+    // A backend chosen within its renderer comes first; with no falling
+    // back, it is the only one.
+    try expectBackends(.auto, .{ .renderer = .modern, .modern_backend = .vulkan }, .windows, &.{ .vulkan, .d3d12, .d3d11, .gl });
+    try expectBackends(.auto, .{ .compatibility_backend = .gl, .fall_back = false }, .windows, &.{.gl});
+    try expectBackends(.auto, .{ .renderer = .modern, .fall_back = false, .fall_back_to_compatibility = false }, .windows, &.{.d3d12});
+    // One the system has not got is the renderer's best.
+    try expectBackends(.auto, .{ .compatibility_backend = .d3d11 }, .linux, &.{.gl});
+
+    // None here, and no falling back to the other renderer: refused, not
+    // drawn with something else - unless asked for.
+    try expectBackends(.auto, .{ .renderer = .modern, .fall_back_to_compatibility = false }, .macos, &.{});
+    try expectBackends(.auto, .{ .renderer = .modern }, .macos, &.{.gl});
+    try expectBackends(.d3d11, .{ .renderer = .modern }, .windows, &.{.d3d11});
 
     const flags = try App.parseFlags(App.Flags, &.{ "game", "--backend", "gl" });
     try testing.expectEqual(Backend.gl, flags.apply(.{}).backend);

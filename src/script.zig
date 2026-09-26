@@ -3514,7 +3514,7 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
 }
 
 /// The engine's types a script names besides its components, and with them
-/// the enums and unions they take and give - `Key`, `Fullscreen` - and what
+/// the enums and unions they take and give - `Key`, `WindowMode` - and what
 /// those unions' arms hold - `KeyEvent`: see `flux.Vm.declareType`.
 const named_types = [_]*const reflect.Type{
     reflect.typeOf(App),

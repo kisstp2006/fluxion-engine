@@ -31,6 +31,7 @@ const rhi = @import("fluxion_rhi");
 const ui_lib = @import("fluxion_ui");
 
 const Input = @import("input.zig");
+const Window = @import("window.zig");
 const Interface = @import("interface.zig");
 
 const ToolWindow = @This();
@@ -151,9 +152,9 @@ fn framebufferSize(context: *anyopaque) [2]u32 {
     return .{ self.width, self.height };
 }
 
-fn setSwapInterval(context: *anyopaque, vsync: bool) void {
+fn setSwapInterval(context: *anyopaque, mode: rhi.PresentMode) void {
     const handle = of(context).handle orelse return;
-    handle.setSwapInterval(if (vsync) .vsync else .immediate) catch {};
+    Window.applySwapInterval(handle, mode);
 }
 
 /// The interface's scale: the main one's zoom times this window's display,

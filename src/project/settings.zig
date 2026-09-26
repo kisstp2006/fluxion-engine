@@ -47,6 +47,7 @@ const flux = @import("fluxion_script");
 const Color = @import("../color.zig").Color;
 const settings_file = @import("../settings_file.zig");
 const stretch = @import("../stretch.zig");
+const geometry = @import("../geometry.zig");
 
 /// What the file is called, at the root of a project's folder.
 pub const file_name = "project.fluxion";
@@ -103,6 +104,7 @@ pub const Renderer = enum {
 pub const Application = struct {
     name: []const u8 = "",
     description: []const u8 = "",
+    version: []const u8 = "",
     icon: []const u8 = "",
     main_scene: []const u8 = "",
     tags: []const []const u8 = &.{},
@@ -110,6 +112,7 @@ pub const Application = struct {
     autoload: []const []const u8 = &.{},
     boot_splash: BootSplash = .{},
     user_folder: []const u8 = "",
+    quit_on_close: bool = true,
 
     /// What the window shows while the game opens. See `App.openProject`.
     pub const BootSplash = struct {
@@ -127,6 +130,7 @@ pub const Application = struct {
     pub const reflect_fields = .{
         .name = .{ attr.Required{}, attr.Doc{ .text = "What the project is called: the game window's title, and what the project list shows." } },
         .description = .{ attr.Multiline{}, attr.Doc{ .text = "A line or two about the project, for the project list." } },
+        .version = .{attr.Doc{ .text = "Which version of the game this is - 1.2.0, say - for its menus to show: app.gameVersion()." }},
         .icon = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "The project's picture: the game window's icon, and the project list's." } },
         .main_scene = .{ attr.ProjectFile{ .kind = .scene }, attr.Doc{ .text = "The scene the game opens with, and what Play runs." } },
         .tags = .{attr.Doc{ .text = "Words to find the project by in the project list." }},
@@ -134,21 +138,34 @@ pub const Application = struct {
         .autoload = .{attr.Doc{ .text = "Scenes and scripts made before the main scene, each named after its file, and kept when the scene changes." }},
         .boot_splash = .{attr.Doc{ .text = "What the window shows while the game opens." }},
         .user_folder = .{ attr.Advanced{}, attr.Doc{ .text = "The folder user:// is, in the system's folder for programs' data: empty for the project's name. Studio/Game keeps a studio's games together." } },
+        .quit_on_close = .{ attr.Advanced{}, attr.Doc{ .text = "Whether the window's close button quits at once. Off, it only asks: app.closeRequested() says so, and the game quits with app.quit() when it agrees - after saving, say." } },
     };
 };
 
 /// The game's window. A game's own `App.Options` say otherwise when they
 /// say anything.
 pub const Display = struct {
+    /// The size the game is made at: what its stretch scales from, and the
+    /// window's size unless `window_width` and `window_height` say another.
     width: u32 = 1280,
     height: u32 = 720,
+    window_width: u32 = 0,
+    window_height: u32 = 0,
+    mode: App.WindowMode = .windowed,
+    /// Where the window opens, and on which screen.
+    initial_position: InitialPosition = .center_of_primary_screen,
+    screen: u16 = 0,
+    position: geometry.Vec2i = .init(0, 0),
     resizable: bool = true,
-    mode: Mode = .windowed,
-    vsync: bool = true,
+    borderless: bool = false,
+    always_on_top: bool = false,
+    vsync_mode: App.VsyncMode = .enabled,
     /// How the game, made at `width` by `height`, is shown in a window of
     /// another size. See `stretch.zig`.
     stretch_mode: stretch.Mode = .disabled,
     stretch_aspect: stretch.Aspect = .keep,
+    stretch_scale: f32 = 1,
+    stretch_scale_mode: stretch.ScaleMode = .fractional,
     /// The least the player may drag the window to; nought is no least.
     min_width: u32 = 0,
     min_height: u32 = 0,
@@ -156,34 +173,45 @@ pub const Display = struct {
     /// points: see `App.setCustomCursor`.
     mouse_cursor: []const u8 = "",
     mouse_cursor_hotspot: math.Vec2 = .init(0, 0),
+    keep_screen_on: bool = true,
 
-    pub const Mode = enum {
-        /// A window of `width` by `height`.
-        windowed,
-        /// The window, as large as the screen lets it be.
-        maximized,
-        /// The whole monitor, at the resolution it already has.
-        fullscreen,
-    };
+    /// Where the window opens. See `App.InitialPosition`.
+    pub const InitialPosition = App.InitialPosition;
 
     pub const reflect_fields = .{
-        .width = .{ attr.Range{ .min = 1, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "How wide the game's window opens." } },
-        .height = .{ attr.Range{ .min = 1, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "How tall the game's window opens." } },
-        .resizable = .{ attr.Restart{}, attr.Doc{ .text = "Whether the player may drag the window's edges." } },
-        .mode = .{ attr.Restart{}, attr.Doc{ .text = "Whether the game opens in a window, maximised, or filling the screen." } },
-        .vsync = .{ attr.Restart{}, attr.Doc{ .text = "Wait for the screen between frames, so a frame is never shown half drawn." } },
-        .stretch_mode = .{ attr.Restart{}, attr.Doc{ .text = "Disabled: a bigger window shows more. Canvas: laid out at the width and height above and drawn at the window's, scaled. Picture: drawn at that size and the picture scaled to the window, for pixel art." } },
-        .stretch_aspect = .{ attr.Restart{}, attr.Doc{ .text = "Keep: always this shape, with bars where the window has room to spare. Expand: the spare room shows more of the game." } },
-        .min_width = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "The narrowest the window may be dragged to; nought is no least." } },
-        .min_height = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "The lowest the window may be dragged to; nought is no least." } },
-        .mouse_cursor = .{ attr.ProjectFile{ .kind = .texture }, attr.Restart{}, attr.Doc{ .text = "A picture for the pointer, instead of the system's arrow: 256 pixels a side at most." } },
-        .mouse_cursor_hotspot = .{ attr.Unit{ .text = "px" }, attr.Restart{}, attr.Doc{ .text = "The pixel of the pointer's picture that points: the tip of an arrow, the middle of a crosshair." } },
+        .width = .{ attr.Range{ .min = 1, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Doc{ .text = "How wide the game is made: what its stretch scales from, and how wide the window opens." } },
+        .height = .{ attr.Range{ .min = 1, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Doc{ .text = "How tall the game is made: what its stretch scales from, and how tall the window opens." } },
+        .window_width = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Advanced{}, attr.Doc{ .text = "How wide the window opens when not the game's width - a game made at 640 in a window of 1280, say; nought is the width above." } },
+        .window_height = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Advanced{}, attr.Doc{ .text = "How tall the window opens when not the game's height; nought is the height above." } },
+        .mode = .{attr.Doc{ .text = "How the window opens: a window, minimised, maximised, filling the screen at the resolution it has, or filling it exclusively - the display switched to the window's video mode." }},
+        .initial_position = .{attr.Doc{ .text = "Where the window opens: in the middle of the primary screen, in the middle of the screen below, or at the position below." }},
+        .screen = .{ attr.Range{ .min = 0, .max = 16, .step = 1 }, attr.Doc{ .text = "Which screen the window opens on, counting from nought, when it opens in the middle of one." } },
+        .position = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "Where the top left of the window's content opens on the desktop, when it opens at a position." } },
+        .resizable = .{attr.Doc{ .text = "Whether the player may drag the window's edges." }},
+        .borderless = .{attr.Doc{ .text = "A window with no frame and no title bar of the system's." }},
+        .always_on_top = .{ attr.Advanced{}, attr.Doc{ .text = "Keep the window over every window that is not kept so itself." } },
+        .vsync_mode = .{attr.Doc{ .text = "How frames are shown against the screen's refresh. Disabled: as fast as they are drawn, and they may tear. Enabled: one a refresh, never tearing. Adaptive: one a refresh, a late one shown at once. Mailbox: the newest at each refresh, never waiting. One a backend has not is shown enabled." }},
+        .stretch_mode = .{attr.Doc{ .text = "Disabled: a bigger window shows more. Canvas: laid out at the width and height above and drawn at the window's, scaled. Picture: drawn at that size and the picture scaled to the window, for pixel art." }},
+        .stretch_aspect = .{attr.Doc{ .text = "Keep: always this shape, with bars where the window has room to spare. Expand: the spare room shows more. Keep width: as wide as made, a taller window showing more below. Keep height: as tall as made, a wider window showing more at the sides." }},
+        .stretch_scale = .{ attr.Range{ .min = 0.25, .max = 8 }, attr.Advanced{}, attr.Doc{ .text = "How big the game is drawn on top of its stretch: two draws everything twice the size, showing half as much." } },
+        .stretch_scale_mode = .{attr.Doc{ .text = "Fractional: scaled to fill the window. Integer: scaled only by a whole number, so every pixel of pixel art is the same size, with bars round what is left." }},
+        .min_width = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Doc{ .text = "The narrowest the window may be dragged to; nought is no least." } },
+        .min_height = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Doc{ .text = "The lowest the window may be dragged to; nought is no least." } },
+        .mouse_cursor = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "A picture for the pointer, instead of the system's arrow: 256 pixels a side at most." } },
+        .mouse_cursor_hotspot = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "The pixel of the pointer's picture that points: the tip of an arrow, the middle of a crosshair." } },
+        .keep_screen_on = .{ attr.Advanced{}, attr.Doc{ .text = "Keep the screen from blanking, and the machine from sleeping, while the game runs: a game played with a pad sees no mouse or keyboard for a long while." } },
     };
 };
 
 /// How the project is drawn.
 pub const Rendering = struct {
     renderer: Renderer = .compatibility,
+    /// The backend each renderer is drawn with where there is a choice -
+    /// Windows - and what is tried when it cannot open. See `backendsFor`.
+    compatibility_backend: CompatibilityBackend = .auto,
+    modern_backend: ModernBackend = .auto,
+    fall_back: bool = true,
+    fall_back_to_compatibility: bool = true,
     clear_color: Color = default_clear_color,
     /// How a texture is sampled when it does not say: nearest keeps pixel
     /// art's pixels square, linear smooths a painting.
@@ -191,11 +219,85 @@ pub const Rendering = struct {
 
     pub const TextureFilter = enum { nearest, linear };
 
+    /// A Compatibility backend, or `auto` for the renderer's best on the
+    /// system: Direct3D 11 on Windows, OpenGL elsewhere.
+    pub const CompatibilityBackend = enum {
+        auto,
+        d3d11,
+        gl,
+
+        pub fn backend(self: CompatibilityBackend) ?App.Backend {
+            return switch (self) {
+                .auto => null,
+                .d3d11 => .d3d11,
+                .gl => .gl,
+            };
+        }
+    };
+
+    /// A Modern backend, or `auto` for the renderer's best on the system:
+    /// Direct3D 12 on Windows, Vulkan elsewhere.
+    pub const ModernBackend = enum {
+        auto,
+        d3d12,
+        vulkan,
+
+        pub fn backend(self: ModernBackend) ?App.Backend {
+            return switch (self) {
+                .auto => null,
+                .d3d12 => .d3d12,
+                .vulkan => .vulkan,
+            };
+        }
+    };
+
+    /// The backends a game is drawn with on an operating system, the one to
+    /// try first first: the renderer's chosen one where it has it here - or
+    /// its best - then, when `fall_back` is on, the rest of that renderer's,
+    /// and a Modern game with `fall_back_to_compatibility` on, the
+    /// Compatibility renderer's after them. Into `buffer`, which has room
+    /// for every backend there is.
+    pub fn backendsFor(self: Rendering, os: std.Target.Os.Tag, buffer: *[max_backends]App.Backend) []const App.Backend {
+        var count: usize = 0;
+        const add = struct {
+            fn add(into: *[max_backends]App.Backend, at: *usize, backend: App.Backend) void {
+                if (std.mem.indexOfScalar(App.Backend, into[0..at.*], backend) != null) return;
+                into[at.*] = backend;
+                at.* += 1;
+            }
+        }.add;
+        const first_wanted: ?App.Backend = switch (self.renderer) {
+            .compatibility => self.compatibility_backend.backend(),
+            .modern => self.modern_backend.backend(),
+        };
+        const own = self.renderer.backends(os);
+        if (first_wanted) |wanted| {
+            if (std.mem.indexOfScalar(App.Backend, own, wanted) != null) add(buffer, &count, wanted);
+        }
+        for (own, 0..) |backend, i| {
+            if (count > 0 and !self.fall_back) break;
+            if (i == 0 or self.fall_back) add(buffer, &count, backend);
+        }
+        if (self.renderer == .modern and self.fall_back_to_compatibility) {
+            const compatibility: Rendering = .{ .renderer = .compatibility, .compatibility_backend = self.compatibility_backend, .fall_back = self.fall_back };
+            var more: [max_backends]App.Backend = undefined;
+            for (compatibility.backendsFor(os, &more)) |backend| add(buffer, &count, backend);
+        }
+        return buffer[0..count];
+    }
+
+    /// Every backend there is, which is the most `backendsFor` can list.
+    pub const max_backends = @typeInfo(App.Backend).@"enum".fields.len;
+
     pub const default_clear_color: Color = .hex(0x0E1013);
 
     pub const reflect_fields = .{
         .renderer = .{ attr.Restart{}, attr.Doc{ .text = "The family of graphics APIs the game is drawn with. Modern - Direct3D 12 and Vulkan - is experimental." } },
-        .clear_color = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "What every frame is cleared to, under the world." } },
+        .compatibility_backend = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "Which of the Compatibility renderer's backends the game is drawn with where there is a choice: Direct3D 11 or OpenGL on Windows. Auto is the best the system has." } },
+        .modern_backend = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "Which of the Modern renderer's backends the game is drawn with where there is a choice: Direct3D 12 or Vulkan on Windows. Auto is the best the system has." } },
+        .fall_back = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "Where the backend chosen cannot open on a machine, try the renderer's others." } },
+        .fall_back_to_compatibility = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "Where no Modern backend opens on a machine, draw with the Compatibility renderer instead." } },
+        .clear_color = .{ attr.Advanced{}, attr.Doc{ .text = "What every frame is cleared to, under the world." } },
         .default_texture_filter = .{ attr.Restart{}, attr.Doc{ .text = "How a texture is sampled when it does not say: nearest for pixel art, linear for a painting." } },
     };
 };
@@ -209,6 +311,7 @@ pub const Physics2D = struct {
     default_linear_damp: f32 = 0.1,
     default_angular_damp: f32 = 1,
     ticks_per_second: u16 = 60,
+    max_steps_per_frame: u16 = 8,
 
     pub const reflect_attributes = .{attr.Label{ .text = "Physics 2D" }};
     pub const reflect_fields = .{
@@ -216,7 +319,8 @@ pub const Physics2D = struct {
         .default_gravity_vector = .{attr.Doc{ .text = "Which way things fall: down the screen." }},
         .default_linear_damp = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How much of its speed a body loses a second, when its own linear damp is minus one." } },
         .default_angular_damp = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How much of its spin a body loses a second, when its own angular damp is minus one." } },
-        .ticks_per_second = .{ attr.Range{ .min = 1, .max = 1000, .step = 1 }, attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "How many fixed steps a second the physics and the fixed systems take." } },
+        .ticks_per_second = .{ attr.Range{ .min = 1, .max = 1000, .step = 1 }, attr.Advanced{}, attr.Doc{ .text = "How many fixed steps a second the physics and the fixed systems take." } },
+        .max_steps_per_frame = .{ attr.Range{ .min = 1, .max = 100, .step = 1 }, attr.Advanced{}, attr.Doc{ .text = "The most fixed steps one frame takes to catch up after a slow one: past them the game runs slower rather than stalling." } },
     };
 
     /// The gravity as the physics takes it: the vector, scaled.
@@ -268,11 +372,15 @@ pub const Gui = struct {
     theme: []const u8 = "",
     /// Seconds the pointer rests on a control before its tooltip shows.
     tooltip_delay: f32 = 0.5,
+    /// What every length of the interface is multiplied by, on top of the
+    /// display's scale: `App.setInterfaceZoom`.
+    scale: f32 = 1,
 
     pub const reflect_attributes = .{attr.Label{ .text = "GUI" }};
     pub const reflect_fields = .{
         .theme = .{ attr.ProjectFile{ .kind = .theme }, attr.Doc{ .text = "The .theme every control is drawn with, under the one it names itself." } },
         .tooltip_delay = .{ attr.Unit{ .text = "s" }, attr.Range{ .min = 0, .max = 10 }, attr.Doc{ .text = "How long the pointer rests on a control before its tooltip shows." } },
+        .scale = .{ attr.Range{ .min = 0.25, .max = 4 }, attr.Doc{ .text = "How big the interface is drawn, on top of the display's own scale: two for twice the size." } },
     };
 };
 
@@ -521,7 +629,7 @@ test "a project file is written and read back as it was, saying only what differ
     try testing.expectEqualStrings("jam", application.tags[1]);
     try testing.expectEqual(@as(u32, 1600), settings.display.width);
     try testing.expectEqual(@as(u32, 720), settings.display.height);
-    try testing.expectEqual(Display.Mode.maximized, settings.display.mode);
+    try testing.expectEqual(App.WindowMode.maximized, settings.display.mode);
     try testing.expectEqual(Renderer.compatibility, settings.rendering.renderer);
     const physics = settings.physics_2d;
     try testing.expectEqual(@as(f32, 981), physics.default_gravity);
@@ -543,6 +651,58 @@ test "a project file is written and read back as it was, saying only what differ
 
     // A theme that is not the project's is not written.
     try testing.expectError(error.WrongType, write(testing.allocator, testing.io, try folder.at(""), .{ .application = .{ .name = "Out" }, .gui = .{ .theme = "C:/elsewhere.theme" } }));
+}
+
+test "the window's, the renderer's and the rest of the newer settings are written as the words they are, and read back the same" {
+    var folder: Folder = .init();
+    defer folder.tmp.cleanup();
+    try write(testing.allocator, testing.io, try folder.at(""), .{
+        .application = .{ .name = "Settled", .version = "1.2.0", .quit_on_close = false },
+        .display = .{
+            .window_width = 1920,
+            .window_height = 1080,
+            .mode = .exclusive_fullscreen,
+            .initial_position = .center_of_screen,
+            .screen = 1,
+            .position = .init(40, -20),
+            .borderless = true,
+            .always_on_top = true,
+            .vsync_mode = .mailbox,
+            .stretch_aspect = .keep_height,
+            .stretch_scale = 2,
+            .stretch_scale_mode = .integer,
+            .keep_screen_on = false,
+        },
+        .rendering = .{ .renderer = .modern, .modern_backend = .vulkan, .compatibility_backend = .gl, .fall_back = false, .fall_back_to_compatibility = false },
+        .physics_2d = .{ .max_steps_per_frame = 4 },
+        .gui = .{ .scale = 1.25 },
+    });
+    var kept: [4096]u8 = undefined;
+    const written = try folder.tmp.dir.readFile(testing.io, file_name, &kept);
+    try testing.expect(std.mem.indexOf(u8, written, "\"mode\": \"exclusive_fullscreen\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"vsync_mode\": \"mailbox\"") != null);
+    try testing.expect(std.mem.indexOf(u8, written, "\"modern_backend\": \"vulkan\"") != null);
+
+    var settings = try read(testing.allocator, testing.io, try folder.at(""), null);
+    defer settings.deinit();
+    try testing.expectEqualStrings("1.2.0", settings.application.version);
+    try testing.expect(!settings.application.quit_on_close);
+    const display = settings.display;
+    try testing.expectEqual(@as(u32, 1920), display.window_width);
+    try testing.expectEqual(App.WindowMode.exclusive_fullscreen, display.mode);
+    try testing.expectEqual(Display.InitialPosition.center_of_screen, display.initial_position);
+    try testing.expectEqual(@as(u16, 1), display.screen);
+    try testing.expectEqual(@as(i32, -20), display.position.y);
+    try testing.expect(display.borderless and display.always_on_top and !display.keep_screen_on);
+    try testing.expectEqual(App.VsyncMode.mailbox, display.vsync_mode);
+    try testing.expectEqual(stretch.Aspect.keep_height, display.stretch_aspect);
+    try testing.expectEqual(stretch.ScaleMode.integer, display.stretch_scale_mode);
+    try testing.expectEqual(@as(f32, 2), display.stretch_scale);
+    try testing.expectEqual(Rendering.ModernBackend.vulkan, settings.rendering.modern_backend);
+    try testing.expectEqual(Rendering.CompatibilityBackend.gl, settings.rendering.compatibility_backend);
+    try testing.expect(!settings.rendering.fall_back and !settings.rendering.fall_back_to_compatibility);
+    try testing.expectEqual(@as(u16, 4), settings.physics_2d.max_steps_per_frame);
+    try testing.expectEqual(@as(f32, 1.25), settings.gui.scale);
 }
 
 test "what a project file leaves out takes its default, and a key it does not know is kept" {

@@ -29,8 +29,9 @@ const log = std.log.scoped(.fluxion_engine);
 
 pub const Error = platform.Error;
 
-/// How the window fills the screen - always on the monitor it is on.
-pub const Fullscreen = union(enum) {
+/// How the window fills the screen - always on the monitor it is on. `Mode`
+/// is what a program asks for.
+const Fullscreen = union(enum) {
     /// A window, at the size and in the place it had before.
     windowed,
     /// The whole monitor at the resolution it already has. What a game should
@@ -79,8 +80,59 @@ pub const Cursor = enum {
     }
 };
 
-/// Whether a window is at its own size, maximised, or minimised.
-pub const State = enum {
+/// How the window is on the screen: one of five, where fullscreen, maximised
+/// and minimised would otherwise be three switches that contradict each
+/// other.
+pub const Mode = enum {
+    /// A window of its own size, in its own place.
+    windowed,
+    /// In the taskbar.
+    minimized,
+    /// Filling the screen's work area, frame and all.
+    maximized,
+    /// The whole screen it is on, at the resolution that screen has: what a
+    /// game should use - alt-tab is instant, and nothing else on the desktop
+    /// moves.
+    fullscreen,
+    /// The whole screen, the display switched to the window's video mode -
+    /// the screen's own, unless `setVideoMode` said another. Slower to enter
+    /// and leave, and it rearranges the desktop: worth it only where the
+    /// resolution is the point.
+    exclusive_fullscreen,
+
+    pub const reflect_name = "WindowMode";
+};
+
+/// How frames are shown against the display's refresh: a game's name for
+/// `rhi.PresentMode`, whose four these are.
+pub const VsyncMode = enum {
+    /// As soon as a frame is drawn, never waiting: it may tear.
+    disabled,
+    /// One frame a refresh, never tearing.
+    enabled,
+    /// One a refresh, a late frame shown at once rather than a refresh late.
+    adaptive,
+    /// The newest frame at each refresh, the game never waiting.
+    mailbox,
+
+    pub const reflect_name = "VsyncMode";
+
+    /// The rhi's mode it is.
+    pub fn present(self: VsyncMode) PresentMode {
+        return switch (self) {
+            .disabled => .disabled,
+            .enabled => .enabled,
+            .adaptive => .adaptive,
+            .mailbox => .mailbox,
+        };
+    }
+};
+
+const PresentMode = rhi.PresentMode;
+
+/// Whether a window is at its own size, maximised, or minimised: the part of
+/// `Mode` a window that is not fullscreen has.
+const State = enum {
     normal,
     /// Filling the monitor's work area, frame included.
     maximized,
@@ -99,12 +151,16 @@ pub const Desc = struct {
     width: u32 = 1280,
     height: u32 = 720,
     resizable: bool = true,
+    /// With the system's frame and title bar; without, a borderless window.
+    decorated: bool = true,
+    /// Shown at once. Hidden to put it in its place first, and `show` it.
+    visible: bool = true,
     /// Open maximised. Only a resizable window can be.
     maximized: bool = false,
     /// Ask for an OpenGL context. Only the `gl` backend needs one.
     gl: bool = true,
-    /// Wait for the display before showing a frame.
-    vsync: bool = true,
+    /// How frames are shown against the refresh.
+    present_mode: PresentMode = .enabled,
 };
 
 ctx: platform.Context,
@@ -140,6 +196,13 @@ content_scale: f32 = 1,
 
 has_gl_context: bool = false,
 
+/// How frames are shown, as last asked: the swap interval's, on a GL context.
+present_mode: PresentMode = .enabled,
+
+/// The video mode `exclusive_fullscreen` switches the display to, or null
+/// for the one its screen has.
+exclusive_mode: ?platform.VideoMode = null,
+
 /// Open a window at this address.
 pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
     self.* = .{
@@ -157,6 +220,8 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
         .width = desc.width,
         .height = desc.height,
         .resizable = desc.resizable,
+        .decorated = desc.decorated,
+        .visible = desc.visible,
         .maximized = desc.maximized,
         .gl = if (desc.gl) .{ .major = 3, .minor = 3, .profile = .core } else null,
     });
@@ -165,10 +230,10 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
     if (desc.gl) {
         try self.handle.makeContextCurrent();
         // Not fatal: a driver that refuses draws at a rate of its own.
-        self.setVsync(desc.vsync) catch |err| {
+        self.setPresentMode(desc.present_mode) catch |err| {
             log.warn("could not set the swap interval: {t}", .{err});
         };
-    }
+    } else self.present_mode = desc.present_mode;
 
     const fb = self.handle.framebufferSize();
     self.width = fb[0];
@@ -203,8 +268,30 @@ pub fn cursor(self: *const Window) Cursor {
     return self.cursor_wanted;
 }
 
-pub fn setVsync(self: *Window, on: bool) Error!void {
-    if (self.has_gl_context) try self.handle.setSwapInterval(if (on) .vsync else .immediate);
+/// How frames are shown against the refresh. A GL context's swap interval
+/// says it here - `adaptive` where the driver has late swaps, `enabled`
+/// where it has not, and `mailbox` as `enabled`; any other backend's surface
+/// is told by `App.setVsyncMode`.
+pub fn setPresentMode(self: *Window, wanted: PresentMode) Error!void {
+    self.present_mode = wanted;
+    if (!self.has_gl_context) return;
+    try self.handle.setSwapInterval(swapInterval(wanted));
+}
+
+/// The swap interval a GL context shows `mode` with, and the one it takes
+/// where the driver will not have that one.
+pub fn swapInterval(wanted: PresentMode) platform.gl.SwapInterval {
+    return switch (wanted) {
+        .disabled => .immediate,
+        .enabled, .mailbox => .vsync,
+        .adaptive => .adaptive,
+    };
+}
+
+/// Take a present mode on a GL context, or the nearest the driver has: an
+/// `adaptive` refused is `enabled`.
+pub fn applySwapInterval(handle: platform.Window, wanted: PresentMode) void {
+    handle.setSwapInterval(swapInterval(wanted)) catch handle.setSwapInterval(.vsync) catch {};
 }
 
 /// Use one of the system's own pointer shapes over this window.
@@ -309,16 +396,132 @@ pub fn openFolderDialog(self: *Window, options: dialog.FolderOptions) Error!dial
     } else return error.Unavailable;
 }
 
+/// Put the window in a mode: see `Mode`. Fullscreen fills the screen it is
+/// on; from fullscreen, maximised and minimised are reached through a window.
+/// The size is read back at once.
+pub fn setMode(self: *Window, wanted: Mode) Error!void {
+    switch (wanted) {
+        .windowed => {
+            if (self.fullscreen() != .windowed) try self.setFullscreen(.windowed);
+            if (self.state() != .normal) try self.handle.restore();
+        },
+        .minimized => try self.handle.iconify(),
+        .maximized => try self.setState(.maximized),
+        .fullscreen => {
+            if (self.state() == .minimized) try self.handle.restore();
+            try self.setFullscreen(.borderless);
+        },
+        .exclusive_fullscreen => {
+            if (self.state() == .minimized) try self.handle.restore();
+            const on = self.screen() orelse return error.Unavailable;
+            const video = self.exclusive_mode orelse self.ctx.monitors()[on].current;
+            try self.setFullscreen(.{ .exclusive = video });
+        },
+    }
+    self.refreshSize();
+}
+
+/// Which of the five the window is in now.
+pub fn mode(self: *const Window) Mode {
+    if (self.state() == .minimized) return .minimized;
+    return switch (self.fullscreen()) {
+        .borderless => .fullscreen,
+        .exclusive => .exclusive_fullscreen,
+        .windowed => if (self.state() == .maximized) .maximized else .windowed,
+    };
+}
+
+/// The video mode `exclusive_fullscreen` switches the display to: one of
+/// the screen's `videoModes`, or null for the one it has. Taken at once
+/// where the window is in that mode already.
+pub fn setVideoMode(self: *Window, wanted: ?platform.VideoMode) Error!void {
+    self.exclusive_mode = wanted;
+    if (self.mode() == .exclusive_fullscreen) try self.setMode(.exclusive_fullscreen);
+}
+
+/// Give the window the system's frame and title bar, or take them away. See
+/// `platform.Window.setDecorated`.
+pub fn setDecorated(self: *Window, on: bool) Error!void {
+    try self.handle.setDecorated(on);
+    self.refreshSize();
+}
+
+pub fn decorated(self: *const Window) bool {
+    return self.handle.decorated();
+}
+
+/// Let the player drag the window's edges, or not.
+pub fn setResizable(self: *Window, on: bool) Error!void {
+    try self.handle.setResizable(on);
+}
+
+pub fn resizable(self: *const Window) bool {
+    return self.handle.resizable();
+}
+
+/// Keep the window over every window that is not kept so itself.
+pub fn setTopmost(self: *Window, on: bool) Error!void {
+    try self.handle.setTopmost(on);
+}
+
+pub fn topmost(self: *const Window) bool {
+    return self.handle.topmost();
+}
+
+/// Keep the screen on - neither blanked nor the machine asleep for want of
+/// input - while the program runs, or let it go again.
+pub fn setKeepAwake(self: *Window, on: bool) Error!void {
+    try self.ctx.setKeepAwake(on);
+}
+
+pub fn keepAwake(self: *const Window) bool {
+    return self.ctx.keepAwake();
+}
+
+/// Show a window opened hidden.
+pub fn show(self: *Window) void {
+    self.handle.show();
+}
+
+/// The screens attached, as the system lists them.
+pub fn screens(self: *Window) []const platform.Monitor {
+    return self.ctx.monitors();
+}
+
+/// Which of `screens` the window is on - most of it - or null where the
+/// system does not say.
+pub fn screen(self: *const Window) ?usize {
+    return self.handle.monitor();
+}
+
+/// The first screen the system calls its primary, or the first there is.
+pub fn primaryScreen(self: *Window) ?usize {
+    const list = self.ctx.monitors();
+    for (list, 0..) |held, i| if (held.primary) return i;
+    return if (list.len > 0) 0 else null;
+}
+
+/// Put the window in the middle of a screen's work area, the part no
+/// taskbar covers. An ordinary window first, as with `setPosition`.
+pub fn centerOn(self: *Window, index: usize) Error!void {
+    const list = self.ctx.monitors();
+    if (index >= list.len) return error.Unavailable;
+    const area = list[index].work_area;
+    const x = area.x + @divTrunc(@as(i32, @intCast(area.width)) - @as(i32, @intCast(self.width)), 2);
+    const y = area.y + @divTrunc(@as(i32, @intCast(area.height)) - @as(i32, @intCast(self.height)), 2);
+    try self.setPosition(x, y);
+}
+
 /// Fill the monitor the window is on, or go back to being a window. The size
 /// is read back at once, so `App.create` makes its swapchain at the right
 /// size.
-pub fn setFullscreen(self: *Window, wanted: Fullscreen) Error!void {
+fn setFullscreen(self: *Window, wanted: Fullscreen) Error!void {
     const request: platform.Fullscreen = switch (wanted) {
         .windowed => .windowed,
         .borderless => .{ .borderless = self.handle.monitor() orelse return error.Unavailable },
-        .exclusive => |mode| .{ .exclusive = .{
+        .exclusive => |video| .{ .exclusive = .{
             .monitor = self.handle.monitor() orelse return error.Unavailable,
-            .mode = mode,
+            .mode = video,
         } },
     };
     try self.handle.setFullscreen(request);
@@ -326,7 +529,7 @@ pub fn setFullscreen(self: *Window, wanted: Fullscreen) Error!void {
 }
 
 /// How the window fills the screen now.
-pub fn fullscreen(self: *const Window) Fullscreen {
+fn fullscreen(self: *const Window) Fullscreen {
     return switch (self.handle.fullscreen()) {
         .windowed => .windowed,
         .borderless => .borderless,
@@ -371,7 +574,7 @@ pub fn setSizeLimits(self: *Window, limits: SizeLimits) Error!void {
 
 /// Maximise the window, minimise it, or put it back. Maximising leaves
 /// fullscreen first; a fullscreen game minimised comes back fullscreen.
-pub fn setState(self: *Window, wanted: State) Error!void {
+fn setState(self: *Window, wanted: State) Error!void {
     if (self.state() == wanted) return;
     switch (wanted) {
         .minimized => try self.handle.iconify(),
@@ -385,7 +588,7 @@ pub fn setState(self: *Window, wanted: State) Error!void {
 }
 
 /// Whether the window is at its own size, maximised, or minimised.
-pub fn state(self: *const Window) State {
+fn state(self: *const Window) State {
     if (self.handle.isIconified()) return .minimized;
     if (self.handle.isMaximized()) return .maximized;
     return .normal;

@@ -536,7 +536,8 @@ const turn = app.input.pointer.dx;
 try app.setWindowTitle("Level 3");
 try app.setWindowSize(1280, 720);
 try app.setWindowSizeLimits(.{ .min_width = 640, .min_height = 360 });
-try app.setWindowState(.maximized);         // .normal, .maximized, .minimized
+try app.setWindowMode(.fullscreen);         // .windowed .minimized .maximized .fullscreen .exclusive_fullscreen
+try app.setWindowBorderless(true);
 if (app.resized) layOutAgain(app.width, app.height);
 ```
 
@@ -549,15 +550,34 @@ if (app.resized) layOutAgain(app.width, app.height);
   `height`**: pixels, on every backend there is today. `app.windowSize()` is
   the size now - what `setWindowSize` asked for, once it has arrived - for a
   settings menu to show.
-- **`setFullscreen` takes a choice**: `.windowed`, `.borderless` - what a
-  game should use - or a video mode of its own; from a script, a choice
-  with nothing to carry is its name: `app.setFullscreen(.borderless)`, and
-  `app.fullscreen() == .borderless` asks for one.
+- **A window is in one of five `WindowMode`s**: `windowed`, `minimized`,
+  `maximized`, `fullscreen` - the screen it is on, at the resolution the
+  screen has, what a game should use - and `exclusive_fullscreen`, the
+  screen switched to a video mode: its own, or the one `setVideoMode` gave.
+  `toggleFullscreen` goes between a window and `fullscreen`. A script says
+  the same enum: `app.setWindowMode(.fullscreen)`, `app.windowMode() ==
+  .windowed`.
 - **A fullscreen, maximised or minimised window is made an ordinary one
   before it is sized or moved**, because none of them has a size of its own.
-  `.normal` means the window's own size even for one that was maximised
+  `.windowed` means the window's own size even for one that was maximised
   before it was minimised, which Windows would otherwise bring back
   maximised.
+- **Its frame, its place in the pile, the screen's sleep**:
+  `setWindowBorderless`, `setWindowResizable`, `setWindowAlwaysOnTop` and
+  `setKeepScreenOn`, each with its question - `windowBorderless()`. Where
+  the system decides, as on Wayland, a phone and a page, they give
+  `error.Unavailable`.
+- **The screens**: `screenCount`, `windowScreen`, `setWindowScreen` - the
+  middle of it, or all of it for a window that fills its screen - and
+  `centerWindow`; of each, `screenRect`, `screenUsableRect` (what no
+  taskbar covers), `screenScale`, `screenRefreshRate`, and its
+  `videoMode(screen, i)` up to `videoModeCount`, for a menu of resolutions.
+- **The project says how the window opens**: `display.mode`, where -
+  `initial_position`: the middle of the primary screen, of `screen`, or at
+  `position` - how big when not the game's size (`window_width`,
+  `window_height`), `resizable`, `borderless`, `always_on_top` and
+  `keep_screen_on`. It opens hidden, is put in its place and its mode, and
+  shows then, so it never flashes up somewhere else first.
 - **Limits apply at once.** A window already outside new limits is brought
   inside them when they are set, and one that is maximised, minimised or
   fullscreen when it is a window again.
@@ -566,14 +586,19 @@ if (app.resized) layOutAgain(app.width, app.height);
   the one it wants. An empty list puts the system's own back. Wayland has
   none - a window's picture comes from its desktop file there.
 - **The close button can ask rather than close.** With
-  `Options.ask_before_closing`, pressing it - or Alt+F4 - only sets
-  `app.close_pressed`, and the run goes on until the program calls `quit`:
-  an editor asks about work not saved first. A game leaves it off and closes
-  at once.
-- **`Options.resizable` and `Options.maximized`** say what can only be said
-  when the window is made. Without a window - headless - all of this is
-  nothing, and says so without failing. The project's `display.min_width`
-  and `min_height` are the least the player may drag the window to.
+  `Options.ask_before_closing` - or the project's `application.quit_on_close`
+  off - pressing it, or Alt+F4, only sets `app.close_pressed`, and
+  `closeRequested()` for the frame it was pressed in; the run goes on until
+  the program calls `quit`: an editor asks about work not saved first, a
+  game shows its "Quit?" A game leaves it on and closes at once.
+- **`Options` overrule the project, field by field**: `window_mode`,
+  `initial_position`, `screen`, `position`, `resizable`, `borderless`,
+  `always_on_top`, `keep_screen_on`, and the flags `--window-mode`,
+  `--screen`, `--position-x` and `--position-y` overrule both - how an
+  editor's Play puts the game where it was asked. Without a window -
+  headless - all of this is nothing, and says so without failing. The
+  project's `display.min_width` and `min_height` are the least the player
+  may drag the window to.
 
 ### 🗔 Tool windows: more than one window
 
@@ -606,7 +631,7 @@ if (tool.close_pressed) app.closeToolWindow(tool);
 ## 📐 Made at one size
 
 ```json
-"display": { "width": 640, "height": 360, "stretch_mode": "canvas", "stretch_aspect": "keep" }
+"display": { "width": 640, "height": 360, "stretch_mode": "canvas", "stretch_aspect": "keep", "stretch_scale_mode": "integer" }
 ```
 
 - **`stretch_mode` fits a game made at one size to a window of any.**
@@ -618,7 +643,16 @@ if (tool.close_pressed) app.closeToolWindow(tool);
   `rendering.default_texture_filter` says.
 - **`stretch_aspect` says what the spare room is.** `keep` keeps the
   project's shape and fills the rest with bars; `expand` shows more of the
-  game the long way, the project's size the least of it.
+  game the long way, the project's size the least of it; `keep_width` and
+  `keep_height` keep the one and show more the other way - a phone game
+  held upright, a side-scroller on a wide screen.
+- **`stretch_scale` draws it bigger** on top of that - two shows half as
+  much, twice the size - and **`stretch_scale_mode = integer`** scales only
+  by whole numbers, so every pixel of pixel art is the same size, with bars
+  round what is left.
+- **A game changes all four as it runs**: `setStretchMode`,
+  `setStretchAspect`, `setStretchScale`, `setStretchScaleMode`, each with
+  its question, a settings menu's "pixel perfect" included.
 - **What the game sees is the frame**: `app.frame` - its `width` and
   `height`, what the interface is laid out in and the camera's view is
   sized by, and its `scale` - and the pointer in the frame's pixels, turned
@@ -718,7 +752,7 @@ for (app.input.dropped()) |drop| {
 ## ⌛ Frame pacing
 
 ```zig
-try app.setVsync(false);
+try app.setVsyncMode(.disabled);            // .enabled .adaptive .mailbox
 app.time.max_fps = 144;                     // null is no cap
 if (!app.input.focused) app.setPaused(true);
 ```
@@ -726,6 +760,16 @@ if (!app.input.focused) app.setPaused(true);
 - **A project caps its frames with `application.max_fps`** - nought for no
   cap - and a game's `Options.max_fps` overrules it. A settings menu sets it
   with `app.setMaxFps(60)` and reads it with `maxFps()`, from a script too.
+- **`VsyncMode` is how a frame meets the refresh**: `disabled` never waits
+  and may tear; `enabled` shows one a refresh and never tears; `adaptive`
+  shows a late one at once, tearing that once rather than stuttering;
+  `mailbox` shows the newest at each refresh, the game never waiting. The
+  project's `display.vsync_mode` opens with it; a backend without one - an
+  OpenGL driver with no late swap - shows it `enabled`.
+- **The fixed step catches up at most `physics_2d.max_steps_per_frame`
+  steps** in a frame - eight - so a long stall slows the simulation down
+  rather than freezing the game to catch up with it:
+  `setMaxPhysicsStepsPerFrame`, and `setPhysicsTicksPerSecond` for the rate.
 
 - **The cap keeps a schedule**, so a late frame is caught up with and the
   average holds; after a stall longer than `time.max_delta` it starts again.
@@ -1984,7 +2028,7 @@ _ = try app.assets.reloadFile("res://art/hero.png");                 // changed 
 {
   "fluxion_project": 2,
   "application": { "name": "Meadow", "icon": "res://icon.png", "main_scene": "res://levels/meadow.json", "tags": ["2d"] },
-  "display": { "width": 1600, "height": 900, "mode": "maximized", "stretch_mode": "canvas" },
+  "display": { "width": 1600, "height": 900, "mode": "maximized", "vsync_mode": "adaptive", "stretch_mode": "canvas" },
   "physics_2d": { "default_gravity": 420 },
   "layer_names": { "physics_2d": ["world", "player"] },
   "gui": { "theme": "res://ui/game.theme" },
@@ -2017,15 +2061,21 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   naming no section of this build - a newer one's, or a game's own - is kept
   and written back; the game reads its own with `settings.section`. A key
   inside a section that no setting reads is passed over with a warning.
-- **The project says how the game opens**: the window's `width`, `height`,
-  `resizable`, `mode` (`windowed`, `maximized`, `fullscreen`) and `vsync`,
-  how the game is fitted to it - `stretch_mode`, `stretch_aspect` - and the
-  least it may be dragged to, the `clear_color` and the
-  `default_texture_filter`, the `ticks_per_second` of the fixed step, the
-  `icon` on the window and the pointer's picture, `mouse_cursor` with its
-  `mouse_cursor_hotspot`. What the game's own `App.Options` say overrules it,
-  field by field; what neither says is the sections' defaults, so a folder
-  with no project file opens as it always did.
+- **The project says how the game opens**: the window - see
+  [The window](#-the-window) - and its `vsync_mode`, how the game is fitted
+  to it - `stretch_mode`, `stretch_aspect`, `stretch_scale`,
+  `stretch_scale_mode` - and the least it may be dragged to, the
+  `clear_color` and the `default_texture_filter`, the `ticks_per_second` of
+  the fixed step and its `max_steps_per_frame`, `gui.scale`, the `icon` on
+  the window and the pointer's picture, `mouse_cursor` with its
+  `mouse_cursor_hotspot`, the game's `version` for its menu
+  (`gameVersion()`) and whether its close button closes (`quit_on_close`).
+  What the game's own `App.Options` say overrules it, field by field; what
+  neither says is the sections' defaults, so a folder with no project file
+  opens as it always did.
+- **A setting marked `attr.Restart`** is one an editor takes only when it
+  starts again - the renderer, its backends, the texture filter - because
+  the editor draws with them itself. A game reads them all when it starts.
 - **`application.name` is all it must have.** The name is the window's
   title when the game gives none.
 - **What is wrong is said, with where it is**, and stops the start rather
@@ -2048,6 +2098,13 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   the compatibility renderer. So on Windows a game opens Direct3D 11 unless
   asked otherwise, examples and editor included, and a `modern` one
   Direct3D 12.
+- **Within its renderer a project may choose the backend** -
+  `rendering.compatibility_backend` (`auto`, `d3d11`, `gl`) and
+  `modern_backend` (`auto`, `d3d12`, `vulkan`) - and says what is tried when
+  it does not open: `fall_back` the rest of the renderer's, then
+  `fall_back_to_compatibility` the Compatibility renderer's, each tried in
+  turn and said in the log. A choice the system has not got is the
+  renderer's best. `rendererInUse()` and `backendInUse()` say what opened.
 - **The modern renderer is experimental.** It draws everything the engine
   does, and the same picture - a scene, its interface, its shaders, the
   editor - but its backends are newer, slower, and less proven, and the log
@@ -2057,8 +2114,8 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   says to choose `compatibility`, rather than being drawn with something it
   will not look like.
 - **`--backend` wins over the project** - `gl`, `d3d11`, `d3d12`, `vulkan` -
-  so one game can be checked on every backend of its renderer, and one
-  outside it is allowed, and said in the log.
+  and nothing else is tried: one game can be checked on every backend of its
+  renderer, and one outside it is allowed, and said in the log.
 - **Nothing in the engine asks which backend it is on.** It draws through
   fluxion-rhi, hands every shader over in every language fluxion-shader
   writes it in, describes its window once - its handle, and its way to make
@@ -2665,10 +2722,10 @@ struct Door {
   `Entity`, `Files`, `Image`, `DateTime` are named in a type -
   `var body: CharacterBody2D`, `fn aim(at: Entity)` - where a value goes -
   `get(Sprite)` - and after `is`. The enums and unions the engine's types
-  take and give are named with them: `Key`, `MouseButton`, `Fullscreen`,
+  take and give are named with them: `Key`, `MouseButton`, `WindowMode`,
   `CursorShape`, and a component's own where no other has its name.
   - An enum is a Flux enum: `event.key == .space`, `app.setCursor(.hidden)`, `Key.escape`; never a string.
-  - A union is the arm it holds: its payload, asked for with `is`, or for an arm that holds nothing, its name - `.borderless`.
+  - A union is the arm it holds: its payload, asked for with `is` - `if (event is KeyEvent)` - or, for an arm that holds nothing, its name.
   - What may be none is optional: a field that holds an entity or a file - `sprite.texture` - and what a call gives that may be none - `app.parentOf(e)`, `app.currentScene()` - are read with `.?`, `orelse` or `if (x) |v|`. What a call that can fail gives is never none: `app.spawn(null)` is an entity.
   - So a call is checked as the script compiles - how many arguments, of what types, and what it gives back - and an editor offers their fields and methods after the dot, with their signatures and what their doc comments say. `tools/member_docs.zig` gathers those from the engine's source as it builds.
 - **An error of the engine's stops the script** with its name, as a
@@ -2968,11 +3025,12 @@ Here, and checked by the tests:
   one pad, and SDL mappings for the ones the system does not know.
 - The pointer in world coordinates, through the camera; locked, confined or
   hidden, and let go whenever the window loses the keyboard.
-- Fullscreen - borderless, or exclusive at a chosen mode - on whichever
-  monitor the window is on, at `create` or at any time after, and a no-op
-  without a window.
+- The window's mode - windowed, minimised, maximised, filling its screen,
+  or exclusive at a chosen video mode - its frame, whether it is resizable
+  or kept on top, the screen it opens on and where, and the screen kept
+  awake, at `create` or at any time after, and a no-op without a window.
 - The window changed while it runs: title, size, position, size limits,
-  maximised and minimised, and `resized` for the frame the size changed in.
+  its screen, and `resized` for the frame the size changed in.
 - The system clipboard, for the interface's copy and paste and for the
   game's own - `setClipboardText`, `clipboardText`, `hasClipboardText` - and
   the program's own clipboard when there is no window.

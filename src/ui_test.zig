@@ -388,12 +388,18 @@ test "a script sets the window's fill, the frame cap and the interface's size, a
     defer app.destroy();
     try app.useScripts(.{});
     const handle = try app.addScript("settings.flux",
-        \\const modes: [Fullscreen] = [.windowed, .borderless];
+        \\const modes: [WindowMode] = [.windowed, .exclusive_fullscreen];
         \\var windowed = false;
+        \\var mailbox = false;
         \\struct Settings {
         \\    fn ready(self) {
-        \\        app.setFullscreen(modes[1]) catch {};
-        \\        windowed = app.fullscreen() == modes[0]; // with no window, a window
+        \\        app.setWindowMode(modes[1]) catch {};
+        \\        windowed = app.windowMode() == modes[0]; // with no window, a window
+        \\        app.setVsyncMode(.mailbox) catch {};
+        \\        mailbox = app.vsyncMode() == .mailbox;
+        \\        app.setStretchAspect(.keep_height);
+        \\        app.setStretchScaleMode(.integer);
+        \\        app.setWindowBorderless(true) catch {};
         \\        app.setMaxFps(30.0);
         \\        app.setInterfaceZoom(1.5);
         \\        print(app.maxFps(), app.interfaceZoom(), app.loadProgress("res://nowhere.json"), app.currentScene());
@@ -404,6 +410,8 @@ test "a script sets the window's fill, the frame cap and the interface's size, a
     _ = try app.step();
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
     try testing.expect(app.scripts.?.vm.get(app.scripts.?.moduleOf(handle).?, "windowed").?.asBool());
+    try testing.expect(app.scripts.?.vm.get(app.scripts.?.moduleOf(handle).?, "mailbox").?.asBool());
+    try testing.expect(app.stretchAspect() == .keep_height and app.stretchScaleMode() == .integer);
     try testing.expectEqual(@as(?f32, 30), app.time.max_fps);
     try testing.expectEqual(@as(f32, 1.5), app.interface.zoom);
     app.setMaxFps(0);

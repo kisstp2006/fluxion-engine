@@ -271,17 +271,19 @@ pub const Collision = character.Collision;
 /// `App.drawWorld` draws the world through.
 pub const View = render.view.View;
 
-/// How the window fills the screen.
-pub const Fullscreen = Window.Fullscreen;
+/// How the window is on the screen: windowed, minimised, maximised,
+/// fullscreen or exclusively so.
+pub const WindowMode = Window.Mode;
+/// How frames are shown against the display's refresh.
+pub const VsyncMode = Window.VsyncMode;
+/// Where the window opens.
+pub const InitialPosition = App.InitialPosition;
 
 /// Where the pointer may go, and whether it shows.
 pub const Cursor = Window.Cursor;
 
 /// One of the system's own pointer shapes.
 pub const CursorShape = platform.CursorShape;
-
-/// Whether the window is at its own size, maximised, or minimised.
-pub const WindowState = Window.State;
 
 /// How small and how large the player may drag the window.
 pub const WindowSizeLimits = Window.SizeLimits;
