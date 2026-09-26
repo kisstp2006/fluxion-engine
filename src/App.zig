@@ -1158,8 +1158,12 @@ fn placeWindow(w: *Window, resolved: Resolved) void {
         .absolute => w.setPosition(resolved.position.x, resolved.position.y) catch |err| log.info("the window could not be put at its position: {t}", .{err}),
     }
     if (resolved.always_on_top) w.setTopmost(true) catch |err| log.warn("the window cannot be kept on top here: {t}", .{err});
+    // In its mode before it shows, so it never shows as a window first; a
+    // system that takes no mode for a window not shown yet is asked again.
+    const wanted = resolved.window_mode;
+    if (wanted != .windowed) w.setMode(wanted) catch {};
     w.show();
-    if (resolved.window_mode != .windowed) w.setMode(resolved.window_mode) catch |err| log.warn("the window could not open {t}: {t}", .{ resolved.window_mode, err });
+    if (wanted != .windowed and w.mode() != wanted) w.setMode(wanted) catch |err| log.warn("the window could not open {t}: {t}", .{ wanted, err });
     w.setKeepAwake(resolved.keep_screen_on) catch |err| switch (err) {
         // A phone, a page and Wayland keep their screens as they will.
         error.Unavailable => {},
