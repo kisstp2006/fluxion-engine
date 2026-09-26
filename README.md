@@ -513,7 +513,11 @@ const turn = app.input.pointer.dx;
   picture from the start. A browser quietly keeps its arrow past 128 by 128,
   so a cursor a page will see should be small.
 - **Where the pointer is, and how fast**: `input.pointer.x/y` in the
-  framebuffer's pixels, `app.pointerInWorld()` through the camera,
+  framebuffer's pixels - `app.pointerOnScreen()` from a script - against
+  `app.screenSize()`, the frame's size in those pixels, so a place on the
+  screen reads the same at every resolution:
+  `app.pointerOnScreen().x / app.screenSize().x` is 0 at the left and 1 at
+  the right. `app.pointerInWorld()` is through the camera,
   `app.pointerIn(entity)` in one entity's own space, and
   `input.pointer.velocity` in pixels a second, worked out over at least a
   tenth of a second and nought once it has been still for three. A game

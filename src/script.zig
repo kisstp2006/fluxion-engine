@@ -280,7 +280,17 @@ pub const EntityRef = struct {
 
     pub const reflect_name = "Entity";
     pub const reflect_opaque = true;
-    pub const reflect_methods = .{ .alive, .name, .uuid, .has, .get, .add, .remove, .despawn, .script };
+    pub const reflect_methods = .{
+        .alive = .{},
+        .name = .{},
+        .uuid = .{},
+        .has = .{attr.Params{ .names = &.{"component"} }},
+        .get = .{attr.Params{ .names = &.{ "vm", "component" } }},
+        .add = .{attr.Params{ .names = &.{ "vm", "component" } }},
+        .remove = .{attr.Params{ .names = &.{ "vm", "component" } }},
+        .despawn = .{},
+        .script = .{},
+    };
 
     /// Whether it is still in the world. False in `exit` for a despawned
     /// entity.

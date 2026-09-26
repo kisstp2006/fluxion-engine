@@ -2147,18 +2147,18 @@ test "every call a script can make names what it takes" {
         seen: std.ArrayList(*const reflect.Type) = .empty,
 
         /// A type a script reaches, through what it is wrapped in: a
-        /// pointer, an optional, an error union.
+        /// pointer, an optional, an error union. `App` and the handles are
+        /// opaque to reflection, and have methods all the same.
         fn reach(self: *@This(), t: *const reflect.Type) !void {
-            const inner = switch (t.kind) {
+            switch (t.kind) {
                 .pointer => return self.reach(t.info.pointer.child),
                 .optional => return self.reach(t.info.optional.child),
                 .error_union => return self.reach(t.info.error_union.payload),
-                .@"struct", .@"union" => t,
-                else => return,
-            };
-            if (inner.methods.slice().len == 0) return;
-            for (self.seen.items) |held| if (held.same(inner)) return;
-            try self.seen.append(testing.allocator, inner);
+                else => {},
+            }
+            if (t.methods.slice().len == 0) return;
+            for (self.seen.items) |held| if (held.same(t)) return;
+            try self.seen.append(testing.allocator, t);
         }
     };
     var walk: Walk = .{};
@@ -2192,6 +2192,15 @@ test "every call a script can make names what it takes" {
                 break :named true;
             } else false;
             if (!named) try unnamed.print(gpa, "{s}.{s}\n", .{ t.name.slice(), m.name.slice() });
+        }
+    }
+    // The walk reached what a script starts from, not only the components.
+    for ([_][]const u8{ "App", "Entity", "Files", "Time" }) |name| {
+        for (walk.seen.items) |t| {
+            if (std.mem.eql(u8, t.name.slice(), name)) break;
+        } else {
+            std.debug.print("the walk never reached {s}\n", .{name});
+            return error.NotReached;
         }
     }
     if (unnamed.items.len > 0) {
