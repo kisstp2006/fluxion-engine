@@ -2512,8 +2512,9 @@ as data, and the engine hands its components and its calls out through it.
   channels, a collider's friction and bounce; `Angle` on every rotation,
   kept in radians and shown in degrees; a `Unit` after a number (`px`, `s`,
   `/s`); `Layers` on a collider's layer and mask, a toggle a bit named from
-  the project's list; `Extents` and `Radius` on its size and `Placement` on
-  the collider itself, for an editor's handles; a `Doc`
+  the project's list; `Extents`, `Radius` and `Capsule` on its size - each
+  with a `When`, the shape it is while its `shape` is that - and `Placement`
+  on the collider itself, for an editor's handles; a `Doc`
   for a zero that is not zero ("zero is the sprite's width"); a `Text` on
   a type for the words it keeps beside it - a label's `text`, a field's
   `placeholder_text`, `multiline` or not - which are the app's and not in
