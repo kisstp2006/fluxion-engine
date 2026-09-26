@@ -1160,13 +1160,14 @@ pub const Nodes = struct {
         if (self.preview_ui == null) self.preview_ui = .init(app.gpa);
         const layout = &self.preview_ui.?;
         if (faces.len > 0) layout.setMeasurer(Interface.measurer(&faces));
-        // The interface is laid out at the game's size and drawn as big as
-        // the world is: a view zoomed in shows it bigger, as it shows a
-        // sprite bigger.
-        const zoom = @max(view.zoom_x, 0.0001);
+        // The interface is laid out at the game's size, over what the camera
+        // shows, and drawn as big as the world is there: a view zoomed in
+        // shows it bigger, as it shows a sprite bigger.
+        const screen = app.screenInWorld();
+        const zoom = @max(view.zoom_x * screen.units_per_pixel, 0.0001);
         self.preview_interface.scale = zoom;
         const size = app.gameSize();
-        const origin = view.toScreen(.zero);
+        const origin = view.toScreen(screen.top_left);
         self.preview_canvas = .{ .width = size[0], .height = size[1], .x = origin.x / zoom, .y = origin.y / zoom };
         defer self.preview_canvas = null;
         layout.begin(self.preview_interface.surface(width, height));

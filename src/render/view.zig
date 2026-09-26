@@ -63,10 +63,18 @@ pub const View = struct {
         width: f32,
         height: f32,
     ) View {
-        var best: View = .screen(width, height);
-        var best_priority: ?i16 = null;
+        const seen = lookedThrough(world, snapshots) orelse return .screen(width, height);
+        return .through(seen.camera, seen.placed, width, height);
+    }
 
-        var it = Cameras.over(world) catch return best;
+    /// A camera the screen looks through, and where it is.
+    pub const Seen = struct { entity: ecs.Entity, camera: Camera2D, placed: Transform2D };
+
+    /// The camera the screen looks through: the active one with the highest
+    /// `priority` that draws no picture of its own, or null for none.
+    pub fn lookedThrough(world: *ecs.World, snapshots: *const hierarchy.Snapshots) ?Seen {
+        var best: ?Seen = null;
+        var it = Cameras.over(world) catch return null;
         while (it.next()) |chunk| {
             const places = chunk.slice(Transform2D);
             const cameras = chunk.slice(Camera2D);
@@ -75,16 +83,11 @@ pub const View = struct {
                 // through at the screen.
                 if (!camera.active or world.has(entity, components.RenderView)) continue;
                 // Ties go to the first found; see `Camera2D.priority`.
-                if (best_priority) |priority| {
-                    if (camera.priority <= priority) continue;
-                }
-
+                if (best) |held| if (camera.priority <= held.camera.priority) continue;
                 // A camera may be parented, so it is resolved like anything
                 // else. One that cannot be placed is not looked through.
                 const placed = hierarchy.resolve(world, snapshots, entity, local, 1) orelse continue;
-
-                best_priority = camera.priority;
-                best = .through(camera, placed, width, height);
+                best = .{ .entity = entity, .camera = camera, .placed = placed };
             }
         }
         return best;

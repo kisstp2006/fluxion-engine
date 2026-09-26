@@ -6375,13 +6375,59 @@ pub fn gameSize(self: *const App) [2]f32 {
     return .{ @floatFromInt(self.width), @floatFromInt(self.height) };
 }
 
+/// The camera the screen looks through: the active one with the highest
+/// priority that draws no picture of its own, or null for none.
+pub fn currentCamera(self: *App) ?ecs.Entity {
+    const seen = View.lookedThrough(&self.world, &self.snapshots) orelse return null;
+    return seen.entity;
+}
+
+/// What a camera shows of the world: through it at the game's size - or,
+/// for one that draws a picture of its own, at the picture's.
+pub fn cameraView(self: *App, entity: ecs.Entity) ?View {
+    const camera = self.world.get(entity, components.Camera2D) orelse return null;
+    const placed = self.drawnTransform(entity) orelse return null;
+    const size = if (self.world.get(entity, components.RenderView)) |own| [2]f32{ @floatFromInt(own.width), @floatFromInt(own.height) } else self.gameSize();
+    return .through(camera.*, placed, size[0], size[1]);
+}
+
+/// The corners of what a camera shows, in the world, clockwise from the
+/// screen's top left: a frame an editor draws round it.
+pub fn cameraCorners(self: *App, entity: ecs.Entity) ?[4]math.Vec2 {
+    const view = self.cameraView(entity) orelse return null;
+    return .{
+        view.toWorld(.init(0, 0)),
+        view.toWorld(.init(view.width, 0)),
+        view.toWorld(.init(view.width, view.height)),
+        view.toWorld(.init(0, view.height)),
+    };
+}
+
+/// Where the game's screen is in the world, for an editor: the top left of
+/// what the current camera shows at the game's size, and how many of the
+/// world's units a pixel of the screen is - with no camera, the world's
+/// origin and one. The camera's turn is left out: the interface is not
+/// turned with it.
+pub const ScreenPlace = struct { top_left: math.Vec2, units_per_pixel: f32 };
+
+pub fn screenInWorld(self: *App) ScreenPlace {
+    const camera = self.currentCamera() orelse return .{ .top_left = .init(0, 0), .units_per_pixel = 1 };
+    const view = self.cameraView(camera).?;
+    const size = self.gameSize();
+    return .{
+        .top_left = .init(view.x - size[0] / (2 * view.zoom_x), view.y - size[1] / (2 * view.zoom_y)),
+        .units_per_pixel = 1 / view.zoom_x,
+    };
+}
+
 /// Draw the registered Control trees over an editor's scene texture, using
 /// the same declarations and renderer as the running game: laid out at
-/// `gameSize`, with the screen's top left at the world's origin, and as big
-/// as `view` shows the world. A tree with no `CanvasLayer` or `Viewport` of
-/// its own is shown over the screen too. A popup that is shut is drawn open
-/// while it, or something in it, is one of `editing`: what the editor has
-/// picked, to lay it out.
+/// `gameSize` on the screen where `screenInWorld` puts it - over what the
+/// current camera shows, or at the world's origin with none - and as big as
+/// `view` shows the world. A tree with no `CanvasLayer` or `Viewport` of its
+/// own is shown over the screen too. A popup that is shut is drawn open while
+/// it, or something in it, is one of `editing`: what the editor has picked,
+/// to lay it out.
 pub fn drawControlPreview(self: *App, into: rhi.Texture, view: View, editing: []const ecs.Entity) !void {
     try self.control_nodes.preview(self, into, view, view.width, view.height, self.interface.faces, editing);
 }
@@ -9851,4 +9897,30 @@ test "the game's chance is the same from the same seed, and keeps to the ranges 
     try testing.expectEqual(@as(i64, 0), app.randomIndex(0));
     try testing.expect(!app.randomChance(0));
     try testing.expect(app.randomChance(1));
+}
+
+test "a camera's frame is what it shows at the game's size, and an editor's screen is over what the current one shows" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 1280, .height = 720 });
+    defer app.destroy();
+    // With no camera, the screen's top left is the world's origin.
+    try testing.expectEqual(math.Vec2.init(0, 0), app.screenInWorld().top_left);
+    try testing.expectEqual(@as(f32, 1), app.screenInWorld().units_per_pixel);
+
+    const camera = try app.world.spawnWith(.{ components.Transform2D.at(100, 50), components.Camera2D{ .zoom = 2 } });
+    try testing.expect(app.currentCamera().?.eql(camera));
+    const corners = app.cameraCorners(camera).?;
+    try testing.expectApproxEqAbs(@as(f32, -220), corners[0].x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, -130), corners[0].y, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 420), corners[2].x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 230), corners[2].y, 0.001);
+    const screen = app.screenInWorld();
+    try testing.expectApproxEqAbs(@as(f32, -220), screen.top_left.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, -130), screen.top_left.y, 0.001);
+    try testing.expectEqual(@as(f32, 0.5), screen.units_per_pixel);
+
+    // One that draws a picture of its own is framed at the picture's size,
+    // and the screen does not look through it.
+    const picture = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Camera2D{}, components.RenderView{ .width = 320, .height = 180 } });
+    try testing.expectApproxEqAbs(@as(f32, 160), app.cameraCorners(picture).?[2].x, 0.001);
+    try testing.expect(app.currentCamera().?.eql(camera));
 }
