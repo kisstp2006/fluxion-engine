@@ -1413,6 +1413,23 @@ test "an editor's analysis knows the engine's calls and types: app's, an entity'
             if (std.mem.eql(u8, item.label, name)) break;
         } else return error.NotOffered;
     }
+    // The components and the engine's other types, where one is given as a
+    // value: `get(Sprite)`, `is KeyEvent`, `Key.escape`.
+    for ([_][2][]const u8{
+        .{ "struct H { fn ready(self) { self.entity.get(Spri$) } }", "Sprite" },
+        .{ "struct H { fn ready(self) { self.entity.add(AnimatedSp$) } }", "AnimatedSprite2D" },
+        .{ "struct H { fn input(self, event: InputEvent) { if (event is KeyE$) {} } }", "KeyEvent" },
+        .{ "struct H { fn ready(self) { const k = Ke$ } }", "Key" },
+    }) |case| {
+        const cut = std.mem.indexOfScalar(u8, case[0], '$').?;
+        const got = try flux.service.complete(testing.allocator, arena, "hero.flux", try std.mem.concat(arena, u8, &.{ case[0][0..cut], case[0][cut + 1 ..] }), @intCast(cut), app.scriptSetup());
+        for (got.items) |item| {
+            if (std.mem.eql(u8, item.label, case[1])) break;
+        } else {
+            std.debug.print("{s} is not offered in `{s}`\n", .{ case[1], case[0] });
+            return error.NotOffered;
+        }
+    }
     const hooks = "struct H {\n    fn upd$\n}\n";
     const hook_at = std.mem.indexOfScalar(u8, hooks, '$').?;
     const offered = try flux.service.complete(testing.allocator, arena, "hero.flux", try std.mem.concat(arena, u8, &.{ hooks[0..hook_at], hooks[hook_at + 1 ..] }), @intCast(hook_at), app.scriptSetup());
