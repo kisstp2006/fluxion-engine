@@ -1467,7 +1467,14 @@ app.grabFocus(play);                                                            
   `hasFocus` and `releaseFocus`, from Flux too.
 - **A tooltip** is a control's `tooltip_text`, shown by the pointer once it
   has rested there the project's `gui.tooltip_delay`, in the theme's
-  `Tooltip` style.
+  `Tooltip` style: its lines as written, a long one broken, and kept on the
+  window.
+- **Words never run out of their box.** A label's `wrap` says what they do
+  where there is no room: `words` breaks between words and inside a word too
+  long for a line, `newline` breaks only at the text's own newlines and ends
+  a line too long in an ellipsis, and `none` is one line ending in one. A
+  button's words end in an ellipsis too, and a container too small for its
+  controls squeezes them before anything spills.
 - **A `RichText`** is words with styles written into them - every tag
   fluxion-ui's markup reads, and `{b|heavy}`, `{size=24|large}` and
   `{img=res://icons/key.png|}` - wrapping between words, each word in its

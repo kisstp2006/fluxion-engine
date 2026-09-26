@@ -395,6 +395,11 @@ pub const Label = extern struct {
     /// needs it and a label on a panel does not.
     outline_color: Color = .black,
     outline_width: u16 = 0,
+    /// What the words do where the label has no room for them: never run
+    /// out of it. `words` breaks between words, and inside a word too long
+    /// for a line; `newline` breaks only at the text's own newlines, a line
+    /// too long ending in an ellipsis; `none` is one line, the first,
+    /// ending in an ellipsis where it does not fit.
     wrap: Wrap = .words,
     /// Where the words sit in the label's box, and each line among the
     /// others: a title across the top in the middle, a number on the right.
@@ -699,6 +704,10 @@ pub const Nodes = struct {
         app.interface.textures = self.textures.items;
     }
 
+    /// The widest a tooltip is, in the interface's units, before its lines
+    /// break.
+    const tooltip_width = 360;
+
     /// The words of the control the pointer has rested on long enough, by
     /// the pointer, over everything.
     fn tooltip(self: *Nodes, app: *App) !void {
@@ -715,12 +724,16 @@ pub const Nodes = struct {
         const context: Context = .{ .app = app, .layout = &app.ui };
         const style = self.resolvedStyle(context, under, .tooltip, .normal);
         const scale = @max(app.interface.scale, 0.01);
+        // Its lines as they are written, and a long one broken: never wider
+        // than a reader follows easily, and never off the window.
         var box: ui.Declaration = .{
             .id = "control-tooltip",
+            .width = .fitBetween(0, tooltip_width),
             .floating = .{
                 .attach = .root,
                 .offset = .{ .x = app.input.pointer.x / scale + 12, .y = app.input.pointer.y / scale + 18 },
                 .z_index = 1000,
+                .keep_on_screen = true,
             },
         };
         self.applyStyle(app, &box, style);
@@ -730,7 +743,7 @@ pub const Nodes = struct {
             .font = app.interface.addFont(style.font) catch 0,
             .font_size = style.font_size,
             .color = color(style.text_color),
-            .wrap = .none,
+            .wrap = .words,
         });
     }
 

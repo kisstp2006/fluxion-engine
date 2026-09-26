@@ -5916,9 +5916,12 @@ pub fn setWindowTitle(self: *App, title: []const u8) Window.Error!void {
 
 /// Make the window's content area this size, in pixels. A fullscreen,
 /// maximised or minimised window becomes an ordinary one first. The new size
-/// arrives at the top of the next frame. Nothing without a window.
-pub fn setWindowSize(self: *App, width: u32, height: u32) Window.Error!void {
-    if (self.window) |*window| try window.setSize(width, height);
+/// arrives at the top of the next frame. Without a window, what the app draws
+/// into is that size at once - a test of a layout at a size asks this.
+pub fn setWindowSize(self: *App, width: u32, height: u32) (Window.Error || rhi.Error)!void {
+    if (self.window) |*window| return window.setSize(width, height);
+    // With no window, what there is to draw into is that size at once.
+    try self.adoptSize(width, height);
 }
 
 /// How big the window's content area is, in pixels: what `setWindowSize`
@@ -7650,7 +7653,7 @@ test "the pointer takes the shape its control asks for, the game's default elsew
     try testing.expectError(error.FileNotFound, app.setCustomCursorFile("res://nowhere.png", .arrow, .init(0, 0)));
 }
 
-test "a headless app has no window to move or resize, and says so without failing" {
+test "a headless app has no window to move, and says so without failing; a size is what it draws into" {
     const app = try App.create(testing.allocator, .{
         .headless = true,
         .width = 320,
@@ -7668,10 +7671,10 @@ test "a headless app has no window to move or resize, and says so without failin
 
     try testing.expect(app.windowPosition() == null);
     try testing.expect(app.windowState() == .normal);
-    // The target is the size it was made at, and nothing was resized.
-    try testing.expectEqual(@as(u32, 320), app.width);
-    try testing.expectEqual(@as(u32, 240), app.height);
-    try testing.expect(!app.resized);
+    // What it draws into took the size.
+    try testing.expectEqual(@as(u32, 800), app.width);
+    try testing.expectEqual(@as(u32, 600), app.height);
+    try testing.expect(app.resized);
 }
 
 test "resized is true for the one frame the size changed in, and no other" {
