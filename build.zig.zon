@@ -21,16 +21,16 @@
         // the 3D one that is not written yet, the 2D one, the interface -
         // goes through this and through nothing else.
         .fluxion_rhi = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-rhi#aba1e2731ee571b54b6c8c3060ef566bfeb27abf",
-            .hash = "fluxion_rhi-0.1.0--pvwD5DUDwCRS3BGcy1rL30F2Fu2ntprihQQ4ojdRv5J",
+            .url = "git+https://github.com/kisstp2006/fluxion-rhi#a9722e15f0a347685006085c0580500bdd964be0",
+            .hash = "fluxion_rhi-0.1.0--pvwD5DUDwB3k7sfsM0WQdGC26ThB_zZKAhK47QzH6d3",
         },
 
         // Windows, input and the event loop. A library may not depend on
         // this; an engine is exactly the thing that may, because opening the
         // window is its job.
         .fluxion_platform = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-platform#11c03758aafb2f5c792e333e868cc517e7225ed7",
-            .hash = "fluxion_platform-0.1.0-WsOjURttGAC7ybsA4m-cJh3UVuiTb2HLJ3TORifJVt4v",
+            .url = "git+https://github.com/kisstp2006/fluxion-platform#5b9e0f68299117b924849a71452c31a5edc6d0dc",
+            .hash = "fluxion_platform-0.1.0-WsOjUbdyGAC9gDHrhCOkb_LcsXrOzijfatykISXtqLaa",
         },
 
         // The interface layer: the layout `.ui` systems declare into, and the

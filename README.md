@@ -567,11 +567,12 @@ if (app.resized) layOutAgain(app.width, app.height);
   `setKeepScreenOn`, each with its question - `windowBorderless()`. Where
   the system decides, as on Wayland, a phone and a page, they give
   `error.Unavailable`.
-- **The screens**: `screenCount`, `windowScreen`, `setWindowScreen` - the
-  middle of it, or all of it for a window that fills its screen - and
-  `centerWindow`; of each, `screenRect`, `screenUsableRect` (what no
-  taskbar covers), `screenScale`, `screenRefreshRate`, and its
-  `videoMode(screen, i)` up to `videoModeCount`, for a menu of resolutions.
+- **The screens**: `screenCount`, `windowScreen`, `primaryScreen`,
+  `setWindowScreen` - the middle of it, or all of it for a window that
+  fills its screen - and `centerWindow`; of each, `screenRect`,
+  `screenUsableRect` (what no taskbar covers), `screenScale`,
+  `screenRefreshRate`, and its `videoMode(screen, i)` up to
+  `videoModeCount`, for a menu of resolutions.
 - **The project says how the window opens**: `display.mode`, where -
   `initial_position`: the middle of the primary screen, of `screen`, or at
   `position` - how big when not the game's size (`window_width`,

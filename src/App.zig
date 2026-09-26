@@ -5020,6 +5020,7 @@ pub const reflect_methods = .{
     .keepScreenOn = .{},
     .screenCount = .{},
     .windowScreen = .{},
+    .primaryScreen = .{},
     .setWindowScreen = .{ attr.Params{ .names = &.{"screen"} }, script_mod.flux.GivesErrors{} },
     .centerWindow = .{script_mod.flux.GivesErrors{}},
     .screenRect = .{attr.Params{ .names = &.{"screen"} }},
@@ -6140,6 +6141,13 @@ pub fn screenCount(self: *App) u32 {
 /// system does not say.
 pub fn windowScreen(self: *const App) ?u32 {
     if (self.window) |*window| if (window.screen()) |index| return @intCast(index);
+    return null;
+}
+
+/// Which screen the system calls its primary - the first where it calls
+/// none so - or null with none at all.
+pub fn primaryScreen(self: *App) ?u32 {
+    if (self.window) |*window| if (window.primaryScreen()) |index| return @intCast(index);
     return null;
 }
 
@@ -7920,7 +7928,7 @@ test "a headless app has no screen to fill, and says so without failing" {
     try testing.expect(!app.windowBorderless() and !app.windowResizable() and !app.windowAlwaysOnTop() and !app.keepScreenOn());
     // No screens to be on, and nothing to say of one.
     try testing.expectEqual(@as(u32, 0), app.screenCount());
-    try testing.expect(app.windowScreen() == null);
+    try testing.expect(app.windowScreen() == null and app.primaryScreen() == null);
     try app.setWindowScreen(1);
     try app.centerWindow();
     try testing.expect(app.screenRect(0) == null and app.videoMode(0, 0) == null);
