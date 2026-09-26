@@ -866,7 +866,7 @@ _ = app.setBusVolumeDb("Music", app.linearToDb(0.5));            // a settings s
 // A tween: steps one after another, or together once tweenParallel says so.
 const fade = try app.tween(panel);
 try app.tweenProperty(fade, panel, "Appearance.modulate.a", .{ .number = 0 }, 0.3);
-_ = app.tweenEase(fade, "quad_out");
+try app.tweenEase(fade, .quad_out);
 try app.tweenParallel(fade, true);
 try app.tweenProperty(fade, panel, "Transform2D.x,y", .{ .vec2 = .{ 0, -40 } }, 0.3);
 try app.signal(fade, fx.Tween, .finished).connectFn(closed, .{});
@@ -2626,8 +2626,8 @@ struct Door {
 - **Dates and times through `time`**, in the game's culture: `time.now()`,
   `time.date(2026, 9, 25)`, `time.parse("2026-09-25 19:42")`,
   `time.minutes(5)`, `time.setLocale("de-DE")`; a date's `format("HH:mm")`,
-  `formatStyle("long", "short")`, `relative()`, `addDays(1)`,
-  `weekdayName()`; a span's `format("wide")`. `time.clock(start, rate)` is a
+  `formatStyle(.long, .short)`, `relative()`, `addDays(1)`,
+  `weekdayName()`; a span's `format(.wide)`. `time.clock(start, rate)` is a
   clock of the game's own, whose `minute_passed`, `hour_passed` and
   `day_passed` are signals:
 

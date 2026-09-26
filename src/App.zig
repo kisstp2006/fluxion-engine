@@ -3332,14 +3332,11 @@ pub fn tweenParallel(self: *App, tween_entity: ecs.Entity, together: bool) !void
     (try self.tweens.planOf(self.gpa, tween_entity)).parallel = together;
 }
 
-/// The curve the steps added after this move by: `linear`, `quad_out`,
-/// `back_in`, `elastic_out`, ... False for a name that is none.
-pub fn tweenEase(self: *App, tween_entity: ecs.Entity, name: []const u8) bool {
-    const kind = std.meta.stringToEnum(math.ease.Kind, name) orelse return false;
-    if (!self.world.has(tween_entity, tween_mod.Tween)) return false;
-    const plan = self.tweens.planOf(self.gpa, tween_entity) catch return false;
-    plan.ease = kind;
-    return true;
+/// The curve the steps added after this move by: `.linear`, `.quad_out`,
+/// `.back_in`, `.elastic_out`, ...
+pub fn tweenEase(self: *App, tween_entity: ecs.Entity, ease: math.ease.Kind) !void {
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return error.NotATween;
+    (try self.tweens.planOf(self.gpa, tween_entity)).ease = ease;
 }
 
 /// Read a `.anim` file - an animation library - or find the one read from
@@ -4788,8 +4785,6 @@ pub const reflect_methods = .{
     .isPaused = .{},
     .isProcessing = .{attr.Params{ .names = &.{"entity"} }},
     .clearWorld = .{},
-    .addComponentNamed = .{attr.Params{ .names = &.{ "entity", "name" } }},
-    .removeComponentNamed = .{attr.Params{ .names = &.{ "entity", "name" } }},
     .stateNamed = .{attr.Params{ .names = &.{"state"} }},
     .setStateNamed = .{attr.Params{ .names = &.{ "state", "value" } }},
     .saveScene = .{ attr.Params{ .names = &.{ "path", "options" } }, script_mod.flux.GivesErrors{} },
@@ -5439,12 +5434,13 @@ pub fn callDeferred(self: *App, callable: script_mod.flux.Value) !void {
     return scripts.calls.callDeferred(scripts, callable);
 }
 
-pub fn keyDown(self: *const App, name: []const u8) bool {
-    const key = std.meta.stringToEnum(platform.Key, name) orelse return false;
+/// Whether a key is held: `app.keyDown(.w)`.
+pub fn keyDown(self: *const App, key: platform.Key) bool {
     return self.input.isDown(key);
 }
 
-pub fn keyAxis(self: *const App, negative: []const u8, positive: []const u8) f32 {
+/// -1, 0 or 1 from two keys: `app.keyAxis(.a, .d)`.
+pub fn keyAxis(self: *const App, negative: platform.Key, positive: platform.Key) f32 {
     var value: f32 = 0;
     if (self.keyDown(negative)) value -= 1;
     if (self.keyDown(positive)) value += 1;
@@ -7324,16 +7320,16 @@ fn pressOf(key: platform.Key) platform.Event {
     } };
 }
 
-test "key names expose held input and axes to reflected callers" {
+test "a key held, and an axis of two keys" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
     app.input.apply(pressOf(.a));
-    try testing.expect(app.keyDown("a"));
-    try testing.expectEqual(@as(f32, -1), app.keyAxis("a", "d"));
+    try testing.expect(app.keyDown(.a));
+    try testing.expectEqual(@as(f32, -1), app.keyAxis(.a, .d));
     app.input.apply(pressOf(.d));
-    try testing.expectEqual(@as(f32, 0), app.keyAxis("a", "d"));
-    try testing.expect(!app.keyDown("not-a-key"));
+    try testing.expectEqual(@as(f32, 0), app.keyAxis(.a, .d));
+    try testing.expect(!app.keyDown(.w));
 }
 
 /// One press of space on a chosen frame, and a count of the fixed steps

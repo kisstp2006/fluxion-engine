@@ -1486,6 +1486,8 @@ test "a script writes dates in the game's culture, counts with them, reads ISO 8
         \\var parsed = "";
         \\var clock_text = "";
         \\var words = "";
+        \\var styled = "";
+        \\var day_name = "";
         \\var refused = "";
         \\var hours_seen = 0;
         \\var night: any = null;
@@ -1499,7 +1501,9 @@ test "a script writes dates in the game's culture, counts with them, reads ISO 8
         \\        added = d.addDays(7).addMonths(1).format("yyyy-MM-dd");
         \\        parsed = (time.parse("2026-09-25T18:00:00+02:00") catch return).toUtc().iso();
         \\        clock_text = time.minutes(65).format();
-        \\        words = time.hours(26).format("wide");
+        \\        words = time.hours(26).format(.wide);
+        \\        styled = d.formatStyle(.long, null);
+        \\        day_name = d.weekdayName(.abbreviated);
         \\        const wrong: any = time.parse("the day after") catch null;
         \\        if (wrong == null) refused = "refused";
         \\        night = time.clock(time.utcDate(2026, 1, 1), 3600);
@@ -1516,6 +1520,8 @@ test "a script writes dates in the game's culture, counts with them, reads ISO 8
     try testing.expectEqualStrings("2026-09-25T16:00:00Z", globalText(app, file, "parsed"));
     try testing.expectEqualStrings("1:05:00", globalText(app, file, "clock_text"));
     try testing.expectEqualStrings("1 day, 2 hours", globalText(app, file, "words"));
+    try testing.expectEqualStrings("September 25, 2026", globalText(app, file, "styled"));
+    try testing.expectEqualStrings("Fri", globalText(app, file, "day_name"));
     try testing.expectEqualStrings("refused", globalText(app, file, "refused"));
     try testing.expectEqualStrings("en-US", try app.locale());
 

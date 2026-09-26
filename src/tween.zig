@@ -261,10 +261,10 @@ test "steps started together, along a curve, from where each was when it started
     const panel = try app.world.spawnWith(.{ components.Transform2D.at(-200, 10), @import("inherited.zig").Appearance{} });
     const slide = try app.tween(panel);
     try app.tweenParallel(slide, true);
-    try testing.expect(app.tweenEase(slide, "quad_out"));
+    try app.tweenEase(slide, .quad_out);
     try app.tweenProperty(slide, panel, "Appearance.modulate.a", .{ .number = 0 }, 0.5);
     try app.tweenProperty(slide, panel, "Transform2D.x,y", .{ .vec2 = .{ 0, 0 } }, 1);
-    try testing.expect(!app.tweenEase(slide, "wobbly"));
+    try testing.expectError(error.NotATween, app.tweenEase(panel, .quad_in));
 
     _ = try app.step();
     // A quarter of the way along quad_out is seven sixteenths of the move.

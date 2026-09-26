@@ -30,7 +30,7 @@
 //! noon, `z`, `Z`, `X` and `O` the zone, and `'quoted words'`. See `write`.
 //!
 //! **Scripts have the same**, through `time`: `time.now().format("HH:mm")`,
-//! `time.date(2026, 9, 25).addDays(1).formatStyle("long")`, in the game's
+//! `time.date(2026, 9, 25).addDays(1).formatStyle(.long)`, in the game's
 //! culture - see `App.culture`.
 
 const std = @import("std");
@@ -76,7 +76,7 @@ pub const Duration = extern struct {
         .minus = .{attr.Params{ .names = &.{"other"} }},
         .times = .{attr.Params{ .names = &.{"factor"} }},
         .negated = .{},
-        .format = .{ attr.Params{ .names = &.{ "vm", "style" } }, attr.defaults(.{"clock"}) },
+        .format = .{ attr.Params{ .names = &.{ "vm", "style" } }, attr.defaults(.{FormatStyle.clock}) },
     };
 
     pub fn ofSeconds(seconds: f64) Duration {
@@ -158,12 +158,11 @@ pub const Duration = extern struct {
         narrow,
     };
 
-    /// For scripts: `span.format("wide")` - `clock`, `wide`, `abbreviated`
-    /// or `narrow`, in the game's culture.
-    pub fn format(self: Duration, vm: *flux.Vm, style: []const u8) anyerror![]const u8 {
+    /// For scripts: `span.format(.wide)` - `.clock`, `.wide`, `.abbreviated`
+    /// or `.narrow`, in the game's culture.
+    pub fn format(self: Duration, vm: *flux.Vm, style: FormatStyle) anyerror![]const u8 {
         const scripts = scriptsOf(vm);
-        const how = std.meta.stringToEnum(FormatStyle, style) orelse return error.UnknownStyle;
-        return self.write(try scripts.app.culture(), how, &scripts.said);
+        return self.write(try scripts.app.culture(), style, &scripts.said);
     }
 
     /// The span in words the culture writes, or as a clock does.
@@ -370,13 +369,13 @@ pub const DateTime = extern struct {
     };
     pub const reflect_methods = .{
         .format = .{attr.Params{ .names = &.{ "vm", "pattern" } }},
-        .formatStyle = .{ attr.Params{ .names = &.{ "vm", "date", "time" } }, attr.defaults(.{ "medium", "short" }) },
+        .formatStyle = .{ attr.Params{ .names = &.{ "vm", "date", "time" } }, attr.defaults(.{ @as(?Style, .medium), @as(?Style, .short) }) },
         .formatSkeleton = .{attr.Params{ .names = &.{ "vm", "skeleton" } }},
         .iso = .{attr.Params{ .names = &.{"vm"} }},
         .relative = .{attr.Params{ .names = &.{"vm"} }},
         .weekday = .{},
-        .weekdayName = .{ attr.Params{ .names = &.{ "vm", "width" } }, attr.defaults(.{"wide"}) },
-        .monthName = .{ attr.Params{ .names = &.{ "vm", "width" } }, attr.defaults(.{"wide"}) },
+        .weekdayName = .{ attr.Params{ .names = &.{ "vm", "width" } }, attr.defaults(.{Width.wide}) },
+        .monthName = .{ attr.Params{ .names = &.{ "vm", "width" } }, attr.defaults(.{Width.wide}) },
         .dayOfYear = .{},
         .isoWeek = .{},
         .daysInMonth = .{},
@@ -853,11 +852,11 @@ pub const DateTime = extern struct {
         return self.write(try scripts.app.culture(), pattern, &scripts.said);
     }
 
-    /// In the culture's styles - `full`, `long`, `medium`, `short` or
-    /// `none` - for the date and the time.
-    pub fn formatStyle(self: DateTime, vm: *flux.Vm, date: []const u8, time: []const u8) anyerror![]const u8 {
+    /// In the culture's styles - `.full`, `.long`, `.medium`, `.short`, or
+    /// null for none - for the date and the time.
+    pub fn formatStyle(self: DateTime, vm: *flux.Vm, date: ?Style, time: ?Style) anyerror![]const u8 {
         const scripts = scriptsOf(vm);
-        return self.writeStyle(try scripts.app.culture(), try styleNamed(date), try styleNamed(time), &scripts.said);
+        return self.writeStyle(try scripts.app.culture(), date, time, &scripts.said);
     }
 
     /// With the culture's pattern for the fields a skeleton names: `MMMMd`.
@@ -878,16 +877,16 @@ pub const DateTime = extern struct {
         return self.writeRelative(try scripts.app.culture(), now, .wide, &scripts.said);
     }
 
-    /// Its weekday's name: `wide`, `abbreviated` or `narrow`.
-    pub fn weekdayName(self: DateTime, vm: *flux.Vm, width: []const u8) anyerror![]const u8 {
+    /// Its weekday's name: `.wide`, `.abbreviated` or `.narrow`.
+    pub fn weekdayName(self: DateTime, vm: *flux.Vm, width: Width) anyerror![]const u8 {
         const culture = try scriptsOf(vm).app.culture();
-        return culture.weekdayName(@intFromEnum(self.weekday()), try widthNamed(width), .standalone);
+        return culture.weekdayName(@intFromEnum(self.weekday()), width, .standalone);
     }
 
     /// Its month's name, as it stands on its own: `szeptember`, `wrzesień`.
-    pub fn monthName(self: DateTime, vm: *flux.Vm, width: []const u8) anyerror![]const u8 {
+    pub fn monthName(self: DateTime, vm: *flux.Vm, width: Width) anyerror![]const u8 {
         const culture = try scriptsOf(vm).app.culture();
-        return culture.monthName(@intCast(self.month), try widthNamed(width), .standalone);
+        return culture.monthName(@intCast(self.month), width, .standalone);
     }
 
     /// The start of its week, on the culture's first day of one.
@@ -961,15 +960,6 @@ pub fn relative(culture: *Culture, then: Instant, now: Instant, zone: Zone, widt
 
 fn scriptsOf(vm: *flux.Vm) *script_mod.Scripts {
     return @ptrCast(@alignCast(vm.host.?));
-}
-
-fn styleNamed(name: []const u8) error{UnknownStyle}!?Style {
-    if (std.mem.eql(u8, name, "none") or name.len == 0) return null;
-    return std.meta.stringToEnum(Style, name) orelse error.UnknownStyle;
-}
-
-fn widthNamed(name: []const u8) error{UnknownWidth}!Width {
-    return std.meta.stringToEnum(Width, name) orelse error.UnknownWidth;
 }
 
 // -------------------------------------------------------------------------
