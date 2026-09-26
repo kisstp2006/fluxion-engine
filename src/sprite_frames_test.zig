@@ -510,7 +510,7 @@ test "a script plays it, leaving arguments out, writes it through its setters, a
         \\        const sprite = self.entity.get(AnimatedSprite2D);
         \\        sprite.animation_finished.connect(fn () { finished += 1; });
         \\        sprite.play("once");
-        \\        const frames = sprite.sprite_frames;
+        \\        const frames = sprite.sprite_frames.?;
         \\        names = frames.getAnimationNames();
         \\        swings = frames.getAnimationLoopMode("swing") == .pingpong;
         \\        same = frames == sprite.sprite_frames;

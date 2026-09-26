@@ -2034,7 +2034,7 @@ test "a script makes, changes and saves a picture, and draws it as a texture" {
         \\        named = images.toTexture(picture) catch return;
         \\        const sprite = self.entity.add(Sprite);
         \\        sprite.texture = named;
-        \\        drawn = sprite.texture;
+        \\        drawn = sprite.texture.?;
         \\    }
         \\}
     );

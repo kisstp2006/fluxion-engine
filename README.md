@@ -2655,6 +2655,7 @@ struct Door {
   `CursorShape`, and a component's own where no other has its name.
   - An enum is a Flux enum: `event.key == .space`, `app.setCursor(.hidden)`, `Key.escape`; never a string.
   - A union is the arm it holds: its payload, asked for with `is`, or for an arm that holds nothing, its name - `.borderless`.
+  - What may be none is optional: a field that holds an entity or a file - `sprite.texture` - and what a call gives that may be none - `app.parentOf(e)`, `app.currentScene()` - are read with `.?`, `orelse` or `if (x) |v|`. What a call that can fail gives is never none: `app.spawn(null)` is an entity.
   - So a call is checked as the script compiles - how many arguments, of what types, and what it gives back - and an editor offers their fields and methods after the dot, with their signatures and what their doc comments say. `tools/member_docs.zig` gathers those from the engine's source as it builds.
 - **An error of the engine's stops the script** with its name, as a
   mistake in the script would: a name taken, a component that is not
