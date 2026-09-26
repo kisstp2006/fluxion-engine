@@ -133,11 +133,24 @@ pub const Pickable = struct { by_default: bool = true };
 // knowing the component.
 
 /// A radius, drawn as a circle with a handle on it.
-pub const Radius = struct {};
+pub const Radius = struct { when: ?When = null };
 
 /// Half a width and a height, drawn as a box around the middle with handles
 /// on its sides and corners: the `extents` of a box.
-pub const Extents = struct {};
+pub const Extents = struct { when: ?When = null };
+
+/// Half a height along `y`, with round ends of the radius in the field
+/// `radius` names: a capsule standing up, drawn with handles on its ends and
+/// its sides.
+pub const Capsule = struct { radius: []const u8, when: ?When = null };
+
+/// When a shape above is the component's: while its enum field `field`
+/// holds one of the members `is` names. A collider's box is its shape only
+/// while it is a rectangle.
+pub const When = struct {
+    field: []const u8,
+    is: []const []const u8,
+};
 
 /// On a component whose geometry sits away from its entity's origin: the
 /// fields that say where, which every field above is drawn from. A

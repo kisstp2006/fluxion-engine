@@ -542,8 +542,12 @@ pub const Collider2D = extern struct {
     pub const reflect_name = "Collider2D";
     pub const reflect_attributes = .{attr.Placement{ .offset = "offset", .rotation = "rotation" }};
     pub const reflect_fields = .{
-        .extents = .{ attr.Extents{}, attr.Doc{ .text = "Half the size; zero is the sprite's" } },
-        .radius = .{ attr.Radius{}, attr.Doc{ .text = "Zero is half the sprite's width" } },
+        .extents = .{
+            attr.Extents{ .when = .{ .field = "shape", .is = &.{"rectangle"} } },
+            attr.Capsule{ .radius = "radius", .when = .{ .field = "shape", .is = &.{"capsule"} } },
+            attr.Doc{ .text = "Half the size; zero is the sprite's" },
+        },
+        .radius = .{ attr.Radius{ .when = .{ .field = "shape", .is = &.{"circle"} } }, attr.Doc{ .text = "Zero is half the sprite's width" } },
         .rotation = .{attr.Angle{}},
         .friction = .{attr.Range{ .min = 0, .max = 1 }},
         .bounce = .{attr.Range{ .min = 0, .max = 1 }},
