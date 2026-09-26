@@ -159,7 +159,7 @@ test "a scene writes a player's library as its file, and an animation from Flux"
         \\fn done(name: string) { finished = name; }
         \\struct Fader {
         \\    fn ready(self) {
-        \\        const player = self.entity.get("AnimationPlayer");
+        \\        const player = self.entity.get(AnimationPlayer);
         \\        player.animation_finished.connect(done);
         \\        player.play("fade");
         \\    }

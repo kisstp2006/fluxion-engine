@@ -13,7 +13,7 @@ const platform = @import("fluxion_platform");
 
 const App = @import("App.zig");
 const components = @import("components.zig");
-const pointer = @import("pointer.zig");
+const InputEvent = @import("input_event.zig").InputEvent;
 
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;
@@ -36,7 +36,7 @@ const Heard = struct {
         kind: Kind,
         object: Entity,
         shape: Entity = .none,
-        what: ?pointer.InputEvent = null,
+        what: ?InputEvent = null,
     };
 
     fn reset() void {
@@ -68,7 +68,7 @@ const Heard = struct {
         return null;
     }
 
-    fn picked(app: *App, self: Entity, event: pointer.InputEvent, shape: Entity) !void {
+    fn picked(app: *App, self: Entity, event: InputEvent, shape: Entity) !void {
         note(.{ .kind = .picked, .object = self, .shape = shape, .what = event });
         if (stops) app.input.setAsHandled();
     }
@@ -156,9 +156,9 @@ test "a click is heard by what is under it, with where it was and which collider
     try testing.expect(first.object.eql(button));
     try testing.expect(first.shape.eql(button));
     try testing.expect(first.what.?.isPressed(.left));
-    try testing.expect(first.what.?.buttonMask().has(.left));
+    try testing.expect(first.what.?.buttons().has(.left));
     // The event's place is the window's pixels, and the world's through it.
-    const in_world = app.screenToWorld(first.what.?.position().x, first.what.?.position().y);
+    const in_world = app.screenToWorld(first.what.?.position().?.x, first.what.?.position().?.y);
     try testing.expectApproxEqAbs(@as(f32, 50), in_world.x, 0.001);
 
     // The release is heard too, and nothing is entered again.
@@ -377,16 +377,13 @@ test "a wheel notch is a press and a release of a wheel button, and motion is on
     app.input.apply(.{ .scroll = .{ .window = .none, .x = 0, .y = 2, .mods = .{} } });
     _ = try app.step();
 
-    // One motion, then the wheel's press and release.
-    try testing.expectEqual(@as(usize, 3), Heard.count(.picked));
+    // One motion, then the wheel's turn.
+    try testing.expectEqual(@as(usize, 2), Heard.count(.picked));
     try testing.expect(Heard.nth(.picked, 0).?.what.? == .mouse_motion);
-    const press = Heard.nth(.picked, 1).?.what.?;
-    try testing.expect(press.isPressed(.wheel_up));
-    try testing.expectEqual(@as(f32, 2), press.mouse_button.factor);
-    try testing.expect(press.buttonMask().has(.wheel_up));
-    const release = Heard.nth(.picked, 2).?.what.?;
-    try testing.expect(release.isReleased(.wheel_up));
-    try testing.expect(!release.buttonMask().has(.wheel_up));
+    const turned = Heard.nth(.picked, 1).?.what.?;
+    try testing.expect(turned == .wheel);
+    try testing.expectEqual(@as(f32, 2), turned.wheel.delta.y);
+    try testing.expect(!turned.buttons().any());
 }
 
 test "a click beside a turned shape, near it but not in it, hits nothing" {
@@ -516,7 +513,7 @@ test "an event handed to an entity is the same event in its own space" {
     defer app.destroy();
     const knob = try app.world.spawnWith(.{Transform2D.at(60, 0)});
     const on_screen = app.worldToScreen(70, 0);
-    const event: pointer.InputEvent = .{ .mouse_button = .{
+    const event: InputEvent = .{ .mouse_button = .{
         .button = .left,
         .pressed = true,
         .position = .init(on_screen.x, on_screen.y),
@@ -524,12 +521,12 @@ test "an event handed to an entity is the same event in its own space" {
 
     const local = app.localEvent(knob, event);
     try testing.expect(local.isPressed(.left));
-    try testing.expectApproxEqAbs(@as(f32, 10), local.position().x, 0.001);
-    try testing.expectApproxEqAbs(@as(f32, 0), local.position().y, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 10), local.position().?.x, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0), local.position().?.y, 0.001);
 
     // An entity that is not there leaves the event as it was.
     const same = app.localEvent(.none, event);
-    try testing.expectEqual(event.position().x, same.position().x);
+    try testing.expectEqual(event.position().?.x, same.position().?.x);
 }
 
 test "the interface keeps inside the safe area, or inside whatever the game says" {

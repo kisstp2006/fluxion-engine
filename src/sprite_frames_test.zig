@@ -504,22 +504,22 @@ test "a script plays it, leaving arguments out, writes it through its setters, a
         \\var names = [];
         \\var same = false;
         \\var path = "?";
-        \\var loop = "";
+        \\var swings = false;
         \\struct Hero {
         \\    fn ready(self) {
-        \\        const sprite = self.entity.get("AnimatedSprite2D");
+        \\        const sprite = self.entity.get(AnimatedSprite2D);
         \\        sprite.animation_finished.connect(fn () { finished += 1; });
         \\        sprite.play("once");
         \\        const frames = sprite.sprite_frames;
         \\        names = frames.getAnimationNames();
-        \\        loop = frames.getAnimationLoopMode("swing");
+        \\        swings = frames.getAnimationLoopMode("swing") == .pingpong;
         \\        same = frames == sprite.sprite_frames;
         \\        path = frames.resource_path;
         \\        frames.addAnimation("blink");
         \\        frames.addFrameRegion("blink", null, 0, 0, 4, 4);
         \\    }
         \\    fn jump(self) {
-        \\        const sprite = self.entity.get("AnimatedSprite2D");
+        \\        const sprite = self.entity.get(AnimatedSprite2D);
         \\        sprite.frame = 1;
         \\        sprite.animation = "walk";
         \\        frame_after = sprite.frame;
@@ -535,7 +535,7 @@ test "a script plays it, leaving arguments out, writes it through its setters, a
     try testing.expectEqual(@as(i64, 1), scripts.vm.get(module, "finished").?.asInt());
     try testing.expect(scripts.vm.get(module, "same").?.asBool());
     try testing.expectEqualStrings("", scripts.vm.get(module, "path").?.as(flux.object.String).bytes());
-    try testing.expectEqualStrings("pingpong", scripts.vm.get(module, "loop").?.as(flux.object.String).bytes());
+    try testing.expect(scripts.vm.get(module, "swings").?.asBool());
     try testing.expectEqual(@as(usize, 4), scripts.vm.get(module, "names").?.as(flux.object.List).items.items.len);
     try testing.expectEqual(@as(i32, 1), app.sprite_frames.get(strip).?.getFrameCount("blink"));
 

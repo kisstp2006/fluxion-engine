@@ -173,7 +173,7 @@ test "a script walks a character" {
         \\var stood = false;
         \\struct Walker {
         \\    fn fixed(self, dt: float) {
-        \\        const body = self.entity.get("CharacterBody2D");
+        \\        const body = self.entity.get(CharacterBody2D);
         \\        body.velocity = vec2(120.0, body.velocity.y + 900.0 * dt);
         \\        app.moveAndSlide(self.entity);
         \\        if (body.on_floor) stood = true;

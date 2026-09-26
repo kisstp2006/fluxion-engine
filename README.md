@@ -551,8 +551,8 @@ if (app.resized) layOutAgain(app.width, app.height);
   settings menu to show.
 - **`setFullscreen` takes a choice**: `.windowed`, `.borderless` - what a
   game should use - or a video mode of its own; from a script, a choice
-  with nothing to carry is its name: `app.setFullscreen("borderless")`, and
-  `app.fullscreen()` reads back as one.
+  with nothing to carry is its name: `app.setFullscreen(.borderless)`, and
+  `app.fullscreen() == .borderless` asks for one.
 - **A fullscreen, maximised or minimised window is made an ordinary one
   before it is sized or moved**, because none of them has a size of its own.
   `.normal` means the window's own size even for one that was maximised
@@ -1211,7 +1211,7 @@ try app.setShaderParam(screen, "darkness", &.{0.6});
   it starts as - `float darkness = 0.35;` - until a material gives it its
   own: `app.setShaderParam(e, "darkness", &.{0.6})`, `app.shaderParam`,
   and from a script as the material's own field,
-  `self.entity.get("Material").darkness = 0.6`. A `vec4` is a colour to a
+  `self.entity.get(Material).darkness = 0.6`. A `vec4` is a colour to a
   script, a `vec2` and a `vec3` vectors. The numbers are the app's, kept
   under the entity, and a scene writes them as the material's `params`.
 - **Materials batch as sprites do.** Sprites with the same shader, giving
@@ -1755,8 +1755,8 @@ fn walk(app: *fx.App) !void {                          // a .fixed system
 - **`app.moveAndCollide(e, motion)` moves it once**, and says what stopped
   it - the collider, where, the way out of it, how far it went and what was
   left - for a game that does its own sliding, or its own bouncing.
-- **From a script** it is the same two calls:
-  `app.moveAndSlide(self.entity)`, with `self.entity.get("CharacterBody2D")`
+- **From a script** it is the same two calls, the entity's own:
+  `self.entity.moveAndSlide()`, with `self.entity.get(CharacterBody2D)`
   for its velocity and what it stands on.
 
 **When the bodies catch up.** Before every fixed step the engine compares
@@ -1857,8 +1857,8 @@ fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.En
   static body, is not a collision object to pick: give it an `Area2D` or a
   static body with the flag.
 - **Every pointer event of the frame goes to it, in order**: presses,
-  releases, the wheel's notches as presses and releases of wheel buttons,
-  and one motion event for the frame's moving. `app.input.pointerEvents()`
+  releases, the wheel's turns, and one motion event for the frame's
+  moving. `app.input.pointerEvents()`
   is the same list, for a game that would rather read it itself, and
   `app.input.buttonMask()` says what is held.
 - **What is on top hears first**: higher `Sprite.layer`, then higher
@@ -2162,7 +2162,7 @@ try app.updateTexture(texture, map);                       // after the next cha
 
   ```zig
   const shot = images.capture() catch return;
-  shot.resize(320, 180) catch {};
+  shot.resize(320, 180);
   shot.saveJpg("user://saves/one.jpg", 0.85) catch {};
   sprite.texture = images.toTexture(shot) catch return;
   ```
@@ -2512,7 +2512,7 @@ struct Door {
     }
 
     fn update(self, dt: float) {
-        if (self.open) self.entity.get("Transform2D").rotation += dt;
+        if (self.open) self.entity.get(Transform2D).rotation += dt;
     }
 }
 ```
@@ -2524,17 +2524,21 @@ struct Door {
   - Both only while the entity runs: see [Pause](#️-pause). A task a script starts - a call of a function that `await`s - is the entity's, and its waits stand still while the entity does not run. When the entity dies, or loses its script, its tasks stop where they wait, after its `exit`.
   - `exit(self)` runs at the end of the frame in which the entity dies, or its `Script` is taken off or turned off, and when the world is cleared.
 
-  A method the struct does not declare is not called. One with the wrong parameters is said once in the log and not called.
+  A method the struct does not declare is not called. One with the wrong parameters is warned of as the script compiles, and said once in the log and not called. A parameter of one given no type, or `any`, has the type the engine passes: `fn input(self, event)` has an `InputEvent`. An editor offers each of them whole - `fn update(self, dt: float) { }` - where a struct's member is written, but those it has.
 - **One VM, only in a game that asks.** `useScripts` makes the VM and
   registers `Script`. The frame reaches the scripts through pointers that
   only `useScripts` sets, so a game that never calls it has none of the
   language in it: the ReleaseSmall examples grew by half a kilobyte, and the
   one that saves and reads scenes by two.
 - **What a script reaches.** `app` is the engine, with the calls
-  `App.reflect_methods` lists. `self.entity` has `alive()`, `name()`,
-  `uuid()`, `has(name)`, `get(name)`, `add(name)` and `remove(name)`.
-  `files` reads the game's files and reads and writes the player's - see
-  below.
+  `App.reflect_methods` lists. `self.entity` is its entity: `alive()`,
+  `name()`, `uuid()`, its components by their types, and every call of
+  `app`'s that is given an entity first, as its own -
+  `self.entity.globalPosition()` is `app.globalPosition(self.entity)`,
+  under a name that fits an entity where `app`'s would not: `parent()`,
+  `spawnChild()`. `files` reads the game's files and reads and writes the
+  player's - see below.
+  - `get(Sprite)` is the entity's sprite, and stops the script, saying the entity and the component, when it has none; `find(Sprite)` is a `?Sprite`, null then; `has(Sprite)`, `add(Sprite)` and `remove(Sprite)`.
   - A component from `get` is looked up again each time the script uses it, so keeping it in a field is safe while the world's rows move.
   - Once it is gone, using it stops the script with a panic saying so.
   - An entity is one handle wherever a script is handed it: `self.entity`, `app.find("door")`, a field such as `Parent.entity`, a signal's argument. So `app.find("door") == self.entity` says whether it is this one, and none is null.
@@ -2601,7 +2605,7 @@ struct Door {
   print(files.modifiedTime(slot).relative());                 // 5 minutes ago
   const settings = files.config("user://settings.cfg") catch return;
   const volume = settings.get("audio", "music", 0.8);          // 0.8 the first time
-  settings.set("audio", "music", 0.5) catch {};
+  settings.set("audio", "music", 0.5);
   settings.save() catch {};
   ```
 
@@ -2643,15 +2647,23 @@ struct Door {
   `app.scriptSetup()` gives the language service's `flux.service.Options`
   with `app`, `files`, `time` and `self.entity` declared. This is for completions and
   diagnostics, and it needs no `useScripts`.
-- **The engine's calls are known as a script is compiled.** `app`,
-  `self.entity`, an entity a call gives, a component got by its name -
-  `self.entity.get("AnimatedSprite2D")` - and a sprite's `sprite_frames` are
-  known by their types: a call of their methods is checked for how many
-  arguments it has, the last ones left out where the method has defaults,
-  and for a number, a string or a flag where nothing else will do; an
-  editor offers their fields and methods after the dot, with signatures and
-  docs. A `var` holding one is offered and not checked, since it may be
-  given another value.
+- **The engine's types are the scripts'.** A component, an input event,
+  `Entity`, `Files`, `Image`, `DateTime` are named in a type -
+  `var body: CharacterBody2D`, `fn aim(at: Entity)` - where a value goes -
+  `get(Sprite)` - and after `is`. The enums and unions the engine's types
+  take and give are named with them: `Key`, `MouseButton`, `Fullscreen`,
+  `CursorShape`, and a component's own where no other has its name.
+  - An enum is a Flux enum: `event.key == .space`, `app.setCursor(.hidden)`, `Key.escape`; never a string.
+  - A union is the arm it holds: its payload, asked for with `is`, or for an arm that holds nothing, its name - `.borderless`.
+  - So a call is checked as the script compiles - how many arguments, of what types, and what it gives back - and an editor offers their fields and methods after the dot, with their signatures and what their doc comments say. `tools/member_docs.zig` gathers those from the engine's source as it builds.
+- **An error of the engine's stops the script** with its name, as a
+  mistake in the script would: a name taken, a component that is not
+  there. What can fail from outside the script is a value to `catch`: a
+  file that is not there, a window the system would not change, a date
+  that does not parse. Those are the calls of `files` and `images`, an
+  image's `savePng` and `saveJpg`, a config's `save`, `time.parse` and
+  `time.setLocale`, and `app`'s calls of the window, the clipboard, the
+  input map, a URL, and scene, data and sprite-frames files.
 - **An editor has the scripts and runs none of them**, with
   `useScripts(.{ .run = false })`.
   - Each file is compiled and never run: not its top level, a default, `ready` or `update`. So a script cannot change the scene being edited.
@@ -2672,30 +2684,32 @@ struct Guard {
 
     fn ready(self) {
         const timer = app.createTimer(2);
-        timer.timeout.connect(looked);                  // the engine's signal, as the script's own
-        await self.entity.get("Area2D").body_entered;   // or waited for
+        timer.get(Timer).timeout.connect(looked);       // the engine's signal, as the script's own
+        await self.entity.get(Area2D).body_entered;     // or waited for
         await app.nextFrame();
-        const bolt = app.instantiate("res://bolt.json", self.entity) catch return;
-        app.callDeferred(reloaded) catch {};
+        const bolt = app.instantiate("res://bolt.json", self.entity);
+        print(bolt.name());
+        app.callDeferred(reloaded);
     }
 
-    fn input(self, event: any) {
+    fn input(self, event: InputEvent) {
         if (event.isActionPressed("jump")) app.setInputAsHandled();
+        if (event is KeyEvent and event.pressed and event.key == .escape) app.setPaused(true);
     }
 }
 ```
 
 - **The engine's signals are the script's own.** A component's signal is a
-  member of the component a script reaches - `timer.timeout`,
-  `self.entity.get("Area2D").body_entered` - or of its entity, by name. It
-  is a signal of the script's: `connect`, `once`, `disconnect` and `await`
+  member of the component a script reaches - `timer.get(Timer).timeout`,
+  `self.entity.get(Area2D).body_entered`. It is a signal of the script's: `connect`, `once`, `disconnect` and `await`
   are the language's, and its arguments arrive as the engine's do. The first
   use connects it to the engine's table with a `Callable.script`, never
   saved; it goes with its entity, and with `clearWorld`.
 - **`app.nextFrame()`** is a signal emitted once a frame: `await
   app.nextFrame()` goes on in the next one, even from `ready`.
 - **Making and unmaking.** `app.spawn(parent)` makes an empty entity -
-  `null` for the top of the tree - and `entity.despawn()` takes one away
+  `null` for the top of the tree, `entity.spawnChild()` one under an
+  entity - and `entity.despawn()` takes one away
   with everything under it, at once. `app.instantiate("res://…", parent)`
   and `app.changeScene("res://…")` take a scene by its path.
   `app.callDeferred(fn)` calls a function at the end of the frame, after
@@ -2708,8 +2722,8 @@ struct Guard {
   it, `@import("res://lib/save.flux")` one anywhere in the project; the same
   file is one module however it is spelt.
 - **Colours are the language's own**: a component's colour reads as a
-  `color`, and takes one - `look.modulate = color(1, 0.4, 0.4, 1)` - or
-  `"#ff6666"`.
+  `color`, and takes one - `look.modulate = color(1, 0.4, 0.4, 1)`,
+  `color("#ff6666")`, `color("salmon")`.
 - **A file is its path.** Where a call or a field wants a scene, a texture,
   a font, a tile set, a theme, a script or a data file, a script gives
   `"res://…"`, and the file is read if nothing has read it yet. The same
@@ -2723,13 +2737,15 @@ struct Guard {
   longer has, or a value it cannot hold, is said in the log and passed over.
   - `app.exportedFields(entity, &buffer)` lists the fields, made or not, with their kind, default, doc comment and annotations (`@range`, `@multiline`, `@group`, `@file`, `@entity`, …): what an editor draws.
   - `script.jsonOf` writes a default as a scene would.
-- **Input, as events.** `input(self, event)` hears each key, mouse button,
-  motion, wheel and pad button of the frame, before the game's `.input`
-  systems; `unhandled_input(self, event)` hears what nothing took - not a
-  script's `app.setInputAsHandled()`, and not the interface, which takes a
-  key while a field has the keys and the pointer over what it draws.
-  - The event has `kind`, `pressed`, `echo`, `key` and `virtual_key`, `button` and `double_click`, `pad_button` and `pad`, `position`, `relative`, `wheel`, and `shift`, `control` and `alt`.
-  - `event.isAction("jump")`, `isActionPressed`, `isActionReleased` and `describe()` say it by the project's actions.
+- **Input, as events.** `input(self, event: InputEvent)` hears each key,
+  mouse button, motion of the pointer, turn of the wheel and pad button of
+  the frame, before the game's `.input` systems; `unhandled_input(self,
+  event: InputEvent)` hears what nothing took - not a script's
+  `app.setInputAsHandled()`, and not the interface, which takes a key while
+  a field has the keys and the pointer over what it draws.
+  - Each kind is a type of its own, asked for with `is`: a `KeyEvent` has `key`, `virtual_key`, `pressed`, `echo` and `mods`; a `MouseButtonEvent` `button`, `pressed`, `double_click`, `position`, `buttons` and `mods`; a `MouseMotionEvent` `position`, `relative`, `buttons` and `mods`; a `WheelEvent` `delta`, `position`, `buttons` and `mods`; a `PadButtonEvent` `button`, `pad` and `pressed`. `mods` has `shift`, `control`, `alt` and `super`.
+  - Inside `if (event is KeyEvent)`, after an `and`, and past an `if (!(event is KeyEvent)) return;`, the event is a `KeyEvent`. A field only some kinds have is a mistake elsewhere, and the compiler names the kinds that have it.
+  - Every kind has `isAction("jump")`, `isActionPressed`, `isActionReleased` and `describe()`, by the project's actions.
   - `app.bindAction("jump", event)` binds what was pressed to an action, and `app.clearAction("jump")` unbinds it: a key-remapping screen, saved with `app.saveInputMap()`.
 
 ### Data files
@@ -3030,7 +3046,7 @@ Here, and checked by the tests:
 - Picking: what the pointer is on and what it did there -
   `input_event`, `mouse_entered` and their shape pairs, the topmost first,
   a handler that stops the rest, hover worked out every frame, and the
-  pointer's own events with the wheel as buttons.
+  pointer's own events with the wheel's as its own kind.
 - The pointer itself: its speed, a warp, a point in an entity's own space,
   double clicks the system counted, every cursor mode and shape, a cursor
   picture of the game's own, and the window's icon.

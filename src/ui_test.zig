@@ -269,9 +269,9 @@ test "a script reads and writes a label's words, and a control's box as one valu
     const handle = try app.addScript("title.flux",
         \\struct Title {
         \\    fn ready(self) {
-        \\        const label = self.entity.get("Label");
+        \\        const label = self.entity.get(Label);
         \\        label.text = "Paused: " + label.text;
-        \\        const look = self.entity.get("ThemeOverride");
+        \\        const look = self.entity.get(ThemeOverride);
         \\        var box = look.styleBox();
         \\        box.corner_radius = 9.0;
         \\        look.setStyleBox(box);
@@ -388,10 +388,12 @@ test "a script sets the window's fill, the frame cap and the interface's size, a
     defer app.destroy();
     try app.useScripts(.{});
     const handle = try app.addScript("settings.flux",
+        \\const modes: [Fullscreen] = [.windowed, .borderless];
+        \\var windowed = false;
         \\struct Settings {
         \\    fn ready(self) {
-        \\        app.setFullscreen("borderless");
-        \\        print(app.fullscreen());
+        \\        app.setFullscreen(modes[1]) catch {};
+        \\        windowed = app.fullscreen() == modes[0]; // with no window, a window
         \\        app.setMaxFps(30.0);
         \\        app.setInterfaceZoom(1.5);
         \\        print(app.maxFps(), app.interfaceZoom(), app.loadProgress("res://nowhere.json"), app.currentScene());
@@ -401,6 +403,7 @@ test "a script sets the window's fill, the frame cap and the interface's size, a
     _ = try app.world.spawnWith(.{script.Script.of(handle)});
     _ = try app.step();
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expect(app.scripts.?.vm.get(app.scripts.?.moduleOf(handle).?, "windowed").?.asBool());
     try testing.expectEqual(@as(?f32, 30), app.time.max_fps);
     try testing.expectEqual(@as(f32, 1.5), app.interface.zoom);
     app.setMaxFps(0);

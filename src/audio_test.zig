@@ -269,7 +269,7 @@ test "a script plays a sound, hears it finish, and turns a bus down" {
         \\fn done() { heard += 1; }
         \\struct Sfx {
         \\    fn ready(self) {
-        \\        const player = self.entity.get("AudioPlayer");
+        \\        const player = self.entity.get(AudioPlayer);
         \\        player.clip = "beep.wav";
         \\        player.play(0.0);
         \\        asked = player.playing;

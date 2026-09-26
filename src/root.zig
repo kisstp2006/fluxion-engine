@@ -178,8 +178,6 @@ pub const Text2D = components.Text2D;
 /// What a `Text2D` is drawn in.
 pub const FontHandle = assets.FontHandle;
 
-/// A sprite that walks through the cells of its own texture.
-
 /// What the 2D pass looks through.
 pub const Camera2D = components.Camera2D;
 
@@ -236,17 +234,18 @@ pub const TabContainer = control.TabContainer;
 pub const TextureRect = control.TextureRect;
 pub const NinePatchRect = control.NinePatchRect;
 
-/// What the pointer did, as an `input_event` signal is handed it.
-pub const pointer = @import("pointer.zig");
+/// One thing the player did, of its own kind: what a script's `input` is
+/// handed, and a pointer's `input_event` signal. See `input_event.zig`.
+pub const input_event = @import("input_event.zig");
+pub const InputEvent = input_event.InputEvent;
+pub const KeyEvent = input_event.KeyEvent;
+pub const MouseButtonEvent = input_event.MouseButtonEvent;
+pub const MouseMotionEvent = input_event.MouseMotionEvent;
+pub const WheelEvent = input_event.WheelEvent;
+pub const PadButtonEvent = input_event.PadButtonEvent;
 
-/// One thing the pointer did: `fx.pointer.InputEvent`.
-pub const InputEvent = pointer.InputEvent;
-
-/// A button of the pointer, the wheel among them.
-pub const PointerButton = pointer.PointerButton;
-
-/// Which pointer buttons are held: `app.input.buttonMask()`.
-pub const ButtonMask = pointer.ButtonMask;
+/// Which mouse buttons are held: `app.input.buttonMask()`.
+pub const ButtonMask = input_event.ButtonMask;
 
 /// A picture of the game's own for the pointer: `App.setCustomCursorPixels`.
 pub const CursorImage = platform.CursorImage;
@@ -456,7 +455,7 @@ test {
     _ = signals;
     _ = @import("areas.zig");
     _ = @import("picking.zig");
-    _ = @import("pointer.zig");
+    _ = @import("input_event.zig");
     _ = events;
     _ = @import("signals_test.zig");
     _ = @import("areas_test.zig");

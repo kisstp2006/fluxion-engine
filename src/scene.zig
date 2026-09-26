@@ -288,6 +288,14 @@ pub const Registry = struct {
         }
         return null;
     }
+
+    /// The one registered for the type `t`.
+    pub fn findType(self: *const Registry, t: *const reflect.Type) ?*const Entry {
+        for (self.entries.items) |*entry| {
+            if (entry.type.same(t)) return entry;
+        }
+        return null;
+    }
 };
 
 /// Components scenes held that nothing here is registered as, each kept with

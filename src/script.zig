@@ -13,10 +13,16 @@
 //! - `exit(self)` when the entity dies, when its `Script` is taken off or
 //!   turned off, or when the world is cleared.
 //!
-//! - `input(self, event)` for everything the player does - each key, each
-//!   mouse button, the mouse moving, a wheel's notch, a controller's button -
-//!   and `unhandled_input(self, event)` for what no `input` took with
-//!   `app.setInputAsHandled()` and the interface did not have. See `Event`.
+//! - `input(self, event: InputEvent)` for everything the player does - each
+//!   key, each mouse button, the mouse moving, the wheel, a controller's
+//!   button - and `unhandled_input(self, event: InputEvent)` for what no
+//!   `input` took with `app.setInputAsHandled()` and the interface did not
+//!   have. Which it is, `is` asks: `if (event is KeyEvent)`. See
+//!   `input_event.zig`.
+//!
+//! The compiler knows them (see `Lifecycle`): a method of one of these
+//! names that takes other arguments is warned of, and a parameter of one
+//! given no type is given the type the engine passes.
 //!
 //! `fixed` and `update` are called while the entity runs: not while the game
 //! is paused, unless its `Processing` - or the nearest one above it - says
@@ -40,7 +46,7 @@
 //!     }
 //!
 //!     fn update(self, dt: float) {
-//!         if (self.open) self.entity.get("Transform2D").rotation += dt;
+//!         if (self.open) self.entity.get(Transform2D).rotation += dt;
 //!     }
 //! }
 //! ```
@@ -51,8 +57,14 @@
 //!
 //! **Every script sees `app`**: the engine, with the calls
 //! `App.reflect_methods` lists. **Every instance sees `self.entity`**, which
-//! it reads and cannot assign. `App.scriptSetup` gives an editor's language
-//! service the same, so it checks and completes what the game runs.
+//! it reads and cannot assign: `get(Sprite)`, `find(Sprite)`, `has`, `add`,
+//! `remove`, and every call of `app`'s that is given an entity first, as the
+//! entity's own - `self.entity.globalPosition()`, `self.entity.parent()`.
+//! **The engine's types are the scripts'**: a component, an event, `Entity`,
+//! named in a type and where a value goes, and their enums as Flux enums.
+//! `install` says all of it to the VM, in one place, and `App.scriptSetup`
+//! gives an editor's language service the same, so it checks and completes
+//! what the game runs, with what the doc comments say.
 //!
 //! **And `files`**: the game's own files to read, the player's to read and
 //! write - `files.readText`, `writeText`, `exists`, `makeDir`, `list`,
@@ -72,10 +84,16 @@
 //! }
 //! ```
 //!
-//! **A component is found again at each use.** `self.entity.get("Health")`
+//! **A component is found again at each use.** `self.entity.get(Health)`
 //! is a handle the engine looks up every time the script touches it, so
 //! keeping it in a field is safe while rows move. Once the component or its
 //! entity is gone, using it stops the script with a panic that says so.
+//!
+//! **An error of the engine's stops the script** with its name, as a
+//! mistake in the script would - a name taken, a property that is not
+//! there. Those of `files`, `images`, `time`, a config, an image, a clock and
+//! a set of sprite frames are values to `catch` instead: a file that is not
+//! there is no mistake.
 //!
 //! **Signals both ways.** A script's signals are its entity's, under
 //! `Script`: listed by `App.signalsOf` from the struct as soon as the entity
@@ -145,6 +163,8 @@ const sprite_frames = @import("sprite_frames.zig");
 const Assets = @import("assets.zig");
 const geometry = @import("geometry.zig");
 const Color = @import("color.zig").Color;
+const input_event = @import("input_event.zig");
+const InputEvent = input_event.InputEvent;
 const datetime = @import("datetime.zig");
 const clocks_mod = @import("clocks.zig");
 const ConfigFile = @import("config.zig").ConfigFile;
@@ -286,6 +306,7 @@ pub const EntityRef = struct {
         .uuid = .{},
         .has = .{attr.Params{ .names = &.{"component"} }},
         .get = .{attr.Params{ .names = &.{ "vm", "component" } }},
+        .find = .{attr.Params{ .names = &.{ "vm", "component" } }},
         .add = .{attr.Params{ .names = &.{ "vm", "component" } }},
         .remove = .{attr.Params{ .names = &.{ "vm", "component" } }},
         .despawn = .{},
@@ -298,7 +319,7 @@ pub const EntityRef = struct {
         return self.scripts.app.world.isAlive(self.entity);
     }
 
-    /// Its name, or "" for one without.
+    /// Its name, or "" for one without: never null, as `app.nameOf` may be.
     pub fn name(self: *EntityRef) []const u8 {
         return self.scripts.app.nameOf(self.entity) orelse "";
     }
@@ -310,30 +331,48 @@ pub const EntityRef = struct {
         return &self.uuid_text;
     }
 
-    /// Whether it has the component called `component`.
-    pub fn has(self: *EntityRef, component: []const u8) bool {
-        return self.scripts.app.componentOf(self.entity, component) != null;
+    /// Whether it has a `component`: `self.entity.has(Sprite)`.
+    pub fn has(self: *EntityRef, component: *const reflect.Type) bool {
+        return self.scripts.app.componentOfType(self.entity, component) != null;
     }
 
-    /// The component called `component`, to read and write in place:
-    /// `self.entity.get("Transform2D").x += 1`. Null when it has none. It is
-    /// found again at each use, so it may be kept.
-    pub fn get(self: *EntityRef, vm: *flux.Vm, component: []const u8) flux.Vm.Error!flux.Value {
-        const found = self.scripts.app.componentOf(self.entity, component) orelse return .null;
-        return vm.liveHandle(&self.scripts.resolver, self.entity.toInt(), found.type);
+    /// Its `component`, to read and write in place:
+    /// `self.entity.get(Transform2D).x += 1`. One it has not got stops the
+    /// script, saying so; `find` is for one it may not have. It is found
+    /// again at each use, so it may be kept.
+    pub fn get(self: *EntityRef, vm: *flux.Vm, component: *const reflect.Type) flux.Vm.Error!flux.Value {
+        return try self.find(vm, component) orelse vm.fail("{s} has no {s}: `find({s})` is null for one that may not have it", .{ self.called(), shortName(component), shortName(component) });
     }
 
-    /// Put the component called `component` on, holding its defaults, and
-    /// hand it back to fill in. One it has already is handed back as it is.
-    pub fn add(self: *EntityRef, vm: *flux.Vm, component: []const u8) flux.Vm.Error!flux.Value {
-        const added = self.scripts.app.addComponentNamed(self.entity, component) catch |err| return refused(vm, err, "add", component);
+    /// Its `component`, or null when it has none: `if
+    /// (self.entity.find(Sprite)) |sprite| ...`.
+    pub fn find(self: *EntityRef, vm: *flux.Vm, component: *const reflect.Type) flux.Vm.Error!?flux.Value {
+        _ = try self.entryOf(vm, component);
+        if (self.scripts.app.componentOfType(self.entity, component) == null) return null;
+        return try vm.liveHandle(&self.scripts.resolver, self.entity.toInt(), component);
+    }
+
+    /// Put a `component` on, holding its defaults, and hand it back to fill
+    /// in. One it has already is handed back as it is.
+    pub fn add(self: *EntityRef, vm: *flux.Vm, component: *const reflect.Type) flux.Vm.Error!flux.Value {
+        const entry = try self.entryOf(vm, component);
+        const added = self.scripts.app.addComponentNamed(self.entity, entry.name) catch |err| return refused(vm, err, "add", entry.name);
         return vm.liveHandle(&self.scripts.resolver, self.entity.toInt(), added.type);
     }
 
-    /// Take the component called `component` off. One it has not got does
-    /// nothing.
-    pub fn remove(self: *EntityRef, vm: *flux.Vm, component: []const u8) flux.Vm.Error!void {
-        self.scripts.app.removeComponentNamed(self.entity, component) catch |err| return refused(vm, err, "remove", component);
+    /// Take a `component` off. One it has not got does nothing.
+    pub fn remove(self: *EntityRef, vm: *flux.Vm, component: *const reflect.Type) flux.Vm.Error!void {
+        const entry = try self.entryOf(vm, component);
+        self.scripts.app.removeComponentNamed(self.entity, entry.name) catch |err| return refused(vm, err, "remove", entry.name);
+    }
+
+    fn entryOf(self: *EntityRef, vm: *flux.Vm, component: *const reflect.Type) flux.Vm.Error!*const @import("scene.zig").Registry.Entry {
+        return self.scripts.app.scene_components.findType(component) orelse vm.fail("{s} is no component", .{shortName(component)});
+    }
+
+    /// What it is called in a message: its name, or "the entity".
+    fn called(self: *EntityRef) []const u8 {
+        return self.scripts.app.nameOf(self.entity) orelse "the entity";
     }
 
     /// The instance its `Script` made, to call and to read as any value:
@@ -383,39 +422,39 @@ pub const FileAccess = struct {
     pub const reflect_name = "Files";
     pub const reflect_opaque = true;
     pub const reflect_methods = .{
-        .readText = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .writeText = .{attr.Params{ .names = &.{ "path", "text" } }},
-        .appendText = .{attr.Params{ .names = &.{ "path", "text" } }},
+        .readText = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8), flux.GivesErrors{} },
+        .writeText = .{ attr.Params{ .names = &.{ "path", "text" } }, flux.GivesErrors{} },
+        .appendText = .{ attr.Params{ .names = &.{ "path", "text" } }, flux.GivesErrors{} },
         .exists = .{attr.Params{ .names = &.{"path"} }},
         .isDir = .{attr.Params{ .names = &.{"path"} }},
-        .makeDir = .{attr.Params{ .names = &.{"path"} }},
-        .list = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .remove = .{attr.Params{ .names = &.{"path"} }},
-        .copy = .{ attr.Params{ .names = &.{ "from", "to", "replace" } }, attr.defaults(.{false}) },
-        .move = .{ attr.Params{ .names = &.{ "from", "to", "replace" } }, attr.defaults(.{false}) },
-        .size = .{attr.Params{ .names = &.{"path"} }},
-        .modifiedTime = .{attr.Params{ .names = &.{"path"} }},
-        .sha256 = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .writeCompressed = .{attr.Params{ .names = &.{ "path", "text" } }},
-        .readCompressed = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .writeSecret = .{attr.Params{ .names = &.{ "path", "text", "password" } }},
-        .readSecret = .{attr.Params{ .names = &.{ "vm", "path", "password" } }},
-        .config = .{ attr.Params{ .names = &.{ "vm", "path", "password" } }, attr.defaults(.{""}) },
-        .writeData = .{attr.Params{ .names = &.{ "value", "path" } }},
-        .readData = .{attr.Params{ .names = &.{"path"} }},
-        .join = .{attr.Params{ .names = &.{ "vm", "path", "name" } }},
-        .dirName = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .fileName = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .stem = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .extension = .{attr.Params{ .names = &.{ "vm", "path" } }},
+        .makeDir = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+        .list = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const []const u8), flux.GivesErrors{} },
+        .remove = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+        .copy = .{ attr.Params{ .names = &.{ "from", "to", "replace" } }, attr.defaults(.{false}), flux.GivesErrors{} },
+        .move = .{ attr.Params{ .names = &.{ "from", "to", "replace" } }, attr.defaults(.{false}), flux.GivesErrors{} },
+        .size = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+        .modifiedTime = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+        .sha256 = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8), flux.GivesErrors{} },
+        .writeCompressed = .{ attr.Params{ .names = &.{ "path", "text" } }, flux.GivesErrors{} },
+        .readCompressed = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8), flux.GivesErrors{} },
+        .writeSecret = .{ attr.Params{ .names = &.{ "path", "text", "password" } }, flux.GivesErrors{} },
+        .readSecret = .{ attr.Params{ .names = &.{ "vm", "path", "password" } }, flux.Returns.of([]const u8), flux.GivesErrors{} },
+        .config = .{ attr.Params{ .names = &.{ "vm", "path", "password" } }, attr.defaults(.{""}), flux.Returns.of(ConfigRef), flux.GivesErrors{} },
+        .writeData = .{ attr.Params{ .names = &.{ "value", "path" } }, flux.GivesErrors{} },
+        .readData = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+        .join = .{ attr.Params{ .names = &.{ "vm", "path", "name" } }, flux.Returns.of([]const u8) },
+        .dirName = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8) },
+        .fileName = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8) },
+        .stem = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8) },
+        .extension = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8) },
         .isValidName = .{attr.Params{ .names = &.{"name"} }},
-        .validName = .{attr.Params{ .names = &.{ "vm", "name" } }},
-        .globalPath = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .localPath = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .open = .{attr.Params{ .names = &.{"path"} }},
-        .showInFolder = .{attr.Params{ .names = &.{"path"} }},
-        .choose = .{ attr.Params{ .names = &.{ "vm", "title", "extensions", "many" } }, attr.defaults(.{ "", flux.Value.null, false }) },
-        .dropped = .{attr.Params{ .names = &.{"vm"} }},
+        .validName = .{ attr.Params{ .names = &.{ "vm", "name" } }, flux.Returns.of([]const u8) },
+        .globalPath = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8) },
+        .localPath = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8) },
+        .open = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+        .showInFolder = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+        .choose = .{ attr.Params{ .names = &.{ "vm", "title", "extensions", "many" } }, attr.defaults(.{ "", flux.Value.null, false }), flux.Returns{ .builtin = .signal }, flux.GivesErrors{} },
+        .dropped = .{ attr.Params{ .names = &.{"vm"} }, flux.Returns{ .builtin = .signal } },
     };
 
     /// The text of a file: the game's (`res://`) or the player's
@@ -842,9 +881,9 @@ pub const ConfigRef = struct {
         .has = .{attr.Params{ .names = &.{ "section", "key" } }},
         .erase = .{attr.Params{ .names = &.{ "section", "key" } }},
         .eraseSection = .{attr.Params{ .names = &.{"section"} }},
-        .sections = .{attr.Params{ .names = &.{"vm"} }},
-        .keys = .{attr.Params{ .names = &.{ "vm", "section" } }},
-        .save = .{},
+        .sections = .{ attr.Params{ .names = &.{"vm"} }, flux.Returns.of([]const []const u8) },
+        .keys = .{ attr.Params{ .names = &.{ "vm", "section" } }, flux.Returns.of([]const []const u8) },
+        .save = .{flux.GivesErrors{}},
     };
 
     fn release(self: *ConfigRef, gpa: Allocator) void {
@@ -964,12 +1003,12 @@ pub const ImagesAccess = struct {
     pub const reflect_name = "Images";
     pub const reflect_opaque = true;
     pub const reflect_methods = .{
-        .new = .{ attr.Params{ .names = &.{ "vm", "width", "height", "color" } }, attr.defaults(.{Color.transparent}) },
-        .read = .{attr.Params{ .names = &.{ "vm", "path" } }},
-        .capture = .{attr.Params{ .names = &.{"vm"} }},
-        .fromTexture = .{attr.Params{ .names = &.{ "vm", "texture" } }},
-        .toTexture = .{attr.Params{ .names = &.{ "vm", "image" } }},
-        .updateTexture = .{attr.Params{ .names = &.{ "vm", "texture", "image" } }},
+        .new = .{ attr.Params{ .names = &.{ "vm", "width", "height", "color" } }, attr.defaults(.{Color.transparent}), flux.Returns.of(ImageRef) },
+        .read = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of(ImageRef), flux.GivesErrors{} },
+        .capture = .{ attr.Params{ .names = &.{"vm"} }, flux.Returns.of(ImageRef), flux.GivesErrors{} },
+        .fromTexture = .{ attr.Params{ .names = &.{ "vm", "texture" } }, flux.Returns.of(ImageRef), flux.GivesErrors{} },
+        .toTexture = .{ attr.Params{ .names = &.{ "vm", "image" } }, flux.GivesErrors{} },
+        .updateTexture = .{ attr.Params{ .names = &.{ "vm", "texture", "image" } }, flux.GivesErrors{} },
     };
 
     /// One `width` by `height`, every pixel `color`: see-through when none
@@ -1038,15 +1077,15 @@ pub const ImageRef = struct {
         .setPixel = .{attr.Params{ .names = &.{ "x", "y", "color" } }},
         .fill = .{attr.Params{ .names = &.{"color"} }},
         .fillRect = .{attr.Params{ .names = &.{ "x", "y", "width", "height", "color" } }},
-        .region = .{attr.Params{ .names = &.{ "vm", "x", "y", "width", "height" } }},
+        .region = .{ attr.Params{ .names = &.{ "vm", "x", "y", "width", "height" } }, flux.Returns.of(ImageRef) },
         .blit = .{attr.Params{ .names = &.{ "vm", "source", "x", "y" } }},
         .blend = .{attr.Params{ .names = &.{ "vm", "source", "x", "y" } }},
         .resize = .{ attr.Params{ .names = &.{ "vm", "width", "height", "smooth" } }, attr.defaults(.{true}) },
         .flipX = .{},
         .flipY = .{},
-        .copy = .{attr.Params{ .names = &.{"vm"} }},
-        .savePng = .{attr.Params{ .names = &.{"path"} }},
-        .saveJpg = .{ attr.Params{ .names = &.{ "path", "quality" } }, attr.defaults(.{0.9}) },
+        .copy = .{ attr.Params{ .names = &.{"vm"} }, flux.Returns.of(ImageRef) },
+        .savePng = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+        .saveJpg = .{ attr.Params{ .names = &.{ "path", "quality" } }, attr.defaults(.{0.9}), flux.GivesErrors{} },
     };
 
     fn release(self: *ImageRef, gpa: Allocator) void {
@@ -1177,16 +1216,16 @@ pub const TimeAccess = struct {
         .fromUnix = .{attr.Params{ .names = &.{"seconds"} }},
         .date = .{ attr.Params{ .names = &.{ "year", "month", "day", "hour", "minute", "second" } }, attr.defaults(.{ 0, 0, 0 }) },
         .utcDate = .{ attr.Params{ .names = &.{ "year", "month", "day", "hour", "minute", "second" } }, attr.defaults(.{ 0, 0, 0 }) },
-        .parse = .{attr.Params{ .names = &.{"text"} }},
+        .parse = .{ attr.Params{ .names = &.{"text"} }, flux.GivesErrors{} },
         .seconds = .{attr.Params{ .names = &.{"n"} }},
         .minutes = .{attr.Params{ .names = &.{"n"} }},
         .hours = .{attr.Params{ .names = &.{"n"} }},
         .days = .{attr.Params{ .names = &.{"n"} }},
         .locale = .{},
-        .setLocale = .{attr.Params{ .names = &.{"tag"} }},
+        .setLocale = .{ attr.Params{ .names = &.{"tag"} }, flux.GivesErrors{} },
         .systemLocale = .{attr.Params{ .names = &.{"vm"} }},
         .zoneName = .{attr.Params{ .names = &.{"vm"} }},
-        .clock = .{ attr.Params{ .names = &.{ "vm", "start", "rate" } }, attr.defaults(.{1.0}) },
+        .clock = .{ attr.Params{ .names = &.{ "vm", "start", "rate" } }, attr.defaults(.{1.0}), flux.Returns.of(ClockRef) },
     };
 
     /// This moment, on the player's calendar and clock.
@@ -1391,7 +1430,7 @@ pub const FramesRef = struct {
         .duplicateAnimation = .{attr.Params{ .names = &.{ "from", "to" } }},
         .getAnimationLoopMode = .{attr.Params{ .names = &.{"name"} }},
         .setAnimationLoopMode = .{attr.Params{ .names = &.{ "name", "mode" } }},
-        .getAnimationNames = .{},
+        .getAnimationNames = .{ attr.Params{ .names = &.{"vm"} }, flux.Returns.of([]const []const u8) },
         .getAnimationSpeed = .{attr.Params{ .names = &.{"name"} }},
         .setAnimationSpeed = .{attr.Params{ .names = &.{ "name", "fps" } }},
         .getFrameCount = .{attr.Params{ .names = &.{"name"} }},
@@ -1517,113 +1556,25 @@ pub const FramesRef = struct {
     }
 };
 
-/// One thing the player did, as a script's `input(self, event)` and
-/// `unhandled_input(self, event)` are handed it:
-///
-/// ```
-/// fn input(self, event: any) {
-///     if (event.isActionPressed("jump")) self.jump();
-///     if (event.kind == "mouse_button" and event.pressed) print(event.button, event.position);
-/// }
-/// ```
-pub const Event = struct {
-    kind: Kind,
-    /// Went down, rather than came up: a key's, a button's. A repeat is
-    /// down too, with `echo`. Motion and a wheel's notch are neither.
-    pressed: bool = false,
-    /// A key held long enough that the system repeats it.
-    echo: bool = false,
-    /// The key where it sits on a US layout, and the key the player's
-    /// layout names, for `.key`.
-    key: platform.Key = .unknown,
-    virtual_key: platform.Key = .unknown,
-    /// For `.mouse_button`.
-    button: platform.MouseButton = .left,
-    double_click: bool = false,
-    /// For `.pad_button`: which, on which controller.
-    pad_button: platform.GamepadButton = .a,
-    pad: u8 = 0,
-    /// Where the pointer is, in the window's pixels.
-    position: math.Vec2 = .zero,
-    /// How far the pointer moved, for `.mouse_motion`.
-    relative: math.Vec2 = .zero,
-    /// How far the wheel turned, notches up and right positive, for `.wheel`.
-    wheel: math.Vec2 = .zero,
-    shift: bool = false,
-    control: bool = false,
-    alt: bool = false,
+/// The app a VM's scripts belong to: for a call of the engine's given the
+/// VM, as `InputEvent.isAction` is.
+pub fn appOf(vm: *flux.Vm) *App {
+    const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
+    return scripts.app;
+}
 
-    pub const Kind = enum { key, mouse_button, mouse_motion, wheel, pad_button };
+/// An input in words - `Space`, `Left Mouse`, `Pad A` - for the call that
+/// asked.
+pub fn describe(vm: *flux.Vm, bound: actions.Binding) []const u8 {
+    const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
+    return std.fmt.bufPrint(&scripts.described, "{f}", .{bound}) catch "";
+}
 
-    pub const reflect_name = "Event";
-    pub const reflect_methods = .{
-        .isAction = .{attr.Params{ .names = &.{ "vm", "action" } }},
-        .isActionPressed = .{attr.Params{ .names = &.{ "vm", "action" } }},
-        .isActionReleased = .{attr.Params{ .names = &.{ "vm", "action" } }},
-        .describe = .{},
-    };
-
-    /// Whether it is one of the action's inputs.
-    pub fn isAction(self: *const Event, vm: *flux.Vm, action: []const u8) bool {
-        const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
-        const entry = scripts.app.input.actions.findConst(action) orelse return false;
-        for (entry.bindings.items) |each| {
-            if (self.sets(each)) return true;
-        }
-        return false;
-    }
-
-    /// Whether it is one of the action's inputs going down - not a repeat.
-    pub fn isActionPressed(self: *const Event, vm: *flux.Vm, action: []const u8) bool {
-        return self.pressed and !self.echo and self.isAction(vm, action);
-    }
-
-    /// Whether it is one of the action's inputs coming up.
-    pub fn isActionReleased(self: *const Event, vm: *flux.Vm, action: []const u8) bool {
-        return !self.pressed and self.kind != .mouse_motion and self.kind != .wheel and self.isAction(vm, action);
-    }
-
-    /// What the player pressed, in words: `Space`, `Left Mouse`, `Pad A`.
-    /// Empty for motion and the wheel.
-    pub fn describe(self: *const Event, vm: *flux.Vm) []const u8 {
-        const scripts: *Scripts = @ptrCast(@alignCast(vm.host.?));
-        const pressed_input = self.binding() orelse return "";
-        return std.fmt.bufPrint(&scripts.described, "{f}", .{pressed_input}) catch "";
-    }
-
-    /// The input it is, as an action binds it: what `app.bindAction` gives
-    /// the action. Null for motion and the wheel.
-    pub fn binding(self: *const Event) ?actions.Binding {
-        return switch (self.kind) {
-            .key => .keyOf(self.key),
-            .mouse_button => .mouseButtonOf(self.button),
-            .pad_button => .padButtonOf(self.pad_button),
-            .mouse_motion, .wheel => null,
-        };
-    }
-
-    fn sets(self: *const Event, bound: actions.Binding) bool {
-        return switch (bound) {
-            .key => |held| self.kind == .key and (if (held.physical) held.key == self.key else held.key == self.virtual_key),
-            .mouse_button => |held| self.kind == .mouse_button and held.button == self.button,
-            .pad_button => |held| self.kind == .pad_button and held.button == self.pad_button and (held.pad == null or held.pad.? == self.pad),
-            .pad_axis => false,
-        };
-    }
-};
-
-fn mouseButtonOf(button: @import("pointer.zig").PointerButton) platform.MouseButton {
-    return switch (button) {
-        .left => .left,
-        .right => .right,
-        .middle => .middle,
-        .button_4 => .button_4,
-        .button_5 => .button_5,
-        .button_6 => .button_6,
-        .button_7 => .button_7,
-        .button_8 => .button_8,
-        .wheel_up, .wheel_down, .wheel_left, .wheel_right => .left,
-    };
+/// A type's name as a script writes it, without the file it is in.
+fn shortName(t: *const reflect.Type) []const u8 {
+    const full = t.name.slice();
+    const dot = std.mem.lastIndexOfScalar(u8, full, '.') orelse return full;
+    return full[dot + 1 ..];
 }
 
 /// One of the engine's signals as the scripts' own. See `Scripts.bridges`.
@@ -1667,6 +1618,9 @@ const Stamp = struct {
     }
 };
 
+/// The methods the engine calls on a script's instance: what each is passed
+/// and when, as the compiler checks a struct's methods against and an
+/// editor offers them. See `install`.
 const Lifecycle = enum {
     ready,
     fixed,
@@ -1675,21 +1629,23 @@ const Lifecycle = enum {
     input,
     unhandled_input,
 
-    /// How many parameters it takes besides `self`.
-    fn params(self: Lifecycle) u8 {
+    const dt = [_]flux.Hook.Param{.{ .name = "dt", .type = reflect.typeOf(f32) }};
+    const event = [_]flux.Hook.Param{.{ .name = "event", .type = reflect.typeOf(InputEvent) }};
+
+    fn hook(self: Lifecycle) flux.Hook {
         return switch (self) {
-            .ready, .exit => 0,
-            .fixed, .update, .input, .unhandled_input => 1,
+            .ready => .{ .name = "ready", .doc = "Once, when its entity is in the world with the script made: before anything else of it." },
+            .fixed => .{ .name = "fixed", .params = &dt, .doc = "Every fixed step, `dt` seconds of the physics' own clock, before the game's `.fixed` systems: what moves a body." },
+            .update => .{ .name = "update", .params = &dt, .doc = "Every frame, `dt` seconds after the last, before the game's `.update` systems." },
+            .exit => .{ .name = "exit", .doc = "When its entity dies, its `Script` is taken off or turned off, or the world is cleared: at the end of that frame." },
+            .input => .{ .name = "input", .params = &event, .doc = "Each thing the player did this frame, in order. `app.setInputAsHandled()` keeps it from the scripts after, and from `unhandled_input`." },
+            .unhandled_input => .{ .name = "unhandled_input", .params = &event, .doc = "What no script's `input` took, and the interface did not have." },
         };
     }
 
-    /// What the engine passes it besides `self`, as a warning says.
-    fn passes(self: Lifecycle) []const u8 {
-        return switch (self) {
-            .ready, .exit => "none",
-            .fixed, .update => "dt",
-            .input, .unhandled_input => "the event",
-        };
+    /// How many parameters it takes besides `self`.
+    fn params(self: Lifecycle) usize {
+        return self.hook().params.len;
     }
 };
 
@@ -1814,7 +1770,7 @@ pub const Scripts = struct {
     /// Whether the event being handed round was taken: see
     /// `App.setInputAsHandled`.
     input_handled: bool = false,
-    /// `Event.describe`'s words, for the call that asked.
+    /// `InputEvent.describe`'s words, for the call that asked.
     described: [64]u8 = undefined,
     /// The words a date, a time or a span was written in, for the call that
     /// asked: see `datetime.zig`.
@@ -1864,15 +1820,16 @@ pub const Scripts = struct {
             .io = app.io,
             .on_task_panic = sayTaskPanic,
             .on_emit = heardEmit,
-            .host_types = &host_types,
-            .host_member = hostMember,
-            .host_set_member = hostSetMember,
-            .host_result = .{ .context = app, .run = componentResult },
             .loader = .{ .context = app, .load = loadImport },
         });
         errdefer vm.destroy();
         vm.host = self;
-        try install(vm, try vm.handle(app), try vm.handle(&self.file_access), try vm.handle(&self.time_access), try vm.handle(&self.images_access));
+        try install(vm, app, .{
+            .app = try vm.handle(app),
+            .files = try vm.handle(&self.file_access),
+            .time = try vm.handle(&self.time_access),
+            .images = try vm.handle(&self.images_access),
+        });
         self.frame = try vm.newSignal("frame", 0);
         try vm.hold(self.frame);
         self.vm = vm;
@@ -2347,10 +2304,10 @@ pub const Scripts = struct {
             inst.methods.set(which, null);
             if (!inst.said.contains(which)) {
                 inst.said.insert(which);
-                log.warn("`{s}` takes {d} parameters besides self, and the engine passes {s}: it is not called", .{
+                log.warn("`{s}` takes {d} parameters besides self, and the engine passes {d}: it is not called", .{
                     member.name,
                     member.params,
-                    which.passes(),
+                    which.params(),
                 });
             }
         }
@@ -2527,72 +2484,34 @@ pub const Scripts = struct {
         }
         if (!any) return;
         const app = self.app;
-        var events: std.ArrayList(Event) = .empty;
+        var events: std.ArrayList(InputEvent) = .empty;
         defer events.deinit(app.gpa);
         self.gather(&events) catch return self.outOfMemory(null);
         for (events.items) |event| self.deliver(event);
     }
 
-    fn gather(self: *Scripts, events: *std.ArrayList(Event)) Allocator.Error!void {
+    fn gather(self: *Scripts, events: *std.ArrayList(InputEvent)) Allocator.Error!void {
         const app = self.app;
         const gpa = app.gpa;
-        for (app.input.keyEvents()) |k| try events.append(gpa, .{
-            .kind = .key,
-            .pressed = k.action.down(),
-            .echo = k.action == .repeat,
+        for (app.input.keyEvents()) |k| try events.append(gpa, .{ .key = .{
             .key = k.key,
             .virtual_key = k.virtual,
-            .position = .init(app.input.pointer.x, app.input.pointer.y),
-            .shift = k.mods.shift,
-            .control = k.mods.control,
-            .alt = k.mods.alt,
-        });
-        for (app.input.pointerEvents()) |pointer| switch (pointer) {
-            .mouse_button => |b| {
-                const wheel: ?math.Vec2 = switch (b.button) {
-                    .wheel_up => .init(0, b.factor),
-                    .wheel_down => .init(0, -b.factor),
-                    .wheel_left => .init(-b.factor, 0),
-                    .wheel_right => .init(b.factor, 0),
-                    else => null,
-                };
-                if (wheel) |turned| {
-                    // A notch is a press and a release: it is one wheel event.
-                    if (!b.pressed) continue;
-                    try events.append(gpa, .{ .kind = .wheel, .position = b.position, .wheel = turned, .shift = b.mods.shift, .control = b.mods.control, .alt = b.mods.alt });
-                    continue;
-                }
-                try events.append(gpa, .{
-                    .kind = .mouse_button,
-                    .pressed = b.pressed,
-                    .button = mouseButtonOf(b.button),
-                    .double_click = b.double_click,
-                    .position = b.position,
-                    .shift = b.mods.shift,
-                    .control = b.mods.control,
-                    .alt = b.mods.alt,
-                });
-            },
-            .mouse_motion => |m| try events.append(gpa, .{
-                .kind = .mouse_motion,
-                .position = m.position,
-                .relative = m.relative,
-                .shift = m.mods.shift,
-                .control = m.mods.control,
-                .alt = m.mods.alt,
-            }),
-        };
+            .pressed = k.action.down(),
+            .echo = k.action == .repeat,
+            .mods = k.mods,
+        } });
+        try events.appendSlice(gpa, app.input.pointerEvents());
         for (app.input.pads, 0..) |state, slot| {
             for (0..platform.GamepadButton.count) |i| {
                 const went_down = state.pressed.isSet(i);
                 const came_up = state.released.isSet(i);
-                if (went_down) try events.append(gpa, .{ .kind = .pad_button, .pressed = true, .pad_button = @enumFromInt(i), .pad = @intCast(slot) });
-                if (came_up) try events.append(gpa, .{ .kind = .pad_button, .pressed = false, .pad_button = @enumFromInt(i), .pad = @intCast(slot) });
+                if (went_down) try events.append(gpa, .{ .pad_button = .{ .button = @enumFromInt(i), .pad = @intCast(slot), .pressed = true } });
+                if (came_up) try events.append(gpa, .{ .pad_button = .{ .button = @enumFromInt(i), .pad = @intCast(slot), .pressed = false } });
             }
         }
     }
 
-    fn deliver(self: *Scripts, event: Event) void {
+    fn deliver(self: *Scripts, event: InputEvent) void {
         const vm = self.vm;
         var held = event;
         const value = vm.valueOf(reflect.Value.of(&held)) catch return self.outOfMemory(null);
@@ -2617,9 +2536,9 @@ pub const Scripts = struct {
 
     /// Whether the interface had it: a key while a field has the keys, the
     /// pointer over what it draws or taken by a system.
-    fn takenByInterface(self: *Scripts, event: Event) bool {
+    fn takenByInterface(self: *Scripts, event: InputEvent) bool {
         const app = self.app;
-        return switch (event.kind) {
+        return switch (event) {
             .key => app.ui.wantsKeyboard(),
             .mouse_button, .mouse_motion, .wheel => app.input.isHandled() or app.ui.wantsPointer(),
             .pad_button => false,
@@ -3283,6 +3202,8 @@ fn assetType(comptime kind: AssetKind) flux.HostType {
         // Sprite frames are a value of their own to a script; the other
         // files are their paths.
         .script = if (kind == .frames) reflect.typeOf(FramesRef) else null,
+        .given = if (kind == .frames) null else .string,
+        .nullable = true,
         .to_script = Shim.toScript,
         .from_script = Shim.fromScript,
     };
@@ -3306,8 +3227,9 @@ fn framesHandle(scripts: *Scripts, handle: sprite_frames.SpriteFramesHandle) flu
 }
 
 /// A member of an engine's value that is none of its fields: a signal one
-/// of the entity's components declares - `timer.timeout` on the Timer, or
-/// on its entity by the name that finds it - as the scripts' own.
+/// of the entity's components declares - `timer.timeout` - as the scripts'
+/// own, the words a component keeps beside it, a material's numbers, a
+/// clock's signals. `install` declares them for the compiler.
 fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!?flux.Value {
     const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
     const h = handle.as(flux.object.Handle);
@@ -3336,18 +3258,6 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
             if (std.mem.eql(u8, signal_name, name)) break i;
         } else return null;
         return try self.clockSignal(clock.handle, which);
-    }
-    const ref = now.asConst(EntityRef) orelse return null;
-    if (!self.app.world.isAlive(ref.entity)) return null;
-    const found = self.app.signalNamed(ref.entity, name) catch |err| switch (err) {
-        error.AmbiguousSignal => return vm.fail("two of this entity's components say {s}: ask the one, as `entity.get(\"Health\").{s}`", .{ name, name }),
-        else => return null,
-    };
-    // A script's own signal is its instance's: `self.died`.
-    if (std.mem.eql(u8, found.component, component_name)) return null;
-    const entry = self.app.scene_components.find(found.component) orelse return null;
-    for (entry.signals) |decl| {
-        if (std.mem.eql(u8, decl.name, found.name)) return try self.bridgeOf(ref.entity, entry.name, decl.name, decl.args.fields().len);
     }
     return null;
 }
@@ -3433,6 +3343,7 @@ fn setShaderParamOf(self: *Scripts, entity: Entity, name: []const u8, value: flu
 const entity_type: flux.HostType = .{
     .type = reflect.typeOf(Entity),
     .script = reflect.typeOf(EntityRef),
+    .nullable = true,
     .to_script = entityToScript,
     .from_script = entityFromScript,
 };
@@ -3469,6 +3380,7 @@ fn tileValueFromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flu
 /// 0.5)`, or `"#ff8080"`, and read back as colours.
 const color_type: flux.HostType = .{
     .type = reflect.typeOf(Color),
+    .given = .color,
     .to_script = colorToScript,
     .from_script = colorFromScript,
 };
@@ -3554,42 +3466,87 @@ fn notAnEntity(vm: *flux.Vm, value: flux.Value) flux.Vm.Error {
     };
 }
 
-/// What every VM that compiles the game's scripts is given - the game's
-/// own, and each of an editor's analyses - so the two agree on what a
-/// script may name.
-pub fn install(vm: *flux.Vm, app: flux.Value, files: flux.Value, time: flux.Value, images: flux.Value) Allocator.Error!void {
+/// The values behind `app`, `files`, `time` and `images` where the scripts
+/// run.
+pub const Given = struct { app: flux.Value, files: flux.Value, time: flux.Value, images: flux.Value };
+
+/// What every VM that compiles the game's scripts is given - the game's own,
+/// with the values `given` holds, and each of an editor's analyses, with
+/// their types only - so the two agree on what a script may name, what it
+/// can call, and what is said of it: the engine's types and enums by name,
+/// the calls an entity has of `app`'s, what its components have beside
+/// their fields, the methods the engine calls and the annotations it reads.
+pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
+    vm.options.host_types = &host_types;
+    vm.options.host_member = hostMember;
+    vm.options.host_set_member = hostSetMember;
+    vm.options.docs = member_docs;
     try vm.declareHostMemberOf("entity", reflect.typeOf(EntityRef), entity_doc);
-    try vm.defineGlobal("app", app, app_doc);
-    try vm.defineGlobal("files", files, files_doc);
-    try vm.defineGlobal("time", time, time_doc);
-    try vm.defineGlobal("images", images, images_doc);
+    if (given) |g| {
+        try vm.defineGlobal("app", g.app, app_doc);
+        try vm.defineGlobal("files", g.files, files_doc);
+        try vm.defineGlobal("time", g.time, time_doc);
+        try vm.defineGlobal("images", g.images, images_doc);
+    } else {
+        try vm.declareGlobal("app", reflect.typeOf(App), app_doc);
+        try vm.declareGlobal("files", reflect.typeOf(FileAccess), files_doc);
+        try vm.declareGlobal("time", reflect.typeOf(TimeAccess), time_doc);
+        try vm.declareGlobal("images", reflect.typeOf(ImagesAccess), images_doc);
+    }
+    try vm.extend(reflect.typeOf(EntityRef), reflect.typeOf(App), if (given) |g| g.app else .null);
+    for (named_types) |t| try vm.declareType(t);
+    for (app.scene_components.entries.items) |*entry| {
+        try vm.declareType(entry.type);
+        for (entry.signals) |decl| try vm.declareMember(.{ .of = entry.type, .name = decl.name, .type = .signal });
+        for (entry.type.attributes.slice()) |a| if (a.as(attr.Text)) |text| {
+            try vm.declareMember(.{ .of = entry.type, .name = text.name, .type = .string, .writable = true });
+        };
+    }
+    // A material's numbers are its shader's to name.
+    try vm.declareOpen(reflect.typeOf(shaders_mod.Material));
+    for (ClockRef.signal_names) |name| try vm.declareMember(.{ .of = reflect.typeOf(ClockRef), .name = name, .type = .signal });
+    try vm.declareMember(.{ .of = reflect.typeOf(FramesRef), .name = "resource_path", .type = .string, .doc = "The file the frames were read from, or \"\" for ones made in memory." });
+    for (std.enums.values(Lifecycle)) |which| try vm.declareHook(which.hook());
+    for (annotations) |a| try vm.declareAnnotation(a);
 }
 
-const entity_doc = "The entity this script is on: `alive()`, `name()`, `uuid()`, `has(name)`, `get(name)`, `add(name)`, `remove(name)`.";
+/// The engine's types a script names besides its components, and with them
+/// the enums and unions they take and give - `Key`, `Fullscreen` - and what
+/// those unions' arms hold - `KeyEvent`: see `flux.Vm.declareType`.
+const named_types = [_]*const reflect.Type{
+    reflect.typeOf(App),
+    reflect.typeOf(EntityRef),
+    reflect.typeOf(FileAccess),
+    reflect.typeOf(ConfigRef),
+    reflect.typeOf(ImagesAccess),
+    reflect.typeOf(ImageRef),
+    reflect.typeOf(TimeAccess),
+    reflect.typeOf(ClockRef),
+    reflect.typeOf(FramesRef),
+    reflect.typeOf(datetime.DateTime),
+    reflect.typeOf(datetime.Duration),
+    reflect.typeOf(InputEvent),
+};
+
+/// What the engine reads of an exported field besides `@export`: see
+/// `exports.zig` and the editor's Inspector.
+const annotations = [_]flux.Annotation{
+    .{ .name = "range", .sig = "@range(min, max, step)", .doc = "The numbers an exported field may be, for the Inspector's slider: `@range(0, 100)`, the step left out for any." },
+    .{ .name = "multiline", .sig = "@multiline", .doc = "An exported string written over several lines." },
+    .{ .name = "group", .sig = "@group(name: string)", .doc = "Where an exported field is listed in the Inspector, under a heading of its own." },
+    .{ .name = "file", .sig = "@file(ending: string, ...)", .doc = "An exported string that names a file of the project's, by its endings: `@file(\"png\", \"jpg\")`." },
+    .{ .name = "entity", .sig = "@entity", .doc = "An exported field that names an entity of the scene, chosen from its tree." },
+};
+
+/// What the engine's doc comments say of its types' members: see
+/// `tools/member_docs.zig`.
+const member_docs = @import("member_docs").list(flux.Doc);
+
+const entity_doc = "The entity this script is on: `get(Sprite)`, `find(Sprite)`, `has`, `add`, `remove`, `alive()`, `uuid()`, and every call of `app`'s given an entity first - `name()`, `parent()`, `globalPosition()`.";
 const app_doc = "The engine: the calls `App.reflect_methods` lists.";
 const files_doc = "The game's files to read (`res://`) and the player's to read and write (`user://`): `readText(path)`, `writeText(path, text)`, `appendText`, `exists`, `isDir`, `list`, `copy`, `move`, `remove`, `size`, `modifiedTime`, `sha256`; kept sealed with `writeSecret(path, text, password)` or small with `writeCompressed`; `config(path)` for settings and `writeData(value, path)` for a struct; paths with `join`, `dirName`, `fileName`, `stem`, `extension`, `validName`; the player's own with `choose(title, extensions)` and `dropped()`.";
 const time_doc = "Dates, times and spans, written in the game's culture: `now()`, `date(year, month, day)`, `parse(text)`, `minutes(n)`, `locale()`, `setLocale(tag)`, and `clock(start, rate)` for a clock of the game's own.";
 const images_doc = "Pictures in memory: `new(width, height, color)`, `read(path)`, `capture()` of the frame, `fromTexture(texture)`; an image's `getPixel`, `setPixel`, `fill`, `fillRect`, `region`, `blit`, `blend`, `resize`, `flipX`, `flipY`, `savePng`, `saveJpg`; `toTexture(image)` draws it.";
-
-/// What `entity.get("Timer")` and `entity.add("Timer")` give, for the
-/// compiler to know its fields and calls by: the component registered under
-/// that name.
-fn componentResult(context: ?*anyopaque, receiver: *const reflect.Type, method: []const u8, strings: []const ?[]const u8) ?*const reflect.Type {
-    const app: *App = @ptrCast(@alignCast(context.?));
-    if (receiver.is(FileAccess) and std.mem.eql(u8, method, "config")) return reflect.typeOf(ConfigRef);
-    if (receiver.is(ImagesAccess) or receiver.is(ImageRef)) {
-        inline for (.{ "new", "read", "capture", "fromTexture", "region", "copy" }) |made| {
-            if (std.mem.eql(u8, method, made)) return reflect.typeOf(ImageRef);
-        }
-        return null;
-    }
-    if (!receiver.is(EntityRef)) return null;
-    if (!std.mem.eql(u8, method, "get") and !std.mem.eql(u8, method, "add")) return null;
-    if (strings.len == 0) return null;
-    const name = strings[0] orelse return null;
-    const entry = app.scene_components.find(name) orelse return null;
-    return entry.type;
-}
 
 /// For `App.scriptSetup`. An analysis only compiles, so `app` is a name
 /// with nothing behind it there. Inside the quotes of a call that names an
@@ -3708,17 +3665,10 @@ fn actionValue(arena: Allocator, action: actions.Action, doc: ?[]const u8) Alloc
     return .{ .label = action.name, .detail = if (action.bindings.len == 0) "no input yet" else inputs.written(), .doc = doc };
 }
 
-/// What the game's VM is given, with nothing behind `app` and `files`: their
-/// types, and those of the rest of the engine's values, for the compiler to
-/// check the calls of and an editor to offer.
+/// What the game's VM is given, with nothing behind `app` and `files`: see
+/// `install`.
 fn installForAnalysis(context: ?*anyopaque, vm: *flux.Vm) anyerror!void {
-    try vm.declareHostMemberOf("entity", reflect.typeOf(EntityRef), entity_doc);
-    try vm.declareGlobal("app", reflect.typeOf(App), app_doc);
-    try vm.declareGlobal("files", reflect.typeOf(FileAccess), files_doc);
-    try vm.declareGlobal("time", reflect.typeOf(TimeAccess), time_doc);
-    try vm.declareGlobal("images", reflect.typeOf(ImagesAccess), images_doc);
-    vm.options.host_types = &host_types;
-    vm.options.host_result = .{ .context = context, .run = componentResult };
+    try install(vm, @ptrCast(@alignCast(context.?)), null);
 }
 
 /// The struct a `Script` names: the one it names, or else the one named

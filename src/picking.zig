@@ -21,7 +21,7 @@ const physics = @import("fluxion_physics");
 const App = @import("App.zig");
 const Bodies = @import("bodies.zig");
 const components = @import("components.zig");
-const pointer = @import("pointer.zig");
+const InputEvent = @import("input_event.zig").InputEvent;
 
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;
@@ -84,7 +84,8 @@ pub fn update(self: *Picking, app: *App) !void {
     self.found_shapes.clearRetainingCapacity();
     const events = app.input.pointerEvents();
     for (events) |event| {
-        try self.gather(app, app.screenToWorld(event.position().x, event.position().y));
+        const at = event.position().?;
+        try self.gather(app, app.screenToWorld(at.x, at.y));
         try self.deliver(app, event);
         if (app.input.isHandled()) break;
     }
@@ -186,7 +187,7 @@ fn pickable(app: *App, object: Entity) bool {
 
 /// The hits of one pass: what is newly over, then the event itself to each,
 /// until a handler takes it.
-fn deliver(self: *Picking, app: *App, event: ?pointer.InputEvent) !void {
+fn deliver(self: *Picking, app: *App, event: ?InputEvent) !void {
     var first = true;
     for (self.hits.items) |hit| {
         if (!self.found.contains(hit.object)) {

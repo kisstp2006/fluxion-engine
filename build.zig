@@ -81,6 +81,20 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // What the doc comments say of the types' members, for the scripts'
+    // compiler to show: see tools/member_docs.zig.
+    const member_docs = b.addExecutable(.{
+        .name = "member_docs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/member_docs.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const write_docs = b.addRunArtifact(member_docs);
+    const docs_zig = write_docs.addOutputFileArg("member_docs.zig");
+    addSources(b, write_docs);
+    mod.addAnonymousImport("member_docs", .{ .root_source_file = docs_zig });
+
     // zig build test
     //
     // Every one of these runs with no window and no GPU: `App.init` with
@@ -156,5 +170,20 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(b.getInstallStep());
         if (b.args) |args| run.addArgs(args);
         b.step(example.step, example.about).dependOn(&run.step);
+    }
+}
+
+/// Every source file of the engine but its tests, as the arguments of `run`.
+fn addSources(b: *std.Build, run: *std.Build.Step.Run) void {
+    const io = b.graph.io;
+    var dir = b.build_root.handle.openDir(io, "src", .{ .iterate = true }) catch |err| std.debug.panic("src: {t}", .{err});
+    defer dir.close(io);
+    var walker = dir.walk(b.allocator) catch @panic("out of memory");
+    defer walker.deinit();
+    while (walker.next(io) catch |err| std.debug.panic("src: {t}", .{err})) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig") or std.mem.endsWith(u8, entry.path, "_test.zig")) continue;
+        const path = b.dupe(entry.path);
+        std.mem.replaceScalar(u8, path, '\\', '/');
+        run.addFileArg(b.path(b.fmt("src/{s}", .{path})));
     }
 }

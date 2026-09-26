@@ -174,13 +174,15 @@ pub fn surface(self: *const Interface, width: f32, height: f32) ui.Surface {
 }
 
 /// Hand this frame's input to the interface, before any system asks it
-/// anything. A wheel the interface scrolled with is taken out of `input`.
+/// anything. A wheel the interface scrolled with is taken out of `input`;
+/// one turned with Ctrl held is a zoom's, and is left for whoever zooms.
 ///
-/// Tab always moves the focus. The arrows, a d-pad and the left stick move it
-/// only once something has it, so a game keeps them until a menu takes the
+/// Tab moves the focus. The arrows, a d-pad and the left stick move it only
+/// once something has it, so a game keeps them until a menu takes the
 /// focus. Characters and editing keys reach a text input that has the focus,
 /// copying and pasting through `clipboard`; Enter, Space and a pad's A press
-/// whatever else has it.
+/// whatever else has it. An element that takes every key (`Focus.keys =
+/// .all`, a code editor) keeps them all: nothing moves the focus from it.
 pub fn feed(
     self: *Interface,
     gpa: Allocator,
@@ -202,7 +204,7 @@ pub fn feed(
 
     for (input.typedThisFrame()) |typed| try receive(gpa, layout, clipboard, typed);
 
-    if (input.wheel.x != 0 or input.wheel.y != 0) {
+    if ((input.wheel.x != 0 or input.wheel.y != 0) and !input.mods.control) {
         // The wheel counts up as positive, and a scroll moves the content.
         const across, const up = self.wheelDistance(input.wheel.x, input.wheel.y, layout.surface.height);
         if (layout.scrollHovered(across, -up)) input.wheel = .{};
@@ -239,7 +241,7 @@ fn receive(gpa: Allocator, layout: *ui.Ui, clipboard: *Clipboard, typed: Input.T
         .key => |k| {
             if (k.key == .tab) {
                 _ = layout.navigate(if (k.mods.shift) .previous else .next);
-            } else if (layout.wantsKeyboard()) {
+            } else if (layout.wantsKeyboard() and !layout.holdsEveryKey()) {
                 try edit(gpa, layout, clipboard, k);
             }
         },
@@ -619,6 +621,18 @@ test "a wheel the interface scrolled with does not reach the game" {
     fixture.input.apply(wheelTurned(-1));
     try fixture.feed(0);
     try testing.expectEqual(@as(f32, -1), fixture.input.wheel.y);
+}
+
+test "a wheel turned with Ctrl held is a zoom's: no list scrolls with it" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+
+    try fixture.frame(longList);
+    fixture.input.apply(pointerAt(10, 10));
+    fixture.input.apply(.{ .scroll = .{ .window = .none, .x = 0, .y = -1, .mods = .{ .control = true } } });
+    try fixture.feed(0);
+    try testing.expectEqual(@as(f32, -1), fixture.input.wheel.y);
+    try testing.expectEqual(@as(f32, 0), fixture.layout.scrollOf("list").?.position.y);
 }
 
 test "a notch scrolls the lines the system says, at the interface's scale, or a page" {

@@ -20,7 +20,7 @@
 //! says otherwise. The numbers are the app's, kept under the entity and the
 //! field's name, as a label's words are: written in a scene as the
 //! material's `params`, and from Flux as the material's own fields -
-//! `self.entity.get("Material").strength = 0.6`.
+//! `self.entity.get(Material).strength = 0.6`.
 //!
 //! A file that does not compile keeps its handle, says why in the log, and
 //! draws as though it named none, so a scene with a broken shader still

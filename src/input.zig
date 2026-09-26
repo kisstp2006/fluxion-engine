@@ -42,7 +42,7 @@ const math = @import("fluxion_math");
 
 const actions_mod = @import("actions.zig");
 const dialog = @import("dialog.zig");
-const pointer_mod = @import("pointer.zig");
+const events = @import("input_event.zig");
 
 pub const Action = actions_mod.Action;
 pub const Actions = actions_mod.Actions;
@@ -142,7 +142,7 @@ key_events_seen: usize = 0,
 /// Everything the pointer did this frame, in order: what picking hands
 /// to whatever is under it, and what a game reads for itself. See
 /// `pointerEvents`.
-pointer_events: [pointer_event_capacity]pointer_mod.InputEvent = undefined,
+pointer_events: [pointer_event_capacity]events.InputEvent = undefined,
 pointer_events_len: usize = 0,
 /// How many of them this frame's systems have seen, so one given between
 /// frames - by a test, for the hand that is not there - is the next
@@ -765,20 +765,18 @@ pub fn trackPointer(self: *Input, delta: f32) void {
     if (self.pointer_still >= velocity_forgets) self.pointer.velocity = .zero;
 }
 
-/// What the pointer did this frame, oldest first: presses, releases,
-/// wheel notches as wheel buttons, and one motion for the frame's
-/// moving. Picking hands each to whatever is under it.
-pub fn pointerEvents(self: *const Input) []const pointer_mod.InputEvent {
+/// What the pointer did this frame, oldest first: presses, releases, the
+/// wheel's turns, and one motion for the frame's moving. Picking hands
+/// each to whatever is under it.
+pub fn pointerEvents(self: *const Input) []const events.InputEvent {
     return self.pointer_events[0..self.pointer_events_len];
 }
 
-/// Which buttons are held now, as a mask. The wheel is in an event's own
-/// mask, never here.
-pub fn buttonMask(self: *const Input) pointer_mod.ButtonMask {
-    var mask: pointer_mod.ButtonMask = .none;
-    for (0..button_span) |i| {
-        if (!self.button_down.isSet(i)) continue;
-        if (pointer_mod.PointerButton.of(@enumFromInt(@as(u8, @intCast(i))))) |which| mask = mask.with(which, true);
+/// Which buttons are held now, as a mask.
+pub fn buttonMask(self: *const Input) events.ButtonMask {
+    var mask: events.ButtonMask = .none;
+    for (0..@min(button_span, platform.MouseButton.max + 1)) |i| {
+        if (self.button_down.isSet(i)) mask = mask.with(@enumFromInt(@as(u8, @intCast(i))), true);
     }
     return mask;
 }
@@ -911,7 +909,7 @@ pub fn beginFrame(self: *Input) void {
     self.key_events_seen = 0;
 
     const unseen = self.pointer_events_len - self.pointer_events_seen;
-    std.mem.copyForwards(pointer_mod.InputEvent, self.pointer_events[0..unseen], self.pointer_events[self.pointer_events_seen..self.pointer_events_len]);
+    std.mem.copyForwards(events.InputEvent, self.pointer_events[0..unseen], self.pointer_events[self.pointer_events_seen..self.pointer_events_len]);
     self.pointer_events_len = unseen;
     self.pointer_events_seen = 0;
 
@@ -1089,16 +1087,14 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 },
                 .repeat => {},
             }
-            if (b.action != .repeat) {
-                if (pointer_mod.PointerButton.of(b.button)) |which| self.pushPointer(.{ .mouse_button = .{
-                    .button = which,
-                    .pressed = b.action == .press,
-                    .double_click = b.double_click,
-                    .position = .init(self.pointer.x, self.pointer.y),
-                    .button_mask = self.buttonMask(),
-                    .mods = b.mods,
-                } });
-            }
+            if (b.action != .repeat and b.button.index() != null) self.pushPointer(.{ .mouse_button = .{
+                .button = b.button,
+                .pressed = b.action == .press,
+                .double_click = b.double_click,
+                .position = .init(self.pointer.x, self.pointer.y),
+                .buttons = self.buttonMask(),
+                .mods = b.mods,
+            } });
         },
         .cursor => |m| {
             if (self.pointer.locked) {
@@ -1120,12 +1116,15 @@ pub fn apply(self: *Input, ev: platform.Event) void {
         },
         .cursor_enter => |s| self.pointer.inside = s.value,
         .scroll => |w| {
+            self.mods = w.mods;
             self.wheel.x += @floatCast(w.x);
             self.wheel.y += @floatCast(w.y);
-            // A notch is reported as a press and a release of a wheel
-            // button.
-            if (w.y != 0) self.pushWheel(if (w.y > 0) .wheel_up else .wheel_down, @floatCast(@abs(w.y)), w.mods);
-            if (w.x != 0) self.pushWheel(if (w.x > 0) .wheel_right else .wheel_left, @floatCast(@abs(w.x)), w.mods);
+            if (w.x != 0 or w.y != 0) self.pushPointer(.{ .wheel = .{
+                .delta = .init(@floatCast(w.x), @floatCast(w.y)),
+                .position = .init(self.pointer.x, self.pointer.y),
+                .buttons = self.buttonMask(),
+                .mods = w.mods,
+            } });
         },
         .focus => |s| {
             self.focused = s.value;
@@ -1176,7 +1175,7 @@ pub fn releaseEverything(self: *Input) void {
 }
 
 /// One pointer event, dropped rather than grown, as the typed ones are.
-fn pushPointer(self: *Input, event: pointer_mod.InputEvent) void {
+fn pushPointer(self: *Input, event: events.InputEvent) void {
     if (self.pointer_events_len == self.pointer_events.len) return;
     self.pointer_events[self.pointer_events_len] = event;
     self.pointer_events_len += 1;
@@ -1191,7 +1190,7 @@ fn pushMotion(self: *Input, by: math.Vec2) void {
         if (last.* == .mouse_motion) {
             last.mouse_motion.position = at;
             last.mouse_motion.relative = last.mouse_motion.relative.add(by);
-            last.mouse_motion.button_mask = self.buttonMask();
+            last.mouse_motion.buttons = self.buttonMask();
             last.mouse_motion.mods = self.mods;
             return;
         }
@@ -1199,31 +1198,8 @@ fn pushMotion(self: *Input, by: math.Vec2) void {
     self.pushPointer(.{ .mouse_motion = .{
         .position = at,
         .relative = by,
-        .button_mask = self.buttonMask(),
+        .buttons = self.buttonMask(),
         .mods = self.mods,
-    } });
-}
-
-/// A wheel notch: the press that has the wheel's bit, and the release
-/// that has not.
-fn pushWheel(self: *Input, which: pointer_mod.PointerButton, notches: f32, mods: platform.Mods) void {
-    const at: math.Vec2 = .init(self.pointer.x, self.pointer.y);
-    const held = self.buttonMask();
-    self.pushPointer(.{ .mouse_button = .{
-        .button = which,
-        .pressed = true,
-        .factor = notches,
-        .position = at,
-        .button_mask = held.with(which, true),
-        .mods = mods,
-    } });
-    self.pushPointer(.{ .mouse_button = .{
-        .button = which,
-        .pressed = false,
-        .factor = notches,
-        .position = at,
-        .button_mask = held,
-        .mods = mods,
     } });
 }
 

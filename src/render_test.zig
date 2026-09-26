@@ -164,7 +164,7 @@ test "a script reads and writes a material's numbers as its fields" {
         \\var was = 0.0;
         \\struct Pulse {
         \\    fn ready(self) {
-        \\        const material = self.entity.get("Material");
+        \\        const material = self.entity.get(Material);
         \\        was = material.strength;
         \\        material.strength = 0.25;
         \\        material.glow = color(0.0, 1.0, 0.0, 1.0);

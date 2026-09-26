@@ -42,7 +42,7 @@ const attr = @import("attr.zig");
 const Areas = @import("areas.zig");
 const Bodies = @import("bodies.zig");
 const Picking = @import("picking.zig");
-const pointer = @import("pointer.zig");
+const InputEvent = @import("input_event.zig").InputEvent;
 const Clipboard = @import("clipboard.zig");
 const Commands = @import("commands.zig");
 const control = @import("control.zig");
@@ -4768,10 +4768,10 @@ pub const reflect_methods = .{
     .quit = .{},
     .setName = .{attr.Params{ .names = &.{ "entity", "name" } }},
     .setFreeName = .{attr.Params{ .names = &.{ "entity", "name" } }},
-    .nameOf = .{attr.Params{ .names = &.{"entity"} }},
+    .nameOf = .{ attr.Params{ .names = &.{"entity"} }, script_mod.flux.Alias{ .name = "name" } },
     .find = .{attr.Params{ .names = &.{"name"} }},
     .setParent = .{attr.Params{ .names = &.{ "entity", "parent", "keep_global" } }},
-    .parentOf = .{attr.Params{ .names = &.{"entity"} }},
+    .parentOf = .{ attr.Params{ .names = &.{"entity"} }, script_mod.flux.Alias{ .name = "parent" } },
     .hangsFrom = .{attr.Params{ .names = &.{ "entity", "ancestor" } }},
     .childCount = .{attr.Params{ .names = &.{"parent"} }},
     .childAt = .{attr.Params{ .names = &.{ "parent", "index" } }},
@@ -4792,12 +4792,12 @@ pub const reflect_methods = .{
     .removeComponentNamed = .{attr.Params{ .names = &.{ "entity", "name" } }},
     .stateNamed = .{attr.Params{ .names = &.{"state"} }},
     .setStateNamed = .{attr.Params{ .names = &.{ "state", "value" } }},
-    .saveScene = .{attr.Params{ .names = &.{ "path", "options" } }},
-    .readScene = .{attr.Params{ .names = &.{ "path", "options" } }},
-    .loadInBackground = .{attr.Params{ .names = &.{"path"} }},
+    .saveScene = .{ attr.Params{ .names = &.{ "path", "options" } }, script_mod.flux.GivesErrors{} },
+    .readScene = .{ attr.Params{ .names = &.{ "path", "options" } }, script_mod.flux.GivesErrors{} },
+    .loadInBackground = .{ attr.Params{ .names = &.{"path"} }, script_mod.flux.GivesErrors{} },
     .loadProgress = .{attr.Params{ .names = &.{"path"} }},
     .loadStatus = .{attr.Params{ .names = &.{"path"} }},
-    .finishLoad = .{attr.Params{ .names = &.{"path"} }},
+    .finishLoad = .{ attr.Params{ .names = &.{"path"} }, script_mod.flux.GivesErrors{} },
     .currentScene = .{},
     .currentSceneRoot = .{},
     .createTimer = .{attr.Params{ .names = &.{"seconds"} }},
@@ -4829,13 +4829,13 @@ pub const reflect_methods = .{
     .setInputAsHandled = .{},
     .bindAction = .{attr.Params{ .names = &.{ "name", "event" } }},
     .clearAction = .{attr.Params{ .names = &.{"name"} }},
-    .spawn = .{attr.Params{ .names = &.{"parent"} }},
+    .spawn = .{ attr.Params{ .names = &.{"parent"} }, script_mod.flux.Alias{ .name = "spawnChild" } },
     .instantiate = .{attr.Params{ .names = &.{ "scene", "parent" } }},
     .changeScene = .{attr.Params{ .names = &.{"scene"} }},
-    .readData = .{attr.Params{ .names = &.{"path"} }},
+    .readData = .{ attr.Params{ .names = &.{"path"} }, script_mod.flux.GivesErrors{} },
     .newSpriteFrames = .{},
-    .loadSpriteFrames = .{attr.Params{ .names = &.{"path"} }},
-    .saveSpriteFrames = .{attr.Params{ .names = &.{ "frames", "path" } }},
+    .loadSpriteFrames = .{ attr.Params{ .names = &.{"path"} }, script_mod.flux.GivesErrors{} },
+    .saveSpriteFrames = .{ attr.Params{ .names = &.{ "frames", "path" } }, script_mod.flux.GivesErrors{} },
     .tween = .{attr.Params{ .names = &.{"owner"} }},
     .tweenProperty = .{attr.Params{ .names = &.{ "tween", "target", "property", "to", "seconds" } }},
     .tweenInterval = .{attr.Params{ .names = &.{ "tween", "seconds" } }},
@@ -4853,7 +4853,7 @@ pub const reflect_methods = .{
     .isBusMuted = .{attr.Params{ .names = &.{"name"} }},
     .linearToDb = .{attr.Params{ .names = &.{"linear"} }},
     .dbToLinear = .{attr.Params{ .names = &.{"db"} }},
-    .nextFrame = .{},
+    .nextFrame = .{script_mod.flux.Returns{ .builtin = .signal }},
     .callDeferred = .{attr.Params{ .names = &.{"function"} }},
     .keyDown = .{attr.Params{ .names = &.{"name"} }},
     .keyAxis = .{attr.Params{ .names = &.{ "negative", "positive" } }},
@@ -4866,8 +4866,8 @@ pub const reflect_methods = .{
     .pressAction = .{attr.Params{ .names = &.{ "name", "strength" } }},
     .releaseAction = .{attr.Params{ .names = &.{"name"} }},
     .describeAction = .{attr.Params{ .names = &.{"name"} }},
-    .saveInputMap = .{attr.Params{ .names = &.{"path"} }},
-    .loadInputMap = .{attr.Params{ .names = &.{"path"} }},
+    .saveInputMap = .{ attr.Params{ .names = &.{"path"} }, script_mod.flux.GivesErrors{} },
+    .loadInputMap = .{ attr.Params{ .names = &.{"path"} }, script_mod.flux.GivesErrors{} },
     .isOnFloor = .{attr.Params{ .names = &.{ "entity", "distance" } }},
     .moveAndSlide = .{attr.Params{ .names = &.{"entity"} }},
     .moveAndCollide = .{attr.Params{ .names = &.{ "entity", "motion" } }},
@@ -4882,32 +4882,32 @@ pub const reflect_methods = .{
     .overlapPoint = .{attr.Params{ .names = &.{"point"} }},
     .addCollisionExceptionWith = .{attr.Params{ .names = &.{ "entity", "other" } }},
     .removeCollisionExceptionWith = .{attr.Params{ .names = &.{ "entity", "other" } }},
-    .setFullscreen = .{attr.Params{ .names = &.{"mode"} }},
+    .setFullscreen = .{ attr.Params{ .names = &.{"mode"} }, script_mod.flux.GivesErrors{} },
     .fullscreen = .{},
-    .toggleFullscreen = .{},
-    .setWindowTitle = .{attr.Params{ .names = &.{"title"} }},
-    .setWindowSize = .{attr.Params{ .names = &.{ "width", "height" } }},
+    .toggleFullscreen = .{script_mod.flux.GivesErrors{}},
+    .setWindowTitle = .{ attr.Params{ .names = &.{"title"} }, script_mod.flux.GivesErrors{} },
+    .setWindowSize = .{ attr.Params{ .names = &.{ "width", "height" } }, script_mod.flux.GivesErrors{} },
     .windowSize = .{},
-    .setWindowPosition = .{attr.Params{ .names = &.{ "x", "y" } }},
+    .setWindowPosition = .{ attr.Params{ .names = &.{ "x", "y" } }, script_mod.flux.GivesErrors{} },
     .windowPosition = .{},
-    .setWindowState = .{attr.Params{ .names = &.{"state"} }},
+    .setWindowState = .{ attr.Params{ .names = &.{"state"} }, script_mod.flux.GivesErrors{} },
     .windowState = .{},
-    .setVsync = .{attr.Params{ .names = &.{"enabled"} }},
+    .setVsync = .{ attr.Params{ .names = &.{"enabled"} }, script_mod.flux.GivesErrors{} },
     .vsync = .{},
     .setMaxFps = .{attr.Params{ .names = &.{"fps"} }},
     .maxFps = .{},
     .setInterfaceZoom = .{attr.Params{ .names = &.{"zoom"} }},
     .interfaceZoom = .{},
-    .setCursor = .{attr.Params{ .names = &.{"mode"} }},
+    .setCursor = .{ attr.Params{ .names = &.{"mode"} }, script_mod.flux.GivesErrors{} },
     .cursor = .{},
-    .setCustomCursor = .{ attr.Params{ .names = &.{ "image", "shape", "hotspot" } }, attr.defaults(.{ CursorShape.arrow, math.Vec2.init(0, 0) }) },
+    .setCustomCursor = .{ attr.Params{ .names = &.{ "image", "shape", "hotspot" } }, attr.defaults(.{ CursorShape.arrow, math.Vec2.init(0, 0) }), script_mod.flux.GivesErrors{} },
     .setDefaultCursorShape = .{attr.Params{ .names = &.{"shape"} }},
     .defaultCursorShape = .{},
     .currentCursorShape = .{},
-    .setClipboardText = .{attr.Params{ .names = &.{"text"} }},
-    .clipboardText = .{},
+    .setClipboardText = .{ attr.Params{ .names = &.{"text"} }, script_mod.flux.GivesErrors{} },
+    .clipboardText = .{script_mod.flux.GivesErrors{}},
     .hasClipboardText = .{},
-    .openUrl = .{attr.Params{ .names = &.{"url"} }},
+    .openUrl = .{ attr.Params{ .names = &.{"url"} }, script_mod.flux.GivesErrors{} },
 };
 
 /// Call one of the calls `reflect_methods` lists, by name, with values for
@@ -5396,8 +5396,8 @@ pub fn screenSize(self: *const App) math.Vec2 {
 }
 
 /// A new entity, with nothing on it, hanging from `parent` - or a root, for
-/// none. What a script makes things with: `app.spawn(self.entity)`, then
-/// `add("Sprite")`.
+/// none. What a script makes things with: `self.entity.spawnChild()`, or
+/// `app.spawn(null)` for a root, then `add(Sprite)`.
 pub fn spawn(self: *App, parent: ecs.Entity) !ecs.Entity {
     const made = try self.world.spawn();
     errdefer self.world.despawn(made);
@@ -5414,7 +5414,7 @@ pub fn setInputAsHandled(self: *App) void {
 /// One more input for an action: the key, mouse button or controller
 /// button an event is - what a settings menu rebinds with, from the
 /// `input` that caught the player's next press. Kept with `saveInputMap`.
-pub fn bindAction(self: *App, name: []const u8, event: script_mod.Event) !void {
+pub fn bindAction(self: *App, name: []const u8, event: InputEvent) !void {
     const binding = event.binding() orelse return error.NotAnInput;
     try self.input.actions.bind(self.gpa, name, binding);
 }
@@ -6195,15 +6195,13 @@ pub fn pointerIn(self: *App, entity: ecs.Entity) ?math.Vec2 {
 }
 
 /// A pointer event as an entity sees it: the same event, with its place in
-/// that entity's own space rather than the window's.
-pub fn localEvent(self: *App, entity: ecs.Entity, event: pointer.InputEvent) pointer.InputEvent {
-    const at = self.screenToWorld(event.position().x, event.position().y);
+/// that entity's own space rather than the window's. A key's and a
+/// controller's are as they are.
+pub fn localEvent(self: *App, entity: ecs.Entity, event: InputEvent) InputEvent {
+    const place = event.position() orelse return event;
+    const at = self.screenToWorld(place.x, place.y);
     const local = self.toLocal(entity, at) orelse return event;
-    var made = event;
-    switch (made) {
-        inline else => |*held| held.position = local,
-    }
-    return made;
+    return event.at(local);
 }
 
 /// Open the system's file dialog over the window, and say which one it is:

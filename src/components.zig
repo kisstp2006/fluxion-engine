@@ -30,7 +30,7 @@ const math = @import("fluxion_math");
 const physics = @import("fluxion_physics");
 const assets = @import("assets.zig");
 const attr = @import("attr.zig");
-const pointer = @import("pointer.zig");
+const InputEvent = @import("input_event.zig").InputEvent;
 
 /// Re-exported because a transform names the entity it hangs from.
 pub const Entity = ecs.Entity;
@@ -472,7 +472,7 @@ pub const RigidBody2D = extern struct {
     /// over. A body is picked only with `input_pickable`; see
     /// `App.physics_object_picking`.
     pub const signals = .{
-        .input_event = struct { event: pointer.InputEvent, shape: Entity },
+        .input_event = struct { event: InputEvent, shape: Entity },
         .mouse_entered = struct {},
         .mouse_exited = struct {},
         .mouse_shape_entered = struct { shape: Entity },
@@ -659,7 +659,7 @@ pub const Area2D = extern struct {
         .area_shape_exited = struct { area: Entity, area_shape: Entity, local_shape: Entity },
 
         // What the pointer did over it; see `App.physics_object_picking`.
-        .input_event = struct { event: pointer.InputEvent, shape: Entity },
+        .input_event = struct { event: InputEvent, shape: Entity },
         .mouse_entered = struct {},
         .mouse_exited = struct {},
         .mouse_shape_entered = struct { shape: Entity },

@@ -89,7 +89,7 @@ const door_script =
     \\    }
     \\    fn fixed(self, dt: float) {
     \\        steps += 1;
-    \\        self.entity.get("Counter").value += 1;
+    \\        self.entity.get(Counter).value += 1;
     \\    }
     \\    fn update(self, dt: float) {
     \\        updates += 1;
@@ -204,7 +204,7 @@ test "the tasks of an entity that dies stop where they wait" {
         \\    fn ring(self) {
         \\        await wait(0.5);
         \\        rang += 1;
-        \\        self.entity.get("Counter").value += 1;
+        \\        self.entity.get(Counter).value += 1;
         \\    }
         \\}
     );
@@ -375,12 +375,12 @@ test "a script reaches its entity's components, and a handle it keeps follows th
         \\    var kept: any = null;
         \\
         \\    fn ready(self) {
-        \\        had = self.entity.has("Counter") and !self.entity.has("Marker");
+        \\        had = self.entity.has(Counter) and !self.entity.has(Marker);
         \\        id = self.entity.uuid();
-        \\        self.kept = self.entity.get("Counter");
+        \\        self.kept = self.entity.get(Counter);
         \\        // Moves the entity to another table, and the one after it into
         \\        // its row.
-        \\        self.entity.add("Marker").on = false;
+        \\        self.entity.add(Marker).on = false;
         \\    }
         \\
         \\    fn update(self, dt: float) {
@@ -438,7 +438,7 @@ const mover_before =
     \\    var hits: int = 0;
     \\    fn update(self, dt: float) {
     \\        self.hits += 1;
-    \\        self.entity.get("Counter").value = self.hits;
+    \\        self.entity.get(Counter).value = self.hits;
     \\    }
     \\}
 ;
@@ -448,7 +448,7 @@ const mover_after =
     \\    var hits: int = 0;
     \\    fn update(self, dt: float) {
     \\        self.hits += 1;
-    \\        self.entity.get("Counter").value = self.hits * 100;
+    \\        self.entity.get(Counter).value = self.hits * 100;
     \\    }
     \\}
 ;
@@ -512,8 +512,8 @@ test "a script imports the file beside it, and calls another entity's script" {
         \\const same = @import("res://scripts/numbers.flux");
         \\struct Saver {
         \\    fn ready(self) {
-        \\        const bank = app.find("Bank").script();
-        \\        self.entity.get("Counter").value = bank.put(numbers.twice(3)) + same.twice(1);
+        \\        const bank = app.find("Bank").?.script();
+        \\        self.entity.get(Counter).value = bank.put(numbers.twice(3)) + same.twice(1);
         \\        print(app.find("Nobody") == null, self.entity.script() != null);
         \\    }
         \\}
@@ -779,7 +779,7 @@ test "a script reads what a tile says as the number or the truth it is" {
         \\        damage = app.tileDataAt(ground, vec2(20, 4), "damage");
         \\        water = app.tileData(ground, 1, 0, "water");
         \\        slow = app.tileData(ground, 1, 0, "slow");
-        \\        var cell = app.cellAt(ground, vec2(20, 4));
+        \\        var cell = app.cellAt(ground, vec2(20, 4)).?;
         \\        cell_x = cell.x;
         \\        cell_y = cell.y;
         \\        nothing = app.tileData(ground, 5, 5, "damage");
@@ -839,16 +839,16 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
         \\var me: any = null;
         \\struct Finder {
         \\    fn ready(self) {
-        \\        app.find("other").get("Transform2D").x += 1;
-        \\        name = app.nameOf(app.find("other"));
+        \\        app.find("other").?.get(Transform2D).x += 1;
+        \\        name = app.find("other").?.name();
         \\        nobody = app.find("nobody") == null;
         \\        mine = app.find("finder") == self.entity;
         \\        // A struct handed back is the script's own, which the next
         \\        // call does not write over.
-        \\        var place = app.worldTransform(app.find("other"));
+        \\        var place = app.worldTransform(app.find("other")).?;
         \\        app.nameOf(self.entity);
         \\        placed = place.x;
-        \\        var health = self.entity.get("Health");
+        \\        var health = self.entity.get(Health);
         \\        health.target = app.find("other");
         \\        parented = health.target == app.find("other");
         \\        app.setParent(self.entity, app.find("other"), false);
@@ -863,15 +863,14 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
         \\struct Point {
         \\    var x: int = 0;
         \\}
-        \\fn unparent() { app.findPath(app.find("other"), "finder").get("Health").target = null; }
-        \\fn parentOf() { return app.findPath(app.find("other"), "finder").get("Health").target; }
-        \\fn byInstance() { return app.nameOf(me); }
+        \\fn unparent() { app.findPath(app.find("other"), "finder").?.get(Health).target = null; }
+        \\fn parentOf() { return app.findPath(app.find("other"), "finder").?.get(Health).target; }
         \\fn keptAlive() { return kept.alive(); }
-        \\fn number() { return app.nameOf(5); }
-        \\fn fraction() { return app.nameOf(1.5); }
-        \\fn text() { return app.nameOf("other"); }
-        \\fn component() { return app.nameOf(app.find("finder").get("Transform2D")); }
-        \\fn stray() { return app.nameOf(Point{}); }
+        \\fn number() { const given: any = 5; return app.nameOf(given); }
+        \\fn fraction() { const given: any = 1.5; return app.nameOf(given); }
+        \\fn text() { const given: any = "other"; return app.nameOf(given); }
+        \\fn component() { const given: any = app.find("finder").?.get(Transform2D); return app.nameOf(given); }
+        \\fn stray() { const given: any = Point{}; return app.nameOf(given); }
     );
     const finder = try app.world.spawnWith(.{ Transform2D.at(0, 0), Health{}, Script.of(file) });
     try app.setName(finder, "finder");
@@ -903,15 +902,14 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
     _ = try scripts.vm.callName(module, "unparent", &.{});
     try testing.expect(app.world.get(finder, Health).?.target.isNone());
     try testing.expect((try scripts.vm.callName(module, "parentOf", &.{})).tag == .null);
-    try testing.expectEqualStrings("finder", (try scripts.vm.callName(module, "byInstance", &.{})).as(flux.object.String).bytes());
 
     // Anything else stops the script, saying what it gave.
     for ([_][2][]const u8{
-        .{ "number", "an entity is wanted here, not a number" },
-        .{ "fraction", "an entity is wanted here, not a number" },
-        .{ "text", "an entity is wanted here, not a string" },
-        .{ "component", "an entity is wanted here, not a Transform2D" },
-        .{ "stray", "an entity is wanted here, not a Point on no entity" },
+        .{ "number", "`this value` is ?Entity, not int" },
+        .{ "fraction", "`this value` is ?Entity, not float" },
+        .{ "text", "`this value` is ?Entity, not string" },
+        .{ "component", "`this value` is ?Entity, not Transform2D" },
+        .{ "stray", "`this value` is ?Entity, not Point" },
     }) |case| {
         try testing.expectError(error.Panic, scripts.vm.callName(module, case[0], &.{}));
         try testing.expectEqualStrings(case[1], scripts.vm.panic.?.message);
@@ -1278,14 +1276,14 @@ test "a script asks for the game's actions, and holds one down as a button on th
         \\var across = 0.0;
         \\struct Jumper {
         \\    fn ready(self) {
-        \\        app.pressAction("jump", 1.0) catch {};
+        \\        app.pressAction("jump", 1.0);
         \\    }
         \\    fn update(self, dt: float) {
         \\        if (app.actionJustPressed("jump")) pressed = true;
         \\        down = app.actionDown("jump");
         \\        named = app.describeAction("jump");
         \\        across = app.actionVector("ui_left", "ui_right", "ui_up", "ui_down").x;
-        \\        app.releaseAction("jump") catch {};
+        \\        app.releaseAction("jump");
         \\    }
         \\}
     );
@@ -1340,7 +1338,7 @@ test "an editor's analysis offers the project's actions inside the quotes of a c
     }
 }
 
-test "an editor's analysis knows the engine's calls: app's, an entity's, and a component's got by its name" {
+test "an editor's analysis knows the engine's calls and types: app's, an entity's, a component's got by its type, an event's" {
     const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
     defer app.destroy();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -1351,12 +1349,12 @@ test "an editor's analysis knows the engine's calls: app's, an entity's, and a c
     const source =
         \\struct Hero {
         \\    fn ready(self) {
-        \\        const sprite = self.entity.get("AnimatedSprite2D");
+        \\        const sprite = self.entity.get(AnimatedSprite2D);
         \\        sprite.play("run");
         \\        sprite.play("run", 2.0, false, 1);
-        \\        self.entity.get("Timer").start(1.0, 2);
+        \\        self.entity.get(Timer).start(1.0, 2);
         \\        app.moveAndSlide();
-        \\        app.find("Door").get("AnimatedSprite2D").playBackwards(3);
+        \\        app.find("Door").?.get(AnimatedSprite2D).playBackwards(3);
         \\    }
         \\}
     ;
@@ -1366,16 +1364,22 @@ test "an editor's analysis knows the engine's calls: app's, an entity's, and a c
     for (a.diagnostics.items.items) |d| try said.append(arena, try arena.dupe(u8, d.message));
     try testing.expectEqual(@as(usize, 4), said.items.len);
     try testing.expectEqualStrings("`play` takes 0 to 3 arguments, and is given 4", said.items[0]);
+    try testing.expectEqualStrings("`start` takes 1 argument, and is given 2", said.items[1]);
     try testing.expectEqualStrings("`moveAndSlide` takes 1 argument, and is given 0", said.items[2]);
-    try testing.expectEqualStrings("`name` is string, and is given int", said.items[3]);
+    try testing.expectEqualStrings("the argument must be string, not int", said.items[3]);
 
-    // Offered after the dot, with their signatures.
+    // Offered after the dot, with their signatures: an entity has app's
+    // calls given an entity first, under the names that fit it; an event
+    // asked with `is` has its kind's fields.
     const Case = struct { []const u8, []const u8 };
     for ([_]Case{
         .{ "fn f() { app.$ }", "moveAndSlide" },
         .{ "struct H { fn ready(self) { self.entity.$ } }", "get" },
-        .{ "struct H { fn ready(self) { self.entity.get(\"AnimatedSprite2D\").$ } }", "playBackwards" },
-        .{ "struct H { fn ready(self) { self.entity.get(\"AnimatedSprite2D\").sprite_frames.$ } }", "addAnimation" },
+        .{ "struct H { fn ready(self) { self.entity.$ } }", "globalPosition" },
+        .{ "struct H { fn ready(self) { self.entity.$ } }", "parent" },
+        .{ "struct H { fn ready(self) { self.entity.get(AnimatedSprite2D).$ } }", "playBackwards" },
+        .{ "struct H { fn ready(self) { self.entity.get(AnimatedSprite2D).sprite_frames.$ } }", "addAnimation" },
+        .{ "struct H { fn input(self, event) { if (event is KeyEvent) event.$ } }", "isActionPressed" },
     }) |case| {
         const where = std.mem.indexOfScalar(u8, case[0], '$').?;
         const text = try std.mem.concat(arena, u8, &.{ case[0][0..where], case[0][where + 1 ..] });
@@ -1388,6 +1392,24 @@ test "an editor's analysis knows the engine's calls: app's, an entity's, and a c
         };
         try testing.expect(std.mem.startsWith(u8, item.detail, "fn "));
     }
+
+    // An event's fields, once `is` says its kind; the methods the engine
+    // calls, whole, where a struct's member is written.
+    const fields = "struct H { fn input(self, event) { if (event is MouseButtonEvent) event.$ } }";
+    const at = std.mem.indexOfScalar(u8, fields, '$').?;
+    const found = try flux.service.complete(testing.allocator, arena, "hero.flux", try std.mem.concat(arena, u8, &.{ fields[0..at], fields[at + 1 ..] }), @intCast(at), app.scriptSetup());
+    for ([_][]const u8{ "button", "position", "double_click" }) |name| {
+        for (found.items) |item| {
+            if (std.mem.eql(u8, item.label, name)) break;
+        } else return error.NotOffered;
+    }
+    const hooks = "struct H {\n    fn upd$\n}\n";
+    const hook_at = std.mem.indexOfScalar(u8, hooks, '$').?;
+    const offered = try flux.service.complete(testing.allocator, arena, "hero.flux", try std.mem.concat(arena, u8, &.{ hooks[0..hook_at], hooks[hook_at + 1 ..] }), @intCast(hook_at), app.scriptSetup());
+    const update = for (offered.items) |item| {
+        if (std.mem.eql(u8, item.label, "update")) break item;
+    } else return error.NotOffered;
+    try testing.expectEqualStrings("fn update(self, dt: float) {\n        \n    }", update.insert.?);
 }
 
 test "a script connects to and awaits the engine's signals: a component's, a timer's, and the next frame" {
@@ -1406,13 +1428,13 @@ test "a script connects to and awaits the engine's signals: a component's, a tim
         \\}
         \\struct Watcher {
         \\    fn ready(self) {
-        \\        app.createTimer(0.25).timeout.connect(onTimeout);
-        \\        self.entity.get("Health").hit.connect(onHit);
+        \\        app.createTimer(0.25).get(Timer).timeout.connect(onTimeout);
+        \\        self.entity.get(Health).hit.connect(onHit);
         \\        self.wait();
         \\        self.count();
         \\    }
         \\    fn wait(self) {
-        \\        await app.createTimer(0.5).timeout;
+        \\        await app.createTimer(0.5).get(Timer).timeout;
         \\        waited = true;
         \\    }
         \\    fn count(self) {
@@ -1460,12 +1482,12 @@ test "a script writes dates in the game's culture, counts with them, reads ISO 8
         \\fn heard(hours: int) { hours_seen += hours; }
         \\struct Calendar {
         \\    fn ready(self) {
-        \\        time.setLocale("en-US");
+        \\        time.setLocale("en-US") catch {};
         \\        const d = time.utcDate(2026, 9, 25, 19, 42, 5);
         \\        formatted = d.format("yyyy-MM-dd HH:mm:ss");
         \\        named = d.format("EEEE, MMMM d");
         \\        added = d.addDays(7).addMonths(1).format("yyyy-MM-dd");
-        \\        parsed = time.parse("2026-09-25T18:00:00+02:00").toUtc().iso();
+        \\        parsed = (time.parse("2026-09-25T18:00:00+02:00") catch return).toUtc().iso();
         \\        clock_text = time.minutes(65).format();
         \\        words = time.hours(26).format("wide");
         \\        const wrong: any = time.parse("the day after") catch null;
@@ -1549,15 +1571,15 @@ test "a script makes entities and scenes, takes them out, and calls what it defe
         \\fn later() { deferred += 1; }
         \\struct Maker {
         \\    fn ready(self) {
-        \\        const child = app.spawn(self.entity) catch return;
-        \\        _ = child.add("Marker");
-        \\        app.setName(child, "made") catch {};
-        \\        made_name = app.nameOf(child);
-        \\        const crate = app.instantiate("res://crate.json", self.entity) catch return;
-        \\        crate_value = crate.get("Counter").value;
-        \\        app.callDeferred(later) catch {};
+        \\        const child = self.entity.spawnChild();
+        \\        _ = child.add(Marker);
+        \\        child.setName("made");
+        \\        made_name = child.name();
+        \\        const crate = app.instantiate("res://crate.json", self.entity);
+        \\        crate_value = crate.get(Counter).value;
+        \\        app.callDeferred(later);
         \\        deferred_then = deferred;
-        \\        child.despawn() catch {};
+        \\        child.despawn();
         \\        gone = !child.alive();
         \\    }
         \\}
@@ -1587,11 +1609,11 @@ test "a file a component holds is its path to a script, and a path given loads i
         \\var refused = "";
         \\struct Swap {
         \\    fn ready(self) {
-        \\        const script = self.entity.get("Script");
+        \\        const script = self.entity.get(Script);
         \\        before = script.source;
-        \\        const other = app.spawn(null) catch return;
-        \\        other.add("Script").source = "res://door.flux";
-        \\        after = other.get("Script").source;
+        \\        const other = app.spawn(null);
+        \\        other.add(Script).source = "res://door.flux";
+        \\        after = other.get(Script).source;
         \\    }
         \\}
     );
@@ -1700,16 +1722,16 @@ test "a script hears the player's input, takes it from the scripts after it, and
         \\var named = "";
         \\var released = 0;
         \\struct First {
-        \\    fn input(self, event: any) {
+        \\    fn input(self, event) {
         \\        if (event.isActionPressed("jump")) {
         \\            jumps += 1;
         \\            named = event.describe();
         \\            app.setInputAsHandled();
         \\        }
         \\        if (event.isActionReleased("jump")) released += 1;
-        \\        if (event.kind == "key" and event.key == "j" and event.pressed and !app.actionDown("jump")) {
+        \\        if (event is KeyEvent and event.key == .j and event.pressed and !app.actionDown("jump")) {
         \\            _ = app.clearAction("jump");
-        \\            app.bindAction("jump", event) catch {};
+        \\            app.bindAction("jump", event);
         \\        }
         \\    }
         \\}
@@ -1718,11 +1740,11 @@ test "a script hears the player's input, takes it from the scripts after it, and
         \\var heard = 0;
         \\var unheard = 0;
         \\struct Second {
-        \\    fn input(self, event: any) {
-        \\        if (event.kind == "key") heard += 1;
+        \\    fn input(self, event: InputEvent) {
+        \\        if (event is KeyEvent) heard += 1;
         \\    }
         \\    fn unhandled_input(self, event: any) {
-        \\        if (event.kind == "mouse_button" and event.pressed and event.button == "left") unheard += 1;
+        \\        if (event is MouseButtonEvent and event.pressed and event.button == .left and !event.mods.shift) unheard += 1;
         \\    }
         \\}
     );
@@ -1826,12 +1848,12 @@ test "a script gives the pointer a picture and a default shape" {
     const app = try scriptedAt(root);
     defer app.destroy();
     const file = try app.addScript("pointer.flux",
-        \\var shape = "";
+        \\var crosshair = false;
         \\struct Pointer {
         \\    fn ready(self) {
-        \\        app.setDefaultCursorShape("crosshair");
-        \\        shape = app.defaultCursorShape();
-        \\        app.setCustomCursor("res://hand.png", "pointing_hand", vec2(2, 1)) catch return;
+        \\        app.setDefaultCursorShape(.crosshair);
+        \\        crosshair = app.defaultCursorShape() == .crosshair;
+        \\        app.setCustomCursor("res://hand.png", .pointing_hand, vec2(2, 1)) catch return;
         \\        app.setCustomCursor("res://hand.png") catch return;
         \\    }
         \\}
@@ -1839,7 +1861,7 @@ test "a script gives the pointer a picture and a default shape" {
     _ = try app.world.spawnWith(.{Script.of(file)});
     _ = try app.step();
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
-    try testing.expectEqualStrings("crosshair", globalText(app, file, "shape"));
+    try testing.expect(global(app, file, "crosshair").asBool());
     const hand = app.custom_cursors[@intFromEnum(App.CursorShape.pointing_hand)].?;
     try testing.expectEqual(@as(u32, 2), hand.hot_x);
     try testing.expect(app.custom_cursors[@intFromEnum(App.CursorShape.arrow)] != null);
@@ -1915,9 +1937,9 @@ test "a script keeps its saves in the player's files: added to, copied, told of,
         \\
         \\        const settings = files.config("user://settings.cfg") catch return;
         \\        fresh = settings.get("audio", "music", 0.8);
-        \\        settings.set("audio", "music", 0.25) catch return;
-        \\        settings.set("display", "window", vec2(1280, 720)) catch return;
-        \\        settings.set("display", "tint", color(1, 0, 0)) catch return;
+        \\        settings.set("audio", "music", 0.25);
+        \\        settings.set("display", "window", vec2(1280, 720));
+        \\        settings.set("display", "tint", color(1, 0, 0));
         \\        settings.save() catch return;
         \\        const again = files.config("user://settings.cfg") catch return;
         \\        volume = again.get("audio", "music", 1.0);
@@ -1940,7 +1962,7 @@ test "a script keeps its saves in the player's files: added to, copied, told of,
         \\        kept = kept + " " + str(later.gold);
         \\
         \\        refused = files.writeData(save, "res://slot.data") catch |e| e.name;
-        \\        local = files.localPath(files.globalPath("user://slot.data") catch "") catch "";
+        \\        local = files.localPath(files.globalPath("user://slot.data"));
         \\    }
         \\}
     );
@@ -1989,7 +2011,6 @@ test "a script makes, changes and saves a picture, and draws it as a texture" {
     app.project.user_root = try std.fs.path.join(testing.allocator, &.{ root, "saves" });
     const file = try app.addScript("painter.flux",
         \\var white = 0.0;
-        \\var outside = "";
         \\var part = 0;
         \\var grown = 0;
         \\var saved = false;
@@ -1998,21 +2019,20 @@ test "a script makes, changes and saves a picture, and draws it as a texture" {
         \\var drawn = "";
         \\struct Painter {
         \\    fn ready(self) {
-        \\        const picture = images.new(4, 3, color(0, 0, 0, 1)) catch return;
-        \\        picture.setPixel(1, 2, color(1, 1, 1)) catch return;
-        \\        white = (picture.getPixel(1, 2) catch return).r;
-        \\        outside = picture.setPixel(9, 9, color(1, 1, 1)) catch |e| e.name;
-        \\        const corner = picture.region(0, 1, 2, 5) catch return;
+        \\        const picture = images.new(4, 3, color(0, 0, 0, 1));
+        \\        picture.setPixel(1, 2, color(1, 1, 1));
+        \\        white = picture.getPixel(1, 2).r;
+        \\        const corner = picture.region(0, 1, 2, 5);
         \\        part = corner.width() * 10 + corner.height();
-        \\        picture.blend(corner, 2, 0) catch return;
-        \\        picture.resize(8, 6, false) catch return;
+        \\        picture.blend(corner, 2, 0);
+        \\        picture.resize(8, 6, false);
         \\        grown = picture.width();
         \\        picture.savePng("user://picture.png") catch return;
         \\        const again = images.read("user://picture.png") catch return;
-        \\        saved = again.width() == 8 and (again.getPixel(3, 5) catch return).g == 1.0;
+        \\        saved = again.width() == 8 and again.getPixel(3, 5).g == 1.0;
         \\        refused = picture.savePng("res://picture.png") catch |e| e.name;
         \\        named = images.toTexture(picture) catch return;
-        \\        const sprite = self.entity.add("Sprite");
+        \\        const sprite = self.entity.add(Sprite);
         \\        sprite.texture = named;
         \\        drawn = sprite.texture;
         \\    }
@@ -2023,13 +2043,24 @@ test "a script makes, changes and saves a picture, and draws it as a texture" {
 
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
     try testing.expectEqual(@as(f64, 1), global(app, file, "white").asFloat());
-    try testing.expectEqualStrings("OutsideImage", globalText(app, file, "outside"));
     try testing.expectEqual(@as(i64, 22), global(app, file, "part").asInt());
     try testing.expectEqual(@as(i64, 8), global(app, file, "grown").asInt());
     try testing.expect(global(app, file, "saved").asBool());
     try testing.expectEqualStrings("NotAllowed", globalText(app, file, "refused"));
     try testing.expectEqualStrings("image://1", globalText(app, file, "named"));
     try testing.expectEqualStrings("image://1", globalText(app, file, "drawn"));
+
+    // A pixel outside the picture is a mistake: it stops the script.
+    const outside = try app.addScript("outside.flux",
+        \\struct Outside {
+        \\    fn ready(self) {
+        \\        images.new(1, 1).setPixel(9, 9, color(1, 1, 1));
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(outside)});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), app.scripts.?.failures);
 }
 
 test "a script asks the player for a file of theirs, hears the files let go over the window, and reads them" {
@@ -2064,7 +2095,8 @@ test "a script asks the player for a file of theirs, hears the files let go over
         \\    fn ready(self) {{
         \\        before = files.readText("{s}") catch |e| e.name;
         \\        files.dropped().connect(fn(paths: any) {{ heard = files.readText(paths[0]) catch |e| e.name; }});
-        \\        const paths = await files.choose("A note", ["txt", ".md"]);
+        \\        const asked = files.choose("A note", ["txt", ".md"]) catch return;
+        \\        const paths = await asked;
         \\        chosen = paths.len;
         \\        text = files.readText(paths[0]) catch |e| e.name;
         \\    }}
@@ -2098,9 +2130,9 @@ test "a script moves a property with a tween" {
     const file = try app.addScript("mover.flux",
         \\struct Mover {
         \\    fn ready(self) {
-        \\        const t = app.tween(self.entity) catch return;
-        \\        app.tweenProperty(t, self.entity, "Transform2D.x", 10.0, 0.5) catch return;
-        \\        app.tweenProperty(t, self.entity, "Transform2D.x,y", vec2(20, 30), 0.5) catch return;
+        \\        const t = self.entity.tween();
+        \\        t.tweenProperty(self.entity, "Transform2D.x", 10.0, 0.5);
+        \\        t.tweenProperty(self.entity, "Transform2D.x,y", vec2(20, 30), 0.5);
         \\    }
         \\}
     );
@@ -2163,7 +2195,7 @@ test "every call a script can make names what it takes" {
     };
     var walk: Walk = .{};
     defer walk.seen.deinit(gpa);
-    inline for (.{ App, script.FileAccess, script.TimeAccess, script.ImagesAccess, script.ImageRef, script.ConfigRef, script.FramesRef, script.ClockRef, script.EntityRef, script.Event }) |T| {
+    inline for (.{ App, script.FileAccess, script.TimeAccess, script.ImagesAccess, script.ImageRef, script.ConfigRef, script.FramesRef, script.ClockRef, script.EntityRef, @import("input_event.zig").InputEvent }) |T| {
         try walk.reach(reflect.typeOf(T));
     }
     for (app.scene_components.entries.items) |entry| try walk.reach(entry.type);
@@ -2173,7 +2205,7 @@ test "every call a script can make names what it takes" {
     var i: usize = 0;
     while (i < walk.seen.items.len) : (i += 1) {
         const t = walk.seen.items[i];
-        if (t.kind == .@"struct") for (t.fields()) |f| try walk.reach(f.type);
+        if (t.kind == .@"struct" or t.kind == .@"union") for (t.fields()) |f| try walk.reach(f.type);
         for (t.methods.slice()) |m| {
             const f = m.type.info.function;
             const all = if (m.takesSelf(t)) f.params.slice()[1..] else f.params.slice();
