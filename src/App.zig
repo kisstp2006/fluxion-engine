@@ -6360,11 +6360,19 @@ fn drawLayersInto(self: *App, into: rhi.RenderTarget, frame: stretch_mod.Frame, 
 /// On OpenGL a texture drawn into is read bottom row first, so shown in the
 /// interface it wants its `source` turned over; see `drawnUpsideDown`.
 pub fn drawWorld(self: *App, into: rhi.Texture, view: View) !void {
+    try self.drawWorldWithoutDebug(into, view);
+    try self.drawDebugOverlay(into, view);
+}
+
+/// `drawWorld` without the `debug` lines over it, for an editor that draws
+/// its interface preview over the world first and its marks last, with
+/// `drawDebugOverlay`: a material there that reads the screen reads the
+/// game's picture, not a selection's outline or a camera's frame.
+pub fn drawWorldWithoutDebug(self: *App, into: rhi.Texture, view: View) !void {
     self.sprites.time = @floatCast(self.interface.seconds);
     try self.drawViews();
     const clear = try self.drawDebugUnder(.{ .texture = into }, view);
     try self.sprites.draw(self.gpa, &self.world, &self.assets, &self.tile_sets, &self.snapshots, &self.inherited, .{ .texture = into }, view, clear, self.time.alpha());
-    if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
 }
 
 /// The size the game is made at: the project's `display.width` and
@@ -6432,7 +6440,8 @@ pub fn drawControlPreview(self: *App, into: rhi.Texture, view: View, editing: []
     try self.control_nodes.preview(self, into, view, view.width, view.height, self.interface.faces, editing);
 }
 
-/// Draw this frame's world-space debug lines over an editor preview.
+/// Draw this frame's world-space debug lines over an editor preview: after
+/// `drawWorldWithoutDebug` and `drawControlPreview`.
 pub fn drawDebugOverlay(self: *App, into: rhi.Texture, view: View) !void {
     if (self.debug_visible) try self.drawDebug(.{ .texture = into }, view);
 }

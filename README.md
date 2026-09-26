@@ -1159,6 +1159,9 @@ _ = try world.spawnWith(.{
   only the background and the interface, and a texture is the one place the
   world appears. Drawn into on OpenGL, a texture comes out with its bottom row
   first, and `app.drawnUpsideDown()` says when a picture of it wants turning.
+  An editor draws with `app.drawWorldWithoutDebug`, then its interface
+  preview, then `app.drawDebugOverlay`: a material over the screen reads the
+  game's picture then, not the editor's marks.
   `app.drawControlPreview(texture, view, picked)` draws the interface over
   it as the game lays it out: at `gameSize()` - the project's
   `display.width` and `height` - with the screen's top left at the world's
