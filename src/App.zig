@@ -4983,7 +4983,7 @@ pub const reflect_methods = .{
     .dbToLinear = .{attr.Params{ .names = &.{"db"} }},
     .nextFrame = .{script_mod.flux.Returns{ .builtin = .signal }},
     .callDeferred = .{attr.Params{ .names = &.{"function"} }},
-    .keyDown = .{attr.Params{ .names = &.{"name"} }},
+    .keyDown = .{attr.Params{ .names = &.{"key"} }},
     .keyAxis = .{attr.Params{ .names = &.{ "negative", "positive" } }},
     .actionDown = .{attr.Params{ .names = &.{"name"} }},
     .actionJustPressed = .{attr.Params{ .names = &.{"name"} }},
