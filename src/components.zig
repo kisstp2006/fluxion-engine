@@ -31,6 +31,7 @@ const physics = @import("fluxion_physics");
 const assets = @import("assets.zig");
 const attr = @import("attr.zig");
 const InputEvent = @import("input_event.zig").InputEvent;
+const MouseButton = @import("fluxion_platform").MouseButton;
 
 /// Re-exported because a transform names the entity it hangs from.
 pub const Entity = ecs.Entity;
@@ -477,6 +478,9 @@ pub const RigidBody2D = extern struct {
         .mouse_exited = struct {},
         .mouse_shape_entered = struct { shape: Entity },
         .mouse_shape_exited = struct { shape: Entity },
+        .pressed = struct { button: MouseButton },
+        .released = struct { button: MouseButton },
+        .clicked = struct { button: MouseButton },
     };
 
     pub const reflect_name = "RigidBody2D";
@@ -621,11 +625,14 @@ pub const CharacterBody2D = extern struct {
 };
 
 /// A place that tells what is in it, and pushes nothing. A trigger, a
-/// pickup, a hurtbox, a door's threshold.
+/// pickup, a hurtbox, a door's threshold - and a thing in the world the
+/// pointer can go onto, leave and press, with no interface at all: a lever,
+/// a card on a table.
 ///
 /// ```zig
-/// const trap = try world.spawnWith(.{ Transform2D.at(100, 0), Area2D{}, Collider2D.box(32, 32) });
+/// const trap = try world.spawnWith(.{ Transform2D.at(100, 0), Area2D{}, Collider2D.rectangle(32, 32) });
 /// try app.signal(trap, Area2D, .body_entered).connect(.method(door, "_on_body_entered"), .{});
+/// try app.signal(trap, Area2D, .clicked).connect(.method(door, "_on_trap_clicked"), .{});
 /// ```
 ///
 /// Its shapes are its own `Collider2D` and the ones hanging from it, every
@@ -644,6 +651,11 @@ pub const Area2D = extern struct {
     monitorable: bool = true,
     /// Whether the pointer can pick it; true for an area by default.
     input_pickable: bool = true,
+    /// Whether the pointer is over it now, and whether a mouse button went
+    /// down on it and is not up yet: what the game draws it by, as a
+    /// button's. Read-only, and never saved.
+    hovered: bool = false,
+    held: bool = false,
 
     /// What it says. `body` is the entity of what came in - the collider's
     /// `App.collisionObjectOf` - and `local_shape` the collider of this
@@ -664,6 +676,12 @@ pub const Area2D = extern struct {
         .mouse_exited = struct {},
         .mouse_shape_entered = struct { shape: Entity },
         .mouse_shape_exited = struct { shape: Entity },
+        // A button down on it; up again after one went down on it, wherever
+        // the pointer is then; and up over it after going down on it - a
+        // click, as on a button.
+        .pressed = struct { button: MouseButton },
+        .released = struct { button: MouseButton },
+        .clicked = struct { button: MouseButton },
     };
 
     pub const reflect_name = "Area2D";
@@ -671,6 +689,8 @@ pub const Area2D = extern struct {
         .monitoring = .{attr.Doc{ .text = "Whether it says what is in it" }},
         .monitorable = .{attr.Doc{ .text = "Whether other areas see it" }},
         .input_pickable = .{attr.Doc{ .text = "Whether the pointer can pick it" }},
+        .hovered = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "Whether the pointer is over it" } },
+        .held = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "Whether a mouse button went down on it and is not up yet" } },
     };
 };
 

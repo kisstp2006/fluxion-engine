@@ -1877,8 +1877,8 @@ if (app.hasOverlappingBodies(door)) open(app, door);
 - **An entity is an area or a body, not both.** One with an `Area2D` and a
   `RigidBody2D` is a body, its area does nothing, and the log says so once.
 - **An area has no `priority`, no gravity or damping overrides and no audio
-  bus**: this is what overlaps, not a place that changes physics.
-  `input_pickable` is here and does nothing yet; picking comes next.
+  bus**: this is what overlaps, not a place that changes physics. What the
+  pointer does over it is the next part.
 
 ### 🖱️ Picking: what the pointer is on
 
@@ -1900,6 +1900,29 @@ fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.En
 }
 ```
 
+```flux
+struct Lever {
+    fn ready(self) {
+        const area = self.entity.get(Area2D);
+        area.mouse_entered.connect(fn() { print("over the lever"); });
+        area.clicked.connect(fn(button: MouseButton) { if (button == .left) pull(); });
+    }
+    fn update(self, dt: float) {
+        self.entity.get(Sprite).tint = if (self.entity.get(Area2D).held) color("gray") else color("white");
+    }
+}
+```
+
+- **A thing in the world the pointer goes onto, leaves and presses, with no
+  interface at all**: an `Area2D` with a `Collider2D` - a lever, a card on a
+  table, a door in a point-and-click room.
+- **`pressed`, `released` and `clicked`**, each with the button, as a
+  button says them: down on it; up again - wherever the pointer is then, so
+  one pressed never stays held; and up over it after going down on it.
+  `input_event` still carries every press, release, wheel turn and motion.
+- **`hovered` and `held`** on the area say the same for drawing it:
+  read-only, and never saved in a scene.
+
 - **Once a frame, after the `.input` stage and before the first fixed step.**
   A game's own `.input` system sees the pointer first and can keep it with
   `app.input.setAsHandled()`; picking then does nothing at all. It does not
@@ -1907,8 +1930,9 @@ fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.En
 - **What can be picked** is an `Area2D` or a `RigidBody2D` with
   `input_pickable` - true on an area and false on a body -
   through a collider that holds the point, is on a layer (a `collision_layer`
-  of nought is never picked, and there is no picking mask), and whose object,
-  if it is drawn at all, is visible. A lone `Collider2D`, which is its own
+  of nought is never picked, and there is no picking mask), and whose object
+  is visible - its `Sprite`, and its `Appearance` and what it hangs from, as
+  they are drawn. A lone `Collider2D`, which is its own
   static body, is not a collision object to pick: give it an `Area2D` or a
   static body with the flag.
 - **Every pointer event of the frame goes to it, in order**: presses,
@@ -1916,14 +1940,16 @@ fn onLampInput(app: *fx.App, self: fx.Entity, event: fx.InputEvent, shape: fx.En
   moving. `app.input.pointerEvents()`
   is the same list, for a game that would rather read it itself, and
   `app.input.buttonMask()` says what is held.
-- **What is on top hears first**: higher `Sprite.layer`, then higher
+- **What is on top hears first**: the higher layer it is drawn on - its
+  `Sprite.layer` with its `Appearance.z` and what it inherits - then higher
   `Sprite.order`, then the later entity. It sorts unless
   `app.physics_object_picking_sort` is false.
 - **Each shape under the point hears**, so an object with two
   colliders under the pointer hears twice, with `shape` saying which. With
   `app.physics_object_picking_first_only` only the first hears.
-- **A handler stops the rest** by calling `app.input.setAsHandled()`: the
-  objects under it hear nothing of that event.
+- **A handler stops the rest** by calling `app.input.setAsHandled()` - a
+  script's by `app.setInputAsHandled()` - and the objects under it hear
+  nothing of that event.
   The handlers run as each object is told, so the next one sees it.
 - **`mouse_entered` and `mouse_exited`** come with the pointer, and
   `mouse_shape_entered` and `mouse_shape_exited` for each collider. Hover is

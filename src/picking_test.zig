@@ -12,7 +12,10 @@ const math = @import("fluxion_math");
 
 const App = @import("App.zig");
 const components = @import("components.zig");
+const inherited = @import("inherited.zig");
+const script = @import("script.zig");
 const InputEvent = @import("input_event.zig").InputEvent;
+const MouseButton = @import("fluxion_platform").MouseButton;
 
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;
@@ -30,7 +33,7 @@ const Heard = struct {
     /// Whether the next `_pick` handler takes the pointer.
     var stops = false;
 
-    const Kind = enum { picked, entered, exited, shape_entered, shape_exited };
+    const Kind = enum { picked, entered, exited, shape_entered, shape_exited, pressed, released, clicked };
     const Event = struct {
         kind: Kind,
         object: Entity,
@@ -83,6 +86,15 @@ const Heard = struct {
     fn shapeExited(_: *App, self: Entity, shape: Entity) !void {
         note(.{ .kind = .shape_exited, .object = self, .shape = shape });
     }
+    fn pressed(_: *App, self: Entity, button: MouseButton) !void {
+        if (button == .left) note(.{ .kind = .pressed, .object = self });
+    }
+    fn released(_: *App, self: Entity, button: MouseButton) !void {
+        if (button == .left) note(.{ .kind = .released, .object = self });
+    }
+    fn clicked(_: *App, self: Entity, button: MouseButton) !void {
+        if (button == .left) note(.{ .kind = .clicked, .object = self });
+    }
 };
 
 fn headless() !*App {
@@ -93,6 +105,9 @@ fn headless() !*App {
     try app.addMethod("_out", Heard.exited);
     try app.addMethod("_shape_in", Heard.shapeEntered);
     try app.addMethod("_shape_out", Heard.shapeExited);
+    try app.addMethod("_down", Heard.pressed);
+    try app.addMethod("_up", Heard.released);
+    try app.addMethod("_click", Heard.clicked);
     _ = try app.world.spawnWith(.{ Transform2D.at(0, 0), Camera2D{} });
     Heard.reset();
     return app;
@@ -200,6 +215,135 @@ test "a click through a camera that is moved, zoomed and turned lands where it l
     _ = try app.step();
     try testing.expectEqual(@as(usize, 1), Heard.count(.picked));
     try testing.expectEqual(@as(usize, 1), Heard.count(.exited));
+}
+
+test "an area is pressed, let go and clicked as a button is, and says whether it is hovered and held" {
+    const app = try headless();
+    defer app.destroy();
+    const lever = try app.world.spawnWith(.{ Transform2D.at(50, 20), Area2D{}, Collider2D.rectangle(20, 20) });
+    try app.signal(lever, Area2D, .pressed).connect(.method(lever, "_down"), .{});
+    try app.signal(lever, Area2D, .released).connect(.method(lever, "_up"), .{});
+    try app.signal(lever, Area2D, .clicked).connect(.method(lever, "_click"), .{});
+    const area = struct {
+        fn of(a: *App, e: Entity) *Area2D {
+            return a.world.get(e, Area2D).?;
+        }
+    }.of;
+
+    move(app, .init(50, 20));
+    _ = try app.step();
+    try testing.expect(area(app, lever).hovered and !area(app, lever).held);
+
+    // Down and up over it: a click.
+    click(app, .init(50, 20), true);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Heard.count(.pressed));
+    try testing.expect(area(app, lever).held);
+    click(app, .init(50, 20), false);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Heard.count(.released));
+    try testing.expectEqual(@as(usize, 1), Heard.count(.clicked));
+    try testing.expect(!area(app, lever).held);
+
+    // Down on it and up somewhere else: let go, not clicked - and it knows
+    // the pointer left while the button was down.
+    click(app, .init(50, 20), true);
+    _ = try app.step();
+    move(app, .init(-150, 0));
+    _ = try app.step();
+    try testing.expect(!area(app, lever).hovered and area(app, lever).held);
+    click(app, .init(-150, 0), false);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 2), Heard.count(.released));
+    try testing.expectEqual(@as(usize, 1), Heard.count(.clicked));
+    try testing.expect(!area(app, lever).held);
+
+    // Up where nothing is picked at all - the pointer out of the window -
+    // it is still let go.
+    click(app, .init(50, 20), true);
+    _ = try app.step();
+    app.input.pointer.inside = false;
+    click(app, .init(50, 20), false);
+    app.input.pointer.inside = false;
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 3), Heard.count(.released));
+    try testing.expect(!area(app, lever).held and !area(app, lever).hovered);
+}
+
+test "an area under something hidden - itself or what it hangs from - is not there to pick" {
+    const app = try headless();
+    defer app.destroy();
+    const holder = try app.world.spawnWith(.{ Transform2D.at(0, 0), inherited.Appearance{ .visible = false } });
+    const inside = try app.world.spawnWith(.{ Transform2D.at(0, 0), Area2D{}, Collider2D.rectangle(30, 30) });
+    try app.setParent(inside, holder, false);
+    try watch(app, inside);
+
+    click(app, .init(0, 0), true);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), Heard.count(.picked));
+
+    app.world.get(holder, inherited.Appearance).?.visible = true;
+    click(app, .init(0, 0), true);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Heard.count(.picked));
+}
+
+test "a script hears an area pressed and clicked, and taking the pointer keeps it from the one under" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 400, .height = 200, .frame_time = 1.0 / 60.0 });
+    defer app.destroy();
+    try app.useScripts(.{});
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 0), Camera2D{} });
+    const file = try app.addScript("lever.flux",
+        \\var clicks = 0;
+        \\var presses = 0;
+        \\var entered = 0;
+        \\var lit = false;
+        \\struct Lever {
+        \\    fn ready(self) {
+        \\        const area = self.entity.get(Area2D);
+        \\        area.pressed.connect(fn(button: MouseButton) { if (button == .left) presses += 1; });
+        \\        area.clicked.connect(fn(button: MouseButton) { clicks += 1; });
+        \\        area.mouse_entered.connect(fn() { entered += 1; });
+        \\    }
+        \\    fn update(self, dt: float) {
+        \\        lit = self.entity.get(Area2D).hovered;
+        \\    }
+        \\}
+    );
+    // One over the other, and the one on top takes the pointer.
+    const under = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 1 }, Area2D{}, Collider2D.rectangle(30, 30), script.Script.of(file) });
+    _ = under;
+    const over = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .layer = 3 }, Area2D{}, Collider2D.rectangle(30, 30) });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+
+    click(app, .init(0, 0), true);
+    _ = try app.step();
+    click(app, .init(0, 0), false);
+    _ = try app.step();
+    _ = try app.step();
+    const vm = app.scripts.?.vm;
+    const module = app.scripts.?.moduleOf(file).?;
+    try testing.expectEqual(@as(i64, 1), vm.get(module, "presses").?.asInt());
+    try testing.expectEqual(@as(i64, 1), vm.get(module, "clicks").?.asInt());
+    try testing.expectEqual(@as(i64, 1), vm.get(module, "entered").?.asInt());
+    try testing.expect(vm.get(module, "lit").?.asBool());
+
+    // The one on top takes it now: the one under hears no press.
+    const taker = try app.addScript("taker.flux",
+        \\struct Taker {
+        \\    fn ready(self) {
+        \\        self.entity.get(Area2D).input_event.connect(fn(event: InputEvent, shape: Entity) { app.setInputAsHandled(); });
+        \\    }
+        \\}
+    );
+    try app.world.add(over, script.Script.of(taker));
+    _ = try app.step();
+    click(app, .init(0, 0), true);
+    _ = try app.step();
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 1), vm.get(module, "presses").?.asInt());
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
 }
 
 test "what is drawn over the other is picked first, and first_only stops after it" {

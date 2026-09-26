@@ -5571,6 +5571,9 @@ pub fn spawn(self: *App, parent: ecs.Entity) !ecs.Entity {
 /// scripts after it do not hear it, nor does any `unhandled_input`.
 pub fn setInputAsHandled(self: *App) void {
     if (self.scripts) |scripts| scripts.input_handled = true;
+    // And from an object's `input_event`, the objects under it do not hear
+    // it either.
+    self.picking.taken = true;
 }
 
 /// One more input for an action: the key, mouse button or controller
