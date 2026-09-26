@@ -43,6 +43,7 @@ const App = @import("../App.zig");
 const actions = @import("../actions.zig");
 const audio = @import("../audio.zig");
 const attr = @import("../attr.zig");
+const flux = @import("fluxion_script");
 const Color = @import("../color.zig").Color;
 const settings_file = @import("../settings_file.zig");
 const stretch = @import("../stretch.zig");
@@ -287,6 +288,18 @@ pub const Internationalization = struct {
     };
 };
 
+/// How the game's scripts are compiled.
+pub const Scripting = struct {
+    /// What the compiler makes of an error nothing handles - a value that
+    /// may be one used as what it would be, no `try`, no `catch`. See
+    /// `flux.Vm.Unhandled`.
+    unhandled_errors: flux.Vm.Unhandled = .warn,
+
+    pub const reflect_fields = .{
+        .unhandled_errors = .{attr.Doc{ .text = "An error nothing handles, no try and no catch: strict refuses the script; warn takes it and says so, quiet says nothing. Taken, the error is passed on where the function returns errors, and elsewhere the script stops if it is one." }},
+    };
+};
+
 /// How the game's sound is mixed. See `audio.zig`.
 pub const Audio = struct {
     /// The buses sound is mixed on, each into the one it sends to, and all
@@ -340,6 +353,7 @@ pub const Settings = struct {
     layer_names: LayerNames = .{},
     gui: Gui = .{},
     internationalization: Internationalization = .{},
+    scripting: Scripting = .{},
     input: InputMap = .{},
     /// The memory the text above is kept in, and the file's keys this build
     /// has no section for.

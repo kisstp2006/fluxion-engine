@@ -2564,7 +2564,11 @@ struct Door {
   `files` reads under `res://` and `user://`, and writes under `user://`
   only. Any other path is `error.NotAllowed`, so a script neither reads the
   player's documents nor breaks the game it came with. A call that fails
-  gives an error to `catch`. Its calls:
+  gives an error to `catch`; one nothing handles is taken as the project's
+  `scripting.unhandled_errors` says - `warn` by default: a warning, and the
+  script stopped if it is one (or the error passed on, where the function
+  returns errors); `strict` refuses the script, `quiet` says nothing. Its
+  calls:
   - `readText(path)`, `writeText(path, text)`, `appendText(path, text)`,
     `exists`, `isDir`, `makeDir`, `list`, `remove`;
   - `copy(from, to)` and `move(from, to)`, which make the folders they go

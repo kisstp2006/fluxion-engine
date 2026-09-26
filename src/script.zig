@@ -3477,6 +3477,9 @@ pub const Given = struct { app: flux.Value, files: flux.Value, time: flux.Value,
 /// the calls an entity has of `app`'s, what its components have beside
 /// their fields, the methods the engine calls and the annotations it reads.
 pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
+    // The project says how strict the compiler is, for the game and for an
+    // editor's analyses alike.
+    vm.options.unhandled_errors = if (app.project.settings) |s| s.scripting.unhandled_errors else (Project.Settings{}).scripting.unhandled_errors;
     vm.options.host_types = &host_types;
     vm.options.host_member = hostMember;
     vm.options.host_set_member = hostSetMember;

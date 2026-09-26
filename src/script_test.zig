@@ -2256,3 +2256,28 @@ test "every call a script can make names what it takes" {
         return error.UnnamedParameters;
     }
 }
+
+test "the project says how strict the compiler is with an error nothing handles: a warning unless it asks for strict" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    const source =
+        \\struct Reader {
+        \\    fn ready(self) {
+        \\        print(int("x") + 1);
+        \\    }
+        \\}
+    ;
+    {
+        const a = try flux.service.Analysis.init(testing.allocator, "reader.flux", source, app.scriptSetup());
+        defer a.deinit();
+        try testing.expectEqual(@as(u32, 0), a.diagnostics.errors);
+        try testing.expectEqual(@as(u32, 1), a.diagnostics.warnings);
+    }
+    app.project.settings = .{ .scripting = .{ .unhandled_errors = .strict } };
+    defer app.project.settings = null;
+    {
+        const a = try flux.service.Analysis.init(testing.allocator, "reader.flux", source, app.scriptSetup());
+        defer a.deinit();
+        try testing.expectEqual(@as(u32, 1), a.diagnostics.errors);
+    }
+}
