@@ -375,7 +375,7 @@ fn syncRigid(self: *Bodies, app: *App) !void {
         for (chunk.entities, chunk.slice(Transform2D), chunk.slice(RigidBody2D)) |e, place, rigid| {
             const link = &self.bodies.items[e.index];
             if (link.entity.eql(e) and link.rigid != null and link.rigid.?.type == rigid.type) {
-                update(app, link, place, rigid);
+                update(app, link, place, rigid, false);
             } else {
                 const at = placed(app, e, place) orelse continue;
                 try self.make(app, link, e, place, at, rigid);
@@ -386,11 +386,11 @@ fn syncRigid(self: *Bodies, app: *App) !void {
     }
 }
 
-fn update(app: *App, link: *BodyLink, place: Transform2D, rigid: RigidBody2D) void {
+fn update(app: *App, link: *BodyLink, place: Transform2D, rigid: RigidBody2D, follows_parent: bool) void {
     const body = app.physics.body(link.body) orelse return;
     const was = link.rigid.?;
     const parent = hierarchy.parentOf(&app.world, link.entity);
-    if (moved(link.transform, place) or !link.parent.eql(parent) or (rigid.type == .static and !parent.isNone())) {
+    if (moved(link.transform, place) or !link.parent.eql(parent) or ((rigid.type == .static or follows_parent) and !parent.isNone())) {
         if (placed(app, link.entity, place)) |at| {
             if (!std.meta.eql(at, link.placed)) body.setTransform(.init(at.x, at.y), at.rotation);
             link.placed = at;
@@ -557,7 +557,7 @@ fn syncCharacters(self: *Bodies, app: *App) !void {
             const character: RigidBody2D = .{ .type = .kinematic };
             const link = &self.bodies.items[e.index];
             if (link.entity.eql(e) and link.rigid != null and link.rigid.?.type == .kinematic) {
-                update(app, link, place, character);
+                update(app, link, place, character, false);
             } else {
                 const at = placed(app, e, place) orelse continue;
                 try self.make(app, link, e, place, at, character);
@@ -597,7 +597,7 @@ fn syncAreas(self: *Bodies, app: *App) !void {
             const area: RigidBody2D = .{ .type = .kinematic };
             const link = &self.bodies.items[e.index];
             if (link.entity.eql(e) and link.rigid != null and link.rigid.?.type == .kinematic) {
-                update(app, link, place, area);
+                update(app, link, place, area, true);
             } else {
                 const at = placed(app, e, place) orelse continue;
                 try self.make(app, link, e, place, at, area);
@@ -1205,6 +1205,26 @@ test "a ray finds what it hits first, and a point what is under it" {
     var found: [4]Entity = undefined;
     try testing.expectEqual(@as(usize, 2), app.overlapBox(.init(40, -10), .init(110, 10), &found).len);
     try testing.expectEqual(@as(usize, 1), app.overlapBox(.init(40, -10), .init(110, 10), found[0..1]).len);
+}
+
+test "an area follows a moving parent" {
+    const app = try headless(1.0 / 60.0);
+    defer app.destroy();
+
+    const carrier = try app.world.spawnWith(.{Transform2D.at(20, 0)});
+    const button = try app.world.spawnWith(.{
+        Transform2D.at(5, 0),
+        components.Parent.of(carrier),
+        Area2D{},
+        Collider2D.rectangle(4, 4),
+    });
+    try app.syncBodies();
+    try testing.expect(app.overlapPoint(.init(25, 0)).?.eql(button));
+
+    app.world.get(carrier, Transform2D).?.x = 100;
+    try app.syncBodies();
+    try testing.expect(app.overlapPoint(.init(25, 0)) == null);
+    try testing.expect(app.overlapPoint(.init(105, 0)).?.eql(button));
 }
 
 test "a collider hanging from a body is part of that body" {
