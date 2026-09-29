@@ -27,7 +27,9 @@
 //! it gives none, as a `Collider2D` is - and by the solid tiles of a
 //! `TileMap` with `light_occlusion`. What an occluder hides of a light is
 //! multiplied by its `shadow_color`: black, and nothing of the light gets
-//! there. An occluder's own face toward the light is lit.
+//! there. An occluder's own face toward the light is lit. A light with a
+//! `shadow_softness` is as wide as that, and its shadows' edges soften the
+//! farther they fall.
 //!
 //! The lights are the `render_layers` of their `Appearance`: a camera whose
 //! `cull_mask` does not see a light's layers is not lit by it.
@@ -63,14 +65,19 @@ pub const PointLight2D = extern struct {
     /// What it is multiplied by where an occluder hides it; its alpha is how
     /// much.
     shadow_color: Color = .{ .r = 0, .g = 0, .b = 0, .a = 1 },
+    /// How far across the light is, for its shadows: nought is a point, and
+    /// its shadows' edges are sharp; the wider, the softer they are, and the
+    /// softer the farther they fall.
+    shadow_softness: f32 = 0,
 
     pub const reflect_name = "PointLight2D";
     pub const reflect_fields = .{
         .energy = .{attr.Range{ .min = 0, .max = 16 }},
         .radius = .{ attr.Radius{}, attr.Doc{ .text = "How far it reaches" } },
         .texture = .{attr.Doc{ .text = "How it falls off; none is a soft round glow" }},
-        .shadows = .{attr.Doc{ .text = "Stopped by light occluders" }},
+        .shadows = .{ attr.Doc{ .text = "Stopped by light occluders" }, attr.Group{ .name = "Shadows" } },
         .shadow_color = .{attr.Doc{ .text = "What it is multiplied by in shadow" }},
+        .shadow_softness = .{ attr.Range{ .min = 0, .max = 256 }, attr.Doc{ .text = "How wide the light is: its shadows' edges are softer the wider it is" } },
     };
 };
 
@@ -81,14 +88,18 @@ pub const DirectionalLight2D = extern struct {
     blend: Blend = .add,
     shadows: bool = false,
     shadow_color: Color = .{ .r = 0, .g = 0, .b = 0, .a = 1 },
+    /// How far either way from its way the light comes, for its shadows:
+    /// nought is sharp, and more is softer the farther they fall.
+    shadow_softness: f32 = 0,
     /// How far behind an occluder its shadow reaches.
     max_distance: f32 = 2000,
 
     pub const reflect_name = "DirectionalLight2D";
     pub const reflect_fields = .{
         .energy = .{attr.Range{ .min = 0, .max = 16 }},
-        .shadows = .{attr.Doc{ .text = "Stopped by light occluders" }},
+        .shadows = .{ attr.Doc{ .text = "Stopped by light occluders" }, attr.Group{ .name = "Shadows" } },
         .shadow_color = .{attr.Doc{ .text = "What it is multiplied by in shadow" }},
+        .shadow_softness = .{ attr.Angle{}, attr.Doc{ .text = "How far either way the light comes from: its shadows are softer the more" } },
         .max_distance = .{attr.Doc{ .text = "How far behind an occluder its shadow reaches" }},
     };
 };

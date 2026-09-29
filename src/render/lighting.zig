@@ -11,12 +11,19 @@
 //! many.
 //!
 //! **Shadows are in the buffer's alpha.** A light with shadows first writes
-//! one over its reach, then nought where its shadows fall: every edge of an
+//! one over its reach, then takes its shadows from it: every edge of an
 //! occluder that faces away from it, drawn out away from it past its reach.
 //! Then it is drawn twice - once everywhere, times what its `shadow_color`
-//! lets through, and once with the rest where the alpha is still one - so no
-//! light needs a buffer of its own. The occluder itself lies between the
-//! edges that face the light and those that do not, and so is lit.
+//! lets through, and once with the rest as far as the alpha says it is not
+//! shadowed - so no light needs a buffer of its own. The occluder itself
+//! lies between the edges that face the light and those that do not, and so
+//! is lit.
+//!
+//! **A soft shadow is many sharp ones.** A light as wide as its
+//! `shadow_softness` casts its shadows from `soft_samples` places across it -
+//! or ways, for a directional one - each taking its share of the alpha, so a
+//! place some of them reach is part lit: a penumbra, wider the farther it
+//! falls. The light itself is still drawn once.
 
 const std = @import("std");
 const testing = std.testing;
@@ -55,15 +62,22 @@ const light_shader =
     \\}
 ;
 
-const light_blends = [_]material.Blend{ .light, .darkness, .light_unshadowed, .darkness_unshadowed, .mask };
+const light_blends = [_]material.Blend{ .light, .darkness, .light_unshadowed, .darkness_unshadowed, .mask, .shadow };
 
 /// The most light buffers kept, one for each size of target drawn into.
 const max_buffers = 4;
 
-/// What a shadow writes into the buffer's alpha, and what marks a light's
-/// reach lit.
-const in_shadow = [4]f32{ 0, 0, 0, 0 };
+/// What marks a light's reach lit, in the buffer's alpha.
 const in_light = [4]f32{ 0, 0, 0, 1 };
+
+/// How many places across it a soft light casts its shadows from. Fifteen,
+/// so each takes seventeen of a byte's 255 from the alpha, and all of them
+/// take it all.
+pub const soft_samples = 15;
+
+/// A turn over the golden ratio, squared: places spread by it over a disc
+/// never line up.
+const golden_angle = std.math.pi * (3 - @sqrt(5.0));
 
 /// One thing drawn into the light buffer, in the order it is drawn.
 pub const Draw = struct {
@@ -88,6 +102,9 @@ const Light = struct {
     blend: lights.Blend,
     shadows: bool,
     shadow_color: Color,
+    /// How far across it is, for its shadows; an angle, for a directional
+    /// light.
+    softness: f32 = 0,
 
     const Source = union(enum) {
         /// Where a point light is, and how far its quad reaches from there.
@@ -95,13 +112,30 @@ const Light = struct {
         /// The way a directional light falls, and how far behind an
         /// occluder its shadow goes.
         way: struct { way: Vec2, distance: f32 },
+
+        /// Where the `k`th of `samples` shares of a light `softness` across
+        /// comes from: a place on a disc round a point light's - spread by
+        /// the golden angle, as many near its middle as a disc has - or a way
+        /// either side of a directional light's.
+        fn sampled(self: Source, softness: f32, k: usize, samples: u32) Source {
+            if (samples <= 1) return self;
+            const along = (@as(f32, @floatFromInt(k)) + 0.5) / @as(f32, @floatFromInt(samples));
+            return switch (self) {
+                .point => |point| point: {
+                    const angle = @as(f32, @floatFromInt(k)) * golden_angle;
+                    const out = Vec2.init(@cos(angle), @sin(angle)).scale(softness * @sqrt(along));
+                    break :point .{ .point = .{ .at = point.at.add(out), .reach = point.reach + softness } };
+                },
+                .way => |way| .{ .way = .{ .way = way.way.rotate(softness * (2 * along - 1)), .distance = way.distance } },
+            };
+        }
     };
 
     /// How far from the view an occluder can be and still cast a shadow of
     /// it into the view.
     fn shadowReach(self: Light) f32 {
         return switch (self.source) {
-            .point => |point| 2 * point.reach,
+            .point => |point| 2 * point.reach + self.softness,
             .way => |way| way.distance,
         };
     }
@@ -278,6 +312,7 @@ pub const Lighting = struct {
                     .blend = held.blend,
                     .shadows = held.shadows,
                     .shadow_color = held.shadow_color,
+                    .softness = if (held.shadow_softness > 0) held.shadow_softness else 0,
                 });
             }
         }
@@ -301,6 +336,9 @@ pub const Lighting = struct {
                     .blend = held.blend,
                     .shadows = held.shadows,
                     .shadow_color = held.shadow_color,
+                    // Less than a quarter turn either way, or the shadows
+                    // would fall back past what casts them.
+                    .softness = if (held.shadow_softness > 0) @min(held.shadow_softness, 1.5) else 0,
                 });
             }
         }
@@ -449,29 +487,36 @@ pub const Lighting = struct {
     }
 
     /// The shadows of every kept outline's edges that face away from the
-    /// light, marked in the alpha. How many pieces were drawn.
+    /// light, taken from the alpha: from its middle, for a sharp light, and
+    /// for a soft one from each of `soft_samples` places across it, each
+    /// taking its share. How many pieces were drawn.
     fn castShadows(self: *Lighting, gpa: Allocator, light: Light) !u32 {
+        const samples: u32 = if (light.softness > 0) soft_samples else 1;
+        const share = [4]f32{ 0, 0, 0, 1 / @as(f32, @floatFromInt(samples)) };
         var cast: u32 = 0;
-        for (self.outlines.items) |outline| {
-            if (light.source == .point) {
-                const point = light.source.point;
-                if (outline.center.dist(point.at) > outline.reach + point.reach) continue;
-            }
-            const corners = self.corners.items[outline.first..][0..outline.count];
-            for (corners, 0..) |a, i| {
-                const b = corners[(i + 1) % corners.len];
-                const edge = b.sub(a);
-                const out: Vec2 = if (outline.anticlockwise) .init(edge.y, -edge.x) else .init(-edge.y, edge.x);
-                switch (light.source) {
-                    .point => |point| {
-                        if (!(out.dot(a.add(b).scale(0.5).sub(point.at)) > 0)) continue;
-                        cast += try self.shadowFrom(gpa, light, point.at, point.reach, a, b);
-                    },
-                    .way => |way| {
-                        if (!(out.dot(way.way) > 0)) continue;
-                        try self.put(gpa, light, .parallelogram(a, edge, way.way.scale(way.distance), in_shadow, .{ 0, 0, 1, 1 }), .mask);
-                        cast += 1;
-                    },
+        for (0..samples) |k| {
+            const from = light.source.sampled(light.softness, k, samples);
+            for (self.outlines.items) |outline| {
+                if (from == .point) {
+                    const point = from.point;
+                    if (outline.center.dist(point.at) > outline.reach + point.reach) continue;
+                }
+                const corners = self.corners.items[outline.first..][0..outline.count];
+                for (corners, 0..) |a, i| {
+                    const b = corners[(i + 1) % corners.len];
+                    const edge = b.sub(a);
+                    const out: Vec2 = if (outline.anticlockwise) .init(edge.y, -edge.x) else .init(-edge.y, edge.x);
+                    switch (from) {
+                        .point => |point| {
+                            if (!(out.dot(a.add(b).scale(0.5).sub(point.at)) > 0)) continue;
+                            cast += try self.shadowFrom(gpa, light, point.at, point.reach, a, b, share);
+                        },
+                        .way => |way| {
+                            if (!(out.dot(way.way) > 0)) continue;
+                            try self.put(gpa, light, .parallelogram(a, edge, way.way.scale(way.distance), share, .{ 0, 0, 1, 1 }), .shadow);
+                            cast += 1;
+                        },
+                    }
                 }
             }
         }
@@ -483,7 +528,7 @@ pub const Lighting = struct {
     /// the light. In at most three pieces, each a sixth of a turn or less
     /// across, so the far side of each stays that far away: an edge the light
     /// is almost on sees nearly half a turn.
-    fn shadowFrom(self: *Lighting, gpa: Allocator, light: Light, from: Vec2, reach: f32, a: Vec2, b: Vec2) !u32 {
+    fn shadowFrom(self: *Lighting, gpa: Allocator, light: Light, from: Vec2, reach: f32, a: Vec2, b: Vec2, share: [4]f32) !u32 {
         const to_a = a.sub(from);
         const to_b = b.sub(from);
         const turn = std.math.atan2(to_a.crossZ(to_b), to_a.dot(to_b));
@@ -501,8 +546,8 @@ pub const Lighting = struct {
             const way: Vec2 = .init(@cos(angle), @sin(angle));
             const next_near = if (i == pieces) b else hit(from, way, a, b);
             const next_away = from.add(way.scale(out));
-            try self.put(gpa, light, .triangle(near, next_near, next_away, in_shadow), .mask);
-            try self.put(gpa, light, .triangle(near, next_away, away, in_shadow), .mask);
+            try self.put(gpa, light, .triangle(near, next_near, next_away, share), .shadow);
+            try self.put(gpa, light, .triangle(near, next_away, away, share), .shadow);
             near = next_near;
             away = next_away;
         }
@@ -558,22 +603,24 @@ fn inTriangle(instance: Instance, p: Vec2) bool {
     return (one >= 0 and two >= 0 and three >= 0) or (one <= 0 and two <= 0 and three <= 0);
 }
 
-/// Whether the shadows drawn cover `p`.
-fn shadowed(lighting: *const Lighting, p: Vec2) bool {
+/// How much the shadows drawn take from the alpha at `p`.
+fn coverage(lighting: *const Lighting, p: Vec2) f32 {
+    var taken: f32 = 0;
     for (lighting.draws.items) |drawn| {
-        if (drawn.blend != .mask or drawn.instance.tint[3] != 0) continue;
-        if (drawn.instance.shape[2] == 1) {
-            if (inTriangle(drawn.instance, p)) return true;
-        } else {
+        if (drawn.blend != .shadow) continue;
+        const covers = if (drawn.instance.shape[2] == 1) inTriangle(drawn.instance, p) else covers: {
             const a = drawn.instance.corner(0, 0);
-            const halves = [2]Instance{
-                .triangle(a, drawn.instance.corner(1, 0), drawn.instance.corner(1, 1), in_shadow),
-                .triangle(a, drawn.instance.corner(1, 1), drawn.instance.corner(0, 1), in_shadow),
-            };
-            for (halves) |half| if (inTriangle(half, p)) return true;
-        }
+            const c = drawn.instance.corner(1, 1);
+            break :covers inTriangle(.triangle(a, drawn.instance.corner(1, 0), c, @splat(0)), p) or
+                inTriangle(.triangle(a, c, drawn.instance.corner(0, 1), @splat(0)), p);
+        };
+        if (covers) taken += drawn.instance.tint[3];
     }
-    return false;
+    return taken;
+}
+
+fn shadowed(lighting: *const Lighting, p: Vec2) bool {
+    return coverage(lighting, p) > 0;
 }
 
 test "a box's shadow falls behind it from the light, and nowhere else" {
@@ -616,7 +663,7 @@ test "a box's shadow falls behind it from the light, and nowhere else" {
         try testing.expectEqual(material.Blend.mask, draws[0].blend);
         try testing.expectEqual(@as(f32, 1), draws[0].instance.tint[3]);
         try testing.expectEqual(material.Blend.light_unshadowed, draws[draws.len - 1].blend);
-        try testing.expect(draws[draws.len - 2].blend == .mask);
+        try testing.expect(draws[draws.len - 2].blend == .shadow);
     }
 }
 
@@ -686,6 +733,42 @@ test "a directional light's shadows fall its way, and a coloured shadow lets som
     try testing.expectEqual(material.Blend.light_unshadowed, unshadowed.blend);
     try testing.expectApproxEqAbs(@as(f32, 0.2), unshadowed.instance.tint[0], 1e-6);
     try testing.expectApproxEqAbs(@as(f32, 0.4), unshadowed.instance.tint[1], 1e-6);
+}
+
+test "a wide light's shadow is dark behind what casts it, and fades out at its edges" {
+    var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+    var lighting: Lighting = try .init(testing.allocator, &device);
+    defer lighting.deinit(testing.allocator);
+    const bounds: Bounds = .{ .left = -300, .top = -300, .right = 300, .bottom = 300 };
+    const box = [_]Vec2{ .init(20, -10), .init(40, -10), .init(40, 10), .init(20, 10) };
+    try lighting.keep(testing.allocator, &box, bounds, 800);
+
+    var light: Light = .{
+        .quad = .quad(0, 0, 500, 500, 0.5, 0.5, 1, 0, .{ 0.5, 0.5, 0.5, 1 }, .{ 0, 0, 1, 1 }),
+        .texture = .none,
+        .sampler = .none,
+        .source = .{ .point = .{ .at = .zero, .reach = 354 } },
+        .blend = .add,
+        .shadows = true,
+        .shadow_color = .{ .r = 0, .g = 0, .b = 0, .a = 1 },
+        .softness = 8,
+    };
+    try lighting.drawLight(testing.allocator, light);
+    // Every share of it is stopped right behind the box, and all of it
+    // together is the whole alpha.
+    try testing.expectApproxEqAbs(@as(f32, 1), coverage(&lighting, .init(60, 0)), 1e-4);
+    // Where the sharp shadow's edge would be, far off, part of it gets by.
+    const edge = coverage(&lighting, .init(200, 100));
+    try testing.expect(edge > 0.2 and edge < 0.8);
+    try testing.expectEqual(@as(f32, 0), coverage(&lighting, .init(200, 240)));
+
+    // Sharp again: all or nothing, even there.
+    lighting.draws.clearRetainingCapacity();
+    light.softness = 0;
+    try lighting.drawLight(testing.allocator, light);
+    try testing.expectEqual(@as(f32, 1), coverage(&lighting, .init(200, 99)));
+    try testing.expectEqual(@as(f32, 0), coverage(&lighting, .init(200, 101)));
 }
 
 test "a buffer is kept for each size a target is drawn at, the least lately used going first" {

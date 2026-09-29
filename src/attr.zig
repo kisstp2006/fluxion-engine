@@ -112,6 +112,10 @@ pub const Advanced = struct {};
 /// for a project's; the editor's, for an editor's.
 pub const Restart = struct {};
 
+/// On a field: it and the fields after it are a group, under this heading
+/// in an editor - a component of many fields, read a part at a time.
+pub const Group = struct { name: []const u8 };
+
 /// On a component: whether a click in an editor's scene picks an entity
 /// that has it, until the entity is told otherwise there. A `Control`'s is
 /// false - a UI over the whole screen would take every click - and a game's

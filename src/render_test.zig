@@ -64,6 +64,21 @@ test "a sprite with a material is drawn with its shader, and those giving the sa
     try testing.expect(app.shaderParamOrDefault(a, "nothing", &buffer) == null);
 }
 
+test "a sprite that multiplies what is under it is drawn apart, with or without a material" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try app.world.spawnWith(.{ Transform2D.at(10, 10), Sprite.solid(.white, 8, 8) });
+    _ = try app.world.spawnWith(.{ Transform2D.at(20, 10), Sprite{ .width = 8, .height = 8, .blend = .multiply, .tint = .rgba(1, 0, 0, 0.5) } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 2), app.sprites.draw_calls);
+
+    // A material's shader gives the colour to multiply by itself.
+    const glow = try app.addShader("glow", glow_source);
+    _ = try app.world.spawnWith(.{ Transform2D.at(30, 10), Sprite{ .width = 8, .height = 8, .blend = .multiply }, Material{ .shader = glow } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 3), app.sprites.draw_calls);
+}
+
 test "a shader that does not compile says why and draws as none" {
     const app = try headless();
     defer app.destroy();

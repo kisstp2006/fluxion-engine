@@ -220,6 +220,8 @@ pub const Renderer = struct {
     /// A picture, coloured: what a sprite with no material is drawn with,
     /// and the light buffer is laid over the world with.
     plain: material.Compiled,
+    /// The same, for one that multiplies what is under it.
+    multiplied: material.Compiled,
     lighting: lighting_mod.Lighting,
 
     quad: rhi.Buffer,
@@ -261,11 +263,16 @@ pub const Renderer = struct {
     pub fn init(gpa: Allocator, device: *rhi.Device) Error!Renderer {
         var problems: std.Io.Writer.Allocating = .init(gpa);
         defer problems.deinit();
-        var plain = material.compile(gpa, device, material.plain, "sprites", &problems.writer, &(material.sprite_blends ++ [_]material.Blend{.lit})) catch |err| {
+        var plain = material.compile(gpa, device, material.plain, "sprites", &problems.writer, &.{ .alpha, .additive, .subtractive, .lit }) catch |err| {
             std.log.scoped(.fluxion_engine).err("sprite shader: {s}", .{problems.written()});
             return err;
         };
         errdefer plain.deinit(device);
+        var multiplied = material.compile(gpa, device, material.plain_multiply, "multiplied sprites", &problems.writer, &.{.multiply}) catch |err| {
+            std.log.scoped(.fluxion_engine).err("sprite shader: {s}", .{problems.written()});
+            return err;
+        };
+        errdefer multiplied.deinit(device);
         var lighting: lighting_mod.Lighting = try .init(gpa, device);
         errdefer lighting.deinit(gpa);
 
@@ -298,6 +305,7 @@ pub const Renderer = struct {
         return .{
             .device = device,
             .plain = plain,
+            .multiplied = multiplied,
             .lighting = lighting,
             .quad = quad,
             .instances = instances,
@@ -319,6 +327,7 @@ pub const Renderer = struct {
         for (self.param_buffers.items) |held| self.device.destroyBuffer(held.buffer);
         self.param_buffers.deinit(gpa);
         self.plain.deinit(self.device);
+        self.multiplied.deinit(self.device);
         self.lighting.deinit(gpa);
         self.device.destroyBuffer(self.quad);
         self.device.destroyBuffer(self.instances);
@@ -477,11 +486,12 @@ pub const Renderer = struct {
         };
     }
 
-    /// The compiled shader a handle names, or the plain one.
-    fn compiledOf(self: *const Renderer, shader: ShaderHandle) *const material.Compiled {
-        if (shader.isNone()) return &self.plain;
-        const table = self.shaders orelse return &self.plain;
-        return table.compiledOf(shader) orelse &self.plain;
+    /// The compiled shader a handle names, or the plain one for `blend`.
+    fn compiledFor(self: *const Renderer, shader: ShaderHandle, blend: material.Blend) *const material.Compiled {
+        const plain = if (blend == .multiply) &self.multiplied else &self.plain;
+        if (shader.isNone()) return plain;
+        const table = self.shaders orelse return plain;
+        return table.compiledOf(shader) orelse plain;
     }
 
     fn forgetParams(self: *Renderer) void {
@@ -574,7 +584,7 @@ pub const Renderer = struct {
         /// Draw with a material's shader - the plain one for none - a way of
         /// blending and a set of numbers.
         fn use(self: *Pass, shader: ShaderHandle, blend: material.Blend, params: u32) !void {
-            try self.bind(.{ .compiled = self.renderer.compiledOf(shader), .blend = blend, .params = params });
+            try self.bind(.{ .compiled = self.renderer.compiledFor(shader, blend), .blend = blend, .params = params });
         }
 
         /// Draw with one of the renderer's own shaders.

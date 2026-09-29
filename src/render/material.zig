@@ -72,15 +72,22 @@ pub const Blend = enum {
     alpha,
     additive,
     subtractive,
+    /// What is under it times its colour. With no material the colour is
+    /// its picture's, turned white where the picture is see-through; a
+    /// material's shader gives the colour to multiply by as it is.
+    multiply,
     /// Light added to the light buffer, and taken from it.
     light,
     darkness,
     /// The same, only where the buffer's alpha is one: not shadowed.
     light_unshadowed,
     darkness_unshadowed,
-    /// The colour's alpha written into the buffer's, and nothing else: where
-    /// a light reaches, and where its shadows fall.
+    /// The colour's alpha written into the buffer's, and nothing else:
+    /// where a light reaches.
     mask,
+    /// The colour's alpha taken from the buffer's, and nothing else: one of
+    /// a light's shadows, or a share of one that is soft.
+    shadow,
     /// The light buffer over the world: twice the two multiplied.
     lit,
 
@@ -96,11 +103,13 @@ pub const Blend = enum {
             .alpha => .alpha,
             .additive => .additive,
             .subtractive => colourOnly(.src_alpha, .one, .reverse_subtract),
+            .multiply => colourOnly(.dst_color, .zero, .add),
             .light => colourOnly(.one, .one, .add),
             .darkness => colourOnly(.one, .one, .reverse_subtract),
             .light_unshadowed => colourOnly(.dst_alpha, .one, .add),
             .darkness_unshadowed => colourOnly(.dst_alpha, .one, .reverse_subtract),
             .mask => .{ .enabled = true, .src_rgb = .zero, .dst_rgb = .one, .src_alpha = .one, .dst_alpha = .zero },
+            .shadow => .{ .enabled = true, .src_rgb = .zero, .dst_rgb = .one, .src_alpha = .one, .dst_alpha = .one, .op_alpha = .reverse_subtract },
             .lit => colourOnly(.dst_color, .src_color, .add),
         };
     }
@@ -152,6 +161,15 @@ pub const Compiled = struct {
 pub const plain =
     \\fragment {
     \\    target = sample(TEXTURE, UV) * COLOR;
+    \\}
+;
+
+/// The same, as what is under it is multiplied by: white where it is
+/// see-through, so a picture's clear parts leave what they cover as it was.
+pub const plain_multiply =
+    \\fragment {
+    \\    vec4 held = sample(TEXTURE, UV) * COLOR;
+    \\    target = vec4(mix(vec3(1.0), held.rgb, held.a), 1.0);
     \\}
 ;
 

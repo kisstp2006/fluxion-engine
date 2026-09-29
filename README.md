@@ -1153,7 +1153,9 @@ _ = try world.spawnWith(.{
   as one run and therefore one call, and two overlapping sprites that tie on
   everything are drawn the same way round every frame.
 - **`Sprite.blend = .additive` adds light** instead of covering what is
-  behind: sparks, glows, lasers; `.subtractive` takes it away. Each is a
+  behind: sparks, glows, lasers; `.subtractive` takes it away, and
+  `.multiply` multiplies what is under it by its colour - a stain, tinted
+  glass - leaving it as it was where the picture is see-through. Each is a
   pipeline of its own, and the sprites of one layer and order that blend
   alike are grouped so they stay one draw call.
 - **A texture loaded with `.wrap = .repeat` tiles** across a region that goes
@@ -1339,6 +1341,12 @@ _ = try world.spawnWith(.{ fx.Transform2D.at(280, 170), fx.Sprite{ .texture = cr
   is. Where an occluder hides a light, the light is multiplied by its
   `shadow_color`: black lets none of it through. The occluder itself is lit,
   and so is its face toward the light.
+- **Soft shadows.** A light's `shadow_softness` is how wide it is - in world
+  units for a point light, an angle either way for a directional one - and
+  its shadows' edges soften the farther they fall from what casts them. A
+  soft light casts them from fifteen places across it, each taking its
+  share of the shadow, so a penumbra has fifteen steps; the light itself is
+  still drawn once.
 - **What is not lit.** The interface never is. An `Appearance` whose
   `lighting` is `unshaded` - and everything under it - is drawn over the lit
   world as it is: a sign that glows in the dark, a fire, a cursor in the
@@ -2707,6 +2715,9 @@ as data, and the engine hands its components and its calls out through it.
       }
   };
   ```
+
+  `fx.attr.Group{ .name = "Regeneration" }` on a field starts a group: it
+  and the fields after it are shown under that heading in an editor.
 
   Two types given one `reflect_name` are `error.ComponentNameTaken`: a name
   is what a description is found by. A `Property` in `reflect_attributes`
