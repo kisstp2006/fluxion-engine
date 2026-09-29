@@ -2178,6 +2178,47 @@ test "a script moves a property with a tween" {
     try testing.expectEqual(@as(f32, 30), app.world.get(mover, Transform2D).?.y);
 }
 
+test "a script draws when its entity is first drawn and when it asks again, points and all" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("gauge.flux",
+        \\var drawn = 0;
+        \\var full = 0.25;
+        \\struct Gauge {
+        \\    fn draw(self) {
+        \\        drawn += 1;
+        \\        self.entity.drawRect(vec2(0, 0), vec2(100, 8), color("gray"));
+        \\        self.entity.drawRect(vec2(0, 0), vec2(100 * full, 8), color("red"));
+        \\        self.entity.drawPolygon([vec2(0, 10), vec2(10, 10), vec2(5, 16)], color("white"));
+        \\        self.entity.drawArc(vec2(0, 0), 20, 0.0, math.pi, color("white"), 2);
+        \\        self.entity.drawText("HP", vec2(0, -20));
+        \\    }
+        \\    fn update(self, delta: float) {
+        \\        // Filled up once it has been drawn half empty.
+        \\        if (drawn == 1 and full < 1.0) {
+        \\            full = 1.0;
+        \\            self.entity.queueRedraw();
+        \\        }
+        \\    }
+        \\}
+        \\const math = @import("math");
+    );
+    const gauge = try app.world.spawnWith(.{ Transform2D.at(0, 0), Script.of(file) });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    // Drawn once as it began, and again when it asked - on an emptied
+    // picture, so the second has five shapes, not ten.
+    _ = try app.step();
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 2), global(app, file, "drawn").asInt());
+    const picture = app.drawings.get(gauge).?;
+    try testing.expectEqual(@as(usize, 5), picture.shapes.items.len);
+    try testing.expectEqual(@as(f32, 100), picture.shapes.items[1].rect.size.x);
+    try testing.expectEqual(@as(usize, 3), picture.corners.items.len);
+    try testing.expect(app.world.has(gauge, @import("drawing.zig").Drawing2D));
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
 test "a script's tween moves by a value, starts from one, waits, counts along and calls back" {
     const app = try scripted(.{});
     defer app.destroy();

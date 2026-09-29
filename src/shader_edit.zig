@@ -48,7 +48,7 @@ pub const Analysis = struct {
 
 /// What the engine writes and a file does not use, or may not write: kept
 /// out of what is offered.
-const hidden = [_][]const u8{ "CORNER", "PLACEMENT", "SPIN", "TINT", "REGION", "PROJECTION", "SCREEN_FLIP", "Frame", "attribute", "varying", "vertex", "position" };
+const hidden = [_][]const u8{ "CORNER", "PLACE", "SHAPE", "TINT", "REGION", "PROJECTION", "SCREEN_FLIP", "Frame", "attribute", "varying", "vertex", "position" };
 
 /// The engine's textures, declared only in a file that names them: offered
 /// whether or not it has yet.

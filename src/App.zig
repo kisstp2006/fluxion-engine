@@ -59,6 +59,7 @@ const world_ui = @import("world_ui.zig");
 const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
 const inherited_mod = @import("inherited.zig");
+const drawing_mod = @import("drawing.zig");
 const timer = @import("timer.zig");
 const tilemap = @import("tilemap.zig");
 const geometry = @import("geometry.zig");
@@ -697,6 +698,8 @@ slide_collisions: std.AutoArrayHashMapUnmanaged(ecs.Entity, std.ArrayList(charac
 overlaps_found: std.ArrayList(ecs.Entity) = .empty,
 /// What `animationNames` hands out.
 names_found: std.ArrayList([]const u8) = .empty,
+/// What each `Drawing2D` has drawn: see `drawing.zig`.
+drawings: drawing_mod.Drawings = .{},
 scene_roots: std.ArrayListUnmanaged(ecs.Entity) = .empty,
 /// The scene `changeScene` asked for, opened at the end of the frame.
 scene_next: ?scenes_mod.SceneHandle = null,
@@ -954,6 +957,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Collider2D,
         components.Area2D,
         components.RayCast2D,
+        drawing_mod.Drawing2D,
         timer.Timer,
         audio_mod.AudioPlayer,
         audio_mod.AudioSpatial2D,
@@ -1049,6 +1053,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.sprites.params = &self.shader_params;
     self.sprites.screen = &self.screen;
     self.sprites.views = &self.views;
+    self.sprites.drawings = &self.drawings;
     self.interface.custom = .{ .context = self, .draw = drawControlBox };
 
     self.debug_renderer = try .init(gpa, &self.device, .{});
@@ -1275,6 +1280,7 @@ pub fn destroy(self: *App) void {
     self.slide_collisions.deinit(gpa);
     self.overlaps_found.deinit(gpa);
     self.names_found.deinit(gpa);
+    self.drawings.deinit(gpa);
     self.inherited.deinit(gpa);
     self.freeInstances();
     self.instances.deinit(gpa);
@@ -1788,6 +1794,7 @@ pub fn step(self: *App) anyerror!bool {
     self.unknown_components.forgetDead(self.gpa, &self.world);
     self.exports.forgetDead(&self.world);
     self.tweens.forgetDead(self);
+    self.drawings.forgetDead(self.gpa, &self.world);
     self.texts.forgetDead(self.gpa, &self.world);
     self.shader_params.forgetDead(self.gpa, &self.world);
     self.views.forgetDead(self.gpa, &self.world, &self.assets, components.RenderView);
@@ -3567,6 +3574,108 @@ fn playerAnimation(self: *App, player: ecs.Entity, name: []const u8) ?*const ani
     return library.find(name);
 }
 
+// -------------------------------------------------------------------------
+// Drawing
+// -------------------------------------------------------------------------
+//
+// Shapes a game draws in an entity's own space, kept until it draws again:
+// see `drawing.zig`. Each call adds to the entity's picture, giving it a
+// `Drawing2D` when it has none.
+
+/// What can go wrong drawing: the entity is gone, or there is no room.
+pub const DrawError = ecs.World.Error || error{NoSuchEntity};
+
+fn pictureFor(self: *App, entity: ecs.Entity) DrawError!*drawing_mod.Picture {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    if (!self.world.has(entity, drawing_mod.Drawing2D)) try self.world.add(entity, drawing_mod.Drawing2D{});
+    return self.drawings.pictureOf(self.gpa, entity);
+}
+
+/// A straight line `width` wide.
+pub fn drawLine(self: *App, entity: ecs.Entity, from: math.Vec2, to: math.Vec2, color: Color, width: f32) DrawError!void {
+    const picture = try self.pictureFor(entity);
+    picture.cover(from, width);
+    picture.cover(to, width);
+    try picture.add(self.gpa, .{ .line = .{ .from = from, .to = to, .color = color, .width = width } });
+}
+
+/// A box from `position`, `size` big: filled, or its edges `width` wide.
+pub fn drawRect(self: *App, entity: ecs.Entity, position: math.Vec2, size: math.Vec2, color: Color, filled: bool, width: f32) DrawError!void {
+    const picture = try self.pictureFor(entity);
+    picture.cover(position, width);
+    picture.cover(position.add(size), width);
+    try picture.add(self.gpa, .{ .rect = .{ .at = position, .size = size, .color = color, .filled = filled, .width = width } });
+}
+
+/// A circle: filled, or its edge `width` wide.
+pub fn drawCircle(self: *App, entity: ecs.Entity, center: math.Vec2, radius: f32, color: Color, filled: bool, width: f32) DrawError!void {
+    const picture = try self.pictureFor(entity);
+    picture.cover(center, radius + width);
+    try picture.add(self.gpa, .{ .circle = .{ .center = center, .radius = radius, .color = color, .filled = filled, .width = width } });
+}
+
+/// Part of a circle's edge, from `start_angle` round to `end_angle`, in
+/// radians clockwise on screen from the right.
+pub fn drawArc(self: *App, entity: ecs.Entity, center: math.Vec2, radius: f32, start_angle: f32, end_angle: f32, color: Color, width: f32) DrawError!void {
+    const picture = try self.pictureFor(entity);
+    picture.cover(center, radius + width);
+    try picture.add(self.gpa, .{ .arc = .{ .center = center, .radius = radius, .start = start_angle, .end = end_angle, .color = color, .width = width } });
+}
+
+/// Lines joining the points in turn: a path, a graph.
+pub fn drawPolyline(self: *App, entity: ecs.Entity, points: []const math.Vec2, color: Color, width: f32) DrawError!void {
+    if (points.len < 2) return;
+    const picture = try self.pictureFor(entity);
+    const first = try picture.keepPoints(self.gpa, points, width);
+    try picture.add(self.gpa, .{ .polyline = .{ .first = first, .count = @intCast(points.len), .color = color, .width = width } });
+}
+
+/// The shape the points go round, filled: any shape whose sides do not
+/// cross, either way round.
+pub fn drawPolygon(self: *App, entity: ecs.Entity, points: []const math.Vec2, color: Color) DrawError!void {
+    const picture = try self.pictureFor(entity);
+    try picture.addPolygon(self.gpa, points, color);
+}
+
+/// A picture from `position`, `size` big - its own size for nought - its
+/// colours multiplied by `modulate`.
+pub fn drawTexture(self: *App, entity: ecs.Entity, texture: Assets.TextureHandle, position: math.Vec2, size: math.Vec2, modulate: Color) DrawError!void {
+    const picture = try self.pictureFor(entity);
+    const shown: math.Vec2 = if (size.x == 0 and size.y == 0) if (self.assets.get(texture)) |held| .init(@floatFromInt(held.width), @floatFromInt(held.height)) else size else size;
+    picture.cover(position, 0);
+    picture.cover(position.add(shown), 0);
+    try picture.add(self.gpa, .{ .texture = .{ .texture = texture, .at = position, .size = size, .color = modulate } });
+}
+
+/// Words, their first line's top left at `position`, `size` pixels high in
+/// `font` - the first one loaded for none.
+pub fn drawText(self: *App, entity: ecs.Entity, text: []const u8, position: math.Vec2, color: Color, size: f32, font: Assets.FontHandle) DrawError!void {
+    const picture = try self.pictureFor(entity);
+    const first = try picture.keepWords(self.gpa, text);
+    var lines: f32 = 1;
+    var widest: usize = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var count: f32 = 0;
+    while (it.next()) |line| : (count += 1) widest = @max(widest, line.len);
+    lines = @max(count, 1);
+    picture.cover(position, 0);
+    picture.cover(position.add(.init(@as(f32, @floatFromInt(widest)) * size, lines * size * 1.5)), 0);
+    try picture.add(self.gpa, .{ .text = .{ .first = first, .len = @intCast(text.len), .at = position, .color = color, .size = size, .font = font } });
+}
+
+/// Everything an entity has drawn taken away.
+pub fn clearDrawing(self: *App, entity: ecs.Entity) void {
+    const picture = self.drawings.get(entity) orelse return;
+    picture.clear();
+}
+
+/// Ask an entity's script to draw it again - its `draw(self)`, on an
+/// emptied picture - at the end of this frame.
+pub fn queueRedraw(self: *App, entity: ecs.Entity) DrawError!void {
+    if (!self.world.isAlive(entity)) return error.NoSuchEntity;
+    (try self.drawings.pictureOf(self.gpa, entity)).wanted = true;
+}
+
 /// Read a `.anim` file - an animation library - or find the one read from
 /// there already. What an `AnimationPlayer` plays; see `animation.zig`.
 pub fn loadAnimations(self: *App, path: []const u8) !animation_mod.AnimationLibraryHandle {
@@ -4567,6 +4676,7 @@ pub fn clearWorld(self: *App) void {
     self.signals.clear();
     self.audio.clear();
     self.tweens.clear(self);
+    self.drawings.clearAll(self.gpa);
     self.texts.clear(self.gpa);
     self.shader_params.clear(self.gpa);
     self.views.clear(&self.assets);
@@ -5076,6 +5186,16 @@ pub const reflect_methods = .{
     .tweenParallel = .{attr.Params{ .names = &.{ "tween", "together" } }},
     .tweenEase = .{attr.Params{ .names = &.{ "tween", "ease" } }},
     .animationNames = .{attr.Params{ .names = &.{"player"} }},
+    .drawLine = .{ attr.Params{ .names = &.{ "entity", "from", "to", "color", "width" } }, attr.defaults(.{@as(f32, 1)}) },
+    .drawRect = .{ attr.Params{ .names = &.{ "entity", "position", "size", "color", "filled", "width" } }, attr.defaults(.{ true, @as(f32, 1) }) },
+    .drawCircle = .{ attr.Params{ .names = &.{ "entity", "center", "radius", "color", "filled", "width" } }, attr.defaults(.{ true, @as(f32, 1) }) },
+    .drawArc = .{ attr.Params{ .names = &.{ "entity", "center", "radius", "start_angle", "end_angle", "color", "width" } }, attr.defaults(.{@as(f32, 1)}) },
+    .drawPolyline = .{ attr.Params{ .names = &.{ "entity", "points", "color", "width" } }, attr.defaults(.{@as(f32, 1)}) },
+    .drawPolygon = .{attr.Params{ .names = &.{ "entity", "points", "color" } }},
+    .drawTexture = .{ attr.Params{ .names = &.{ "entity", "texture", "position", "size", "modulate" } }, attr.defaults(.{ math.Vec2.zero, Color.white }) },
+    .drawText = .{ attr.Params{ .names = &.{ "entity", "text", "position", "color", "size", "font" } }, attr.defaults(.{ Color.white, @as(f32, 16), Assets.FontHandle.none }) },
+    .clearDrawing = .{attr.Params{ .names = &.{"entity"} }},
+    .queueRedraw = .{attr.Params{ .names = &.{"entity"} }},
     .hasAnimation = .{attr.Params{ .names = &.{ "player", "name" } }},
     .animationLength = .{attr.Params{ .names = &.{ "player", "name" } }},
     .tweenCallback = .{attr.Params{ .names = &.{ "tween", "function" } }},
@@ -9026,6 +9146,41 @@ test "additive sprites get a draw of their own, and share it with each other" {
     try testing.expectEqual(@as(u32, 2), app.sprites.draw_calls);
 }
 
+test "a drawing is drawn at its entity: boxes, lines, circles and polygons among the sprites, in the order drawn" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const canvas = try app.world.spawnWith(.{components.Transform2D.at(100, 50)});
+    try app.drawRect(canvas, .init(0, 0), .init(10, 4), .rgba(1, 0, 0, 1), true, 1);
+    try app.drawLine(canvas, .init(0, 0), .init(20, 0), .white, 2);
+    try app.drawCircle(canvas, .init(0, 0), 20, .white, true, 1);
+    try app.drawPolygon(canvas, &.{ .init(0, 0), .init(8, 0), .init(8, 8), .init(0, 8) }, .white);
+    try testing.expect(app.world.has(canvas, drawing_mod.Drawing2D));
+    // A sprite on a layer over it.
+    _ = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite{ .width = 4, .height = 4, .layer = 1 } });
+    _ = try app.step();
+
+    // A box, a line, a circle in fifteen pieces and a square in two.
+    const items = app.sprites.items.items;
+    try testing.expectEqual(@as(usize, 1 + 1 + 15 + 2 + 1), items.len);
+    // In the order drawn, the sprite over them all.
+    const box = items[0].instance;
+    try testing.expect(box.corner(0, 0).approxEql(.init(100, 50)));
+    try testing.expect(box.corner(1, 1).approxEql(.init(110, 54)));
+    try testing.expectEqual(@as(f32, 1), box.tint[0]);
+    const line = items[1].instance;
+    try testing.expect(line.corner(0, 0).approxEql(.init(100, 49)));
+    try testing.expect(line.corner(1, 1).approxEql(.init(120, 51)));
+    // A triangle folds its fourth corner onto its third.
+    const piece = items[2].instance;
+    try testing.expect(piece.corner(1, 1).approxEql(piece.corner(0, 1)));
+    try testing.expectEqual(@as(f32, 4), items[items.len - 1].instance.shape[1]);
+
+    // Cleared, nothing of it is drawn.
+    app.clearDrawing(canvas);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), app.sprites.items.items.len);
+}
+
 test "a repeating texture tiles across a region past its edge" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();
@@ -9039,8 +9194,8 @@ test "a repeating texture tiles across a region past its edge" {
 
     const drawn = app.sprites.items.items[0];
     try testing.expect(std.meta.eql(app.assets.samplers.get(.nearest).get(.repeat), drawn.sampler));
-    try testing.expectEqual(@as(f32, 8), drawn.instance.placement[2]);
-    try testing.expectEqual(@as(f32, 4), drawn.instance.placement[3]);
+    try testing.expectEqual(@as(f32, 8), drawn.instance.place[2]);
+    try testing.expectEqual(@as(f32, 4), drawn.instance.shape[1]);
 }
 
 const Panel = struct {
@@ -9701,7 +9856,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 46), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 47), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

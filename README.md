@@ -1125,6 +1125,9 @@ try app.callGroup("enemies", "alert");
 One quad in a vertex buffer and a second buffer stepping once per instance
 with where each sprite goes, how big, which way round, what colour and which
 part of which texture. A thousand sprites sharing a texture is one draw call.
+An instance is a corner and two sides, so it is any parallelogram - or, with
+its last corner folded onto the one before, a triangle: what a drawing's
+circles and polygons are made of, in the same pass.
 
 ```zig
 _ = try world.spawnWith(.{
@@ -1173,6 +1176,15 @@ _ = try world.spawnWith(.{
   One pipeline, no branch in the shader, no artwork for a health bar.
 - **A sprite with no size is the size of its own artwork**, so most sprites
   need no size at all.
+- **An entity can draw on itself.** `app.drawLine`, `drawRect`, `drawCircle`,
+  `drawArc`, `drawPolyline`, `drawPolygon`, `drawTexture` and `drawText` add
+  a shape to its picture, in its own space, giving it a `Drawing2D` - its
+  `layer`, `order` and `visible` - if it has none. The picture stays until
+  it is drawn again: `app.clearDrawing(entity)` empties it. A health bar, a
+  graph, a selection box, with no sprite for each part.
+  - A circle and an arc are cut into pieces by their size; a polygon is cut into triangles, whichever way round its points go, as long as its sides do not cross; a line and a box's edges are `width` wide.
+  - A drawing's shapes keep the order they were drawn in, among the sprites of its layer, by `order`. It is shown as its entity is - `Appearance`, render layers, a `Material` - and dropped with the rest of what the camera cannot see.
+  - A script draws in `draw(self)`, which runs once as its entity is first shown and again after `self.entity.queueRedraw()`, each time on an emptied picture: see [Scripts](#️-scripts).
 - **A transform's numbers are *local*** - in the space of the transform it
   hangs from through its `Parent`, so a turret rides on a tank and a health
   bar rides over an enemy, and in the world's only when there is none above.
@@ -2683,6 +2695,7 @@ struct Door {
   - `update(self, dt)` runs every frame, before its `.update` systems.
   - Both only while the entity runs: see [Pause](#️-pause). A task a script starts - a call of a function that `await`s - is the entity's, and its waits stand still while the entity does not run. When the entity dies, or loses its script, its tasks stop where they wait, after its `exit`.
   - `exit(self)` runs at the end of the frame in which the entity dies, or its `Script` is taken off or turned off, and when the world is cleared.
+  - `draw(self)` runs at the end of its first frame, and of any frame in which it called `self.entity.queueRedraw()`, on an emptied picture: what it draws - `self.entity.drawRect(vec2(0, 0), vec2(100, 8), color("red"))` and the rest - is shown until then. See [The 2D layer](#-the-2d-layer).
 
   A method the struct does not declare is not called. One with the wrong parameters is warned of as the script compiles, and said once in the log and not called. A parameter of one given no type, or `any`, has the type the engine passes: `fn input(self, event)` has an `InputEvent`. An editor offers each of them whole - `fn update(self, dt: float) { }` - where a struct's member is written, but those it has.
 - **One VM, only in a game that asks.** `useScripts` makes the VM and
@@ -3251,8 +3264,8 @@ Here, and checked by the tests:
   and found on an entity by its scene name, read and written in place, added
   and taken off; the engine's calls and a game's states made by name, errors
   and all.
-- Flux scripts on entities: `ready`, `fixed`, `update`, `exit`, `input` and
-  `unhandled_input`, `self.entity` and its components found again at each
+- Flux scripts on entities: `ready`, `fixed`, `update`, `exit`, `draw`,
+  `input` and `unhandled_input`, `self.entity` and its components found again at each
   use, a budget and a log for what goes wrong, code read again into running
   instances, scripts in scenes, and an editor's checking set up as the
   game's. The engine's signals heard and awaited from a script, entities and

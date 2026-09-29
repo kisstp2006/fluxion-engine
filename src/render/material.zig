@@ -100,13 +100,14 @@ pub const plain =
 ;
 
 /// The attributes, in the order an `Instance` holds them after the corner:
-/// the quad's corner, its place and size, its pivot and turn, its colour and
-/// its part of the picture. What a file reads has its doc above it, which an
-/// editor shows.
+/// the unit square's corner, where its first corner lands and the ways to
+/// the next two - with whether it is a triangle - its colour and its part of
+/// the picture. What a file reads has its doc above it, which an editor
+/// shows.
 const engine_head =
     \\attribute vec2 CORNER : 0;
-    \\attribute vec4 PLACEMENT : 1;
-    \\attribute vec4 SPIN : 2;
+    \\attribute vec4 PLACE : 1;
+    \\attribute vec4 SHAPE : 2;
     \\attribute vec4 TINT : 3;
     \\attribute vec4 REGION : 4;
     \\
@@ -133,18 +134,17 @@ const engine_head =
 pub const texture_doc = "The picture it is drawn with: the sprite's, or the rect's.";
 pub const screen_texture_doc = "What is drawn under it so far this frame.";
 
-/// `CORNER` is a unit square: the pivot taken off it, scaled to the quad's
-/// size, turned, and put where the quad is.
+/// `CORNER` is a unit square, mapped onto any four-cornered shape with
+/// parallel sides: its first corner, and the ways to the next two. A
+/// triangle folds the last corner onto the third.
 const engine_vertex =
     \\vertex {
-    \\    vec2 vertex_local = (CORNER - SPIN.xy) * PLACEMENT.zw;
-    \\    vec2 vertex_turned = vec2(
-    \\        vertex_local.x * SPIN.z - vertex_local.y * SPIN.w,
-    \\        vertex_local.x * SPIN.w + vertex_local.y * SPIN.z
-    \\    );
-    \\    UV = mix(REGION.xy, REGION.zw, CORNER);
+    \\    float vertex_fold = SHAPE.z * CORNER.x * CORNER.y;
+    \\    vec2 vertex_corner = vec2(CORNER.x - CORNER.x * vertex_fold, CORNER.y + (1.0 - CORNER.y) * vertex_fold);
+    \\    vec2 vertex_at = PLACE.xy + PLACE.zw * vertex_corner.x + SHAPE.xy * vertex_corner.y;
+    \\    UV = mix(REGION.xy, REGION.zw, vertex_corner);
     \\    COLOR = TINT;
-    \\    vec4 vertex_clip = PROJECTION * vec4(PLACEMENT.xy + vertex_turned, 0.0, 1.0);
+    \\    vec4 vertex_clip = PROJECTION * vec4(vertex_at, 0.0, 1.0);
     \\    SCREEN_UV = vec2(
     \\        vertex_clip.x / vertex_clip.w * 0.5 + 0.5,
     \\        vertex_clip.y / vertex_clip.w * 0.5 * SCREEN_FLIP + 0.5

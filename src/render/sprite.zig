@@ -45,10 +45,12 @@ const material = shaders_mod.material;
 const ShaderHandle = shaders_mod.ShaderHandle;
 const Screen = @import("screen.zig").Screen;
 const views_mod = @import("../views.zig");
+const drawing_mod = @import("../drawing.zig");
 
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
 const Labels = ecs.Query(.{ Transform2D, Text2D });
 const TileChunks = ecs.Query(.{tilemap.TileChunk});
+const Drawings2D = ecs.Query(.{drawing_mod.Drawing2D});
 
 pub const Error = rhi.Error || Allocator.Error || error{ShaderFailed};
 
@@ -56,13 +58,58 @@ pub const Error = rhi.Error || Allocator.Error || error{ShaderFailed};
 /// is copied into a vertex buffer; the attribute offsets come from the
 /// shader's own list, so the two cannot drift apart.
 pub const Instance = extern struct {
-    /// x and y of the pivot in world space, then width and height.
-    placement: [4]f32,
-    /// Pivot in zero to one, then the cosine and sine of the rotation.
-    spin: [4]f32,
+    /// Where the unit square's corner (0, 0) lands in the world, then the way
+    /// to where (1, 0) does.
+    place: [4]f32,
+    /// The way to where (0, 1) lands, then 1 for a triangle - (1, 1) folded
+    /// onto (0, 1) - and 0 for a four-cornered shape.
+    shape: [4]f32,
     tint: [4]f32,
     /// u0, v0, u1, v1.
     uv_rect: [4]f32,
+
+    /// A box `width` by `height` whose point `pivot` - from nought to one -
+    /// sits at `x, y`, turned by the angle whose cosine and sine are `c` and
+    /// `s`: a sprite, a glyph, a tile.
+    pub fn quad(x: f32, y: f32, width: f32, height: f32, pivot_x: f32, pivot_y: f32, c: f32, s: f32, tint: [4]f32, uv_rect: [4]f32) Instance {
+        const across = [2]f32{ width * c, width * s };
+        const down = [2]f32{ -height * s, height * c };
+        return .{
+            .place = .{ x - pivot_x * across[0] - pivot_y * down[0], y - pivot_x * across[1] - pivot_y * down[1], across[0], across[1] },
+            .shape = .{ down[0], down[1], 0, 0 },
+            .tint = tint,
+            .uv_rect = uv_rect,
+        };
+    }
+
+    /// Any four-cornered shape with parallel sides: `origin`, and the ways
+    /// to its next two corners.
+    pub fn parallelogram(origin: math.Vec2, across: math.Vec2, down: math.Vec2, tint: [4]f32, uv_rect: [4]f32) Instance {
+        return .{
+            .place = .{ origin.x, origin.y, across.x, across.y },
+            .shape = .{ down.x, down.y, 0, 0 },
+            .tint = tint,
+            .uv_rect = uv_rect,
+        };
+    }
+
+    /// A triangle of one colour, corner by corner.
+    pub fn triangle(a: math.Vec2, b: math.Vec2, c: math.Vec2, tint: [4]f32) Instance {
+        return .{
+            .place = .{ a.x, a.y, b.x - a.x, b.y - a.y },
+            .shape = .{ c.x - a.x, c.y - a.y, 1, 0 },
+            .tint = tint,
+            .uv_rect = .{ 0, 0, 1, 1 },
+        };
+    }
+
+    /// Where the vertex stage puts a corner of the unit square.
+    pub fn corner(self: Instance, x: f32, y: f32) math.Vec2 {
+        const fold = self.shape[2] * x * y;
+        const cx = x - x * fold;
+        const cy = y + (1 - y) * fold;
+        return .init(self.place[0] + self.place[2] * cx + self.shape[0] * cy, self.place[1] + self.place[3] * cx + self.shape[1] * cy);
+    }
 };
 
 /// No numbers of a material's own: a plain picture, or a shader with no
@@ -141,6 +188,8 @@ pub const Renderer = struct {
     time: f32 = 0,
     /// The picture each `RenderView` draws, for what a `ViewTexture` shows.
     views: ?*const views_mod.Views = null,
+    /// What each `Drawing2D` has drawn. Nothing of one is drawn without.
+    drawings: ?*const drawing_mod.Drawings = null,
     /// The render view being drawn, whose own picture is not drawn into it.
     drawing: ecs.Entity = .none,
 
@@ -561,18 +610,14 @@ pub const Renderer = struct {
                     .blend = sprite.blend,
                     .shader = drawn_with.shader,
                     .params = drawn_with.params,
-                    .instance = .{
-                        .placement = .{ transform.x, transform.y, drawn_width, drawn_height },
-                        .spin = .{ sprite.pivot_x, sprite.pivot_y, c, s },
-                        .tint = .{ tint.r, tint.g, tint.b, tint.a },
-                        .uv_rect = .{ region.u0, region.v0, region.u1, region.v1 },
-                    },
+                    .instance = .quad(transform.x, transform.y, drawn_width, drawn_height, sprite.pivot_x, sprite.pivot_y, c, s, .{ tint.r, tint.g, tint.b, tint.a }, .{ region.u0, region.v0, region.u1, region.v1 }),
                 });
             }
         }
 
         try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view, &sequence);
         try self.gatherText(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
+        try self.gatherDrawings(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
 
         std.sort.pdq(Item, self.items.items, {}, Item.before);
     }
@@ -674,12 +719,7 @@ pub const Renderer = struct {
                         .texture = texture.gpu,
                         .sampler = assets.samplerFor(texture.filter, texture.wrap),
                         .blend = .alpha,
-                        .instance = .{
-                            .placement = .{ at.x, at.y, across, down },
-                            .spin = .{ 0.5, 0.5, @cos(rotation), @sin(rotation) },
-                            .tint = .{ tint.r, tint.g, tint.b, tint.a },
-                            .uv_rect = .{ how.region.u0, how.region.v0, how.region.u1, how.region.v1 },
-                        },
+                        .instance = .quad(at.x, at.y, across, down, 0.5, 0.5, @cos(rotation), @sin(rotation), .{ tint.r, tint.g, tint.b, tint.a }, .{ how.region.u0, how.region.v0, how.region.u1, how.region.v1 }),
                     });
                 }
             }
@@ -723,7 +763,7 @@ pub const Renderer = struct {
                 var shown = label;
                 shown.color = looks.tint(label.color);
                 shown.layer = looks.layer(label.layer);
-                try self.layOut(gpa, assets, face, shown, run, transform, bounds, sequence);
+                try self.layOut(gpa, assets, face, shown, run, transform, bounds, sequence, null);
             }
         }
     }
@@ -739,6 +779,9 @@ pub const Renderer = struct {
         transform: Transform2D,
         bounds: Bounds,
         sequence: *u32,
+        /// A drawing's key, so its words stay among its shapes in the order
+        /// they were drawn; null for a label's own.
+        drawn_key: ?u64,
     ) !void {
         // Whole pixels, as the atlas is keyed - and no taller than the atlas,
         // which could not keep a bigger glyph anyway: a size read from a file
@@ -768,7 +811,7 @@ pub const Renderer = struct {
 
         const c = @cos(transform.rotation);
         const sn = @sin(transform.rotation);
-        const key = sortKeyOf(label.layer, if (label.font.isNone())
+        const key = drawn_key orelse sortKeyOf(label.layer, if (label.font.isNone())
             assets.default_font.index
         else
             label.font.index);
@@ -823,18 +866,19 @@ pub const Renderer = struct {
                     // not rasterised at.
                     .sampler = assets.samplerFor(.linear, .clamp_to_edge),
                     .blend = .alpha,
-                    .instance = .{
-                        .placement = .{
-                            placed.x,
-                            placed.y,
-                            entry.width * transform.scale_x,
-                            entry.height * transform.scale_y,
-                        },
-                        // The pivot is the corner the pen worked out.
-                        .spin = .{ 0, 0, c, sn },
-                        .tint = .{ label.color.r, label.color.g, label.color.b, label.color.a },
-                        .uv_rect = .{ entry.u0, entry.v0, entry.u1, entry.v1 },
-                    },
+                    // The pivot is the corner the pen worked out.
+                    .instance = .quad(
+                        placed.x,
+                        placed.y,
+                        entry.width * transform.scale_x,
+                        entry.height * transform.scale_y,
+                        0,
+                        0,
+                        c,
+                        sn,
+                        .{ label.color.r, label.color.g, label.color.b, label.color.a },
+                        .{ entry.u0, entry.v0, entry.u1, entry.v1 },
+                    ),
                 });
             }
 
@@ -843,6 +887,218 @@ pub const Renderer = struct {
             line_index += 1;
         }
     }
+
+    /// What each `Drawing2D` holds, its shapes put in the world: at its layer
+    /// among the sprites, in the order they were drawn. See `drawing.zig`.
+    fn gatherDrawings(
+        self: *Renderer,
+        gpa: Allocator,
+        world: *ecs.World,
+        assets: *Assets,
+        snapshots: *const hierarchy.Snapshots,
+        inherited: *Inherited,
+        alpha: f32,
+        view: View,
+        sequence: *u32,
+    ) !void {
+        const table = self.drawings orelse return;
+        const bounds = view.bounds();
+        const white = assets.get(assets.white) orelse return;
+        var it = try Drawings2D.over(world);
+        while (it.next()) |chunk| {
+            for (chunk.slice(drawing_mod.Drawing2D), chunk.entities) |held, entity| {
+                if (!held.visible) continue;
+                const picture = table.get(entity) orelse continue;
+                if (picture.isEmpty()) continue;
+                const looks = inherited.of(gpa, world, entity);
+                if (!looks.visible or looks.modulate.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
+                // In its entity's space, or the world's for one with none.
+                const placed: Transform2D = if (world.get(entity, Transform2D)) |local|
+                    hierarchy.resolve(world, snapshots, entity, local.*, alpha) orelse continue
+                else
+                    .{};
+                const middle = placed.apply((picture.low.x + picture.high.x) / 2, (picture.low.y + picture.high.y) / 2);
+                const reach = spriteRadius((picture.high.x - picture.low.x) * placed.scale_x, (picture.high.y - picture.low.y) * placed.scale_y);
+                if (!bounds.admits(middle.x, middle.y, reach)) {
+                    self.culled += 1;
+                    continue;
+                }
+                const drawn_with = try self.materialOf(gpa, world, entity);
+                var pen: Pen = .{
+                    .renderer = self,
+                    .gpa = gpa,
+                    .placed = placed,
+                    .looks = looks,
+                    // One key for the whole drawing, apart from the
+                    // sprites': its shapes are sorted by the order they
+                    // were drawn in, whatever their pictures.
+                    .key = sortKeyOf(looks.layer(held.layer), drawn_key_base | entity.index),
+                    .order = held.order,
+                    .sequence = sequence,
+                    .white = white.gpu,
+                    .white_sampler = assets.samplerFor(white.filter, white.wrap),
+                    .shader = drawn_with.shader,
+                    .params = drawn_with.params,
+                };
+                for (picture.shapes.items) |shape| try pen.draw(assets, picture, shape, bounds);
+            }
+        }
+    }
+
+    /// Past every texture's index: a drawing's key never falls among the
+    /// sprites' of one texture.
+    const drawn_key_base: u32 = 0x8000_0000;
+
+    /// Puts one drawing's shapes into the queue, in the world.
+    const Pen = struct {
+        renderer: *Renderer,
+        gpa: Allocator,
+        placed: Transform2D,
+        looks: @import("../inherited.zig").Resolved,
+        key: u64,
+        order: f32,
+        sequence: *u32,
+        white: rhi.Texture,
+        white_sampler: rhi.Sampler,
+        shader: ShaderHandle,
+        params: u32,
+
+        fn at(self: *const Pen, p: math.Vec2) math.Vec2 {
+            const moved = self.placed.apply(p.x, p.y);
+            return .init(moved.x, moved.y);
+        }
+
+        /// A width in the entity's space as it is drawn: scaled with it.
+        fn widthOf(self: *const Pen, width: f32) f32 {
+            return @max(width, 0) * (@abs(self.placed.scale_x) + @abs(self.placed.scale_y)) / 2;
+        }
+
+        fn colorOf(self: *const Pen, color: Color) [4]f32 {
+            const shown = self.looks.tint(color);
+            return .{ shown.r, shown.g, shown.b, shown.a };
+        }
+
+        fn put(self: *Pen, instance: Instance, texture: rhi.Texture, sampler: rhi.Sampler) !void {
+            self.sequence.* += 1;
+            try self.renderer.items.append(self.gpa, .{
+                .key = self.key,
+                .order = self.order,
+                .sequence = self.sequence.*,
+                .texture = texture,
+                .sampler = sampler,
+                .blend = .alpha,
+                .shader = self.shader,
+                .params = self.params,
+                .instance = instance,
+            });
+        }
+
+        fn triangle(self: *Pen, a: math.Vec2, b: math.Vec2, c: math.Vec2, tint: [4]f32) !void {
+            try self.put(.triangle(a, b, c, tint), self.white, self.white_sampler);
+        }
+
+        /// A straight line `width` wide between two points of the world.
+        fn line(self: *Pen, from: math.Vec2, to: math.Vec2, width: f32, tint: [4]f32) !void {
+            const along = to.sub(from);
+            const length = along.len();
+            if (length == 0 or width <= 0) return;
+            const side = along.perp().scale(width / (2 * length));
+            try self.put(.parallelogram(from.sub(side), along, side.scale(2), tint, .{ 0, 0, 1, 1 }), self.white, self.white_sampler);
+        }
+
+        /// A box of the entity's space, as it lands in the world.
+        fn box(self: *Pen, corner: math.Vec2, size: math.Vec2, tint: [4]f32, texture: rhi.Texture, sampler: rhi.Sampler, uv: [4]f32) !void {
+            const origin = self.at(corner);
+            const across = self.at(corner.add(.init(size.x, 0))).sub(origin);
+            const down = self.at(corner.add(.init(0, size.y))).sub(origin);
+            try self.put(.parallelogram(origin, across, down, tint, uv), texture, sampler);
+        }
+
+        /// Points round a circle of the entity's space, in the world.
+        fn round(self: *Pen, center: math.Vec2, radius: f32, start: f32, turn: f32, out: []math.Vec2) []math.Vec2 {
+            const scale = (@abs(self.placed.scale_x) + @abs(self.placed.scale_y)) / 2;
+            const pieces = @min(drawing_mod.segmentsOf(radius * scale, turn), @as(u32, @intCast(out.len - 1)));
+            for (0..pieces + 1) |i| {
+                const angle = start + turn * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(pieces));
+                out[i] = self.at(center.add(math.Vec2.init(@cos(angle), @sin(angle)).scale(radius)));
+            }
+            return out[0 .. pieces + 1];
+        }
+
+        fn draw(self: *Pen, assets: *Assets, picture: *const drawing_mod.Picture, shape: drawing_mod.Shape, bounds: Bounds) !void {
+            switch (shape) {
+                .line => |held| try self.line(self.at(held.from), self.at(held.to), self.widthOf(held.width), self.colorOf(held.color)),
+                .rect => |held| {
+                    const tint = self.colorOf(held.color);
+                    if (held.filled) return self.box(held.at, held.size, tint, self.white, self.white_sampler, .{ 0, 0, 1, 1 });
+                    const corners = [4]math.Vec2{
+                        self.at(held.at),
+                        self.at(held.at.add(.init(held.size.x, 0))),
+                        self.at(held.at.add(held.size)),
+                        self.at(held.at.add(.init(0, held.size.y))),
+                    };
+                    const width = self.widthOf(held.width);
+                    for (corners, 0..) |from, i| try self.line(from, corners[(i + 1) % 4], width, tint);
+                },
+                .circle => |held| {
+                    var buffer: [97]math.Vec2 = undefined;
+                    const points = self.round(held.center, held.radius, 0, std.math.tau, &buffer);
+                    const tint = self.colorOf(held.color);
+                    if (held.filled) {
+                        const middle = self.at(held.center);
+                        for (points[0 .. points.len - 1], points[1..]) |a, b| try self.triangle(middle, a, b, tint);
+                    } else {
+                        const width = self.widthOf(held.width);
+                        for (points[0 .. points.len - 1], points[1..]) |a, b| try self.line(a, b, width, tint);
+                    }
+                },
+                .arc => |held| {
+                    var buffer: [97]math.Vec2 = undefined;
+                    const points = self.round(held.center, held.radius, held.start, held.end - held.start, &buffer);
+                    const tint = self.colorOf(held.color);
+                    const width = self.widthOf(held.width);
+                    for (points[0 .. points.len - 1], points[1..]) |a, b| try self.line(a, b, width, tint);
+                },
+                .polyline => |held| {
+                    const points = picture.points.items[held.first..][0..held.count];
+                    if (points.len < 2) return;
+                    const tint = self.colorOf(held.color);
+                    const width = self.widthOf(held.width);
+                    for (points[0 .. points.len - 1], points[1..]) |a, b| try self.line(self.at(a), self.at(b), width, tint);
+                },
+                .polygon => |held| {
+                    const tint = self.colorOf(held.color);
+                    const corners = picture.corners.items[held.first_corner..][0..held.corners];
+                    var i: usize = 0;
+                    while (i + 2 < corners.len) : (i += 3) {
+                        const points = picture.points.items;
+                        try self.triangle(self.at(points[corners[i]]), self.at(points[corners[i + 1]]), self.at(points[corners[i + 2]]), tint);
+                    }
+                },
+                .texture => |held| {
+                    const texture = assets.get(held.texture) orelse return;
+                    const size: math.Vec2 = if (held.size.x == 0 and held.size.y == 0)
+                        .init(@floatFromInt(texture.width), @floatFromInt(texture.height))
+                    else
+                        held.size;
+                    const uv: [4]f32 = if (texture.upside_down) .{ 0, 1, 1, 0 } else .{ 0, 0, 1, 1 };
+                    try self.box(held.at, size, self.colorOf(held.color), texture.gpu, assets.samplerFor(texture.filter, texture.wrap), uv);
+                },
+                .text => |held| {
+                    const run = picture.words.items[held.first..][0..held.len];
+                    if (run.len == 0 or !std.unicode.utf8ValidateSlice(run)) return;
+                    const face = assets.fontOf(held.font) orelse return;
+                    var placed = self.placed;
+                    const start = self.at(held.at);
+                    placed.x = start.x;
+                    placed.y = start.y;
+                    const shown = self.looks.tint(held.color);
+                    const label: Text2D = .{ .font = held.font, .size = held.size, .color = shown, .order = self.order };
+                    try self.renderer.layOut(self.gpa, assets, face, label, run, placed, bounds, self.sequence, self.key);
+                },
+            }
+        }
+    };
 
     /// Make sure the instance buffer holds at least this many.
     fn reserve(self: *Renderer, count: u32) !void {
@@ -1012,7 +1268,7 @@ test "sprites of one layer are grouped by texture" {
 test "within a layer, order comes first, then blend, then texture, and sequence breaks the tie" {
     const first: Assets.TextureHandle = .{ .index = 1, .generation = 1 };
     const second: Assets.TextureHandle = .{ .index = 2, .generation = 1 };
-    const blank: Instance = .{ .placement = @splat(0), .spin = @splat(0), .tint = @splat(0), .uv_rect = @splat(0) };
+    const blank: Instance = .{ .place = @splat(0), .shape = @splat(0), .tint = @splat(0), .uv_rect = @splat(0) };
 
     const item = struct {
         fn make(layer: i16, order: f32, texture: Assets.TextureHandle, sequence: u32) Item {
@@ -1065,18 +1321,12 @@ test "the corners an editor outlines are where the vertex shader puts them" {
     const placed: Transform2D = .{ .x = 100, .y = 50, .rotation = 0.6, .scale_x = 2, .scale_y = -1 };
     const corners = cornersOf(sprite, placed, &texture);
 
-    // `sprite.fxs`, line for line, fed what `gather` gives it.
-    const c = @cos(placed.rotation);
-    const s = @sin(placed.rotation);
-    const placement = [4]f32{ placed.x, placed.y, 20 * placed.scale_x, 10 * placed.scale_y };
-    const spin = [4]f32{ sprite.pivot_x, sprite.pivot_y, c, s };
+    // The vertex stage's arithmetic, fed what `gather` gives it.
+    const instance: Instance = .quad(placed.x, placed.y, 20 * placed.scale_x, 10 * placed.scale_y, sprite.pivot_x, sprite.pivot_y, @cos(placed.rotation), @sin(placed.rotation), @splat(1), .{ 0, 0, 1, 1 });
     for (quad_round, corners) |corner, got| {
-        const local_x = (corner[0] - spin[0]) * placement[2];
-        const local_y = (corner[1] - spin[1]) * placement[3];
-        const turned_x = local_x * spin[2] - local_y * spin[3];
-        const turned_y = local_x * spin[3] + local_y * spin[2];
-        try testing.expectApproxEqAbs(placement[0] + turned_x, got.x, 0.0001);
-        try testing.expectApproxEqAbs(placement[1] + turned_y, got.y, 0.0001);
+        const want = instance.corner(corner[0], corner[1]);
+        try testing.expectApproxEqAbs(want.x, got.x, 0.0001);
+        try testing.expectApproxEqAbs(want.y, got.y, 0.0001);
     }
 
     // And unturned, the box it should be.

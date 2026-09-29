@@ -1629,6 +1629,7 @@ const Lifecycle = enum {
     exit,
     input,
     unhandled_input,
+    draw,
 
     const dt = [_]flux.Hook.Param{.{ .name = "dt", .type = reflect.typeOf(f32) }};
     const event = [_]flux.Hook.Param{.{ .name = "event", .type = reflect.typeOf(InputEvent) }};
@@ -1641,6 +1642,7 @@ const Lifecycle = enum {
             .exit => .{ .name = "exit", .doc = "When its entity dies, its `Script` is taken off or turned off, or the world is cleared: at the end of that frame." },
             .input => .{ .name = "input", .params = &event, .doc = "Each thing the player did this frame, in order. `app.setInputAsHandled()` keeps it from the scripts after, and from `unhandled_input`." },
             .unhandled_input => .{ .name = "unhandled_input", .params = &event, .doc = "What no script's `input` took, and the interface did not have." },
+            .draw => .{ .name = "draw", .doc = "Its entity's drawing, drawn again: the first frame, and at the end of one that called `self.entity.queueRedraw()`. What it draws - `self.entity.drawLine(...)` and the rest - stays until then." },
         };
     }
 
@@ -2166,6 +2168,7 @@ pub const Scripts = struct {
             },
             .end_of_frame => {
                 self.callTheDeferred();
+                self.drawTheWanted();
                 try self.letGoOfTheUnwanted();
                 self.forgetDeadBridges();
                 if (self.frame_given) {
@@ -2320,6 +2323,24 @@ pub const Scripts = struct {
                     which.params(),
                 });
             }
+        }
+    }
+
+    /// `draw` for each instance whose entity has not been drawn yet, or asked
+    /// to be again: on an emptied picture. See `drawing.zig`.
+    fn drawTheWanted(self: *Scripts) void {
+        var at: usize = 0;
+        while (at < self.instances.count()) : (at += 1) {
+            const inst = self.instances.values()[at];
+            if (!inst.readied) continue;
+            const method = inst.methods.get(.draw) orelse continue;
+            const entity = self.instances.keys()[at];
+            if (self.app.drawings.get(entity)) |held| if (held.drawn and !held.wanted) continue;
+            const picture = self.app.drawings.pictureOf(self.app.gpa, entity) catch return self.outOfMemory(null);
+            picture.clear();
+            picture.wanted = false;
+            picture.drawn = true;
+            self.call(entity, method, &.{inst.value}, .draw);
         }
     }
 

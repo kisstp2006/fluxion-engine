@@ -1279,8 +1279,8 @@ pub const Nodes = struct {
         const box = command.bounding_box;
         const faded = command.config.custom.tint;
         try app.sprites.drawQuad(app.gpa, made.entity, made.shader, into, size.width, size.height, .{
-            .placement = .{ box.x, box.y, box.width, box.height },
-            .spin = .{ 0, 0, 1, 0 },
+            .place = .{ box.x, box.y, box.width, 0 },
+            .shape = .{ 0, box.height, 0, 0 },
             .tint = .{ made.tint.r * faded.r, made.tint.g * faded.g, made.tint.b * faded.b, made.tint.a * faded.a },
             .uv_rect = .{ made.region.u0, made.region.v0, made.region.u1, made.region.v1 },
         }, texture.gpu, app.assets.samplerFor(texture.filter, texture.wrap), scissor);

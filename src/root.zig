@@ -191,6 +191,8 @@ pub const Collider2D = components.Collider2D;
 /// pickup, a hurtbox.
 pub const Area2D = components.Area2D;
 pub const RayCast2D = components.RayCast2D;
+pub const Drawing2D = @import("drawing.zig").Drawing2D;
+pub const drawing = @import("drawing.zig");
 
 /// A grid of tiles from a `TileSet`. Its cells live in `TileChunk`s the
 /// map owns; `App.setTile` paints one.
