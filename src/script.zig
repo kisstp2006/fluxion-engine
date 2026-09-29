@@ -3786,7 +3786,37 @@ pub fn serviceOptions(app: *App) flux.service.Options {
         .loader = .{ .context = app, .load = loadImport },
         .io = app.io,
         .strings = .{ .context = app, .values = stringValues },
+        .imports = .{ .context = app, .list = importableScripts },
     };
+}
+
+/// The project's scripts, for an editor's `@import("` and the names they
+/// declare: every `.flux` file under `res://` but in hidden folders and
+/// what a build leaves, `zig-out` and `zig-pkg`. None without a project.
+fn importableScripts(context: ?*anyopaque, arena: Allocator) Allocator.Error![]const []const u8 {
+    const app: *App = @ptrCast(@alignCast(context.?));
+    if (app.project.settings == null) return &.{};
+    var found: std.ArrayList([]const u8) = .empty;
+    try scriptsUnder(app, arena, Project.scheme, &found, 0);
+    return found.items;
+}
+
+fn scriptsUnder(app: *App, arena: Allocator, folder: []const u8, found: *std.ArrayList([]const u8), depth: u8) Allocator.Error!void {
+    if (depth > 16 or found.items.len >= 4096) return;
+    const listing = app.listDir(app.gpa, folder) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return,
+    };
+    defer listing.deinit(app.gpa);
+    for (listing.names) |name| {
+        if (name[0] == '.') continue;
+        if (std.mem.endsWith(u8, name, "/")) {
+            if (std.mem.eql(u8, name, "zig-out/") or std.mem.eql(u8, name, "zig-pkg/")) continue;
+            try scriptsUnder(app, arena, try std.fmt.allocPrint(arena, "{s}{s}", .{ folder, name }), found, depth + 1);
+        } else if (std.mem.endsWith(u8, name, ".flux")) {
+            try found.append(arena, try std.fmt.allocPrint(arena, "{s}{s}", .{ folder, name }));
+        }
+    }
 }
 
 /// A script's `@import("save.flux")`: the file beside the one importing it,

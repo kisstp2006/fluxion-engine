@@ -1311,6 +1311,44 @@ test "a script asks for the game's actions, and holds one down as a button on th
     try testing.expect(!app.actionDown("jump"));
 }
 
+test "an editor's analysis offers the project's scripts to import, and a name one declares with its import" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "project.fluxion", .data =
+        \\{ "fluxion_project": 2, "application": { "name": "Shop" } }
+    });
+    try tmp.dir.createDirPath(testing.io, "lib");
+    try tmp.dir.createDirPath(testing.io, ".hidden");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "lib/coins.flux", .data = "enum Coin { copper, gold }\nfn mint() Coin { return .gold; }\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".hidden/secret.flux", .data = "fn hush() {}\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "shop.flux", .data = "" });
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+    defer app.destroy();
+
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const quoted = "const c = @import(\"\");\n";
+    const files = try flux.service.complete(testing.allocator, arena, "res://shop.flux", quoted, @intCast(std.mem.indexOf(u8, quoted, "\"\"").? + 1), app.scriptSetup());
+    var labels: std.ArrayList(u8) = .empty;
+    for (files.items) |item| try labels.print(arena, "{s} ", .{item.label});
+    try testing.expect(std.mem.indexOf(u8, labels.items, "res://lib/coins.flux ") != null);
+    try testing.expect(std.mem.indexOf(u8, labels.items, "math ") != null);
+    try testing.expect(std.mem.indexOf(u8, labels.items, "secret") == null);
+    try testing.expect(std.mem.indexOf(u8, labels.items, "res://shop.flux ") == null);
+
+    const typed = "struct Shop {\n    fn ready(self) {\n        const c = Coi\n    }\n}\n";
+    const names = try flux.service.complete(testing.allocator, arena, "res://shop.flux", typed, @intCast(std.mem.indexOf(u8, typed, "Coi\n").? + 3), app.scriptSetup());
+    const coin = for (names.items) |item| {
+        if (std.mem.eql(u8, item.label, "Coin")) break item;
+    } else return error.NotOffered;
+    try testing.expectEqualStrings("coins.Coin", coin.insert.?);
+    try testing.expectEqual(@as(u32, 0), coin.also.?.at);
+    try testing.expectEqualStrings("const coins = @import(\"res://lib/coins.flux\");\n", coin.also.?.text);
+}
+
 test "an editor's analysis offers the project's actions inside the quotes of a call that names one" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
