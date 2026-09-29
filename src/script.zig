@@ -1551,11 +1551,97 @@ pub const FramesRef = struct {
     }
 
     /// The file it is: empty for frames not saved yet.
-    fn resourcePath(self: *FramesRef) []const u8 {
+    fn resourcePath(self: *const FramesRef) []const u8 {
         const frames = self.scripts.app.sprite_frames.get(self.handle) orelse return "";
         return if (frames.on_disc) frames.source else "";
     }
 };
+
+/// A file of the game's as the scripts see it - a `Texture`, a `Scene`, an
+/// `AudioClip` - given by its path where one is wanted: `var icon: Texture =
+/// "res://icon.png"`, `sprite.texture = icon`, `app.instantiate(enemy,
+/// self.entity)`. Its `resource_path` is the file. One file is one value;
+/// sprite frames are `FramesRef`, with calls of their own.
+pub fn AssetRef(comptime kind: AssetKind) type {
+    return struct {
+        scripts: *Scripts,
+        handle: kind.Handle(),
+
+        const Self = @This();
+
+        pub const reflect_name = assetTypeName(kind);
+        pub const reflect_opaque = true;
+        pub const reflect_methods = switch (kind) {
+            .texture => .{ .width = .{}, .height = .{}, .size = .{} },
+            .audio => .{ .length = .{} },
+            else => .{},
+        };
+
+        /// How many pixels across: nought once it is unloaded.
+        pub fn width(self: *const Self) i32 {
+            const held = self.scripts.app.assets.get(self.handle) orelse return 0;
+            return @intCast(held.width);
+        }
+
+        /// How many pixels down: nought once it is unloaded.
+        pub fn height(self: *const Self) i32 {
+            const held = self.scripts.app.assets.get(self.handle) orelse return 0;
+            return @intCast(held.height);
+        }
+
+        /// Its width and height, in pixels.
+        pub fn size(self: *const Self) math.Vec2 {
+            return .init(@floatFromInt(self.width()), @floatFromInt(self.height()));
+        }
+
+        /// How long it plays, in seconds.
+        pub fn length(self: *const Self) f32 {
+            return self.scripts.app.audioLength(self.handle);
+        }
+
+        /// The file it is.
+        fn resourcePath(self: *const Self) []const u8 {
+            return self.scripts.app.assetSource(self.handle) orelse "";
+        }
+    };
+}
+
+/// What each kind of file is called in a script.
+fn assetTypeName(comptime kind: AssetKind) [:0]const u8 {
+    return switch (kind) {
+        .texture => "Texture",
+        .font => "Font",
+        .scene => "Scene",
+        .script => "ScriptFile",
+        .tileset => "TileSet",
+        .theme => "Theme",
+        .data => "DataFile",
+        .audio => "AudioClip",
+        .animation => "AnimationLibrary",
+        .frames => "SpriteFrames",
+        .shader => "Shader",
+    };
+}
+
+/// The value a file of `kind` is to the scripts.
+pub fn RefOf(comptime kind: AssetKind) type {
+    return if (kind == .frames) FramesRef else AssetRef(kind);
+}
+
+/// The file a script's value is, and of what kind: null for one that is
+/// none.
+pub fn assetOf(value: flux.Value) ?struct { kind: AssetKind, path: []const u8 } {
+    if (value.tag != .handle) return null;
+    const h = value.as(flux.object.Handle);
+    if (h.live != null) return null;
+    inline for (AssetKind.handled) |kind| {
+        if (h.value.asConst(RefOf(kind))) |ref| return .{ .kind = kind, .path = ref.resourcePath() };
+    }
+    return null;
+}
+
+/// Which file a value stands for, by its kind and handle.
+const AssetKey = struct { kind: AssetKind, index: u32, generation: u32 };
 
 /// The app a VM's scripts belong to: for a call of the engine's given the
 /// VM, as `InputEvent.isAction` is.
@@ -1737,9 +1823,9 @@ pub const Scripts = struct {
     /// The handle each entity is to the scripts, held from the first time
     /// one is handed to them until the end of the frame it dies in.
     handles: std.AutoHashMapUnmanaged(Entity, flux.Value) = .empty,
-    /// The value each set of sprite frames is to the scripts, once handed to
-    /// them: one set, one value.
-    frames_handles: std.AutoHashMapUnmanaged(sprite_frames.SpriteFramesHandle, flux.Value) = .empty,
+    /// The value each file is to the scripts, once handed to them: one
+    /// file, one value. See `assetValue`.
+    asset_values: std.AutoHashMapUnmanaged(AssetKey, flux.Value) = .empty,
     /// Entities whose script could not be made, with the `Script` that
     /// asked. It is not tried again until the `Script` or its file changes.
     refused: std.AutoHashMapUnmanaged(Entity, Script) = .empty,
@@ -1856,7 +1942,7 @@ pub const Scripts = struct {
         self.instances.deinit(gpa);
         self.entity_of.deinit(gpa);
         self.handles.deinit(gpa);
-        self.frames_handles.deinit(gpa);
+        self.asset_values.deinit(gpa);
         self.clock_values.deinit(gpa);
         self.clock_signals.deinit(gpa);
         self.refused.deinit(gpa);
@@ -2640,7 +2726,7 @@ pub const Scripts = struct {
                     continue;
                 },
             } orelse {
-                log.warn("{s} of {f} holds {t}, and is given {f}", .{ name, whose, field.kind, value });
+                log.warn("{s} of {f} holds {t}, and is given {f}", .{ name, whose, field.shape.kind, value });
                 continue;
             };
             self.vm.setField(instance, name, made) catch |err| {
@@ -2713,18 +2799,23 @@ pub const Scripts = struct {
     /// A value a scene wrote as the script's own, as a field of `field`'s
     /// kind holds it; null for one it cannot hold.
     fn fluxOf(self: *Scripts, field: flux.FieldInfo, value: json.Value) flux.Vm.Error!?flux.Value {
-        if (value == .null) return if (field.nullable or field.kind == .any) .null else null;
         if (flux.annotationOf(field, "entity") != null) {
+            if (value == .null) return .null;
             const text = value.asString() orelse return null;
             const uuid = id.Uuid.parse(text) catch return null;
             const entity = self.app.findUuid(uuid) orelse return .null;
             return try entityHandle(self, entity);
         }
-        return self.fluxOfKind(field.kind, field, value);
+        return self.fluxOfShape(field.shape, field, value, false);
     }
 
-    fn fluxOfKind(self: *Scripts, kind: flux.FieldKind, field: flux.FieldInfo, value: json.Value) flux.Vm.Error!?flux.Value {
+    /// `value` as a value of `shape` holds it: a list's items and a map's
+    /// keys and values by `field`'s `element` and `key`. One inside a list
+    /// or a map is `inner`: it holds no list or map of its own.
+    fn fluxOfShape(self: *Scripts, shape: flux.Shape, field: flux.FieldInfo, value: json.Value, inner: bool) flux.Vm.Error!?flux.Value {
         const vm = self.vm;
+        if (value == .null) return if (shape.nullable or shape.kind == .any) .null else null;
+        const kind = shape.kind;
         switch (kind) {
             .int => return .int(value.asInt(i64) orelse return null),
             .float => return .float(value.asFloat(f64) orelse return null),
@@ -2747,15 +2838,10 @@ pub const Scripts = struct {
                 for (0..value.len()) |i| rgba[i] = @floatCast(value.get(i).asFloat(f64) orelse return null);
                 return try vm.newColor(rgba);
             },
-            .enum_member => {
-                const name = value.asString() orelse return null;
-                const e = field.enum_type orelse return null;
-                for (field.members, 0..) |member, i| {
-                    if (std.mem.eql(u8, member.bytes(), name)) return flux.enumMember(e, @intCast(i));
-                }
-                return null;
-            },
+            .enum_member => return memberNamed(shape, value.asString() orelse return null),
+            .host => return try self.hostOfJson(shape.host orelse return null, value),
             .list => {
+                if (inner) return null;
                 const items = value.asArray() orelse return null;
                 if (items.len() > 1024) return null;
                 var made: std.ArrayList(flux.Value) = .empty;
@@ -2764,11 +2850,31 @@ pub const Scripts = struct {
                 // collect.
                 defer for (made.items) |_| vm.popRoot();
                 for (items.items()) |item| {
-                    const one = try self.fluxOfKind(field.element, field, item) orelse return null;
+                    const one = try self.fluxOfShape(field.element, field, item, true) orelse return null;
                     try made.append(self.app.gpa, one);
                     try vm.pushRoot(one);
                 }
-                return try vm.newList(field.element_check, made.items);
+                return try vm.newList(field.element.check, made.items);
+            },
+            .map => {
+                if (inner) return null;
+                if (value.asObject() == null or value.keys().len > 1024) return null;
+                const gpa = self.app.gpa;
+                var keys: std.ArrayList(flux.Value) = .empty;
+                defer keys.deinit(gpa);
+                var values: std.ArrayList(flux.Value) = .empty;
+                defer values.deinit(gpa);
+                defer for (keys.items) |_| vm.popRoot();
+                defer for (values.items) |_| vm.popRoot();
+                for (value.keys(), value.values()) |name, item| {
+                    const key = try self.keyOf(field.key, name) orelse return null;
+                    try keys.append(gpa, key);
+                    try vm.pushRoot(key);
+                    const one = try self.fluxOfShape(field.element, field, item, true) orelse return null;
+                    try values.append(gpa, one);
+                    try vm.pushRoot(one);
+                }
+                return try vm.newMap(field.key.check, field.element.check, keys.items, values.items);
             },
             .any => return switch (value) {
                 .int => |n| .int(n),
@@ -2779,6 +2885,31 @@ pub const Scripts = struct {
             },
             else => return null,
         }
+    }
+
+    /// A map's key a scene wrote as the text it is: text, a whole number,
+    /// or an enum's member by its name.
+    fn keyOf(self: *Scripts, shape: flux.Shape, text: []const u8) flux.Vm.Error!?flux.Value {
+        return switch (shape.kind) {
+            .string, .any => try self.vm.string(text),
+            .int => .int(std.fmt.parseInt(i64, text, 10) catch return null),
+            .enum_member => memberNamed(shape, text),
+            else => null,
+        };
+    }
+
+    /// A file a scene names, as the scripts' value of it: `host` says of
+    /// which kind. Null for one that does not load.
+    fn hostOfJson(self: *Scripts, host: *const reflect.Type, value: json.Value) flux.Vm.Error!?flux.Value {
+        const path = value.asString() orelse return null;
+        inline for (AssetKind.handled) |kind| if (host.same(reflect.typeOf(RefOf(kind)))) {
+            const handle = self.app.loadAsset(kind.Handle(), path) catch |err| {
+                log.warn("the {s} {s} did not load: {t}", .{ kind.label(), path, err });
+                return null;
+            };
+            return try assetValue(self, kind, handle);
+        };
+        return null;
     }
 
     // ---------------------------------------------------------------------
@@ -3233,10 +3364,7 @@ fn assetType(comptime kind: AssetKind) flux.HostType {
             const self: *Scripts = @ptrCast(@alignCast(vm.host.?));
             const handle = value.get(H).?;
             if (std.meta.eql(handle, H.none)) return .null;
-            // Sprite frames are a value with calls of their own.
-            if (comptime kind == .frames) return framesHandle(self, handle);
-            const path = self.app.assetSource(handle) orelse return .null;
-            return vm.string(path);
+            return assetValue(self, kind, handle);
         }
 
         fn fromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flux.Vm.Error!void {
@@ -3248,40 +3376,40 @@ fn assetType(comptime kind: AssetKind) flux.HostType {
                     break :blk2 self.app.loadAsset(H, path) catch |err| return vm.fail("the " ++ comptime kind.label() ++ " {s} did not load: {t}", .{ path, err });
                 },
                 .handle => blk2: {
-                    if (comptime kind == .frames) if (vm.reflectOf(value)) |now| if (now.asConst(FramesRef)) |ref| break :blk2 ref.handle;
-                    return vm.fail("a " ++ comptime kind.label() ++ " is given by its path, as \"res://...\", not a {s}", .{value.as(flux.object.Handle).value.type.name.slice()});
+                    if (vm.reflectOf(value)) |now| if (now.asConst(RefOf(kind))) |ref| break :blk2 ref.handle;
+                    return vm.fail("a " ++ comptime kind.label() ++ " is wanted here, not a {s}", .{value.as(flux.object.Handle).value.type.name.slice()});
                 },
-                else => return vm.fail("a " ++ comptime kind.label() ++ " is given by its path, as \"res://...\", not {s}", .{typeName(value)}),
+                else => return vm.fail("a " ++ comptime kind.label() ++ " is wanted here, or its path, as \"res://...\", not {s}", .{typeName(value)}),
             };
             into.set(H, handle) catch return vm.fail("this " ++ comptime kind.label() ++ " can only be read", .{});
         }
     };
     return .{
         .type = reflect.typeOf(H),
-        // Sprite frames are a value of their own to a script; the other
-        // files are their paths.
-        .script = if (kind == .frames) reflect.typeOf(FramesRef) else null,
-        .given = if (kind == .frames) null else .string,
+        .script = reflect.typeOf(RefOf(kind)),
         .nullable = true,
+        .from_string = true,
         .to_script = Shim.toScript,
         .from_script = Shim.fromScript,
     };
 }
 
-/// The value a set of sprite frames is to the scripts: made the first time,
-/// the same one after.
-fn framesHandle(scripts: *Scripts, handle: sprite_frames.SpriteFramesHandle) flux.Vm.Error!flux.Value {
-    if (scripts.frames_handles.get(handle)) |known| return known;
+/// The value a file is to the scripts: made the first time, the same one
+/// after.
+fn assetValue(scripts: *Scripts, comptime kind: AssetKind, handle: kind.Handle()) flux.Vm.Error!flux.Value {
+    const key: AssetKey = .{ .kind = kind, .index = handle.index, .generation = handle.generation };
+    if (scripts.asset_values.get(key)) |known| return known;
     const vm = scripts.vm;
-    try scripts.frames_handles.ensureUnusedCapacity(scripts.app.gpa, 1);
-    const ref = try vm.gpa.create(FramesRef);
+    try scripts.asset_values.ensureUnusedCapacity(scripts.app.gpa, 1);
+    const Ref = RefOf(kind);
+    const ref = try vm.gpa.create(Ref);
     ref.* = .{ .scripts = scripts, .handle = handle };
     const made = vm.adoptHandle(ref) catch |err| {
         vm.gpa.destroy(ref);
         return err;
     };
     try vm.hold(made);
-    scripts.frames_handles.putAssumeCapacityNoClobber(handle, made);
+    scripts.asset_values.putAssumeCapacityNoClobber(key, made);
     return made;
 }
 
@@ -3310,10 +3438,10 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
         return null;
     }
     const now = vm.reflectOf(handle) orelse return null;
-    if (now.as(FramesRef)) |frames| {
-        if (std.mem.eql(u8, name, "resource_path")) return try vm.string(frames.resourcePath());
+    inline for (AssetKind.handled) |kind| if (now.asConst(RefOf(kind))) |file| {
+        if (std.mem.eql(u8, name, "resource_path")) return try vm.string(file.resourcePath());
         return null;
-    }
+    };
     if (now.as(ClockRef)) |clock| {
         const which = for (ClockRef.signal_names, 0..) |signal_name, i| {
             if (std.mem.eql(u8, signal_name, name)) break i;
@@ -3603,7 +3731,10 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "position", .type = .vec2, .writable = true, .doc = "`x` and `y` as one vector: `t.position += velocity * delta`." });
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "scale", .type = .vec2, .writable = true, .doc = "`scale_x` and `scale_y` as one vector." });
     for (ClockRef.signal_names) |name| try vm.declareMember(.{ .of = reflect.typeOf(ClockRef), .name = name, .type = .signal });
-    try vm.declareMember(.{ .of = reflect.typeOf(FramesRef), .name = "resource_path", .type = .string, .doc = "The file the frames were read from, or \"\" for ones made in memory." });
+    inline for (AssetKind.handled) |kind| {
+        if (kind != .frames) try vm.declareType(reflect.typeOf(AssetRef(kind)));
+        try vm.declareMember(.{ .of = reflect.typeOf(RefOf(kind)), .name = "resource_path", .type = .string, .doc = "The file it was read from, or \"\" for one made in memory and not saved yet." });
+    }
     for (std.enums.values(Lifecycle)) |which| try vm.declareHook(which.hook());
     for (annotations) |a| try vm.declareAnnotation(a);
 }
@@ -3871,8 +4002,18 @@ test "what a script prints is said a line at a time" {
 }
 
 /// A script's value as a scene writes an `@export`'s: what an editor shows
-/// of a field's default. Null for what a scene cannot say - a function, an
-/// instance.
+/// of a field's default. A file is its path, and a map an object whose
+/// names are its keys - text, a whole number or an enum's member. Null for
+/// what a scene cannot say - a function, an instance.
+/// The member of `shape`'s enum called `name`, or null for none.
+fn memberNamed(shape: flux.Shape, name: []const u8) ?flux.Value {
+    const e = shape.enum_type orelse return null;
+    for (e.members, 0..) |member, i| {
+        if (std.mem.eql(u8, member.bytes(), name)) return flux.enumMember(e, @intCast(i));
+    }
+    return null;
+}
+
 pub fn jsonOf(doc: *json.Document, value: flux.Value) json.EditError!json.Value {
     switch (value.tag) {
         .int => return .{ .int = value.asInt() },
@@ -3905,6 +4046,25 @@ pub fn jsonOf(doc: *json.Document, value: flux.Value) json.EditError!json.Value 
             const list = try doc.array();
             for (value.as(flux.object.List).items.items) |item| try list.append(try jsonOf(doc, item));
             return list;
+        },
+        .map => {
+            const object = try doc.object();
+            var it = value.as(flux.object.Map).table.iterator();
+            while (it.next()) |entry| {
+                var digits: [24]u8 = undefined;
+                const name: []const u8 = switch (entry.key.tag) {
+                    .string => entry.key.as(flux.object.String).bytes(),
+                    .int => std.fmt.bufPrint(&digits, "{d}", .{entry.key.asInt()}) catch unreachable,
+                    .enum_value => flux.object.EnumType.from(entry.key.obj()).members[entry.key.extra].bytes(),
+                    else => continue,
+                };
+                try object.put(name, try jsonOf(doc, entry.value));
+            }
+            return object;
+        },
+        .handle => {
+            const file = assetOf(value) orelse return .null;
+            return doc.string(file.path);
         },
         else => return .null,
     }

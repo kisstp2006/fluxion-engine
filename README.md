@@ -2908,18 +2908,28 @@ struct Guard {
 - **The system it runs on**: `app.osName()` - `.windows`, `.macos`,
   `.linux`, `.android`, `.ios`, `.web` - for a touch layout on a phone, and
   `app.isDebugBuild()`.
-- **A file is its path.** Where a call or a field wants a scene, a texture,
-  a font, a tile set, a theme, a script or a data file, a script gives
-  `"res://…"`, and the file is read if nothing has read it yet. The same
-  handle reads back as its path.
+- **A file is a value of its kind**: a `Texture`, `Font`, `Scene`,
+  `ScriptFile`, `TileSet`, `Theme`, `DataFile`, `AudioClip`,
+  `AnimationLibrary`, `SpriteFrames` or `Shader`, its `resource_path` the
+  file. Where one is wanted a script gives its path - `sprite.texture =
+  "res://hero.png"`, `var door: Scene = "res://door.json"` - and the file
+  is read if nothing has read it yet; one file is one value, whoever hands
+  it over. A texture has `width()`, `height()` and `size()`, a sound
+  `length()`.
+- **Every enum lists its members**, the engine's as a script's own:
+  `WindowMode.members()`, `Key.from_name("space")`, `State.from_int(2)`,
+  and each member's `name()` - a settings menu of the window's modes, a
+  key's name saved.
 - **`@export` marks what a scene gives a value.** A scene writes an
   entity's values beside its components, as `"exports": { "hp": 20 }`, and
   `app.exports` holds them. They are set on the instance when it is made,
   before its `ready`: a number, a bool and text as themselves, a vector as
   its numbers, a colour as `"#rrggbbaa"`, an enum's member by its name, an
-  entity by its UUID (`@entity`), a list as a list. A field the struct no
-  longer has, or a value it cannot hold, is said in the log and passed over.
-  - `app.exportedFields(entity, &buffer)` lists the fields, made or not, with their kind, default, doc comment and annotations (`@range`, `@multiline`, `@group`, `@file`, `@entity`, …): what an editor draws.
+  entity by its UUID (`@entity`), a file by its path, a list as a list, a
+  map as an object whose names are its keys - text, whole numbers or an
+  enum's members. A field the struct no longer has, or a value it cannot
+  hold, is said in the log and passed over.
+  - `app.exportedFields(entity, &buffer)` lists the fields, made or not, with what each holds - and a list's items, a map's keys and values, the enum or the engine's type they are of - its default, doc comment and annotations (`@range`, `@multiline`, `@group`, `@file`, `@entity`, …): what an editor draws.
   - `script.jsonOf` writes a default as a scene would.
 - **Input, as events.** `input(self, event: InputEvent)` hears each key,
   mouse button, motion of the pointer, turn of the wheel and pad button of

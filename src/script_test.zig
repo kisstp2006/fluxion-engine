@@ -1630,25 +1630,32 @@ test "a script makes entities and scenes, takes them out, and calls what it defe
     try testing.expectEqual(@as(i64, 1), app.childCount(maker));
 }
 
-test "a file a component holds is its path to a script, and a path given loads it" {
+test "a file is a value of its kind to a script, made from its path where one is wanted: one file, one value" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var buffer: [128]u8 = undefined;
     const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "door.flux", .data = "struct Door {}" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "ball.json", .data =
+        \\{ "fluxion_scene": 3, "entities": [ { "uuid": "00000000-0000-4000-8000-0000000000b1", "name": "Ball" } ] }
+    });
     const app = try scriptedAt(root);
     defer app.destroy();
     const file = try app.addScript("swap.flux",
-        \\var before: any = 0;
-        \\var after: any = 0;
-        \\var refused = "";
+        \\var before = "";
+        \\var after = "";
+        \\var same = false;
         \\struct Swap {
         \\    fn ready(self) {
-        \\        const script = self.entity.get(Script);
-        \\        before = script.source;
+        \\        before = self.entity.get(Script).source.?.resource_path;
         \\        const other = app.spawn(null);
         \\        other.add(Script).source = "res://door.flux";
-        \\        after = other.get(Script).source;
+        \\        const door: ScriptFile = "res://door.flux";
+        \\        same = other.get(Script).source == door;
+        \\        after = door.resource_path;
+        \\        const ball: Scene = "res://ball.json";
+        \\        _ = app.instantiate(ball, null);
+        \\        _ = app.instantiate("res://ball.json", null);
         \\    }
         \\}
     );
@@ -1657,6 +1664,87 @@ test "a file a component holds is its path to a script, and a path given loads i
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
     try testing.expectEqualStrings("swap.flux", globalText(app, file, "before"));
     try testing.expectEqualStrings("res://door.flux", globalText(app, file, "after"));
+    try testing.expect(global(app, file, "same").asBool());
+    try testing.expect(app.find("Ball") != null);
+}
+
+test "the engine's enums list their members, found by name, as a script's own do" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("modes.flux",
+        \\var names = "";
+        \\var found = false;
+        \\struct Modes {
+        \\    fn ready(self) {
+        \\        names = WindowMode.members().map(fn(m: WindowMode) string { return m.name(); }).join(",");
+        \\        found = Key.from_name("space") == Key.space and WindowMode.from_name("sideways") == null;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("windowed,minimized,maximized,fullscreen,exclusive_fullscreen", globalText(app, file, "names"));
+    try testing.expect(global(app, file, "found").asBool());
+}
+
+test "a script's @exports hold files, lists of anything and maps, from a scene and back to it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "door.flux", .data = "struct Door {}" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "chest.flux", .data =
+        \\enum Metal { tin, gold }
+        \\var told = "";
+        \\struct Chest {
+        \\    @export var opens: ?ScriptFile = null;
+        \\    @export var moods: [Metal];
+        \\    @export var spots: [vec3];
+        \\    @export var worth: [Metal: int];
+        \\    @export var stock: [string: float];
+        \\    @export var keys: [ScriptFile];
+        \\    fn ready(self) {
+        \\        const ale = self.stock.get("ale", 0.0);
+        \\        told = f"{self.opens.?.resource_path} {self.moods} {self.spots.len} {self.worth[.gold]} {ale} {self.keys.len}";
+        \\    }
+        \\}
+    });
+    const app = try scriptedAt(root);
+    defer app.destroy();
+    const level =
+        \\{ "fluxion_scene": 3, "entities": [
+        \\  { "uuid": "00000000-0000-4000-8000-0000000000c1", "name": "chest", "Script": { "source": "res://chest.flux" },
+        \\    "exports": { "opens": "res://door.flux", "moods": ["gold", "tin"], "spots": [[1, 2, 3]],
+        \\                 "worth": { "gold": 9, "tin": 1 }, "stock": { "ale": 2.5 }, "keys": ["res://door.flux", "res://door.flux"] } }
+        \\] }
+    ;
+    _ = try scene.read(app, level, .{});
+    _ = try app.step();
+    const file = app.findScript("res://chest.flux").?;
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqualStrings("res://door.flux [Metal.gold, Metal.tin] 1 9 2.5 2", globalText(app, file, "told"));
+
+    // An editor is told what each holds: the list's items, the map's keys
+    // and values, and which of the engine's types a file is.
+    var fields: [16]flux.FieldInfo = undefined;
+    const listed = app.exportedFields(app.find("chest").?, &fields);
+    try testing.expectEqual(flux.FieldKind.host, listed[0].shape.kind);
+    try testing.expect(listed[0].shape.host.?.same(@import("fluxion_reflect").typeOf(script.RefOf(.script))));
+    try testing.expectEqual(flux.FieldKind.enum_member, listed[1].element.kind);
+    try testing.expectEqual(flux.FieldKind.vec3, listed[2].element.kind);
+    try testing.expectEqual(flux.FieldKind.enum_member, listed[3].key.kind);
+    try testing.expectEqual(flux.FieldKind.float, listed[4].element.kind);
+    try testing.expectEqual(flux.FieldKind.host, listed[5].element.kind);
+
+    // What a script holds is written as a scene says it.
+    var doc: @import("fluxion_json").Document = try .init(testing.allocator);
+    defer doc.deinit();
+    const chest = app.scripts.?.instances.get(app.find("chest").?).?.value;
+    const vm = app.scripts.?.vm;
+    try testing.expectEqualStrings("res://door.flux", (try script.jsonOf(&doc, vm.getField(chest, "opens").?)).asString().?);
+    const worth = try script.jsonOf(&doc, vm.getField(chest, "worth").?);
+    try testing.expectEqual(@as(i64, 9), worth.get("gold").asInt(i64).?);
 }
 
 const guard_script =
@@ -2066,10 +2154,11 @@ test "a script makes, changes and saves a picture, and draws it as a texture" {
         \\        const again = images.read("user://picture.png") catch return;
         \\        saved = again.width() == 8 and again.getPixel(3, 5).g == 1.0;
         \\        refused = picture.savePng("res://picture.png") catch |e| e.name;
-        \\        named = images.toTexture(picture) catch return;
+        \\        const made = images.toTexture(picture) catch return;
+        \\        named = f"{made.resource_path} {made.width()}x{made.height()}";
         \\        const sprite = self.entity.add(Sprite);
-        \\        sprite.texture = named;
-        \\        drawn = sprite.texture.?;
+        \\        sprite.texture = made;
+        \\        drawn = sprite.texture.?.resource_path;
         \\    }
         \\}
     );
@@ -2082,7 +2171,7 @@ test "a script makes, changes and saves a picture, and draws it as a texture" {
     try testing.expectEqual(@as(i64, 8), global(app, file, "grown").asInt());
     try testing.expect(global(app, file, "saved").asBool());
     try testing.expectEqualStrings("NotAllowed", globalText(app, file, "refused"));
-    try testing.expectEqualStrings("image://1", globalText(app, file, "named"));
+    try testing.expectEqualStrings("image://1 8x6", globalText(app, file, "named"));
     try testing.expectEqualStrings("image://1", globalText(app, file, "drawn"));
 
     // A pixel outside the picture is a mistake: it stops the script.
