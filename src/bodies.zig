@@ -281,51 +281,26 @@ fn syncTiles(self: *Bodies, app: *App) !void {
 /// A map with no tile set stops nothing: what is solid is the set's to say.
 fn addTileShapes(app: *App, body: BodyId, chunk: tilemap.TileChunk, map: tilemap.TileMap, set: ?*const tileset.TileSet, placed_map: Pose) !void {
     const held = set orelse return;
-    var used = [_]bool{false} ** tilemap.tiles_per_chunk;
     const tile_width: f32 = @floatFromInt(@max(held.tile_width, 1));
     const tile_height: f32 = @floatFromInt(@max(held.tile_height, 1));
     const material: physics.Material = .{ .friction = map.friction, .restitution = map.bounce, .density = 1 };
     const filter: physics.Filter = .{ .category = map.collision_layer, .mask = map.collision_mask };
 
-    for (0..tilemap.chunk_side) |y| for (0..tilemap.chunk_side) |x| {
-        const start = y * tilemap.chunk_side + x;
-        if (used[start]) continue;
-        const tile = held.tileOf(chunk.cells[start]);
-        switch (tile.collision) {
-            .none => continue,
-            .polygon => {
-                used[start] = true;
-                try addTilePolygon(app, body, chunk, chunk.cells[start], tile, x, y, tile_width, tile_height, placed_map, material, filter);
-                continue;
-            },
-            .full => {},
-        }
-
-        // A run to the right, then as many rows below it as are full all the
-        // way across: the fewest boxes this chunk's solid tiles make.
-        var width: usize = 1;
-        while (x + width < tilemap.chunk_side and !used[start + width] and held.tileOf(chunk.cells[start + width]).collision == .full) : (width += 1) {}
-        var height: usize = 1;
-        rows: while (y + height < tilemap.chunk_side) : (height += 1) {
-            for (0..width) |across| {
-                const at = (y + height) * tilemap.chunk_side + x + across;
-                if (used[at] or held.tileOf(chunk.cells[at]).collision != .full) break :rows;
-            }
-        }
-        for (0..height) |down| {
-            for (0..width) |across| used[(y + down) * tilemap.chunk_side + x + across] = true;
-        }
-
-        const local_x = (@as(f32, @floatFromInt(chunk.x * tilemap.chunk_side)) + @as(f32, @floatFromInt(x)) + @as(f32, @floatFromInt(width)) / 2) * tile_width * placed_map.scale_x;
-        const local_y = (@as(f32, @floatFromInt(chunk.y * tilemap.chunk_side)) + @as(f32, @floatFromInt(y)) + @as(f32, @floatFromInt(height)) / 2) * tile_height * placed_map.scale_y;
-        const half_width = @as(f32, @floatFromInt(width)) * tile_width * @abs(placed_map.scale_x) / 2;
-        const half_height = @as(f32, @floatFromInt(height)) * tile_height * @abs(placed_map.scale_y) / 2;
-        _ = try app.physics.addShape(body, .{
-            .geometry = .{ .polygon = .offsetBox(half_width, half_height, .init(local_x, local_y), 0) },
-            .material = material,
-            .filter = filter,
-            .user_data = chunk.map.toInt(),
-        });
+    var solids: tilemap.Solids = .{ .chunk = &chunk, .set = held };
+    while (solids.next()) |solid| switch (solid) {
+        .polygon => |shaped| try addTilePolygon(app, body, chunk, shaped.cell, shaped.tile, shaped.x, shaped.y, tile_width, tile_height, placed_map, material, filter),
+        .box => |box| {
+            const local_x = (@as(f32, @floatFromInt(chunk.x * tilemap.chunk_side)) + @as(f32, @floatFromInt(box.x)) + @as(f32, @floatFromInt(box.width)) / 2) * tile_width * placed_map.scale_x;
+            const local_y = (@as(f32, @floatFromInt(chunk.y * tilemap.chunk_side)) + @as(f32, @floatFromInt(box.y)) + @as(f32, @floatFromInt(box.height)) / 2) * tile_height * placed_map.scale_y;
+            const half_width = @as(f32, @floatFromInt(box.width)) * tile_width * @abs(placed_map.scale_x) / 2;
+            const half_height = @as(f32, @floatFromInt(box.height)) * tile_height * @abs(placed_map.scale_y) / 2;
+            _ = try app.physics.addShape(body, .{
+                .geometry = .{ .polygon = .offsetBox(half_width, half_height, .init(local_x, local_y), 0) },
+                .material = material,
+                .filter = filter,
+                .user_data = chunk.map.toInt(),
+            });
+        },
     };
 }
 
@@ -748,8 +723,7 @@ fn spriteOf(app: *App, e: Entity, collider: Collider2D) [4]f32 {
     if (!wanted) return @splat(0);
     const drawn = app.world.get(e, Sprite) orelse return @splat(0);
     const texture = app.assets.get(drawn.texture) orelse app.assets.get(app.assets.white) orelse return @splat(0);
-    const size = sprite.spriteSize(drawn.*, texture);
-    return .{ size.width, size.height, (0.5 - drawn.pivot_x) * size.width, (0.5 - drawn.pivot_y) * size.height };
+    return sprite.spriteBox(drawn.*, texture);
 }
 
 fn reshape(self: *Bodies, app: *App, link: *ShapeLink, e: Entity, body: BodyId, inputs: Inputs) !void {

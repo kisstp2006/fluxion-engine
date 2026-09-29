@@ -60,6 +60,8 @@ const schedule_mod = @import("schedule.zig");
 const hierarchy = @import("hierarchy.zig");
 const inherited_mod = @import("inherited.zig");
 const drawing_mod = @import("drawing.zig");
+const particles_mod = @import("particles.zig");
+const lights_mod = @import("lights.zig");
 const timer = @import("timer.zig");
 const tilemap = @import("tilemap.zig");
 const geometry = @import("geometry.zig");
@@ -700,6 +702,8 @@ overlaps_found: std.ArrayList(ecs.Entity) = .empty,
 names_found: std.ArrayList([]const u8) = .empty,
 /// What each `Drawing2D` has drawn: see `drawing.zig`.
 drawings: drawing_mod.Drawings = .{},
+/// Each `Particles2D`'s particles: see `particles.zig`.
+particles: particles_mod.Particles = .{},
 scene_roots: std.ArrayListUnmanaged(ecs.Entity) = .empty,
 /// The scene `changeScene` asked for, opened at the end of the frame.
 scene_next: ?scenes_mod.SceneHandle = null,
@@ -958,6 +962,11 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.Area2D,
         components.RayCast2D,
         drawing_mod.Drawing2D,
+        particles_mod.Particles2D,
+        lights_mod.PointLight2D,
+        lights_mod.DirectionalLight2D,
+        lights_mod.AmbientLight2D,
+        lights_mod.LightOccluder2D,
         timer.Timer,
         audio_mod.AudioPlayer,
         audio_mod.AudioSpatial2D,
@@ -1054,6 +1063,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.sprites.screen = &self.screen;
     self.sprites.views = &self.views;
     self.sprites.drawings = &self.drawings;
+    self.sprites.particles = &self.particles;
     self.interface.custom = .{ .context = self, .draw = drawControlBox };
 
     self.debug_renderer = try .init(gpa, &self.device, .{});
@@ -1281,6 +1291,7 @@ pub fn destroy(self: *App) void {
     self.overlaps_found.deinit(gpa);
     self.names_found.deinit(gpa);
     self.drawings.deinit(gpa);
+    self.particles.deinit(gpa);
     self.inherited.deinit(gpa);
     self.freeInstances();
     self.instances.deinit(gpa);
@@ -1775,9 +1786,11 @@ pub fn step(self: *App) anyerror!bool {
     // drawing: whatever hung from something despawned goes with it, and then
     // the names of everything that died are given back.
     try self.despawnOrphans();
-    // Every player's sound as its component says, after everything that
-    // could say otherwise, and `finished` heard before the frame is drawn.
+    // Every player's sound as its component says, and every emitter's
+    // particles moved on, after everything that could say otherwise: and
+    // each `finished` heard before the frame is drawn.
     try self.audio.update(self);
+    try particles_mod.update(self, self.time.delta, .game);
     try self.signals.drain(self);
     // The scripts of the dead, and of what lost its `Script`, hear `exit`
     // in the frame it happened.
@@ -1795,6 +1808,7 @@ pub fn step(self: *App) anyerror!bool {
     self.exports.forgetDead(&self.world);
     self.tweens.forgetDead(self);
     self.drawings.forgetDead(self.gpa, &self.world);
+    self.particles.forgetDead(self.gpa, &self.world);
     self.texts.forgetDead(self.gpa, &self.world);
     self.shader_params.forgetDead(self.gpa, &self.world);
     self.views.forgetDead(self.gpa, &self.world, &self.assets, components.RenderView);
@@ -3676,6 +3690,28 @@ pub fn queueRedraw(self: *App, entity: ecs.Entity) DrawError!void {
     (try self.drawings.pictureOf(self.gpa, entity)).wanted = true;
 }
 
+// -------------------------------------------------------------------------
+// Particles
+// -------------------------------------------------------------------------
+
+/// Start an emitter's cycle again from its beginning, every particle gone,
+/// and emitting: a one-shot's burst again. See `particles.zig`.
+pub fn restartParticles(self: *App, emitter: ecs.Entity) particles_mod.Error!void {
+    try particles_mod.restart(self, emitter);
+}
+
+/// `count` particles let go of at once, over and above an emitter's cycle:
+/// the sparks of a hit.
+pub fn emitParticles(self: *App, emitter: ecs.Entity, count: u32) particles_mod.Error!void {
+    try particles_mod.burst(self, emitter, count);
+}
+
+/// How many of an emitter's particles are alive now.
+pub fn particleCount(self: *App, emitter: ecs.Entity) u32 {
+    const held = self.particles.get(emitter) orelse return 0;
+    return @intCast(held.aliveCount());
+}
+
 /// Read a `.anim` file - an animation library - or find the one read from
 /// there already. What an `AnimationPlayer` plays; see `animation.zig`.
 pub fn loadAnimations(self: *App, path: []const u8) !animation_mod.AnimationLibraryHandle {
@@ -4677,6 +4713,7 @@ pub fn clearWorld(self: *App) void {
     self.audio.clear();
     self.tweens.clear(self);
     self.drawings.clearAll(self.gpa);
+    self.particles.clearAll(self.gpa);
     self.texts.clear(self.gpa);
     self.shader_params.clear(self.gpa);
     self.views.clear(&self.assets);
@@ -5196,6 +5233,9 @@ pub const reflect_methods = .{
     .drawText = .{ attr.Params{ .names = &.{ "entity", "text", "position", "color", "size", "font" } }, attr.defaults(.{ Color.white, @as(f32, 16), Assets.FontHandle.none }) },
     .clearDrawing = .{attr.Params{ .names = &.{"entity"} }},
     .queueRedraw = .{attr.Params{ .names = &.{"entity"} }},
+    .restartParticles = .{attr.Params{ .names = &.{"emitter"} }},
+    .emitParticles = .{attr.Params{ .names = &.{ "emitter", "count" } }},
+    .particleCount = .{attr.Params{ .names = &.{"emitter"} }},
     .hasAnimation = .{attr.Params{ .names = &.{ "player", "name" } }},
     .animationLength = .{attr.Params{ .names = &.{ "player", "name" } }},
     .tweenCallback = .{attr.Params{ .names = &.{ "tween", "function" } }},
@@ -9884,7 +9924,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 47), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 52), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

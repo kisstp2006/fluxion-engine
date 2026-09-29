@@ -12,6 +12,10 @@
 //! depth buffer and half-transparent pixels disagree. The texture is in the
 //! sort key, so a layer's sprites of one texture are one draw call. What the
 //! camera cannot see is dropped before it is sorted.
+//!
+//! A view that sees a light is drawn in three passes: the lit world, the
+//! light into a buffer of its own, and the buffer laid over the world with
+//! what is unshaded drawn after it. See `lighting.zig`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -46,11 +50,14 @@ const ShaderHandle = shaders_mod.ShaderHandle;
 const Screen = @import("screen.zig").Screen;
 const views_mod = @import("../views.zig");
 const drawing_mod = @import("../drawing.zig");
+const particles_mod = @import("../particles.zig");
+const lighting_mod = @import("lighting.zig");
 
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
 const Labels = ecs.Query(.{ Transform2D, Text2D });
 const TileChunks = ecs.Query(.{tilemap.TileChunk});
 const Drawings2D = ecs.Query(.{drawing_mod.Drawing2D});
+const Emitters = ecs.Query(.{particles_mod.Particles2D});
 
 pub const Error = rhi.Error || Allocator.Error || error{ShaderFailed};
 
@@ -129,14 +136,18 @@ const Item = struct {
     instance: Instance,
     texture: rhi.Texture,
     sampler: rhi.Sampler,
-    blend: Sprite.Blend,
+    blend: material.Blend,
     /// The shader its `Material` names, or none for a plain picture.
     shader: ShaderHandle = .none,
     /// Which of this frame's sets of numbers its material gives, or
     /// `no_params`.
     params: u32 = no_params,
+    /// Drawn as it is over the lit world, in a frame that is lit.
+    unshaded: bool = false,
 
-    fn before(_: void, a: Item, b: Item) bool {
+    /// In the order drawn: in a lit frame, the lit before the unshaded.
+    fn before(lit: bool, a: Item, b: Item) bool {
+        if (lit and a.unshaded != b.unshaded) return !a.unshaded;
         const layer_a = a.key >> 32;
         const layer_b = b.key >> 32;
         if (layer_a != layer_b) return layer_a < layer_b;
@@ -190,6 +201,8 @@ pub const Renderer = struct {
     views: ?*const views_mod.Views = null,
     /// What each `Drawing2D` has drawn. Nothing of one is drawn without.
     drawings: ?*const drawing_mod.Drawings = null,
+    /// Each emitter's particles. None are drawn without.
+    particles: ?*const particles_mod.Particles = null,
     /// The render view being drawn, whose own picture is not drawn into it.
     drawing: ecs.Entity = .none,
     /// The font whose atlas the last label found full.
@@ -204,8 +217,10 @@ pub const Renderer = struct {
     /// Whether that has been said.
     said_full: bool = false,
 
-    /// A picture, coloured: what a sprite with no material is drawn with.
+    /// A picture, coloured: what a sprite with no material is drawn with,
+    /// and the light buffer is laid over the world with.
     plain: material.Compiled,
+    lighting: lighting_mod.Lighting,
 
     quad: rhi.Buffer,
     instances: rhi.Buffer,
@@ -218,6 +233,8 @@ pub const Renderer = struct {
 
     /// This frame's sprites, gathered and sorted. Kept for its capacity.
     items: std.ArrayList(Item) = .empty,
+    /// An emitter's living particles, in the order they are drawn.
+    ranks: std.ArrayList(u32) = .empty,
 
     /// The sorted instances, contiguous, as they are uploaded.
     staging: std.ArrayList(Instance) = .empty,
@@ -244,11 +261,13 @@ pub const Renderer = struct {
     pub fn init(gpa: Allocator, device: *rhi.Device) Error!Renderer {
         var problems: std.Io.Writer.Allocating = .init(gpa);
         defer problems.deinit();
-        var plain = material.compile(gpa, device, material.plain, "sprites", &problems.writer) catch |err| {
+        var plain = material.compile(gpa, device, material.plain, "sprites", &problems.writer, &(material.sprite_blends ++ [_]material.Blend{.lit})) catch |err| {
             std.log.scoped(.fluxion_engine).err("sprite shader: {s}", .{problems.written()});
             return err;
         };
         errdefer plain.deinit(device);
+        var lighting: lighting_mod.Lighting = try .init(gpa, device);
+        errdefer lighting.deinit(gpa);
 
         const initial_capacity = 256;
         const quad = try device.createBuffer(.{
@@ -279,6 +298,7 @@ pub const Renderer = struct {
         return .{
             .device = device,
             .plain = plain,
+            .lighting = lighting,
             .quad = quad,
             .instances = instances,
             .capacity = initial_capacity,
@@ -290,6 +310,7 @@ pub const Renderer = struct {
 
     pub fn deinit(self: *Renderer, gpa: Allocator) void {
         self.items.deinit(gpa);
+        self.ranks.deinit(gpa);
         self.emptied.deinit(gpa);
         self.staging.deinit(gpa);
         self.param_sets.deinit(gpa);
@@ -298,6 +319,7 @@ pub const Renderer = struct {
         for (self.param_buffers.items) |held| self.device.destroyBuffer(held.buffer);
         self.param_buffers.deinit(gpa);
         self.plain.deinit(self.device);
+        self.lighting.deinit(gpa);
         self.device.destroyBuffer(self.quad);
         self.device.destroyBuffer(self.instances);
         self.device.destroyBuffer(self.frame);
@@ -329,7 +351,8 @@ pub const Renderer = struct {
         self.forgetParams();
         // The box that culls and the matrix that draws are two readings of
         // the same view.
-        try self.gather(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view);
+        const lit = try self.lighting.gather(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view);
+        try self.gather(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view, lit);
 
         // Gathering the text may have rasterised new letters, so the atlases
         // go up once, before anything samples them.
@@ -338,42 +361,78 @@ pub const Renderer = struct {
         try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&self.frameOf(view.matrix(self.device.clip()), view.width, view.height)));
         try self.uploadParams(gpa);
 
-        if (self.items.items.len > 0) {
-            try self.reserve(@intCast(self.items.items.len));
-            // Laid out contiguously and uploaded in one call; see the module
-            // comment.
+        // The world's instances, then the lights', then the light buffer
+        // laid over the world: contiguous, and uploaded in one call; see the
+        // module comment.
+        const items = self.items.items;
+        const lights = if (lit) self.lighting.draws.items else &.{};
+        const laid_over = items.len + lights.len;
+        const total = laid_over + @intFromBool(lit);
+        if (total > 0) {
+            try self.reserve(@intCast(total));
             self.staging.clearRetainingCapacity();
-            try self.staging.ensureTotalCapacity(gpa, self.items.items.len);
-            for (self.items.items) |item| self.staging.appendAssumeCapacity(item.instance);
+            try self.staging.ensureTotalCapacity(gpa, total);
+            for (items) |item| self.staging.appendAssumeCapacity(item.instance);
+            for (lights) |drawn| self.staging.appendAssumeCapacity(drawn.instance);
+            // The buffer is drawn upside down where the device counts rows
+            // from the bottom, as a render view's picture is.
+            const uv: [4]f32 = if (self.device.caps().features.render_target_origin_bottom_left) .{ 0, 1, 1, 0 } else .{ 0, 0, 1, 1 };
+            if (lit) self.staging.appendAssumeCapacity(lighting_mod.overView(view, @splat(1), uv));
             try self.device.updateBuffer(self.instances, 0, std.mem.sliceAsBytes(self.staging.items));
         }
 
+        self.draw_calls = 0;
+        self.drawn = @intCast(items.len);
+
         var pass: Pass = .{ .renderer = self, .target = target, .width = view.width, .height = view.height };
         try pass.begin(clear);
-
-        self.draw_calls = 0;
-        self.drawn = @intCast(self.items.items.len);
-
-        var start: usize = 0;
-        while (start < self.items.items.len) {
-            const first = self.items.items[start];
-
-            var end = start + 1;
-            while (end < self.items.items.len and first.sharesDrawWith(self.items.items[end])) : (end += 1) {}
-
-            try pass.use(first.shader, first.blend, first.params);
-            try pass.bindPicture(first.texture, first.sampler);
-            // A draw has no first-instance argument, so the buffer binding is
-            // moved to the start of the run instead.
-            try pass.list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
-            try pass.list.draw(.{ .vertex_count = 4, .instance_count = @intCast(end - start) });
-            pass.drew = true;
-            self.draw_calls += 1;
-
-            start = end;
+        if (!lit) {
+            try self.drawItems(&pass, 0, items.len);
+            return pass.end();
         }
 
+        const unshaded = for (items, 0..) |item, i| {
+            if (item.unshaded) break i;
+        } else items.len;
+        try self.drawItems(&pass, 0, unshaded);
         try pass.end();
+
+        const buffer = try self.lighting.bufferOf(@intFromFloat(view.width), @intFromFloat(view.height));
+        var light: Pass = .{ .renderer = self, .target = .{ .texture = buffer }, .width = view.width, .height = view.height };
+        try light.begin(self.lighting.clearColor());
+        var start: usize = 0;
+        while (start < lights.len) {
+            const first = lights[start];
+            var end = start + 1;
+            while (end < lights.len and first.sharesDrawWith(lights[end])) : (end += 1) {}
+            try light.useCompiled(&self.lighting.shader, first.blend);
+            try light.bindPicture(first.texture, first.sampler);
+            try light.drawRun(items.len + start, end - start);
+            start = end;
+        }
+        try light.end();
+
+        try pass.begin(null);
+        try pass.useCompiled(&self.plain, .lit);
+        try pass.bindPicture(buffer, assets.samplerFor(.nearest, .clamp_to_edge));
+        try pass.drawRun(laid_over, 1);
+        try self.drawItems(&pass, unshaded, items.len);
+        try pass.end();
+    }
+
+    /// The items from `from` to `to`, a draw for each run that shares one.
+    fn drawItems(self: *Renderer, pass: *Pass, from: usize, to: usize) !void {
+        const items = self.items.items;
+        var start = from;
+        while (start < to) {
+            const first = items[start];
+            var end = start + 1;
+            while (end < to and first.sharesDrawWith(items[end])) : (end += 1) {}
+            try pass.use(first.shader, first.blend, first.params);
+            try pass.bindPicture(first.texture, first.sampler);
+            try pass.drawRun(start, end - start);
+            start = end;
+        }
     }
 
     /// Draw one quad through `entity`'s material into `target`, which is
@@ -476,14 +535,19 @@ pub const Renderer = struct {
         height: f32,
         scissor: ?rhi.Rect = null,
         list: *rhi.CommandList = undefined,
-        compiled: *const material.Compiled = undefined,
-        shader: ?ShaderHandle = null,
-        blend: Sprite.Blend = .alpha,
-        params: u32 = no_params,
+        /// What it draws with now.
+        bound: ?Bound = null,
         /// Whether anything has been drawn since the screen was last copied.
         drew: bool = false,
         /// The copy a shader reading the screen reads, while it holds.
         copy: ?rhi.Texture = null,
+
+        /// A shader, a way of blending and a set of numbers.
+        const Bound = struct {
+            compiled: *const material.Compiled,
+            blend: material.Blend,
+            params: u32,
+        };
 
         fn begin(self: *Pass, clear: ?Color) !void {
             const r = self.renderer;
@@ -495,11 +559,9 @@ pub const Renderer = struct {
             } });
             try self.list.setViewport(.{ .width = self.width, .height = self.height });
             if (self.scissor) |clip| try self.list.setScissor(clip);
-            if (self.shader) |shader| {
-                const blend = self.blend;
-                const params = self.params;
-                self.shader = null;
-                try self.use(shader, blend, params);
+            if (self.bound) |held| {
+                self.bound = null;
+                try self.bind(held);
             }
         }
 
@@ -509,20 +571,37 @@ pub const Renderer = struct {
             try self.renderer.device.submit();
         }
 
-        /// Draw with a shader, a way of blending and a set of numbers.
-        fn use(self: *Pass, shader: ShaderHandle, blend: Sprite.Blend, params: u32) !void {
+        /// Draw with a material's shader - the plain one for none - a way of
+        /// blending and a set of numbers.
+        fn use(self: *Pass, shader: ShaderHandle, blend: material.Blend, params: u32) !void {
+            try self.bind(.{ .compiled = self.renderer.compiledOf(shader), .blend = blend, .params = params });
+        }
+
+        /// Draw with one of the renderer's own shaders.
+        fn useCompiled(self: *Pass, compiled: *const material.Compiled, blend: material.Blend) !void {
+            try self.bind(.{ .compiled = compiled, .blend = blend, .params = no_params });
+        }
+
+        fn bind(self: *Pass, wanted: Bound) !void {
+            if (self.bound) |held| if (std.meta.eql(held, wanted)) return;
             const r = self.renderer;
-            if (self.shader) |bound| if (bound.eql(shader) and self.blend == blend and self.params == params) return;
-            self.compiled = r.compiledOf(shader);
-            self.shader = shader;
-            self.blend = blend;
-            self.params = params;
-            try self.list.setPipeline(self.compiled.pipelines.get(blend));
+            self.bound = wanted;
+            try self.list.setPipeline(wanted.compiled.pipelines.get(wanted.blend));
             try self.list.setVertexBuffer(0, r.quad, 0);
             try self.list.setUniformBuffer(0, r.frame);
-            if (params != no_params and self.compiled.params != null) {
-                try self.list.setUniformBuffer(material.params_slot, r.param_buffers.items[params].buffer);
+            if (wanted.params != no_params and wanted.compiled.params != null) {
+                try self.list.setUniformBuffer(material.params_slot, r.param_buffers.items[wanted.params].buffer);
             }
+        }
+
+        /// Draw `count` of the frame's instances from `start`.
+        fn drawRun(self: *Pass, start: usize, count: usize) !void {
+            // A draw has no first-instance argument, so the buffer binding is
+            // moved to the start of the run instead.
+            try self.list.setVertexBuffer(1, self.renderer.instances, @intCast(start * @sizeOf(Instance)));
+            try self.list.draw(.{ .vertex_count = 4, .instance_count = @intCast(count) });
+            self.drew = true;
+            self.renderer.draw_calls += 1;
         }
 
         /// Bind a run's picture, and - for a shader that reads the screen -
@@ -530,8 +609,9 @@ pub const Renderer = struct {
         /// since the last.
         fn bindPicture(self: *Pass, texture: rhi.Texture, sampler: rhi.Sampler) !void {
             const r = self.renderer;
-            if (self.compiled.texture_slot) |slot| try self.list.setTexture(slot, texture, sampler);
-            const slot = self.compiled.screen_slot orelse return;
+            const compiled = self.bound.?.compiled;
+            if (compiled.texture_slot) |slot| try self.list.setTexture(slot, texture, sampler);
+            const slot = compiled.screen_slot orelse return;
             const screen = r.screen orelse return self.list.setTexture(slot, r.white, r.white_sampler);
             const from = switch (self.target) {
                 .texture => |held| held,
@@ -545,7 +625,7 @@ pub const Renderer = struct {
                 self.drew = false;
                 try self.begin(null);
                 // `begin` bound the shader again; the picture goes back too.
-                if (self.compiled.texture_slot) |picture_slot| try self.list.setTexture(picture_slot, texture, sampler);
+                if (compiled.texture_slot) |picture_slot| try self.list.setTexture(picture_slot, texture, sampler);
             }
             try self.list.setTexture(slot, self.copy.?, r.white_sampler);
         }
@@ -553,7 +633,8 @@ pub const Renderer = struct {
 
     /// Walk the world and turn every visible sprite into an instance: shown
     /// as its `Appearance` and everything above it say - hidden, its colour
-    /// multiplied, its layer raised.
+    /// multiplied, its layer raised - and sorted for a frame that is `lit`
+    /// or not.
     fn gather(
         self: *Renderer,
         gpa: Allocator,
@@ -564,6 +645,7 @@ pub const Renderer = struct {
         inherited: *Inherited,
         alpha: f32,
         view: View,
+        lit: bool,
     ) !void {
         const bounds = view.bounds();
         self.items.clearRetainingCapacity();
@@ -619,18 +701,119 @@ pub const Renderer = struct {
                     .sequence = sequence,
                     .texture = texture.gpu,
                     .sampler = assets.samplerFor(texture.filter, texture.wrap),
-                    .blend = sprite.blend,
+                    .blend = .of(sprite.blend),
                     .shader = drawn_with.shader,
                     .params = drawn_with.params,
+                    .unshaded = looks.unshaded,
                     .instance = .quad(transform.x, transform.y, drawn_width, drawn_height, sprite.pivot_x, sprite.pivot_y, c, s, .{ tint.r, tint.g, tint.b, tint.a }, .{ region.u0, region.v0, region.u1, region.v1 }),
                 });
             }
         }
 
         try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view, &sequence);
+        try self.gatherParticles(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
         try self.gatherWords(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
 
-        std.sort.pdq(Item, self.items.items, {}, Item.before);
+        std.sort.pdq(Item, self.items.items, lit, Item.before);
+    }
+
+    /// Every emitter's living particles, one instance each, among the
+    /// sprites of its layer: the oldest drawn first, or the newest, as it
+    /// says. See `particles.zig`.
+    fn gatherParticles(
+        self: *Renderer,
+        gpa: Allocator,
+        world: *ecs.World,
+        assets: *Assets,
+        snapshots: *const hierarchy.Snapshots,
+        inherited: *Inherited,
+        alpha: f32,
+        view: View,
+        sequence: *u32,
+    ) !void {
+        const table = self.particles orelse return;
+        const bounds = view.bounds();
+        var it = try Emitters.over(world);
+        while (it.next()) |chunk| {
+            for (chunk.slice(particles_mod.Particles2D), chunk.entities) |*settings, entity| {
+                const emitter = table.get(entity) orelse continue;
+                const looks = inherited.of(gpa, world, entity);
+                if (!looks.visible or looks.modulate.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
+                // Moved with its emitter, or where they were let go of.
+                const placed: Transform2D = if (world.get(entity, Transform2D)) |local|
+                    hierarchy.resolve(world, snapshots, entity, local.*, alpha) orelse continue
+                else
+                    .{};
+                // No picture of its own, or one that no longer resolves: the
+                // soft dot.
+                const own = if (settings.texture.isNone() or assets.get(settings.texture) == null) assets.glow else settings.texture;
+                const picture = assets.get(own) orelse continue;
+                const across: u32 = @max(settings.frames_across, 1);
+                const down: u32 = @max(settings.frames_down, 1);
+                const size: [2]f32 = if (own.eql(assets.glow))
+                    .{ particles_mod.dot_size, particles_mod.dot_size }
+                else
+                    .{ @as(f32, @floatFromInt(picture.width)) / @as(f32, @floatFromInt(across)), @as(f32, @floatFromInt(picture.height)) / @as(f32, @floatFromInt(down)) };
+                const drawn_with = try self.materialOf(gpa, world, entity);
+                const key = sortKey(looks.layer(settings.layer), own);
+                const sampler = assets.samplerFor(picture.filter, picture.wrap);
+
+                self.ranks.clearRetainingCapacity();
+                for (emitter.particles.items, 0..) |particle, index| {
+                    if (particle.alive) try self.ranks.append(gpa, @intCast(index));
+                }
+                const Age = struct {
+                    particles: []const particles_mod.Particle,
+                    newest_first: bool,
+
+                    fn before(by: @This(), a: u32, b: u32) bool {
+                        const age_a = by.particles[a].age;
+                        const age_b = by.particles[b].age;
+                        if (age_a != age_b) return (age_a < age_b) == by.newest_first;
+                        return a < b;
+                    }
+                };
+                std.sort.pdq(u32, self.ranks.items, Age{ .particles = emitter.particles.items, .newest_first = settings.draw_order == .newest_first }, Age.before);
+
+                for (self.ranks.items) |index| {
+                    const particle = emitter.particles.items[index];
+                    const shown = particle.shown(settings, across * down);
+                    const tint = looks.tint(shown.color);
+                    if (tint.a <= 0) continue;
+                    var at: Transform2D = .{ .x = particle.position.x, .y = particle.position.y, .rotation = particle.rotation, .scale_x = shown.scale, .scale_y = shown.scale };
+                    if (settings.local_coords) {
+                        const moved = placed.apply(at.x, at.y);
+                        at = .{ .x = moved.x, .y = moved.y, .rotation = at.rotation + placed.rotation, .scale_x = shown.scale * placed.scale_x, .scale_y = shown.scale * placed.scale_y };
+                    }
+                    const width = size[0] * at.scale_x;
+                    const height = size[1] * at.scale_y;
+                    if (!bounds.admits(at.x, at.y, spriteRadius(width, height))) {
+                        self.culled += 1;
+                        continue;
+                    }
+                    const column: f32 = @floatFromInt(shown.frame % across);
+                    const row: f32 = @floatFromInt(shown.frame / across);
+                    const cells_across: f32 = @floatFromInt(across);
+                    const cells_down: f32 = @floatFromInt(down);
+                    var region: components.Region = .{ .u0 = column / cells_across, .v0 = row / cells_down, .u1 = (column + 1) / cells_across, .v1 = (row + 1) / cells_down };
+                    if (picture.upside_down) region = region.flippedY();
+
+                    sequence.* += 1;
+                    try self.items.append(gpa, .{
+                        .key = key,
+                        .order = settings.order,
+                        .sequence = sequence.*,
+                        .texture = picture.gpu,
+                        .sampler = sampler,
+                        .blend = .of(settings.blend),
+                        .shader = drawn_with.shader,
+                        .params = drawn_with.params,
+                        .unshaded = looks.unshaded,
+                        .instance = .quad(at.x, at.y, width, height, 0.5, 0.5, @cos(at.rotation), @sin(at.rotation), .{ tint.r, tint.g, tint.b, tint.a }, .{ region.u0, region.v0, region.u1, region.v1 }),
+                    });
+                }
+            }
+        }
     }
 
     /// The labels, and the drawings, which may hold words too. A font whose
@@ -788,6 +971,7 @@ pub const Renderer = struct {
                         .texture = texture.gpu,
                         .sampler = assets.samplerFor(texture.filter, texture.wrap),
                         .blend = .alpha,
+                        .unshaded = looks.unshaded,
                         .instance = .quad(at.x, at.y, across, down, 0.5, 0.5, @cos(rotation), @sin(rotation), .{ tint.r, tint.g, tint.b, tint.a }, .{ how.region.u0, how.region.v0, how.region.u1, how.region.v1 }),
                     });
                 }
@@ -832,7 +1016,7 @@ pub const Renderer = struct {
                 var shown = label;
                 shown.color = looks.tint(label.color);
                 shown.layer = looks.layer(label.layer);
-                try self.layOut(gpa, assets, face, shown, run, transform, bounds, sequence, null);
+                try self.layOut(gpa, assets, face, shown, run, transform, bounds, sequence, null, looks.unshaded);
             }
         }
     }
@@ -851,6 +1035,7 @@ pub const Renderer = struct {
         /// A drawing's key, so its words stay among its shapes in the order
         /// they were drawn; null for a label's own.
         drawn_key: ?u64,
+        unshaded: bool,
     ) !void {
         const size = GlyphSize.of(label.size);
         const pixels = size.pixels;
@@ -932,6 +1117,7 @@ pub const Renderer = struct {
                     // not rasterised at.
                     .sampler = assets.samplerFor(.linear, .clamp_to_edge),
                     .blend = .alpha,
+                    .unshaded = unshaded,
                     // The pivot is the corner the pen worked out.
                     .instance = .quad(
                         placed.x,
@@ -1055,6 +1241,7 @@ pub const Renderer = struct {
                 .blend = .alpha,
                 .shader = self.shader,
                 .params = self.params,
+                .unshaded = self.looks.unshaded,
                 .instance = instance,
             });
         }
@@ -1160,7 +1347,7 @@ pub const Renderer = struct {
                     placed.y = start.y;
                     const shown = self.looks.tint(held.color);
                     const label: Text2D = .{ .font = held.font, .size = held.size, .color = shown, .order = self.order };
-                    try self.renderer.layOut(self.gpa, assets, face, label, run, placed, bounds, self.sequence, self.key);
+                    try self.renderer.layOut(self.gpa, assets, face, label, run, placed, bounds, self.sequence, self.key, self.looks.unshaded);
                 },
             }
         }
@@ -1316,6 +1503,14 @@ pub fn spriteSize(sprite: Sprite, texture: *const Assets.Texture) struct { width
     };
 }
 
+/// A sprite's size, and where its middle is from its entity's origin:
+/// `{ width, height, x, y }`, before its transform. What a collider or a
+/// light occluder with no size of its own takes.
+pub fn spriteBox(sprite: Sprite, texture: *const Assets.Texture) [4]f32 {
+    const size = spriteSize(sprite, texture);
+    return .{ size.width, size.height, (0.5 - sprite.pivot_x) * size.width, (0.5 - sprite.pivot_y) * size.height };
+}
+
 /// Layer in the high bits, texture in the low ones. The layer is biased
 /// rather than cast, so negative layers sort before positive ones.
 fn sortKey(layer: i16, texture: Assets.TextureHandle) u64 {
@@ -1369,17 +1564,24 @@ test "within a layer, order comes first, then blend, then texture, and sequence 
     };
 
     // A lower order draws first even on a later texture.
-    try testing.expect(Item.before({}, item.make(0, 1, second, 0), item.make(0, 2, first, 1)));
+    try testing.expect(Item.before(false, item.make(0, 1, second, 0), item.make(0, 2, first, 1)));
     // The same order falls back to the texture, which keeps the batching.
-    try testing.expect(Item.before({}, item.make(0, 0, first, 5), item.make(0, 0, second, 0)));
+    try testing.expect(Item.before(false, item.make(0, 0, first, 5), item.make(0, 0, second, 0)));
     // Everything equal: whichever was found first.
-    try testing.expect(Item.before({}, item.make(0, 0, first, 3), item.make(0, 0, first, 4)));
-    try testing.expect(!Item.before({}, item.make(0, 0, first, 4), item.make(0, 0, first, 3)));
+    try testing.expect(Item.before(false, item.make(0, 0, first, 3), item.make(0, 0, first, 4)));
+    try testing.expect(!Item.before(false, item.make(0, 0, first, 4), item.make(0, 0, first, 3)));
     // And the layer still wins over all of it.
-    try testing.expect(Item.before({}, item.make(-1, 100, second, 9), item.make(0, 0, first, 0)));
+    try testing.expect(Item.before(false, item.make(-1, 100, second, 9), item.make(0, 0, first, 0)));
 
-    try testing.expect(Item.before({}, item.make(0, 0, second, 1), item.glowing(0, 0, first, 0)));
-    try testing.expect(Item.before({}, item.glowing(0, -1, first, 2), item.make(0, 0, second, 1)));
+    try testing.expect(Item.before(false, item.make(0, 0, second, 1), item.glowing(0, 0, first, 0)));
+    try testing.expect(Item.before(false, item.glowing(0, -1, first, 2), item.make(0, 0, second, 1)));
+
+    // In a lit frame what is unshaded comes after all that is lit, whatever
+    // its layer; in one that is not, the layer decides.
+    var sign = item.make(-5, 0, first, 0);
+    sign.unshaded = true;
+    try testing.expect(Item.before(true, item.make(3, 0, second, 1), sign));
+    try testing.expect(Item.before(false, sign, item.make(3, 0, second, 1)));
 }
 
 test "a sprite with no size of its own takes the texture's" {

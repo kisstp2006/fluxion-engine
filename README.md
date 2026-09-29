@@ -1153,8 +1153,9 @@ _ = try world.spawnWith(.{
   as one run and therefore one call, and two overlapping sprites that tie on
   everything are drawn the same way round every frame.
 - **`Sprite.blend = .additive` adds light** instead of covering what is
-  behind: sparks, glows, lasers. It is a second pipeline, and additive sprites
-  of one layer and order are grouped so they stay one draw call.
+  behind: sparks, glows, lasers; `.subtractive` takes it away. Each is a
+  pipeline of its own, and the sprites of one layer and order that blend
+  alike are grouped so they stay one draw call.
 - **A texture loaded with `.wrap = .repeat` tiles** across a region that goes
   past its edge: `.region = .repeated(8, 4)` draws it eight times across and
   four down.
@@ -1198,6 +1199,8 @@ _ = try world.spawnWith(.{
   - `moveLocalX`/`moveLocalY`, `rotate` and `applyScale` change its own numbers along its own axes.
   - `getRelativeTransformToParent` says where it is in an ancestor's space.
   - These are where the entity is. What an entity that `interpolate`s is drawn at between two steps is `drawnTransform`.
+- **Particles and lights are drawn in this pass too**: see
+  [Particles](#-particles) and [Lights and shadows](#-lights-and-shadows).
 - **An `AnimatedSprite2D` plays sprite frames**: a `.frames` file of named
   animations, each a run of textures or pieces of them at a speed. The
   engine puts the frame it is on in the `Sprite` beside it - texture, region,
@@ -1271,6 +1274,83 @@ _ = try world.spawnWith(.{
   sprite with no material is drawn with the plainest material there is -
   its picture times its colour - through the same vertex stage as every
   other.
+
+## 🎇 Particles
+
+```zig
+_ = try world.spawnWith(.{
+    fx.Transform2D.at(320, 300),
+    fx.Particles2D{ .amount = 64, .lifetime = 1.5, .speed_min = 80, .speed_max = 140, .color_end = .{ .r = 1, .g = 0.3, .b = 0, .a = 0 } },
+});
+try app.emitParticles(sword, 20); // a hit's sparks, over and above the cycle
+```
+
+- **A cycle of places.** An emitter has `amount` places, and each starts a
+  particle once every `lifetime`, spread over it - or bunched at its start by
+  `explosiveness`, all at once at one. A particle lives its `lifetime`, less
+  up to `randomness` of it. `one_shot` stops after one cycle: when its last
+  particle is gone, `emitting` is false and `finished` is said.
+  `preprocess` runs it that many seconds before it is first shown - a fire
+  already burning - and `app.restartParticles(e)` starts it again from
+  nothing. Turned off and on, the cycle starts over and what is still out
+  lives on.
+- **Where and how fast.** From a point, a circle, a circle's edge or a box;
+  along `direction`, turned by up to `spread`, at a speed from `speed_min` to
+  `speed_max`; pulled by `gravity`, pushed along its way, away from the
+  emitter or round it, slowed by damping, turned and spun, or turned the way
+  it goes.
+- **What it looks like.** A soft round dot with no `texture`, or a frame of
+  a sheet `frames_across` by `frames_down` - played through over its life,
+  or one of its own for a `frame_speed` of nought; its scale and colour
+  picked between two, and multiplied towards `scale_end` and `color_end` by
+  the end of its life along a curve. `blend`, `layer` and `order` place it
+  among the sprites, and a `Material` beside it draws it.
+- **The particles are the app's, not the component's**: `local_coords` moves
+  them with the emitter, and without it they stay where they were let go of.
+  They go with the entity. The emitter's `Appearance` shows them, and a
+  paused emitter holds them where they are.
+- **On the CPU**, drawn through the sprite pass - one instance each, a draw
+  for all of an emitter's - so there is no second path for a backend to get
+  wrong. An editor moves them with `fx.particles.update(app, dt, .preview)`,
+  which writes nothing to the scene and says nothing.
+
+## 💡 Lights and shadows
+
+```zig
+_ = try world.spawnWith(.{fx.AmbientLight2D{ .color = .rgba(0.12, 0.12, 0.22, 1) }});
+_ = try world.spawnWith(.{ fx.Transform2D.at(200, 200), fx.PointLight2D{ .radius = 220, .shadows = true } });
+_ = try world.spawnWith(.{ fx.Transform2D.at(280, 170), fx.Sprite{ .texture = crate }, fx.LightOccluder2D{} });
+```
+
+- **The world is lit as a whole.** Once a view sees a light or an
+  `AmbientLight2D`, what it draws of the world is multiplied by the light
+  that falls there: the ambient light - white without one, so a light only
+  brightens - with every light added on, or taken off for one whose `blend`
+  subtracts. Light can make what it falls on up to twice as bright.
+- **A `PointLight2D`** shines from its entity out to `radius`, fading to
+  nothing there - or as its own `texture` says, stretched over that reach and
+  turned and scaled with its entity: a torch's cone. **A
+  `DirectionalLight2D`** lights everything alike, falling along its entity's
+  `+y`. `energy` is how strong either is, `color` its colour.
+- **Shadows.** A light with `shadows` is stopped by every `LightOccluder2D` -
+  a box, a circle or a capsule, the sprite's size when it gives none, as a
+  `Collider2D` is - and by the solid tiles of a `TileMap` with
+  `light_occlusion`, merged into as few boxes as they make, as its physics
+  is. Where an occluder hides a light, the light is multiplied by its
+  `shadow_color`: black lets none of it through. The occluder itself is lit,
+  and so is its face toward the light.
+- **What is not lit.** The interface never is. An `Appearance` whose
+  `lighting` is `unshaded` - and everything under it - is drawn over the lit
+  world as it is: a sign that glows in the dark, a fire, a cursor in the
+  world. A light is on its `Appearance`'s render layers, and lights only
+  through a camera whose `cull_mask` sees them.
+- **One buffer, one pass for all the lights.** The light is drawn into a
+  picture the size of the target, cleared to half the ambient light, and
+  laid over the world, multiplied twice. A light's shadows are marked in the
+  buffer's alpha before it is drawn - its reach, then the edges of every
+  occluder facing away from it drawn out past it - so no light needs a
+  buffer of its own. A frame that sees no light is drawn as it always was,
+  in one pass.
 
 ## ✨ Shaders and materials
 
@@ -3210,6 +3290,16 @@ Here, and checked by the tests:
   for what reads what is under it, at every place it is read.
 - Render views: cameras that draw into pictures a view texture shows,
   render layers a camera's mask sees, and pictures let go of with their view.
+- Particles: a cycle of places, bunched or spread, one-shot with `finished`;
+  bursts by hand; shapes to start in, speeds, gravity and the three
+  accelerations, damping and spin; a picture's frames, scale and colour over
+  a life; in the emitter's space or the world's; kept by scenes and played
+  in an editor's preview.
+- Lights: point, directional and ambient, added or taken away, through a
+  buffer the size of the target; shadows of occluders and of a map's solid
+  tiles, coloured or black, in the buffer's alpha; what is unshaded drawn
+  over the lit world; the same picture on Direct3D 11 and 12, Vulkan and
+  OpenGL.
 - A game made at one size, fitted to any window as a canvas or a picture,
   keeping its shape or showing more, with the pointer in its pixels.
 - Tile maps: four-byte cells turned and flipped, in chunks found through an
@@ -3326,8 +3416,9 @@ before this package existed - the seam was cut for it deliberately.
 ## 🧩 What counts as a component
 
 `Parent`, `Processing` and `Appearance`, which every entity may have. In 2D: `Transform2D`, `Sprite`,
-`Text2D`, `AnimatedSprite2D`, `Camera2D`, `RigidBody2D`, `Collider2D`, `Area2D`
-and `TileMap`; `Timer`, `Tween` and `AnimationPlayer`; `AudioPlayer`,
+`Text2D`, `AnimatedSprite2D`, `Particles2D`, `Camera2D`, `RigidBody2D`, `Collider2D`, `Area2D`
+and `TileMap`; `PointLight2D`, `DirectionalLight2D`, `AmbientLight2D` and
+`LightOccluder2D`; `Timer`, `Tween` and `AnimationPlayer`; `AudioPlayer`,
 `AudioSpatial2D` and `AudioListener2D`; and the interface's `Control` with what goes beside it -
 see [Controls and themes](#-controls-and-themes). Each one is something a
 person making a game would name, which is the test. A map's chunks are

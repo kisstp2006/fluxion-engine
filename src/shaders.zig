@@ -249,7 +249,7 @@ fn build(app: *App, into: *Shader, text: []const u8, tell: enum { say, quiet }) 
     errdefer gpa.free(into.text);
     var problems: std.Io.Writer.Allocating = .init(gpa);
     defer problems.deinit();
-    into.compiled = material.compile(gpa, &app.device, text, into.source, &problems.writer) catch |err| switch (err) {
+    into.compiled = material.compile(gpa, &app.device, text, into.source, &problems.writer, &material.sprite_blends) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => blk: {
             if (tell == .say) {
@@ -440,7 +440,7 @@ test "a material's numbers are the file's first values, then its own" {
         \\    int steps = 3;
         \\}
         \\fragment { target = sample(TEXTURE, UV) * glow * strength * float(steps); }
-    , "look", &problems.writer);
+    , "look", &problems.writer, &material.sprite_blends);
     defer compiled.deinit(&device);
     const block = compiled.params.?;
 

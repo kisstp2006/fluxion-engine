@@ -197,6 +197,10 @@ font_reloads: u32 = 0,
 /// One opaque white texel. See the module comment.
 white: TextureHandle = .none,
 
+/// A soft round glow, white and fading out to its edge: what a light with no
+/// picture of its own shines through, and a particle with none is.
+glow: TextureHandle = .none,
+
 /// How a texture is sampled when what loads it does not say: the project's
 /// `rendering.default_texture_filter`.
 default_filter: rhi.Filter = .nearest,
@@ -225,7 +229,25 @@ pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io, project: *Project)
     }
 
     self.white = try self.textureFromPixels(1, 1, &.{ 255, 255, 255, 255 }, .{ .label = "white" });
+    self.glow = try self.makeGlow();
     return self;
+}
+
+/// How many texels across the glow is.
+const glow_side = 64;
+
+fn makeGlow(self: *Assets) Error!TextureHandle {
+    var pixels: [glow_side * glow_side * 4]u8 = undefined;
+    const half: f32 = glow_side / 2;
+    for (0..glow_side) |y| for (0..glow_side) |x| {
+        const dx = (@as(f32, @floatFromInt(x)) + 0.5) / half - 1;
+        const dy = (@as(f32, @floatFromInt(y)) + 0.5) / half - 1;
+        // Falling off as the square of what is left of the way out.
+        const left = @max(1 - @sqrt(dx * dx + dy * dy), 0);
+        const at = (y * glow_side + x) * 4;
+        pixels[at..][0..4].* = .{ 255, 255, 255, @intFromFloat(@round(left * left * 255)) };
+    };
+    return self.textureFromPixels(glow_side, glow_side, &pixels, .{ .filter = .linear, .label = "glow" });
 }
 
 pub fn deinit(self: *Assets) void {
@@ -757,10 +779,9 @@ pub fn samplerFor(self: *const Assets, filter: rhi.Filter, wrap: rhi.Wrap) rhi.S
     return self.samplers.get(filter).get(wrap);
 }
 
-/// How many textures are loaded, not counting the white texel.
+/// How many textures are loaded, not counting the white texel and the glow.
 pub fn count(self: *const Assets) usize {
-    const total = self.textures.count();
-    return if (total == 0) 0 else total - 1;
+    return self.textures.count() -| 2;
 }
 
 test "a handle stops resolving when what it named is unloaded" {
@@ -784,7 +805,7 @@ test "a handle stops resolving when what it named is unloaded" {
     try testing.expect(assets.get(handle) == null);
 }
 
-test "there is a white texel before anything is loaded" {
+test "there is a white texel and a glow before anything is loaded" {
     var device: rhi.Device = try .init(testing.allocator, .{ .backend = .none });
     defer device.deinit();
 
@@ -794,6 +815,7 @@ test "there is a white texel before anything is loaded" {
     defer assets.deinit();
 
     try testing.expect(!assets.white.isNone());
+    try testing.expect(!assets.glow.isNone());
     try testing.expectEqual(@as(usize, 0), assets.count());
 }
 

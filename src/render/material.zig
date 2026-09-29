@@ -66,11 +66,67 @@ pub const Type = shader.Type;
 /// The file's own numbers are the block at this slot.
 pub const params_slot = 1;
 
-/// A shader compiled for the 2D layer, and a pipeline for each way it blends.
+/// Every way the 2D layer lays what it draws over what is there: a sprite's
+/// own, and the lighting's - see `lighting.zig`.
+pub const Blend = enum {
+    alpha,
+    additive,
+    subtractive,
+    /// Light added to the light buffer, and taken from it.
+    light,
+    darkness,
+    /// The same, only where the buffer's alpha is one: not shadowed.
+    light_unshadowed,
+    darkness_unshadowed,
+    /// The colour's alpha written into the buffer's, and nothing else: where
+    /// a light reaches, and where its shadows fall.
+    mask,
+    /// The light buffer over the world: twice the two multiplied.
+    lit,
+
+    /// What a sprite's blend is.
+    pub fn of(own: Sprite.Blend) Blend {
+        return switch (own) {
+            inline else => |tag| @field(Blend, @tagName(tag)),
+        };
+    }
+
+    fn state(self: Blend) rhi.BlendState {
+        return switch (self) {
+            .alpha => .alpha,
+            .additive => .additive,
+            .subtractive => colourOnly(.src_alpha, .one, .reverse_subtract),
+            .light => colourOnly(.one, .one, .add),
+            .darkness => colourOnly(.one, .one, .reverse_subtract),
+            .light_unshadowed => colourOnly(.dst_alpha, .one, .add),
+            .darkness_unshadowed => colourOnly(.dst_alpha, .one, .reverse_subtract),
+            .mask => .{ .enabled = true, .src_rgb = .zero, .dst_rgb = .one, .src_alpha = .one, .dst_alpha = .zero },
+            .lit => colourOnly(.dst_color, .src_color, .add),
+        };
+    }
+};
+
+/// A blend of the colour that leaves the alpha as it was.
+fn colourOnly(src: rhi.BlendFactor, dst: rhi.BlendFactor, op: rhi.BlendOp) rhi.BlendState {
+    return .{ .enabled = true, .src_rgb = src, .dst_rgb = dst, .op_rgb = op, .src_alpha = .zero, .dst_alpha = .one };
+}
+
+/// The ways a sprite, a tile, a label or a particle blends: what a
+/// `.shader` file is made ready for.
+pub const sprite_blends = blk: {
+    const own = std.enums.values(Sprite.Blend);
+    var out: [own.len]Blend = undefined;
+    for (own, &out) |blend, *made| made.* = .of(blend);
+    break :blk out;
+};
+
+/// A shader compiled for the 2D layer, and a pipeline for each way it was
+/// made to blend.
 pub const Compiled = struct {
     module: shader.Module,
     gpu: rhi.Shader,
-    pipelines: std.EnumArray(Sprite.Blend, rhi.Pipeline),
+    /// None for a way it was not made for.
+    pipelines: std.EnumArray(Blend, rhi.Pipeline),
     /// Where `TEXTURE` and `SCREEN_TEXTURE` are bound, for a shader that
     /// reads them.
     texture_slot: ?u32 = null,
@@ -268,8 +324,8 @@ fn lineAndColumn(text: []const u8, offset: u32) struct { line: usize, column: us
 }
 
 /// Compile a `.shader` file's text - `plain` for the engine's own - with the
-/// engine's part after it, and make its pipelines. What is wrong with it is
-/// written to `problems`, at the file's own lines, and is
+/// engine's part after it, and make a pipeline for each of `blends`. What is
+/// wrong with it is written to `problems`, at the file's own lines, and is
 /// `error.ShaderFailed`.
 pub fn compile(
     gpa: Allocator,
@@ -277,6 +333,7 @@ pub fn compile(
     text: []const u8,
     label: []const u8,
     problems: *std.Io.Writer,
+    blends: []const Blend,
 ) (error{ShaderFailed} || Allocator.Error || rhi.Error)!Compiled {
     const built = try whole(gpa, text);
     defer gpa.free(built.source);
@@ -343,9 +400,9 @@ pub fn compile(
         strides[buffer] += format.size();
     }
 
-    var pipelines: std.EnumArray(Sprite.Blend, rhi.Pipeline) = .initFill(.none);
+    var pipelines: std.EnumArray(Blend, rhi.Pipeline) = .initFill(.none);
     errdefer for (pipelines.values) |pipeline| device.destroyPipeline(pipeline);
-    for (std.enums.values(Sprite.Blend)) |blend| {
+    for (blends) |blend| {
         pipelines.set(blend, device.createPipeline(.{
             .shader = gpu,
             .attributes = attributes[0..module.attributes.len],
@@ -354,10 +411,7 @@ pub fn compile(
                 .{ .stride = strides[1], .step = .instance },
             },
             .topology = .triangle_strip,
-            .blend = switch (blend) {
-                .alpha => .alpha,
-                .additive => .additive,
-            },
+            .blend = blend.state(),
             // Both lists come out of the shader, in slot order.
             .uniform_blocks = (try module.uniformBlockNames()) orelse return error.ShaderFailed,
             .textures = (try module.textureNames()) orelse return error.ShaderFailed,
@@ -417,7 +471,7 @@ test "a file names what it reads, and only that is declared" {
     var problems: std.Io.Writer.Allocating = .init(testing.allocator);
     defer problems.deinit();
 
-    var drawn = try compile(testing.allocator, &device, plain, "plain", &problems.writer);
+    var drawn = try compile(testing.allocator, &device, plain, "plain", &problems.writer, &sprite_blends);
     defer drawn.deinit(&device);
     try testing.expectEqual(@as(?u32, 0), drawn.texture_slot);
     try testing.expect(!drawn.readsScreen());
@@ -430,7 +484,7 @@ test "a file names what it reads, and only that is declared" {
         \\fragment {
         \\    target = mix(sample(SCREEN_TEXTURE, SCREEN_UV), COLOR, strength + TIME * 0.0);
         \\}
-    , "glow", &problems.writer);
+    , "glow", &problems.writer, &sprite_blends);
     defer glowing.deinit(&device);
     // No TEXTURE named, so none declared; the screen takes the first slot.
     try testing.expectEqual(@as(?u32, null), glowing.texture_slot);
@@ -452,27 +506,27 @@ test "a mistake is at the file's own line, and a clash with the engine's names i
         \\    vec3 wrong = 1.0 + vec2(1.0);
         \\    target = vec4(1.0);
         \\}
-    , "broken", &problems.writer));
+    , "broken", &problems.writer, &sprite_blends));
     try testing.expect(std.mem.startsWith(u8, problems.written(), "2:"));
 
     problems.clearRetainingCapacity();
     try testing.expectError(error.ShaderFailed, compile(testing.allocator, &device,
         \\const float TIME = 1.0;
         \\fragment { target = vec4(TIME); }
-    , "clash", &problems.writer));
+    , "clash", &problems.writer, &sprite_blends));
     try testing.expect(std.mem.indexOf(u8, problems.written(), "the engine's part") != null);
 
     problems.clearRetainingCapacity();
     try testing.expectError(error.ShaderFailed, compile(testing.allocator, &device,
         \\vertex { position = vec4(1.0); }
         \\fragment { target = vec4(1.0); }
-    , "trespass", &problems.writer));
+    , "trespass", &problems.writer, &sprite_blends));
     try testing.expect(std.mem.startsWith(u8, problems.written(), "1:1: `vertex` is the engine's"));
 
     problems.clearRetainingCapacity();
     try testing.expectError(error.ShaderFailed, compile(testing.allocator, &device,
         \\uniform Look : 2 { float strength; }
         \\fragment { target = vec4(strength); }
-    , "slot", &problems.writer));
+    , "slot", &problems.writer, &sprite_blends));
     try testing.expect(std.mem.indexOf(u8, problems.written(), "one uniform block, at slot 1") != null);
 }

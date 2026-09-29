@@ -84,6 +84,17 @@ pub const Appearance = extern struct {
     /// camera's `cull_mask` sees them: a game in a cabinet on one only its
     /// view sees. Nought is its parent's, and the top's is the first.
     render_layers: u32 = 0,
+    /// Whether the lights fall on it and everything under it, or it is drawn
+    /// over the lit world as it is: a sign that glows in the dark. See
+    /// `lights.zig`.
+    lighting: Lighting = .inherit,
+
+    pub const Lighting = enum(u8) {
+        /// As its parent is; a root is lit.
+        inherit,
+        lit,
+        unshaded,
+    };
 
     pub const reflect_name = "Appearance";
     pub const reflect_fields = .{
@@ -92,6 +103,7 @@ pub const Appearance = extern struct {
         .modulate = .{attr.Doc{ .text = "Multiplied into its colours and everything under it" }},
         .z = .{attr.Doc{ .text = "Added to the layer it and everything under it is drawn on" }},
         .z_relative = .{attr.Doc{ .text = "Whether z is added to the one it inherits" }},
+        .lighting = .{attr.Doc{ .text = "Whether lights fall on it and everything under it: as its parent, lit, or drawn as it is over the lit world" }},
     };
 };
 
@@ -104,6 +116,8 @@ pub const Resolved = struct {
     z: i32 = 0,
     /// Never nought: the first, unless something above says otherwise.
     render_layers: u32 = 1,
+    /// Drawn as it is over the lit world, rather than lit.
+    unshaded: bool = false,
 
     /// The layer something on `layer` is drawn on under this.
     pub fn layer(self: Resolved, own: i16) i16 {
@@ -190,6 +204,7 @@ fn ownOver(world: *const ecs.World, entity: Entity, above: Resolved) Resolved {
         out.modulate = times(above.modulate, appearance.modulate);
         out.z = if (appearance.z_relative) above.z + appearance.z else appearance.z;
         if (appearance.render_layers != 0) out.render_layers = appearance.render_layers;
+        if (appearance.lighting != .inherit) out.unshaded = appearance.lighting == .unshaded;
     }
     return out;
 }
@@ -224,6 +239,12 @@ test "an entity is what it hangs from is, but for what it says itself" {
     try testing.expectEqual(@as(i32, 5), drawn.z);
     try testing.expect(drawn.visible);
     try testing.expectEqual(@as(i16, 15), drawn.layer(10));
+
+    try testing.expect(!drawn.unshaded);
+    try world.add(button, Appearance{ .lighting = .unshaded });
+    inherited.forget();
+    try testing.expect(inherited.of(gpa, &world, icon).unshaded);
+    try testing.expect(!inherited.of(gpa, &world, menu).unshaded);
 
     const gone = inherited.of(gpa, &world, hidden_child);
     try testing.expect(!gone.visible);

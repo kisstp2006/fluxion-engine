@@ -288,3 +288,129 @@ test "a stretched game is laid out at its own size, drawn apart and put on the w
     try testing.expectApproxEqAbs(@as(f32, 0), app.currentView().toScreen(.init(0, 0)).x, 0.001);
     try testing.expectApproxEqAbs(@as(f32, 128), app.currentView().toScreen(.init(32, 16)).x, 0.001);
 }
+
+const lights = @import("lights.zig");
+const Appearance = @import("inherited.zig").Appearance;
+
+test "a light the view sees lights the world through a buffer of its own, and what is unshaded is drawn over it" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try app.world.spawnWith(.{ Transform2D.at(32, 32), Sprite.solid(.white, 8, 8) });
+    const sign = try app.world.spawnWith(.{ Transform2D.at(20, 20), Sprite{ .width = 8, .height = 8, .layer = -5 }, Appearance{ .lighting = .unshaded } });
+    _ = try app.step();
+    // Nothing lit: one draw, the layers as they are.
+    try testing.expectEqual(@as(u32, 1), app.sprites.draw_calls);
+    try testing.expectEqual(@as(u32, 0), app.sprites.lighting.lights_drawn);
+    try testing.expect(app.sprites.items.items[0].unshaded);
+
+    const lamp = try app.world.spawnWith(.{ Transform2D.at(32, 32), lights.PointLight2D{ .radius = 30 } });
+    _ = try app.step();
+    // The lit sprite, the lamp into the buffer, the buffer over the world,
+    // and the sign over that: drawn last whatever its layer.
+    try testing.expectEqual(@as(u32, 1), app.sprites.lighting.lights_drawn);
+    try testing.expectEqual(@as(u32, 4), app.sprites.draw_calls);
+    try testing.expect(app.sprites.items.items[1].unshaded);
+    try testing.expect(!app.sprites.items.items[0].unshaded);
+
+    // A lamp the view does not reach lights nothing, and neither does one
+    // switched off: the world is drawn as it is.
+    app.world.get(lamp, Transform2D).?.x = 5000;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.sprites.draw_calls);
+    app.world.get(lamp, Transform2D).?.x = 32;
+    app.world.get(lamp, lights.PointLight2D).?.enabled = false;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.sprites.draw_calls);
+
+    // The dark alone is lighting too: the world, the buffer over it, the
+    // sign. Its colour is what the buffer starts as, halved.
+    _ = try app.world.spawnWith(.{lights.AmbientLight2D{ .color = .{ .r = 0.2, .g = 0.4, .b = 0.6, .a = 1 } }});
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 3), app.sprites.draw_calls);
+    try testing.expectApproxEqAbs(@as(f32, 0.2), app.sprites.lighting.clearColor().g, 1e-6);
+
+    // Lit again, the sign is lit with the rest.
+    app.world.get(sign, Appearance).?.lighting = .lit;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 2), app.sprites.draw_calls);
+}
+
+test "a light on render layers a camera does not see does not light what it sees" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try app.world.spawnWith(.{ Transform2D.at(32, 32), components.Camera2D{ .cull_mask = 0b01 } });
+    _ = try app.world.spawnWith(.{ Transform2D.at(32, 32), Sprite.solid(.white, 8, 8) });
+    const lamp = try app.world.spawnWith(.{ Transform2D.at(32, 32), lights.PointLight2D{}, Appearance{ .render_layers = 0b10 } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.sprites.lighting.lights_drawn);
+    app.world.get(lamp, Appearance).?.render_layers = 0b01;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.sprites.lighting.lights_drawn);
+}
+
+test "an occluder, and a map's solid tiles when it says so, cast the shadows of a light that has them" {
+    const app = try headless();
+    defer app.destroy();
+    const lamp = try app.world.spawnWith(.{ Transform2D.at(32, 32), lights.PointLight2D{ .radius = 30, .shadows = true } });
+    // Sized by its sprite.
+    const crate = try app.world.spawnWith(.{ Transform2D.at(44, 32), Sprite.solid(.white, 6, 6), lights.LightOccluder2D{} });
+    _ = try app.step();
+    try testing.expect(app.sprites.lighting.shadows_drawn > 0);
+    // Its reach marked, the shadows, and the light where it is not shadowed.
+    try testing.expectEqual(app.sprites.lighting.shadows_drawn + 2, @as(u32, @intCast(app.sprites.lighting.draws.items.len)));
+
+    // Switched off, it casts nothing, and the lamp is drawn as one without
+    // shadows is.
+    app.world.get(crate, lights.LightOccluder2D).?.enabled = false;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.sprites.lighting.shadows_drawn);
+    try testing.expectEqual(@as(usize, 1), app.sprites.lighting.draws.items.len);
+
+    const set = try app.addTileSet("walls.tileset",
+        \\{
+        \\  "fluxion_tileset": 1,
+        \\  "tile_size": [8, 8],
+        \\  "sources": [{ "id": 0, "tiles": [{ "at": [0, 0], "collision": "full" }] }]
+        \\}
+    );
+    const map = try app.world.spawnWith(.{ Transform2D{}, @import("tilemap.zig").TileMap{ .tile_set = set } });
+    _ = try app.setTile(map, 5, 3, .at(0, 0, 0));
+    _ = try app.setTile(map, 5, 4, .at(0, 0, 0));
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.sprites.lighting.shadows_drawn);
+    app.world.get(map, @import("tilemap.zig").TileMap).?.light_occlusion = true;
+    _ = try app.step();
+    // The two tiles are one box.
+    try testing.expectEqual(@as(usize, 1), app.sprites.lighting.outlines.items.len);
+    try testing.expect(app.sprites.lighting.shadows_drawn > 0);
+
+    // A lamp without shadows passes through it all.
+    app.world.get(lamp, lights.PointLight2D).?.shadows = false;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.sprites.lighting.shadows_drawn);
+}
+
+test "a scene keeps its lights and occluders" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try app.world.spawnWith(.{ Transform2D.at(1, 2), lights.PointLight2D{ .radius = 90, .blend = .subtract, .shadows = true, .shadow_color = .{ .r = 0.1, .g = 0, .b = 0.2, .a = 0.5 } } });
+    _ = try app.world.spawnWith(.{ Transform2D.at(3, 4), lights.LightOccluder2D{ .shape = .capsule, .radius = 4, .extents = .init(0, 12) } });
+    _ = try app.world.spawnWith(.{ lights.DirectionalLight2D{ .energy = 0.25 }, lights.AmbientLight2D{}, Appearance{ .lighting = .unshaded } });
+    const bytes = try scene.write(app, testing.allocator, .{});
+    defer testing.allocator.free(bytes);
+    app.clearWorld();
+    _ = try scene.read(app, bytes, .{});
+
+    const ecs = @import("fluxion_ecs");
+    var points = try ecs.Query(.{lights.PointLight2D}).over(&app.world);
+    const lamp = points.next().?.slice(lights.PointLight2D)[0];
+    try testing.expectEqual(lights.Blend.subtract, lamp.blend);
+    try testing.expectEqual(@as(f32, 90), lamp.radius);
+    try testing.expectEqual(@as(f32, 0.5), lamp.shadow_color.a);
+    var walls = try ecs.Query(.{lights.LightOccluder2D}).over(&app.world);
+    try testing.expectEqual(lights.LightOccluder2D.Shape.capsule, walls.next().?.slice(lights.LightOccluder2D)[0].shape);
+    var suns = try ecs.Query(.{ lights.DirectionalLight2D, Appearance }).over(&app.world);
+    const sun = suns.next().?;
+    try testing.expectEqual(@as(f32, 0.25), sun.slice(lights.DirectionalLight2D)[0].energy);
+    try testing.expectEqual(Appearance.Lighting.unshaded, sun.slice(Appearance)[0].lighting);
+}

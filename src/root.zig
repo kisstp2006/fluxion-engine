@@ -155,6 +155,8 @@ pub const render = struct {
     pub const material = @import("render/material.zig");
     /// The frame, drawn where it can be read.
     pub const screen = @import("render/screen.zig");
+    /// The light buffer the world is lit by.
+    pub const lighting = @import("render/lighting.zig");
 };
 
 /// Every glyph the game has drawn, in one texture.
@@ -193,6 +195,17 @@ pub const Area2D = components.Area2D;
 pub const RayCast2D = components.RayCast2D;
 pub const Drawing2D = @import("drawing.zig").Drawing2D;
 pub const drawing = @import("drawing.zig");
+
+/// Sparks, smoke, rain: many small pictures an entity lets go of.
+pub const Particles2D = particles.Particles2D;
+pub const particles = @import("particles.zig");
+
+/// Light in the 2D world, and the shadows it casts: see `lights.zig`.
+pub const lights = @import("lights.zig");
+pub const PointLight2D = lights.PointLight2D;
+pub const DirectionalLight2D = lights.DirectionalLight2D;
+pub const AmbientLight2D = lights.AmbientLight2D;
+pub const LightOccluder2D = lights.LightOccluder2D;
 
 /// A grid of tiles from a `TileSet`. Its cells live in `TileChunk`s the
 /// map owns; `App.setTile` paints one.
@@ -479,6 +492,10 @@ test {
     _ = @import("shader_edit.zig");
     _ = @import("render/material.zig");
     _ = @import("render/screen.zig");
+    _ = render.lighting;
+    _ = particles;
+    _ = @import("particles_test.zig");
+    _ = lights;
     _ = @import("render_test.zig");
     _ = @import("stretch.zig");
     _ = @import("character_test.zig");

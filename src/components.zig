@@ -275,7 +275,9 @@ pub const Sprite = extern struct {
     /// that grouping. Ties keep a stable order.
     order: f32 = 0,
 
-    pub const Blend = enum(u8) { alpha, additive };
+    /// How it is laid over what is under it: over it, added to it - a glow -
+    /// or taken from it.
+    pub const Blend = enum(u8) { alpha, additive, subtractive };
 
     pub const reflect_name = "Sprite";
     pub const reflect_fields = .{

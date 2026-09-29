@@ -49,6 +49,9 @@ pub const TileMap = extern struct {
     collision_mask: u32 = 1,
     friction: f32 = 0.5,
     bounce: f32 = 0,
+    /// Whether its solid tiles - the shapes its tile set gives them - cast
+    /// the shadows of the lights that have them.
+    light_occlusion: bool = false,
 
     pub const reflect_name = "TileMap";
     pub const reflect_fields = .{
@@ -57,6 +60,7 @@ pub const TileMap = extern struct {
         .collision_mask = .{attr.Layers{ .names = .physics_2d }},
         .friction = .{attr.Range{ .min = 0, .max = 1 }},
         .bounce = .{attr.Range{ .min = 0, .max = 1 }},
+        .light_occlusion = .{attr.Doc{ .text = "Its solid tiles cast the shadows of lights" }},
     };
 };
 
@@ -214,6 +218,63 @@ pub fn drawn(cell: Cell, picture: Region) Drawn {
     return .{ .region = region, .turned = true };
 }
 
+/// What a chunk's solid tiles make, one at a time: the tiles their set calls
+/// `full` merged into as few boxes as they make, and each tile with a shape
+/// of its own. What the physics builds a chunk's body from, and what a map's
+/// shadows are cast by.
+pub const Solids = struct {
+    chunk: *const TileChunk,
+    set: *const tileset.TileSet,
+    used: [tiles_per_chunk]bool = @splat(false),
+    at: usize = 0,
+
+    /// In the chunk's cells, from its top left.
+    pub const Solid = union(enum) {
+        /// `width` cells across and `height` down from `x`, `y`.
+        box: struct { x: usize, y: usize, width: usize, height: usize },
+        /// The tile at `x`, `y`, whose `polygon` is turned as `cell` says:
+        /// see `place`.
+        polygon: struct { x: usize, y: usize, cell: Cell, tile: tileset.Tile },
+    };
+
+    pub fn next(self: *Solids) ?Solid {
+        while (self.at < tiles_per_chunk) {
+            const start = self.at;
+            self.at += 1;
+            if (self.used[start]) continue;
+            const x = start % chunk_side;
+            const y = start / chunk_side;
+            const tile = self.set.tileOf(self.chunk.cells[start]);
+            switch (tile.collision) {
+                .none => continue,
+                .polygon => {
+                    self.used[start] = true;
+                    return .{ .polygon = .{ .x = x, .y = y, .cell = self.chunk.cells[start], .tile = tile } };
+                },
+                .full => {},
+            }
+
+            // A run to the right, then as many rows below it as are full all
+            // the way across.
+            var width: usize = 1;
+            while (x + width < chunk_side and self.fullAt(start + width)) : (width += 1) {}
+            var height: usize = 1;
+            rows: while (y + height < chunk_side) : (height += 1) {
+                for (0..width) |across| if (!self.fullAt((y + height) * chunk_side + x + across)) break :rows;
+            }
+            for (0..height) |down| {
+                for (0..width) |across| self.used[(y + down) * chunk_side + x + across] = true;
+            }
+            return .{ .box = .{ .x = x, .y = y, .width = width, .height = height } };
+        }
+        return null;
+    }
+
+    fn fullAt(self: *const Solids, index: usize) bool {
+        return !self.used[index] and self.set.tileOf(self.chunk.cells[index]).collision == .full;
+    }
+};
+
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
@@ -266,6 +327,44 @@ test "the corners the renderer draws are the ones `place` names" {
             }
         }
     }
+}
+
+test "a chunk's solid tiles are as few boxes as they make, and the shaped ones one each" {
+    const App = @import("App.zig");
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+    const set = app.tile_sets.get(try app.tile_sets.add(app, "solid.tileset",
+        \\{
+        \\  "fluxion_tileset": 1,
+        \\  "tile_size": [16, 16],
+        \\  "sources": [{ "id": 0, "tiles": [
+        \\    { "at": [0, 0], "collision": "full" },
+        \\    { "at": [1, 0], "collision": "polygon", "polygon": [[0, 16], [16, 0], [16, 16]] }
+        \\  ] }]
+        \\}
+    )).?;
+
+    // A 3 by 2 block, a lone full tile and a slope; the picture-only tile
+    // makes nothing.
+    var chunk: TileChunk = .{};
+    for (0..3) |x| for (0..2) |y| {
+        _ = chunk.set(@intCast(x), @intCast(y), .at(0, 0, 0));
+    };
+    _ = chunk.set(5, 0, .at(0, 0, 0));
+    _ = chunk.set(7, 7, .at(0, 1, 0));
+    _ = chunk.set(9, 9, .at(0, 2, 0));
+
+    var solids: Solids = .{ .chunk = &chunk, .set = set };
+    const block = solids.next().?.box;
+    try testing.expectEqual(@as(usize, 3), block.width);
+    try testing.expectEqual(@as(usize, 2), block.height);
+    const lone = solids.next().?.box;
+    try testing.expectEqual(@as(usize, 5), lone.x);
+    try testing.expectEqual(@as(usize, 1), lone.width * lone.height);
+    const ramp = solids.next().?.polygon;
+    try testing.expectEqual(@as(usize, 7), ramp.x);
+    try testing.expectEqual(@as(usize, 3), ramp.tile.polygon().len);
+    try testing.expect(solids.next() == null);
 }
 
 test "a quarter turn is the transpose and one flip" {
