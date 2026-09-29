@@ -2899,6 +2899,9 @@ struct Guard {
 - **A script imports another.** `@import("save.flux")` is the file beside
   it, `@import("res://lib/save.flux")` one anywhere in the project; the same
   file is one module however it is spelt.
+  `app.scriptSetup()` gives an editor the project's scripts to offer in an
+  `@import("`, and what each declares to offer where a name is typed, put
+  in with its import.
 - **Colours are the language's own**: a component's colour reads as a
   `color`, and takes one - `look.modulate = color(1, 0.4, 0.4, 1)`,
   `color("#ff6666")`, `color("salmon")`.
