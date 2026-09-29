@@ -7933,6 +7933,34 @@ test "a sprite half off the edge is still drawn" {
     try testing.expectEqual(@as(u32, 0), app.sprites.culled);
 }
 
+test "every letter of a label is drawn however full its font's atlas gets, and at any size" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 1280, .height = 720, .io = threaded.io() });
+    defer app.destroy();
+    // An atlas a few big letters fill.
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 }) catch
+        return error.SkipZigTest;
+
+    const words = "The quick brown fox jumps over the lazy dog";
+    const long = try app.world.spawnWith(.{ components.Transform2D.at(0, 100), components.Text2D{ .size = 40 } });
+    try app.setText(long, components.Text2D, "text", words);
+    // Taller than the atlas is.
+    const big = try app.world.spawnWith(.{ components.Transform2D.at(0, 300), components.Text2D{ .size = 120 } });
+    try app.setText(big, components.Text2D, "text", "Big");
+    const letters = words.len - std.mem.count(u8, words, " ") + 3;
+
+    try app.run();
+    try testing.expectEqual(@as(u32, @intCast(letters)), app.sprites.drawn);
+    var tallest: f32 = 0;
+    for (app.sprites.items.items) |item| tallest = @max(tallest, item.instance.shape[1]);
+    try testing.expect(tallest > 70);
+
+    // And every frame after, from the atlas as the last left it.
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, @intCast(letters)), app.sprites.drawn);
+}
+
 test "a label with no font loaded draws nothing and does not fall over" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();

@@ -192,6 +192,17 @@ pub const Renderer = struct {
     drawings: ?*const drawing_mod.Drawings = null,
     /// The render view being drawn, whose own picture is not drawn into it.
     drawing: ecs.Entity = .none,
+    /// The font whose atlas the last label found full.
+    full: ?*Assets.Font = null,
+    /// The fonts whose atlases this frame's words emptied: one that fills
+    /// again grows.
+    emptied: std.ArrayList(*Assets.Font) = .empty,
+    /// Whether a label that finds its atlas full leaves out the rest of its
+    /// letters, rather than asking for room: the last pass of a frame whose
+    /// words do not fit the biggest atlas.
+    fit_only: bool = false,
+    /// Whether that has been said.
+    said_full: bool = false,
 
     /// A picture, coloured: what a sprite with no material is drawn with.
     plain: material.Compiled,
@@ -279,6 +290,7 @@ pub const Renderer = struct {
 
     pub fn deinit(self: *Renderer, gpa: Allocator) void {
         self.items.deinit(gpa);
+        self.emptied.deinit(gpa);
         self.staging.deinit(gpa);
         self.param_sets.deinit(gpa);
         self.param_bytes.deinit(gpa);
@@ -616,10 +628,67 @@ pub const Renderer = struct {
         }
 
         try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view, &sequence);
-        try self.gatherText(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
-        try self.gatherDrawings(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
+        try self.gatherWords(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
 
         std.sort.pdq(Item, self.items.items, {}, Item.before);
+    }
+
+    /// The labels, and the drawings, which may hold words too. A font whose
+    /// atlas fills on the way has it emptied, and they are laid out again;
+    /// filled again, the atlas grows. What an atlas as big as it goes still
+    /// cannot hold is left out, and that is said once.
+    fn gatherWords(
+        self: *Renderer,
+        gpa: Allocator,
+        world: *ecs.World,
+        assets: *Assets,
+        snapshots: *const hierarchy.Snapshots,
+        inherited: *Inherited,
+        alpha: f32,
+        view: View,
+        sequence: *u32,
+    ) !void {
+        const from = self.items.items.len;
+        const sequence_from = sequence.*;
+        const culled_from = self.culled;
+        self.emptied.clearRetainingCapacity();
+        defer self.fit_only = false;
+        while (true) {
+            self.layWords(gpa, world, assets, snapshots, inherited, alpha, view, sequence) catch |err| switch (err) {
+                error.AtlasFull => {
+                    self.items.shrinkRetainingCapacity(from);
+                    sequence.* = sequence_from;
+                    self.culled = culled_from;
+                    const face = self.full.?;
+                    if (std.mem.indexOfScalar(*Assets.Font, self.emptied.items, face) == null) {
+                        face.atlas.clear();
+                        try self.emptied.append(gpa, face);
+                    } else if (!try assets.growAtlas(face)) {
+                        if (!self.said_full) std.log.scoped(.fluxion_engine).warn("the words of a frame do not fit a font's atlas of {d} pixels a side: the letters that do not fit are left out", .{face.atlas.width});
+                        self.said_full = true;
+                        self.fit_only = true;
+                    }
+                    continue;
+                },
+                else => return err,
+            };
+            return;
+        }
+    }
+
+    fn layWords(
+        self: *Renderer,
+        gpa: Allocator,
+        world: *ecs.World,
+        assets: *Assets,
+        snapshots: *const hierarchy.Snapshots,
+        inherited: *Inherited,
+        alpha: f32,
+        view: View,
+        sequence: *u32,
+    ) !void {
+        try self.gatherText(gpa, world, assets, snapshots, inherited, alpha, view, sequence);
+        try self.gatherDrawings(gpa, world, assets, snapshots, inherited, alpha, view, sequence);
     }
 
     /// The texture a sprite shows: a render view's picture, for one with a
@@ -783,25 +852,17 @@ pub const Renderer = struct {
         /// they were drawn; null for a label's own.
         drawn_key: ?u64,
     ) !void {
-        // Whole pixels, as the atlas is keyed - and no taller than the atlas,
-        // which could not keep a bigger glyph anyway: a size read from a file
-        // is not always one a hand would give, and NaN is the smallest.
-        const tallest: f32 = @floatFromInt(@min(face.atlas.height, std.math.maxInt(u16)));
-        const rounded = @round(label.size);
-        const pixels: u16 = if (rounded >= 1 and rounded <= tallest)
-            @intFromFloat(rounded)
-        else if (rounded > tallest)
-            @intFromFloat(tallest)
-        else
-            1;
+        const size = GlyphSize.of(label.size);
+        const pixels = size.pixels;
+        const stretch = size.stretch;
         const scaled = face.face.at(@floatFromInt(pixels));
-        const line_height = scaled.lineHeight() * label.line_spacing;
+        const line_height = scaled.lineHeight() * label.line_spacing * stretch;
 
         // The whole label against the camera, boxed generously: one test, not
         // one per letter.
         const measured = measure(&face.face, scaled, run);
         const reach = spriteRadius(
-            measured.width * @abs(transform.scale_x),
+            measured.width * stretch * @abs(transform.scale_x),
             (measured.lines * line_height) * @abs(transform.scale_y),
         );
         if (!bounds.admits(transform.x, transform.y, reach)) {
@@ -825,11 +886,11 @@ pub const Renderer = struct {
 
             // The transform is the top left of the first line, so the first
             // baseline is one ascent below it.
-            const baseline = scaled.ascent() + line_index * line_height;
+            const baseline = scaled.ascent() * stretch + line_index * line_height;
             var pen: f32 = switch (label.alignment) {
                 .left => 0,
-                .center => -lineWidth(&face.face, scaled, line) / 2,
-                .right => -lineWidth(&face.face, scaled, line),
+                .center => -lineWidth(&face.face, scaled, line) * stretch / 2,
+                .right => -lineWidth(&face.face, scaled, line) * stretch,
             };
 
             var previous_glyph: ?u16 = null;
@@ -839,22 +900,27 @@ pub const Renderer = struct {
 
                 if (previous_glyph) |left| {
                     const units = face.face.kern(left, index) catch 0;
-                    pen += @as(f32, @floatFromInt(units)) * scaled.scale;
+                    pen += @as(f32, @floatFromInt(units)) * scaled.scale * stretch;
                 }
                 previous_glyph = index;
 
                 const entry = face.atlas.glyph(&face.face, index, pixels) catch |err| switch (err) {
-                    // A full atlas drops the rest of this label rather than
-                    // failing the frame.
-                    error.AtlasFull => break,
+                    // Room is made and the frame's words laid out again - but
+                    // for the last pass of a frame that has none to make,
+                    // which leaves the rest of this label out.
+                    error.AtlasFull => {
+                        if (self.fit_only) break;
+                        self.full = face;
+                        return error.AtlasFull;
+                    },
                     else => return err,
                 };
-                defer pen += entry.advance;
+                defer pen += entry.advance * stretch;
 
                 if (entry.width == 0) continue;
 
                 // The glyph's top left, in the label's space, then the world's.
-                const placed = transform.apply(pen + entry.left, baseline - entry.top);
+                const placed = transform.apply(pen + entry.left * stretch, baseline - entry.top * stretch);
 
                 sequence.* += 1;
                 try self.items.append(gpa, .{
@@ -870,8 +936,8 @@ pub const Renderer = struct {
                     .instance = .quad(
                         placed.x,
                         placed.y,
-                        entry.width * transform.scale_x,
-                        entry.height * transform.scale_y,
+                        entry.width * stretch * transform.scale_x,
+                        entry.height * stretch * transform.scale_y,
                         0,
                         0,
                         c,
@@ -1189,28 +1255,22 @@ pub fn cornersOf(sprite: Sprite, placed: Transform2D, texture: *const Assets.Tex
 pub fn labelCornersOf(label: Text2D, run: []const u8, placed: Transform2D, face: *Assets.Font) ?[4]math.Vec2 {
     if (run.len == 0 or !std.unicode.utf8ValidateSlice(run)) return null;
 
-    // The size the renderer rounds to, and the lines it lays out.
-    const tallest: f32 = @floatFromInt(@min(face.atlas.height, std.math.maxInt(u16)));
-    const rounded = @round(label.size);
-    const pixels: u16 = if (rounded >= 1 and rounded <= tallest)
-        @intFromFloat(rounded)
-    else if (rounded > tallest)
-        @intFromFloat(tallest)
-    else
-        1;
-    const scaled = face.face.at(@floatFromInt(pixels));
-    const line_height = scaled.lineHeight() * label.line_spacing;
+    // The size the renderer lays it out at, and the lines it lays out.
+    const size = GlyphSize.of(label.size);
+    const scaled = face.face.at(@floatFromInt(size.pixels));
+    const line_height = scaled.lineHeight() * label.line_spacing * size.stretch;
     const measured = measure(&face.face, scaled, run);
-    if (!(measured.width > 0) or !(measured.lines > 0) or !std.math.isFinite(line_height)) return null;
+    const across = measured.width * size.stretch;
+    if (!(across > 0) or !(measured.lines > 0) or !std.math.isFinite(line_height)) return null;
 
     // The transform is the top left of the first line; each line is moved
     // by the alignment, and so is the box around them.
     const left: f32 = switch (label.alignment) {
         .left => 0,
-        .center => -measured.width / 2,
-        .right => -measured.width,
+        .center => -across / 2,
+        .right => -across,
     };
-    const width = measured.width * placed.scale_x;
+    const width = across * placed.scale_x;
     const height = measured.lines * line_height * placed.scale_y;
     const x0 = left * placed.scale_x;
     const c = @cos(placed.rotation);
@@ -1223,6 +1283,24 @@ pub fn labelCornersOf(label: Text2D, run: []const u8, placed: Transform2D, face:
     }
     return out;
 }
+
+/// The size a label's glyphs are drawn into its font's atlas at: its own in
+/// whole pixels, as the atlas is keyed - a size read from a file is not
+/// always one a hand would give, and NaN is the smallest - and at most
+/// `Assets.max_glyph`, scaled up past it by `stretch`, which is what one of
+/// the glyphs' pixels is in the label's units.
+const GlyphSize = struct {
+    pixels: u16,
+    stretch: f32,
+
+    fn of(size: f32) GlyphSize {
+        const biggest: f32 = @floatFromInt(Assets.max_glyph);
+        const rounded = @round(size);
+        if (rounded >= 1 and rounded <= biggest) return .{ .pixels = @intFromFloat(rounded), .stretch = 1 };
+        if (rounded > biggest) return .{ .pixels = Assets.max_glyph, .stretch = @min(size, 65536) / biggest };
+        return .{ .pixels = 1, .stretch = 1 };
+    }
+};
 
 /// The unit square's corners in order round it, rather than in the strip's
 /// order.

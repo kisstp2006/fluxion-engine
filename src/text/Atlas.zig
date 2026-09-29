@@ -192,6 +192,17 @@ fn place(self: *Atlas, rendered: font.Rendered) Error!Entry {
     };
 }
 
+/// Every glyph forgotten and the image blank, to be filled anew: what a
+/// frame whose letters no longer fit does before it lays them out again.
+pub fn clear(self: *Atlas) void {
+    self.entries.clearRetainingCapacity();
+    for (0..self.pixels.len / 4) |i| self.pixels[i * 4 + 3] = 0;
+    self.shelf_top = padding;
+    self.shelf_height = 0;
+    self.pen = padding;
+    self.dirty = true;
+}
+
 /// How many glyphs are cached. One per letter per size.
 pub fn count(self: Atlas) usize {
     return self.entries.count();
@@ -241,6 +252,25 @@ test "a glyph too wide for the image is refused rather than wrapped" {
         .advance = 16,
     };
     try testing.expectError(Error.AtlasFull, atlas.place(huge));
+}
+
+test "a cleared atlas forgets its glyphs and has all its room again" {
+    var atlas: Atlas = try .init(testing.allocator, 8, 8);
+    defer atlas.deinit();
+    var coverage: [36]u8 = @splat(255);
+    const square: font.Rendered = .{
+        .bitmap = .{ .pixels = &coverage, .width = 6, .height = 6 },
+        .left = 0,
+        .top = 6,
+        .advance = 6,
+    };
+    const first = try atlas.place(square);
+    try testing.expectError(Error.AtlasFull, atlas.place(square));
+
+    atlas.clear();
+    try testing.expectEqual(@as(usize, 0), atlas.count());
+    try testing.expectEqual(@as(u8, 0), atlas.pixels[(1 * 8 + 1) * 4 + 3]);
+    try testing.expectEqual(first, try atlas.place(square));
 }
 
 test "a space takes no room and still moves the pen" {

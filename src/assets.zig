@@ -572,6 +572,31 @@ pub fn fontOf(self: *Assets, handle: FontHandle) ?*Font {
     return null;
 }
 
+/// The biggest side a font's atlas grows to.
+pub const max_atlas: u32 = 4096;
+
+/// The biggest size, in whole pixels, a glyph is drawn into an atlas at:
+/// bigger text is these glyphs scaled up.
+pub const max_glyph: u16 = 512;
+
+/// `font`'s atlas twice as big and blank, with a texture to match: what a
+/// frame whose letters do not fit an emptied atlas asks for. False once it
+/// is `max_atlas` a side, or as big as the device's textures go.
+pub fn growAtlas(self: *Assets, font: *Font) !bool {
+    const most = @min(max_atlas, self.device.caps().limits.max_texture_2d);
+    const now = @max(font.atlas.width, font.atlas.height);
+    if (now >= most) return false;
+    const side = @min(now * 2, most);
+    var atlas: Atlas = try .init(self.gpa, side, side);
+    errdefer atlas.deinit();
+    const texture = try self.device.createTexture(.{ .width = side, .height = side, .data = atlas.pixels, .label = "glyphs" });
+    self.device.destroyTexture(font.texture);
+    font.atlas.deinit();
+    font.atlas = atlas;
+    font.texture = texture;
+    return true;
+}
+
 /// Upload every atlas that grew since the last frame. The whole image, which
 /// is cheap at this size, and a settled game uploads nothing.
 pub fn flushFonts(self: *Assets) !void {
