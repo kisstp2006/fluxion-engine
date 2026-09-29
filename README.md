@@ -263,6 +263,10 @@ if (app.isProcessing(door)) ...
 - **Worked out once a part of the frame**, as it is asked: see
   `inherited.zig`. A system that changes a `Processing` is heard from the
   next part - the next fixed step, the update, the drawing - on.
+- **Hiding is the same**: `app.setVisible(entity, false)` hides an entity
+  and what hangs from it through its `Appearance` - given one when it has
+  none - and `app.isVisibleInTree(entity)` says whether anything above hides
+  it; a script's `self.entity.setVisible(false)` too.
 
 ## 📨 Events
 
@@ -521,7 +525,14 @@ const turn = app.input.pointer.dx;
   `app.pointerIn(entity)` in one entity's own space, and
   `input.pointer.velocity` in pixels a second, worked out over at least a
   tenth of a second and nought once it has been still for three. A game
-  puts it somewhere itself with `app.warpPointer(x, y)`.
+  puts it somewhere itself with `app.warpPointer(x, y)`, in the same pixels
+  as `pointerOnScreen`, a stretched frame's too.
+- **A script asks as Zig does**: `app.keyDown(.w)`, `keyJustPressed`,
+  `keyJustReleased`; `app.mouseButtonDown(.left)` and its two edges; and a
+  controller by its slot, or any for none - `app.padButtonDown(.a)`,
+  `app.padButtonDown(.a, 1)`, `padButtonJustPressed`, `padAxis(.left_x)`,
+  `padStick(.left)`, `padConnected()`, and `connectedPads()`, the slots
+  something is plugged into, a player to each.
 - **A double click is the system's own**: `input.doubleClicked(.left)` for
   the press that made one, by Windows' setting or four hundred
   milliseconds within a few pixels elsewhere.
@@ -761,6 +772,14 @@ if (!app.input.focused) app.setPaused(true);
 - **A project caps its frames with `application.max_fps`** - nought for no
   cap - and a game's `Options.max_fps` overrules it. A settings menu sets it
   with `app.setMaxFps(60)` and reads it with `maxFps()`, from a script too.
+- **What a counter on screen shows**: `app.fps()`, the frames of the last
+  whole second (`time.frames_per_second`; `time.fps()` is the last frame's
+  alone), `app.frameCount()` and `app.elapsed()`, the game's seconds since it
+  began.
+- **Slow motion is `app.setTimeScale(0.5)`**, `timeScale()` to read it:
+  every frame's time and every fixed step's is multiplied by it, and a hit
+  that holds the world still for a moment is `setTimeScale(0)` and back. It
+  is not a pause - what runs while paused runs slowed too.
 - **`VsyncMode` is how a frame meets the refresh**: `disabled` never waits
   and may tear; `enabled` shows one a refresh and never tears; `adaptive`
   shows a late one at once, tearing that once rather than stuttering;
@@ -1060,9 +1079,10 @@ try app.callGroup("enemies", "alert");
   into the component is seen after the next spawn, despawn or change of
   components, and renames nothing, so an inspector shows it read-only and
   leaves the move to `setParent`.
-- **A parent's children keep an order**: `app.childrenOf(parent, &buf)` in
-  it - `.none` for the roots - `app.childCount` and `app.childAt` one at a
-  time, `app.siblingIndex(entity)` for one's place, and
+- **A parent's children keep an order**: `app.children(parent)` in it -
+  `.none` for the roots, a list from a script, `self.entity.children()` -
+  `app.childrenOf(parent, &buf)` into a buffer, `app.childCount` and
+  `app.childAt` one at a time, `app.siblingIndex(entity)` for one's place, and
   `app.setSiblingIndex(entity, i)` to move one, the ones from there on moving
   along. A child never placed comes after the ones that were, in the order it
   was made. A scene writes its list in this order and a read keeps it, so the
@@ -1079,12 +1099,12 @@ try app.callGroup("enemies", "alert");
   up and a leading `/` from the roots; `app.findIn(root, name)` looks
   anywhere under a root.
 - **A group is a name many entities are put under**, wherever they are in the
-  tree: `addToGroup`, `removeFromGroup`, `isInGroup`, `groupMembers`,
-  `groupSize` and `groupMember`, `groupsOf`, and `callGroup(group, method)`,
-  which calls a method - a component's, the script's, or one `addMethod` gave
-  - on every member that has it. Groups are kept beside the world, as names
-  are, because one entity is in any number of them; a scene writes them with
-  each entity, and the dead leave at the end of the frame.
+  tree: `addToGroup`, `removeFromGroup`, `isInGroup`, `groupMembers` - the
+  living ones, in the order they joined, a list from a script -
+  `groupsOf`, and `callGroup(group, method)`, which calls a method - a
+  component's, the script's, or one `addMethod` gave - on every member that
+  has it. Groups are kept beside the world, as names are, because one entity
+  is in any number of them; a scene writes them with each entity.
 - **All of it is a script's too**: `app.setParent(self.entity,
   app.find("ship"), true)`, `app.findPath(self.entity, "../Door")`,
   `app.callGroup("lights", "flicker")`.
@@ -2308,9 +2328,10 @@ const red = fx.Color.parse("#C8434F").?;         // #RGB, #RGBA, #RRGGBB, #RRGGB
   and `fx.Rect2` and `fx.Rect2i` are boxes by where they start and how big
   they are, with fractions and without. `end` is the first point past a
   box, so two boxes side by side share no point; `hasPoint`, `intersection`,
-  `merge`, `grow`, `expandTo`, and for cells `fromCells` and `last`. A map's
-  cells are `Vec2i`s and its used cells a `Rect2i`, from Zig and from a
-  script alike.
+  `merge`, `grow`, `expandTo`, `encloses`, and for cells `fromCells` and
+  `last`. A map's cells are `Vec2i`s and its used cells a `Rect2i`, from Zig
+  and from a script alike, and a script asks a `Rect2` it is given the same:
+  `app.controlRect(button).?.hasPoint(app.pointerOnScreen())`.
 - **A colour reads from text** with `fx.Color.parse`, as a theme file and a
   colour field write one.
 
@@ -2325,6 +2346,7 @@ const loaded = try app.readScene("res://levels/meadow.scene", .{});    // either
 const bat = try app.loadScene("res://enemies/bat.json");               // a scene to make things of
 const one = try app.instantiate(bat, cave);                            // its root, under cave
 app.changeScene(try app.loadScene("res://levels/two.json"));          // at the end of the frame
+app.reloadCurrentScene();                                              // the level again, from its start
 ```
 
 ### Scenes as things a game makes
@@ -2824,6 +2846,12 @@ struct Guard {
 - **Colours are the language's own**: a component's colour reads as a
   `color`, and takes one - `look.modulate = color(1, 0.4, 0.4, 1)`,
   `color("#ff6666")`, `color("salmon")`.
+- **A transform's place is a vector too**: `t.position += velocity *
+  delta` and `t.scale = vec2(2, 2)` read and write its `x, y` and `scale_x,
+  scale_y`.
+- **The system it runs on**: `app.osName()` - `.windows`, `.macos`,
+  `.linux`, `.android`, `.ios`, `.web` - for a touch layout on a phone, and
+  `app.isDebugBuild()`.
 - **A file is its path.** Where a call or a field wants a scene, a texture,
   a font, a tile set, a theme, a script or a data file, a script gives
   `"res://…"`, and the file is read if nothing has read it yet. The same

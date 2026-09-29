@@ -40,6 +40,13 @@ elapsed: f64 = 0,
 /// How many frames have been through the loop.
 frame: u64 = 0,
 
+/// Frames a second over the last whole second: what a counter on screen
+/// shows. Nought until a second has gone by. See `fps` for the last frame's.
+frames_per_second: f32 = 0,
+/// The frames and the seconds counted toward the next `frames_per_second`.
+counted_frames: u32 = 0,
+counted_seconds: f32 = 0,
+
 /// 0.5 is slow motion, 0 is paused. Scales the fixed steps too.
 scale: f32 = 1,
 
@@ -114,6 +121,14 @@ pub fn tick(self: *Time) void {
     self.elapsed += self.delta;
     self.frame += 1;
     self.accumulator += self.delta;
+
+    self.counted_frames += 1;
+    self.counted_seconds += raw;
+    if (self.counted_seconds >= 1) {
+        self.frames_per_second = @as(f32, @floatFromInt(self.counted_frames)) / self.counted_seconds;
+        self.counted_frames = 0;
+        self.counted_seconds = 0;
+    }
 }
 
 /// Take one whole fixed step out of the accumulator, or null if there is not

@@ -170,6 +170,7 @@ const clocks_mod = @import("clocks.zig");
 const ConfigFile = @import("config.zig").ConfigFile;
 const dialog = @import("dialog.zig");
 const Image = @import("images.zig").Image;
+const Transform2D = @import("components.zig").Transform2D;
 
 const Entity = ecs.Entity;
 const log = std.log.scoped(.fluxion_engine);
@@ -3239,6 +3240,8 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
             if (!entry.type.same(h.value.type)) continue;
             // The words a component keeps beside it: `label.text`.
             if (App.textAttributeOf(entry.type, name) != null) return try vm.string(self.app.textNamed(source, entry.name, name));
+            // A transform's place and scale as vectors: `t.position`.
+            if (entry.type.same(reflect.typeOf(Transform2D))) return transformVector(self, source, name);
             // A material's numbers: `material.strength`.
             if (entry.type.same(reflect.typeOf(shaders_mod.Material))) if (try shaderParamOf(self, source, name)) |value| return value;
             for (entry.signals) |decl| {
@@ -3272,6 +3275,7 @@ fn hostSetMember(vm: *flux.Vm, handle: flux.Value, name: []const u8, value: flux
     for (self.app.scene_components.entries.items) |*entry| {
         if (!entry.type.same(h.value.type)) continue;
         if (entry.type.same(reflect.typeOf(shaders_mod.Material))) return setShaderParamOf(self, source, name, value);
+        if (entry.type.same(reflect.typeOf(Transform2D))) return setTransformVector(self, source, name, value);
         if (App.textAttributeOf(entry.type, name) == null) return false;
         if (value.tag != .string) return vm.fail("{s}.{s} is text, not {s}", .{ entry.name, name, typeName(value) });
         self.app.setTextNamed(source, entry.name, name, value.as(flux.object.String).bytes()) catch |err| switch (err) {
@@ -3281,6 +3285,31 @@ fn hostSetMember(vm: *flux.Vm, handle: flux.Value, name: []const u8, value: flux
         return true;
     }
     return false;
+}
+
+/// A transform's `x, y` and `scale_x, scale_y` as the vectors a script moves
+/// them by: `t.position += velocity * delta`. Null for any other name.
+fn transformVector(self: *Scripts, entity: Entity, name: []const u8) ?flux.Value {
+    const held = self.app.world.get(entity, Transform2D) orelse return null;
+    if (std.mem.eql(u8, name, "position")) return .vec2(held.x, held.y);
+    if (std.mem.eql(u8, name, "scale")) return .vec2(held.scale_x, held.scale_y);
+    return null;
+}
+
+fn setTransformVector(self: *Scripts, entity: Entity, name: []const u8, value: flux.Value) flux.Vm.Error!bool {
+    const place = std.mem.eql(u8, name, "position");
+    if (!place and !std.mem.eql(u8, name, "scale")) return false;
+    if (value.tag != .vec2) return self.vm.fail("Transform2D.{s} is a vec2, not {s}", .{ name, typeName(value) });
+    const held = self.app.world.get(entity, Transform2D) orelse return false;
+    const xy = value.asVec2();
+    if (place) {
+        held.x = xy[0];
+        held.y = xy[1];
+    } else {
+        held.scale_x = xy[0];
+        held.scale_y = xy[1];
+    }
+    return true;
 }
 
 /// What a material gives its shader's field `name`, as a script sees it: a
@@ -3507,6 +3536,8 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
     }
     // A material's numbers are its shader's to name.
     try vm.declareOpen(reflect.typeOf(shaders_mod.Material));
+    try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "position", .type = .vec2, .writable = true, .doc = "`x` and `y` as one vector: `t.position += velocity * delta`." });
+    try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "scale", .type = .vec2, .writable = true, .doc = "`scale_x` and `scale_y` as one vector." });
     for (ClockRef.signal_names) |name| try vm.declareMember(.{ .of = reflect.typeOf(ClockRef), .name = name, .type = .signal });
     try vm.declareMember(.{ .of = reflect.typeOf(FramesRef), .name = "resource_path", .type = .string, .doc = "The file the frames were read from, or \"\" for ones made in memory." });
     for (std.enums.values(Lifecycle)) |which| try vm.declareHook(which.hook());

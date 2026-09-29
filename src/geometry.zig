@@ -20,6 +20,8 @@ const testing = std.testing;
 
 const math = @import("fluxion_math");
 
+const attr = @import("attr.zig");
+
 const Vec2 = math.Vec2;
 
 /// A point, a size or a step on a grid: a cell of a tile map, a pixel, a
@@ -104,6 +106,21 @@ pub const Rect2 = extern struct {
     size: Vec2 = .zero,
 
     pub const reflect_name = "Rect2";
+    /// What a script asks of a box it was given: `app.controlRect(button)
+    /// .hasPoint(app.pointerOnScreen())`.
+    pub const reflect_methods = .{
+        .end = .{},
+        .center = .{},
+        .area = .{},
+        .abs = .{},
+        .hasPoint = .{attr.Params{ .names = &.{"point"} }},
+        .intersects = .{attr.Params{ .names = &.{"other"} }},
+        .intersection = .{attr.Params{ .names = &.{"other"} }},
+        .encloses = .{attr.Params{ .names = &.{"other"} }},
+        .merge = .{attr.Params{ .names = &.{"other"} }},
+        .grow = .{attr.Params{ .names = &.{"by"} }},
+        .expandTo = .{attr.Params{ .names = &.{"point"} }},
+    };
 
     pub inline fn init(x: f32, y: f32, width: f32, height: f32) Rect2 {
         return .{ .position = .init(x, y), .size = .init(width, height) };
@@ -116,15 +133,15 @@ pub const Rect2 = extern struct {
     }
 
     /// The first point past it: its far corner.
-    pub inline fn end(self: Rect2) Vec2 {
+    pub fn end(self: Rect2) Vec2 {
         return self.position.add(self.size);
     }
 
-    pub inline fn center(self: Rect2) Vec2 {
+    pub fn center(self: Rect2) Vec2 {
         return self.position.add(self.size.scale(0.5));
     }
 
-    pub inline fn area(self: Rect2) f32 {
+    pub fn area(self: Rect2) f32 {
         return self.size.x * self.size.y;
     }
 
@@ -152,6 +169,13 @@ pub const Rect2 = extern struct {
         const high = a.end().min(b.end());
         if (high.x <= low.x or high.y <= low.y) return null;
         return .{ .position = low, .size = high.sub(low) };
+    }
+
+    /// Whether `b` is inside it, all of it: its edges on this one's count.
+    pub fn encloses(a: Rect2, b: Rect2) bool {
+        const far = a.end();
+        const b_far = b.end();
+        return b.position.x >= a.position.x and b.position.y >= a.position.y and b_far.x <= far.x and b_far.y <= far.y;
     }
 
     /// The smallest box holding both.

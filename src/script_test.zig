@@ -2176,6 +2176,74 @@ test "a script moves a property with a tween" {
     try testing.expectEqual(@as(f32, 30), app.world.get(mover, Transform2D).?.y);
 }
 
+test "a script asks the tree, a group, how things show, the time, the keys, the mouse and the system" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("asker.flux",
+        \\var kids = 0;
+        \\var place = 0;
+        \\var enemies = 0;
+        \\var shown = true;
+        \\var moved = vec2(0, 0);
+        \\var grown = vec2(0, 0);
+        \\var scale = 0.0;
+        \\var known_os = false;
+        \\var pads = -1;
+        \\var inside = false;
+        \\var held = 0;
+        \\struct Asker {
+        \\    fn ready(self) {
+        \\        const a = self.entity.spawnChild();
+        \\        const b = self.entity.spawnChild();
+        \\        kids = self.entity.children().len;
+        \\        b.setSiblingIndex(0);
+        \\        place = a.siblingIndex() orelse 9;
+        \\        a.addToGroup("enemies");
+        \\        b.addToGroup("enemies");
+        \\        b.despawn();
+        \\        enemies = app.groupMembers("enemies").len;
+        \\        self.entity.setVisible(false);
+        \\        shown = a.isVisibleInTree();
+        \\        const t = self.entity.get(Transform2D);
+        \\        t.position += vec2(3, 4);
+        \\        t.scale = vec2(2, 2);
+        \\        moved = t.position;
+        \\        grown = vec2(t.scale_x, t.scale_y);
+        \\        app.setTimeScale(0.5);
+        \\        scale = app.timeScale();
+        \\        known_os = app.osName() != .other;
+        \\        pads = app.connectedPads().len;
+        \\    }
+        \\    fn update(self, delta: float) {
+        \\        if (app.mouseButtonDown(.left) and !app.keyJustReleased(.space)) held += 1;
+        \\        if (app.padButtonDown(.a) or app.padAxis(.left_x) != 0.0 or app.padConnected()) held += 100;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 0), Script.of(file) });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expectEqual(@as(i64, 2), global(app, file, "kids").asInt());
+    try testing.expectEqual(@as(i64, 1), global(app, file, "place").asInt());
+    try testing.expectEqual(@as(i64, 1), global(app, file, "enemies").asInt());
+    try testing.expect(!global(app, file, "shown").asBool());
+    try testing.expectEqual([2]f32{ 3, 4 }, global(app, file, "moved").asVec2());
+    try testing.expectEqual([2]f32{ 2, 2 }, global(app, file, "grown").asVec2());
+    try testing.expectEqual(@as(f64, 0.5), global(app, file, "scale").asFloat());
+    try testing.expectEqual(@as(f32, 0.5), app.time.scale);
+    try testing.expect(global(app, file, "known_os").asBool());
+    try testing.expectEqual(@as(i64, 0), global(app, file, "pads").asInt());
+
+    // A press between frames is this frame's edge until the next begins.
+    app.input.apply(keyed(.space, .press));
+    app.input.apply(.{ .mouse_button = .{ .window = .none, .button = .left, .action = .press, .mods = .{}, .x = 10, .y = 10 } });
+    try testing.expect(app.keyJustPressed(.space) and app.mouseButtonJustPressed(.left));
+    _ = try app.step();
+    try testing.expectEqual(@as(i64, 1), global(app, file, "held").asInt());
+    try testing.expectEqual(@as(u64, 2), app.frameCount());
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
 test "every call a script can make takes arguments and gives back a result a script can pass" {
     const app = try scripted(.{});
     defer app.destroy();

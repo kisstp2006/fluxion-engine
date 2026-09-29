@@ -689,6 +689,8 @@ instances: std.AutoArrayHashMapUnmanaged(ecs.Entity, Instance) = .empty,
 /// The scene the game is playing, and its roots: what `changeScene` takes
 /// away. See `openScene`.
 scene_now: scenes_mod.SceneHandle = .none,
+/// What `connectedPads` hands out.
+connected_pads: [Input.max_pads]u8 = undefined,
 scene_roots: std.ArrayListUnmanaged(ecs.Entity) = .empty,
 /// The scene `changeScene` asked for, opened at the end of the frame.
 scene_next: ?scenes_mod.SceneHandle = null,
@@ -1452,6 +1454,22 @@ pub fn isProcessing(self: *App, entity: ecs.Entity) bool {
 /// See `Appearance`.
 pub fn resolvedAppearance(self: *App, entity: ecs.Entity) inherited_mod.Resolved {
     return self.inherited.of(self.gpa, &self.world, entity);
+}
+
+/// Show an entity and what hangs from it, or hide them: its `Appearance`,
+/// given one when it has none. What shows, everything above counted, is
+/// `isVisibleInTree`.
+pub fn setVisible(self: *App, entity: ecs.Entity, visible: bool) (ecs.World.Error || error{NoSuchEntity})!void {
+    if (self.world.get(entity, inherited_mod.Appearance)) |held| {
+        held.visible = visible;
+    } else try self.world.add(entity, inherited_mod.Appearance{ .visible = visible });
+    self.inherited.forget();
+}
+
+/// Whether an entity shows: neither it nor anything above it hidden by its
+/// `Appearance`.
+pub fn isVisibleInTree(self: *App, entity: ecs.Entity) bool {
+    return self.world.isAlive(entity) and self.resolvedAppearance(entity).visible;
 }
 
 // -------------------------------------------------------------------------
@@ -3241,33 +3259,18 @@ pub fn isInGroup(self: *const App, entity: ecs.Entity, group: []const u8) bool {
     return false;
 }
 
-/// A group's members, in the order they joined: a slice good until a member
-/// joins or leaves. One despawned this frame is still in it until the frame
-/// ends.
-pub fn groupMembers(self: *const App, group: []const u8) []const ecs.Entity {
+/// A group's living members, in the order they joined: a slice good until a
+/// member joins or leaves. What a script goes through: `for
+/// (app.groupMembers("enemies")) |enemy|`, `app.groupMembers("player").first()`.
+pub fn groupMembers(self: *App, group: []const u8) []const ecs.Entity {
     const members = self.groups.getPtr(group) orelse return &.{};
+    // One despawned since the frame began goes now rather than at its end.
+    var at = members.items.len;
+    while (at > 0) {
+        at -= 1;
+        if (!self.world.isAlive(members.items[at])) _ = members.orderedRemove(at);
+    }
     return members.items;
-}
-
-/// How many living members a group has.
-pub fn groupSize(self: *const App, group: []const u8) i64 {
-    var count: i64 = 0;
-    for (self.groupMembers(group)) |member| {
-        if (self.world.isAlive(member)) count += 1;
-    }
-    return count;
-}
-
-/// A group's living member at `index`, in the order they joined; null past
-/// the end.
-pub fn groupMember(self: *const App, group: []const u8, index: i64) ?ecs.Entity {
-    var at: i64 = 0;
-    for (self.groupMembers(group)) |member| {
-        if (!self.world.isAlive(member)) continue;
-        if (at == index) return member;
-        at += 1;
-    }
-    return null;
 }
 
 /// The groups an entity is in, as many as `found` holds.
@@ -3958,6 +3961,12 @@ pub fn openScene(self: *App, scene_handle: scenes_mod.SceneHandle) !void {
 /// last. `.none` before one has.
 pub fn currentScene(self: *const App) scenes_mod.SceneHandle {
     return self.scene_now;
+}
+
+/// The scene the game is playing, from its start again, at the end of the
+/// frame: a level restarted. Nothing before a scene is open.
+pub fn reloadCurrentScene(self: *App) void {
+    if (!self.scene_now.isNone()) self.changeScene(self.scene_now);
 }
 
 /// The first entity at the top of the scene the game is playing - the one
@@ -4905,18 +4914,22 @@ pub const reflect_methods = .{
     .hangsFrom = .{attr.Params{ .names = &.{ "entity", "ancestor" } }},
     .childCount = .{attr.Params{ .names = &.{"parent"} }},
     .childAt = .{attr.Params{ .names = &.{ "parent", "index" } }},
+    .children = .{attr.Params{ .names = &.{"parent"} }},
+    .siblingIndex = .{attr.Params{ .names = &.{"entity"} }},
+    .setSiblingIndex = .{attr.Params{ .names = &.{ "entity", "index" } }},
     .childNamed = .{attr.Params{ .names = &.{ "parent", "name" } }},
     .findPath = .{attr.Params{ .names = &.{ "from", "path" } }},
     .findIn = .{attr.Params{ .names = &.{ "root", "name" } }},
     .addToGroup = .{attr.Params{ .names = &.{ "entity", "group" } }},
     .removeFromGroup = .{attr.Params{ .names = &.{ "entity", "group" } }},
     .isInGroup = .{attr.Params{ .names = &.{ "entity", "group" } }},
-    .groupSize = .{attr.Params{ .names = &.{"group"} }},
-    .groupMember = .{attr.Params{ .names = &.{ "group", "index" } }},
+    .groupMembers = .{attr.Params{ .names = &.{"group"} }},
     .callGroup = .{attr.Params{ .names = &.{ "group", "method" } }},
     .setPaused = .{attr.Params{ .names = &.{"paused"} }},
     .isPaused = .{},
     .isProcessing = .{attr.Params{ .names = &.{"entity"} }},
+    .setVisible = .{attr.Params{ .names = &.{ "entity", "visible" } }},
+    .isVisibleInTree = .{attr.Params{ .names = &.{"entity"} }},
     .clearWorld = .{},
     .stateNamed = .{attr.Params{ .names = &.{"state"} }},
     .setStateNamed = .{attr.Params{ .names = &.{ "state", "value" } }},
@@ -4960,6 +4973,7 @@ pub const reflect_methods = .{
     .spawn = .{ attr.Params{ .names = &.{"parent"} }, script_mod.flux.Alias{ .name = "spawnChild" } },
     .instantiate = .{attr.Params{ .names = &.{ "scene", "parent" } }},
     .changeScene = .{attr.Params{ .names = &.{"scene"} }},
+    .reloadCurrentScene = .{},
     .readData = .{ attr.Params{ .names = &.{"path"} }, script_mod.flux.GivesErrors{} },
     .newSpriteFrames = .{},
     .loadSpriteFrames = .{ attr.Params{ .names = &.{"path"} }, script_mod.flux.GivesErrors{} },
@@ -4985,6 +4999,18 @@ pub const reflect_methods = .{
     .callDeferred = .{attr.Params{ .names = &.{"function"} }},
     .keyDown = .{attr.Params{ .names = &.{"key"} }},
     .keyAxis = .{attr.Params{ .names = &.{ "negative", "positive" } }},
+    .keyJustPressed = .{attr.Params{ .names = &.{"key"} }},
+    .keyJustReleased = .{attr.Params{ .names = &.{"key"} }},
+    .mouseButtonDown = .{attr.Params{ .names = &.{"button"} }},
+    .mouseButtonJustPressed = .{attr.Params{ .names = &.{"button"} }},
+    .mouseButtonJustReleased = .{attr.Params{ .names = &.{"button"} }},
+    .connectedPads = .{},
+    .padConnected = .{ attr.Params{ .names = &.{"pad"} }, attr.defaults(.{@as(?u8, null)}) },
+    .padButtonDown = .{ attr.Params{ .names = &.{ "button", "pad" } }, attr.defaults(.{@as(?u8, null)}) },
+    .padButtonJustPressed = .{ attr.Params{ .names = &.{ "button", "pad" } }, attr.defaults(.{@as(?u8, null)}) },
+    .padButtonJustReleased = .{ attr.Params{ .names = &.{ "button", "pad" } }, attr.defaults(.{@as(?u8, null)}) },
+    .padAxis = .{ attr.Params{ .names = &.{ "axis", "pad" } }, attr.defaults(.{@as(?u8, null)}) },
+    .padStick = .{ attr.Params{ .names = &.{ "side", "pad" } }, attr.defaults(.{@as(?u8, null)}) },
     .actionDown = .{attr.Params{ .names = &.{"name"} }},
     .actionJustPressed = .{attr.Params{ .names = &.{"name"} }},
     .actionJustReleased = .{attr.Params{ .names = &.{"name"} }},
@@ -5006,6 +5032,7 @@ pub const reflect_methods = .{
     .worldToScreen = .{attr.Params{ .names = &.{ "x", "y" } }},
     .pointerInWorld = .{},
     .pointerOnScreen = .{},
+    .warpPointer = .{attr.Params{ .names = &.{ "x", "y" } }},
     .screenSize = .{},
     .overlapPoint = .{attr.Params{ .names = &.{"point"} }},
     .addCollisionExceptionWith = .{attr.Params{ .names = &.{ "entity", "other" } }},
@@ -5035,6 +5062,8 @@ pub const reflect_methods = .{
     .videoMode = .{attr.Params{ .names = &.{ "screen", "index" } }},
     .closeRequested = .{},
     .gameVersion = .{},
+    .osName = .{},
+    .isDebugBuild = .{},
     .setWindowTitle = .{ attr.Params{ .names = &.{"title"} }, script_mod.flux.GivesErrors{} },
     .setWindowSize = .{ attr.Params{ .names = &.{ "width", "height" } }, script_mod.flux.GivesErrors{} },
     .windowSize = .{},
@@ -5058,6 +5087,11 @@ pub const reflect_methods = .{
     .backendInUse = .{},
     .setMaxFps = .{attr.Params{ .names = &.{"fps"} }},
     .maxFps = .{},
+    .fps = .{},
+    .frameCount = .{},
+    .elapsed = .{},
+    .setTimeScale = .{attr.Params{ .names = &.{"scale"} }},
+    .timeScale = .{},
     .setInterfaceZoom = .{attr.Params{ .names = &.{"zoom"} }},
     .interfaceZoom = .{},
     .setCursor = .{ attr.Params{ .names = &.{"mode"} }, script_mod.flux.GivesErrors{} },
@@ -5615,6 +5649,82 @@ pub fn keyAxis(self: *const App, negative: platform.Key, positive: platform.Key)
     if (self.keyDown(negative)) value -= 1;
     if (self.keyDown(positive)) value += 1;
     return value;
+}
+
+/// Whether a key went down this frame - in a `fixed` hook, since the last
+/// fixed step.
+pub fn keyJustPressed(self: *const App, key: platform.Key) bool {
+    return self.input.justPressed(key);
+}
+
+/// Whether a key came up this frame, or since the last fixed step.
+pub fn keyJustReleased(self: *const App, key: platform.Key) bool {
+    return self.input.justReleased(key);
+}
+
+/// Whether a mouse button is held: `app.mouseButtonDown(.left)`.
+pub fn mouseButtonDown(self: *const App, button: platform.MouseButton) bool {
+    return self.input.buttonDown(button);
+}
+
+/// Whether a mouse button went down this frame, or since the last fixed
+/// step.
+pub fn mouseButtonJustPressed(self: *const App, button: platform.MouseButton) bool {
+    return self.input.buttonJustPressed(button);
+}
+
+/// Whether a mouse button came up this frame, or since the last fixed step.
+pub fn mouseButtonJustReleased(self: *const App, button: platform.MouseButton) bool {
+    return self.input.buttonJustReleased(button);
+}
+
+/// One controller slot, or every connected controller for null.
+fn padOf(self: *const App, pad: ?u8) Input.Pad {
+    return if (pad) |slot| self.input.pad(slot) else self.input.anyPad();
+}
+
+/// The controller slots something is plugged into, from nought: for a game
+/// with a player to each.
+pub fn connectedPads(self: *App) []const u8 {
+    var count: usize = 0;
+    for (self.input.pads, 0..) |held, slot| {
+        if (!held.connected) continue;
+        self.connected_pads[count] = @intCast(slot);
+        count += 1;
+    }
+    return self.connected_pads[0..count];
+}
+
+/// Whether a controller is plugged into the slot, or any for null.
+pub fn padConnected(self: *const App, pad: ?u8) bool {
+    return self.padOf(pad).connected();
+}
+
+/// Whether a controller's button is held: `app.padButtonDown(.a)` on any
+/// controller, `app.padButtonDown(.a, 1)` on the second.
+pub fn padButtonDown(self: *const App, button: platform.GamepadButton, pad: ?u8) bool {
+    return self.padOf(pad).down(button);
+}
+
+/// Whether it went down this frame, or since the last fixed step.
+pub fn padButtonJustPressed(self: *const App, button: platform.GamepadButton, pad: ?u8) bool {
+    return self.padOf(pad).justPressed(button);
+}
+
+/// Whether it came up this frame, or since the last fixed step.
+pub fn padButtonJustReleased(self: *const App, button: platform.GamepadButton, pad: ?u8) bool {
+    return self.padOf(pad).justReleased(button);
+}
+
+/// One axis of a controller, its dead zone taken out: a stick's from -1 to
+/// 1, up negative, a trigger's from 0 to 1.
+pub fn padAxis(self: *const App, axis: platform.GamepadAxis, pad: ?u8) f32 {
+    return self.padOf(pad).axis(axis);
+}
+
+/// A stick, its dead zone taken out and no longer than one; up negative.
+pub fn padStick(self: *const App, side: Input.Side, pad: ?u8) math.Vec2 {
+    return self.padOf(pad).stick(side);
 }
 
 /// `input.actionDown`, for a script: whether the action is down.
@@ -6244,6 +6354,28 @@ pub fn gameVersion(self: *const App) []const u8 {
     return held.application.version;
 }
 
+/// The system a game runs on.
+pub const Os = enum { windows, macos, linux, android, ios, web, other };
+
+/// Which system this is: for a touch layout on a phone, a quit button left
+/// out on the web.
+pub fn osName(_: *const App) Os {
+    return switch (builtin.os.tag) {
+        .windows => .windows,
+        .macos => .macos,
+        .linux => if (builtin.abi.isAndroid()) .android else .linux,
+        .ios => .ios,
+        .emscripten, .wasi => .web,
+        else => if (builtin.cpu.arch.isWasm()) .web else .other,
+    };
+}
+
+/// Whether the game was built for finding mistakes rather than for players:
+/// slower, with checks.
+pub fn isDebugBuild(_: *const App) bool {
+    return builtin.mode == .Debug;
+}
+
 /// What the title bar says. Nothing without a window.
 pub fn setWindowTitle(self: *App, title: []const u8) Window.Error!void {
     if (self.window) |*window| try window.setTitle(title);
@@ -6391,8 +6523,36 @@ pub fn backendInUse(self: *App) Backend {
 
 /// Hold the frames to at most `fps` a second, nought for no cap: a
 /// settings menu's frame limit. `time.max_fps` from Zig.
-pub fn setMaxFps(self: *App, fps: f32) void {
-    self.time.max_fps = if (fps > 0) fps else null;
+pub fn setMaxFps(self: *App, limit: f32) void {
+    self.time.max_fps = if (limit > 0) limit else null;
+}
+
+/// Frames a second over the last whole second; nought until one has gone
+/// by.
+pub fn fps(self: *const App) f32 {
+    return self.time.frames_per_second;
+}
+
+/// How many frames have gone by since the game started.
+pub fn frameCount(self: *const App) u64 {
+    return self.time.frame;
+}
+
+/// Seconds of game time since the first frame: slowed by `timeScale`, and
+/// stopped with it at nought.
+pub fn elapsed(self: *const App) f64 {
+    return self.time.elapsed;
+}
+
+/// How fast game time goes: 1 as it is, 0.5 slow motion, 0 stopped. Every
+/// frame's and fixed step's time is multiplied by it; `update`'s `delta`
+/// too. A pause is `setPaused`, which stops only what may be paused.
+pub fn setTimeScale(self: *App, scale: f32) void {
+    self.time.scale = @max(scale, 0);
+}
+
+pub fn timeScale(self: *const App) f32 {
+    return self.time.scale;
 }
 
 /// The cap on frames a second, nought for none.
@@ -6583,11 +6743,14 @@ pub fn safeArea(self: *const App) platform.Insets {
     return .{};
 }
 
-/// Put the pointer there, in framebuffer pixels. The system takes a moment
-/// to say it moved, so `input.pointer` is set here as well. Nothing without a window, save moving what a test reads.
+/// Put the pointer there, in the pixels `pointerOnScreen` gives: the
+/// frame's, which a stretched game's window shows bigger or beside bars.
+/// The system takes a moment to say it moved, so `input.pointer` is set here
+/// as well. Nothing without a window, save moving what a test reads.
 pub fn warpPointer(self: *App, x: f32, y: f32) void {
     if (self.window) |*window| {
-        window.setCursorPos(x, y) catch |err| {
+        const ratio = if (self.input.frame_ratio > 0) self.input.frame_ratio else 1;
+        window.setCursorPos(x / ratio + self.input.frame_origin.x, y / ratio + self.input.frame_origin.y) catch |err| {
             log.warn("could not put the pointer at {d},{d}: {t}", .{ x, y, err });
             return;
         };
@@ -8419,11 +8582,10 @@ test "a group is found and called wherever its members are, and lets the dead go
     try app.addToGroup(ghost, "enemies");
     try app.addToGroup(ghost, "loud");
 
-    try testing.expectEqual(@as(i64, 2), app.groupSize("enemies"));
-    try testing.expect(app.groupMember("enemies", 1).?.eql(ghost));
-    try testing.expect(app.groupMember("enemies", 2) == null);
+    try testing.expectEqual(@as(usize, 2), app.groupMembers("enemies").len);
+    try testing.expect(app.groupMembers("enemies")[1].eql(ghost));
     try testing.expect(!app.isInGroup(lamp, "enemies"));
-    try testing.expectEqual(@as(i64, 0), app.groupSize("nobody"));
+    try testing.expectEqual(@as(usize, 0), app.groupMembers("nobody").len);
     var held: [4][]const u8 = undefined;
     const groups = app.groupsOf(ghost, &held);
     try testing.expectEqual(@as(usize, 2), groups.len);
@@ -8438,12 +8600,12 @@ test "a group is found and called wherever its members are, and lets the dead go
     try testing.expectEqual(@as(f32, 0), app.world.get(lamp, components.Transform2D).?.x);
 
     app.removeFromGroup(bat, "enemies");
-    try testing.expectEqual(@as(i64, 1), app.groupSize("enemies"));
+    try testing.expectEqual(@as(usize, 1), app.groupMembers("enemies").len);
 
     // The dead are no members at once, and are let go of at the end of the
     // frame.
     app.world.despawn(ghost);
-    try testing.expectEqual(@as(i64, 0), app.groupSize("enemies"));
+    try testing.expectEqual(@as(usize, 0), app.groupMembers("enemies").len);
     _ = try app.step();
     try testing.expectEqual(@as(usize, 0), app.groupMembers("loud").len);
     try testing.expectError(error.NoSuchEntity, app.addToGroup(ghost, "enemies"));
