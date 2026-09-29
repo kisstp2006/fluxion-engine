@@ -190,6 +190,7 @@ pub const Collider2D = components.Collider2D;
 /// A place that tells what is in it and pushes nothing: a trigger, a
 /// pickup, a hurtbox.
 pub const Area2D = components.Area2D;
+pub const RayCast2D = components.RayCast2D;
 
 /// A grid of tiles from a `TileSet`. Its cells live in `TileChunk`s the
 /// map owns; `App.setTile` paints one.

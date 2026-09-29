@@ -114,11 +114,16 @@ pub fn moveAndSlide(app: *App, e: Entity) Error!bool {
     var motion = state.velocity.scale(app.time.delta);
     var collided = false;
 
+    const met = try app.slide_collisions.getOrPut(app.gpa, e);
+    if (!met.found_existing) met.value_ptr.* = .empty;
+    met.value_ptr.clearRetainingCapacity();
+
     var slides: u32 = 0;
     while (slides < @max(state.max_slides, 1)) : (slides += 1) {
         if (motion.lenSq() == 0) break;
         const hit = try step(app, e, body, motion, state.safe_margin) orelse break;
         collided = true;
+        try app.slide_collisions.getPtr(e).?.append(app.gpa, hit);
         var rest = hit.remainder;
         switch (kindOf(state, up, hit.normal)) {
             .floor => {

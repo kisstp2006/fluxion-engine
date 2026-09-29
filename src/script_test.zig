@@ -16,7 +16,9 @@ const signals = @import("signals.zig");
 
 const flux = script.flux;
 const Entity = ecs.Entity;
-const Transform2D = @import("components.zig").Transform2D;
+const components = @import("components.zig");
+const Transform2D = components.Transform2D;
+const Collider2D = components.Collider2D;
 const Script = script.Script;
 const ScriptHandle = script.ScriptHandle;
 
@@ -2242,6 +2244,56 @@ test "a script asks the tree, a group, how things show, the time, the keys, the 
     try testing.expectEqual(@as(i64, 1), global(app, file, "held").asInt());
     try testing.expectEqual(@as(u64, 2), app.frameCount());
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
+test "a script casts a ray, reads a RayCast2D, kicks a body and asks an area what is in it" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("eye.flux",
+        \\var looked = false;
+        \\var passed_the_area = false;
+        \\var seen = false;
+        \\var speed = 0.0;
+        \\var inside = -1;
+        \\var asked = false;
+        \\struct Eye {
+        \\    fn ready(self) {
+        \\        app.find("ball").?.applyImpulse(vec2(50000, 0));
+        \\    }
+        \\    fn update(self, delta: float) {
+        \\        // The physics has seen the world once its first step is done.
+        \\        if (!asked) {
+        \\            asked = true;
+        \\            const hit = app.castRay(vec2(0, 0), vec2(300, 0));
+        \\            looked = hit != null and hit.?.collider == app.find("wall");
+        \\            const through = app.castRay(vec2(0, 0), vec2(300, 0), 0xFFFFFFFF, true);
+        \\            passed_the_area = through != null and through.?.collider == app.find("zone");
+        \\        }
+        \\        const ray = self.entity.get(RayCast2D);
+        \\        seen = ray.colliding and ray.collider == app.find("wall") and ray.point.x < 101.0;
+        \\        speed = app.find("ball").?.get(RigidBody2D).linear_velocity.x;
+        \\        inside = app.overlappingBodies(app.find("zone").?).len;
+        \\    }
+        \\}
+    );
+    const wall = try app.world.spawnWith(.{ Transform2D.at(105, 0), Collider2D.rectangle(5, 50) });
+    try app.setName(wall, "wall");
+    const zone = try app.world.spawnWith(.{ Transform2D.at(50, 0), Collider2D.rectangle(5, 5), components.Area2D{} });
+    try app.setName(zone, "zone");
+    const ball = try app.world.spawnWith(.{ Transform2D.at(0, 300), components.RigidBody2D{ .gravity_scale = 0 }, Collider2D.rectangle(5, 5) });
+    try app.setName(ball, "ball");
+    _ = try app.world.spawnWith(.{ Transform2D.at(0, 0), components.RayCast2D{ .target = .init(300, 0) }, Script.of(file) });
+    for (0..3) |_| _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    // The first thing on the line is the wall; the area in front of it only
+    // for a ray that asks for areas.
+    try testing.expect(global(app, file, "looked").asBool());
+    try testing.expect(global(app, file, "passed_the_area").asBool());
+    try testing.expect(global(app, file, "seen").asBool());
+    // Kicked from `ready`, before the physics had seen it.
+    try testing.expect(global(app, file, "speed").asFloat() > 100);
+    try testing.expect(app.world.get(ball, Transform2D).?.x > 100);
+    try testing.expectEqual(@as(i64, 0), global(app, file, "inside").asInt());
 }
 
 test "every call a script can make takes arguments and gives back a result a script can pass" {

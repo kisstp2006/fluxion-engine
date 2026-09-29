@@ -698,6 +698,44 @@ pub const Area2D = extern struct {
     };
 };
 
+/// A ray from the entity, asked once a fixed step what it hits first: the
+/// ground under a foot, a wall ahead, whether anything stands between a
+/// guard and the player. Beside a `Transform2D`; `target` turns and scales
+/// with it.
+pub const RayCast2D = extern struct {
+    enabled: bool = true,
+    /// Where the ray ends, in the entity's own space.
+    target: math.Vec2 = .init(0, 50),
+    /// The layers it looks for.
+    collision_mask: u32 = 0xFFFF_FFFF,
+    /// Whether an area stops it, as a body does.
+    hit_areas: bool = false,
+    /// Whether the body it hangs from - or is - is passed over.
+    exclude_parent: bool = true,
+
+    /// What it found at the last fixed step: whether it hit, the collision
+    /// object it hit (see `App.collisionObjectOf`), the collider, where,
+    /// and out of which side. Read-only, and never saved.
+    colliding: bool = false,
+    collider: Entity = .none,
+    shape: Entity = .none,
+    point: math.Vec2 = .zero,
+    normal: math.Vec2 = .zero,
+
+    pub const reflect_name = "RayCast2D";
+    pub const reflect_fields = .{
+        .target = .{attr.Doc{ .text = "Where the ray ends, in the entity's own space" }},
+        .collision_mask = .{ attr.Layers{ .names = .physics_2d }, attr.Doc{ .text = "The layers it looks for" } },
+        .hit_areas = .{attr.Doc{ .text = "Whether an area stops it" }},
+        .exclude_parent = .{attr.Doc{ .text = "Whether the body it is on is passed over" }},
+        .colliding = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "Whether it hit something at the last fixed step" } },
+        .collider = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "The body or area it hit" } },
+        .shape = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "The collider it hit" } },
+        .point = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "Where, in the world" } },
+        .normal = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "Out of the side it hit" } },
+    };
+};
+
 test "a transform maps its own space into the world" {
     const t: Transform2D = .{ .x = 10, .y = 20, .rotation = std.math.pi / 2.0, .scale_x = 2, .scale_y = 2 };
     const p = t.apply(1, 0);

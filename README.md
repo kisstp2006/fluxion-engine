@@ -1772,7 +1772,13 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   body's place goes into its transform and its speed into `linear_velocity`;
   set `interpolate` on the transform to draw it between steps.
 - **Writing is moving.** A transform the game writes puts the body there,
-  and a `linear_velocity` it writes sets the body going. For a force or an impulse,
+  and a `linear_velocity` it writes sets the body going.
+- **A kick or a push**: `app.applyImpulse(body, impulse, offset)` changes its
+  speed at once - a jump, a bullet - and `applyForce(body, force, offset)`
+  pushes for the next step, given again each step from `fixed` to keep
+  pushing; an `offset` from its middle turns it too. `applyTorque` and
+  `applyTorqueImpulse` turn it. A script's `body.applyImpulse(vec2(0, -400))`
+  works from `ready`: a body the physics has not seen yet is made first.
   `app.bodyOf(entity)` is the body itself. A body is in the world's space: a
   moving parent does not carry it, and its place is written back in the
   parent's space.
@@ -1781,8 +1787,19 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   each once however many steps ran; a `.fixed` system hears those of the
   step before. A sensor pushes nothing and is still heard. An ended contact
   may name a despawned entity - often that is why it ended.
-- **The three questions, answered in entities**: `app.castRay(from, to, .{})`,
-  `app.overlapPoint(point)` and `app.overlapBox(min, max, &buffer)`.
+- **The three questions, answered in entities**: `app.castRay(from, to,
+  mask, hit_areas)` - the first thing on the line on the mask's layers, an
+  area only when asked, as `collider` (the body or area) and `shape`, with
+  where, the side's normal and how far along - `app.overlapPoint(point)` and
+  `app.overlapBox(min, max, &buffer)`. From a script the mask and areas are
+  optional: `app.castRay(eye, target)`. They see the world as of the last
+  step, so a script asks from `update`, or `fixed` after the first.
+- **A `RayCast2D` asks every step.** Beside a transform, a ray to `target`
+  in the entity's space, turning with it: `colliding`, `collider`, `shape`,
+  `point` and `normal` say what it found after each physics step, and
+  `app.forceRaycastUpdate(entity)` asks now. `exclude_parent` passes over
+  the body it is on, and `hit_areas` lets an area stop it - the ground under
+  a foot, a wall ahead, a guard's line of sight.
 - **How the world moves is the project's**: `physics_2d` in `project.fluxion`
   - and its layers' names, `layer_names.physics_2d` - or `Options.physics_2d`
   for a game with none.
@@ -1830,6 +1847,9 @@ fn walk(app: *fx.App) !void {                          // a .fixed system
 - **`app.moveAndCollide(e, motion)` moves it once**, and says what stopped
   it - the collider, where, the way out of it, how far it went and what was
   left - for a game that does its own sliding, or its own bouncing.
+- **What a slide met**: `app.slideCollisionCount(e)`, `slideCollision(e,
+  i)` and `lastSlideCollision(e)` are what the last `moveAndSlide` met, in
+  order - the crate a character pushes, the enemy it walked into.
 - **From a script** it is the same two calls, the entity's own:
   `self.entity.moveAndSlide()`, with `self.entity.get(CharacterBody2D)`
   for its velocity and what it stands on.
@@ -1880,8 +1900,9 @@ if (app.hasOverlappingBodies(door)) open(app, door);
   nothing, a hurtbox asks for hitboxes and is on no layer, and only the
   hurtbox is told. An area is reported to another area only while its
   `monitorable` is true.
-- **The questions, as of the last step:** `app.overlappingBodies(area, &buf)`,
-  `app.overlappingAreas(area, &buf)`, `app.hasOverlappingBodies(area)`,
+- **The questions, as of the last step:** `app.overlappingBodies(area)` and
+  `app.overlappingAreas(area)` - a list good until the next such question, a
+  script's to loop over - `app.hasOverlappingBodies(area)`,
   `app.hasOverlappingAreas(area)`, `app.overlapsBody(area, body)` and
   `app.overlapsArea(area, other)`. With `monitoring` off they are empty and
   say so in the log once.

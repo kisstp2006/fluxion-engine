@@ -151,7 +151,6 @@ test "a kinematic body is in a still area while it is there, and the questions s
     try watch(app, trigger);
 
     // Walked in from the left, held there, then out to the right.
-    var found: [4]Entity = undefined;
     for (0..10) |_| {
         app.world.get(player, Transform2D).?.x += 10;
         _ = try app.step();
@@ -159,8 +158,8 @@ test "a kinematic body is in a still area while it is there, and the questions s
     try testing.expectEqual(@as(usize, 1), Seen.count(.body_in));
     try testing.expectEqual(@as(usize, 0), Seen.count(.body_out));
     try testing.expect(app.overlapsBody(trigger, player));
-    try testing.expectEqual(@as(usize, 1), app.overlappingBodies(trigger, &found).len);
-    try testing.expect(found[0].eql(player));
+    const inside = try app.overlappingBodies(trigger);
+    try testing.expect(inside.len == 1 and inside[0].eql(player));
     try testing.expect(app.hasOverlappingBodies(trigger));
     try testing.expect(!app.hasOverlappingAreas(trigger));
 
@@ -175,7 +174,7 @@ test "a kinematic body is in a still area while it is there, and the questions s
     }
     try testing.expectEqual(@as(usize, 1), Seen.count(.body_out));
     try testing.expect(!app.overlapsBody(trigger, player));
-    try testing.expectEqual(@as(usize, 0), app.overlappingBodies(trigger, &found).len);
+    try testing.expectEqual(@as(usize, 0), (try app.overlappingBodies(trigger)).len);
 }
 
 test "a hitbox and the hurtbox that asks for it hear each other: the layers go both ways" {
@@ -232,14 +231,12 @@ test "an area that stops monitoring leaves what was in it, and answers nothing" 
 
     app.world.get(zone, Area2D).?.monitoring = false;
     // Asked before the next step, it is empty already.
-    var early: [4]Entity = undefined;
-    try testing.expectEqual(@as(usize, 0), app.overlappingBodies(zone, &early).len);
+    try testing.expectEqual(@as(usize, 0), (try app.overlappingBodies(zone)).len);
     try testing.expect(!app.overlapsBody(zone, thing));
     try frames(app, 1);
     try testing.expectEqual(@as(usize, 1), Seen.count(.body_out));
     try testing.expect(Seen.first(.body_out).?.object.eql(thing));
-    var found: [4]Entity = undefined;
-    try testing.expectEqual(@as(usize, 0), app.overlappingBodies(zone, &found).len);
+    try testing.expectEqual(@as(usize, 0), (try app.overlappingBodies(zone)).len);
     try testing.expect(!app.overlapsBody(zone, thing));
 
     // Watching again finds it where it is.

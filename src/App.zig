@@ -691,6 +691,10 @@ instances: std.AutoArrayHashMapUnmanaged(ecs.Entity, Instance) = .empty,
 scene_now: scenes_mod.SceneHandle = .none,
 /// What `connectedPads` hands out.
 connected_pads: [Input.max_pads]u8 = undefined,
+/// What each character's last `moveAndSlide` met, in order.
+slide_collisions: std.AutoArrayHashMapUnmanaged(ecs.Entity, std.ArrayList(character.Collision)) = .empty,
+/// What the overlap questions hand out.
+overlaps_found: std.ArrayList(ecs.Entity) = .empty,
 scene_roots: std.ArrayListUnmanaged(ecs.Entity) = .empty,
 /// The scene `changeScene` asked for, opened at the end of the frame.
 scene_next: ?scenes_mod.SceneHandle = null,
@@ -947,6 +951,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         components.CharacterBody2D,
         components.Collider2D,
         components.Area2D,
+        components.RayCast2D,
         timer.Timer,
         audio_mod.AudioPlayer,
         audio_mod.AudioSpatial2D,
@@ -1264,6 +1269,9 @@ pub fn destroy(self: *App) void {
     self.tree.deinit(gpa);
     self.freeGroups();
     self.groups.deinit(gpa);
+    for (self.slide_collisions.values()) |*met| met.deinit(gpa);
+    self.slide_collisions.deinit(gpa);
+    self.overlaps_found.deinit(gpa);
     self.inherited.deinit(gpa);
     self.freeInstances();
     self.instances.deinit(gpa);
@@ -1772,6 +1780,7 @@ pub fn step(self: *App) anyerror!bool {
     self.forgetDeadUuids();
     self.forgetDeadPlaces();
     self.forgetDeadGroupMembers();
+    self.forgetDeadSlides();
     self.forgetDeadInstances();
     self.unknown_components.forgetDead(self.gpa, &self.world);
     self.exports.forgetDead(&self.world);
@@ -1817,6 +1826,7 @@ fn stepPhysics(self: *App) !void {
     // What the step found each area holding, said and heard before the
     // systems of the next step run.
     try self.areas.update(self);
+    try self.updateRayCasts();
     try self.signals.drain(self);
 }
 
@@ -5025,6 +5035,21 @@ pub const reflect_methods = .{
     .isOnFloor = .{attr.Params{ .names = &.{ "entity", "distance" } }},
     .moveAndSlide = .{attr.Params{ .names = &.{"entity"} }},
     .moveAndCollide = .{attr.Params{ .names = &.{ "entity", "motion" } }},
+    .slideCollisionCount = .{attr.Params{ .names = &.{"entity"} }},
+    .slideCollision = .{attr.Params{ .names = &.{ "entity", "index" } }},
+    .lastSlideCollision = .{attr.Params{ .names = &.{"entity"} }},
+    .castRay = .{ attr.Params{ .names = &.{ "from", "to", "mask", "hit_areas" } }, attr.defaults(.{ @as(u32, 0xFFFF_FFFF), false }) },
+    .forceRaycastUpdate = .{attr.Params{ .names = &.{"entity"} }},
+    .applyImpulse = .{ attr.Params{ .names = &.{ "body", "impulse", "offset" } }, attr.defaults(.{math.Vec2.zero}) },
+    .applyForce = .{ attr.Params{ .names = &.{ "body", "force", "offset" } }, attr.defaults(.{math.Vec2.zero}) },
+    .applyTorque = .{attr.Params{ .names = &.{ "body", "torque" } }},
+    .applyTorqueImpulse = .{attr.Params{ .names = &.{ "body", "impulse" } }},
+    .overlappingBodies = .{attr.Params{ .names = &.{"area"} }},
+    .overlappingAreas = .{attr.Params{ .names = &.{"area"} }},
+    .hasOverlappingBodies = .{attr.Params{ .names = &.{"area"} }},
+    .hasOverlappingAreas = .{attr.Params{ .names = &.{"area"} }},
+    .overlapsBody = .{attr.Params{ .names = &.{ "area", "body" } }},
+    .overlapsArea = .{attr.Params{ .names = &.{ "area", "other" } }},
     .cellAt = .{attr.Params{ .names = &.{ "map", "point" } }},
     .tileData = .{attr.Params{ .names = &.{ "map", "x", "y", "layer" } }},
     .tileDataAt = .{attr.Params{ .names = &.{ "map", "point", "layer" } }},
@@ -5813,6 +5838,37 @@ pub fn moveAndCollide(self: *App, entity: ecs.Entity, motion: math.Vec2) charact
     return character.moveAndCollide(self, entity, motion);
 }
 
+/// How many things a character's last `moveAndSlide` met: a wall, then the
+/// floor it slid down onto.
+pub fn slideCollisionCount(self: *const App, entity: ecs.Entity) u32 {
+    const met = self.slide_collisions.get(entity) orelse return 0;
+    return @intCast(met.items.len);
+}
+
+/// The one it met `index`th, in order; null past the end. What a character
+/// pushes a crate by: `app.slideCollision(player, 0).?.collider`.
+pub fn slideCollision(self: *const App, entity: ecs.Entity, index: u32) ?character.Collision {
+    const met = self.slide_collisions.get(entity) orelse return null;
+    return if (index < met.items.len) met.items[index] else null;
+}
+
+/// The last it met, or null for none.
+pub fn lastSlideCollision(self: *const App, entity: ecs.Entity) ?character.Collision {
+    const met = self.slide_collisions.get(entity) orelse return null;
+    return met.getLastOrNull();
+}
+
+/// Forget the slides of the dead, at the end of the frame.
+fn forgetDeadSlides(self: *App) void {
+    var at = self.slide_collisions.count();
+    while (at > 0) {
+        at -= 1;
+        if (self.world.isAlive(self.slide_collisions.keys()[at])) continue;
+        self.slide_collisions.values()[at].deinit(self.gpa);
+        self.slide_collisions.swapRemoveAt(at);
+    }
+}
+
 /// Whether an entity stands on a floor: something facing up under the bottom
 /// of its collider, no further below it than `distance`. A floor under the
 /// middle of the bottom, or under either end of it, counts, so a body half
@@ -5834,9 +5890,9 @@ pub fn isOnFloor(self: *App, entity: ecs.Entity, distance: f32) bool {
     const filter: physics_lib.Filter = .{ .category = collider.collision_layer, .mask = collider.collision_mask };
     for ([_]f32{ 0.5, 0.1, 0.9 }) |along| {
         const x = box.min.x + (box.max.x - box.min.x) * along;
-        const hit = self.castRay(.init(x, box.max.y - inside), .init(x, box.max.y + @max(distance, 0)), filter) orelse continue;
+        const hit = self.bodies.castRay(self, .init(x, box.max.y - inside), .init(x, box.max.y + @max(distance, 0)), .{ .filter = filter }) orelse continue;
         // Another collider of the same body is not a floor.
-        if (hit.entity.eql(entity) or std.meta.eql(self.bodies.idOf(hit.entity), own)) continue;
+        if (hit.shape.eql(entity) or std.meta.eql(self.bodies.idOf(hit.shape), own)) continue;
         if (hit.normal.y < -0.5) return true;
     }
     return false;
@@ -6063,8 +6119,94 @@ pub fn syncBodies(self: *App) !void {
 
 /// The first collider on the line from `from` to `to` whose filter agrees
 /// with `filter`; `.{}` agrees with everything.
-pub fn castRay(self: *App, from: math.Vec2, to: math.Vec2, filter: physics_lib.Filter) ?Bodies.RayHit {
-    return self.bodies.castRay(self, from, to, filter);
+pub fn castRay(self: *App, from: math.Vec2, to: math.Vec2, mask: u32, hit_areas: bool) ?Bodies.RayHit {
+    return self.bodies.castRay(self, from, to, .{ .filter = .{ .category = 0xFFFF_FFFF, .mask = mask }, .sensors = hit_areas });
+}
+
+/// Every `RayCast2D` asked what it hits, after each physics step.
+fn updateRayCasts(self: *App) !void {
+    var it = try ecs.Query(.{components.RayCast2D}).over(&self.world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(components.RayCast2D), chunk.entities) |*ray, entity| self.castRayOf(entity, ray);
+    }
+}
+
+/// Ask a `RayCast2D` now rather than at the next physics step: after
+/// moving it, or turning it on.
+pub fn forceRaycastUpdate(self: *App, entity: ecs.Entity) void {
+    const ray = self.world.get(entity, components.RayCast2D) orelse return;
+    self.castRayOf(entity, ray);
+}
+
+fn castRayOf(self: *App, entity: ecs.Entity, ray: *components.RayCast2D) void {
+    ray.colliding = false;
+    ray.collider = .none;
+    ray.shape = .none;
+    if (!ray.enabled) return;
+    const from = self.globalPosition(entity) orelse return;
+    const to = self.toGlobal(entity, ray.target) orelse return;
+    // The body it is on: its own, or the nearest one above it.
+    var own: ?physics_lib.BodyId = null;
+    if (ray.exclude_parent) {
+        var at = entity;
+        while (!at.isNone()) : (at = self.parentOf(at)) {
+            own = self.bodies.idOf(at) orelse continue;
+            break;
+        }
+    }
+    const hit = self.bodies.castRay(self, from, to, .{
+        .filter = .{ .category = 0xFFFF_FFFF, .mask = ray.collision_mask },
+        .sensors = ray.hit_areas,
+        .ignore = own,
+    }) orelse return;
+    ray.colliding = true;
+    ray.collider = hit.collider;
+    ray.shape = hit.shape;
+    ray.point = hit.point;
+    ray.normal = hit.normal;
+}
+
+/// A `RigidBody2D`'s body in the physics, made now if the physics has not
+/// seen it yet.
+fn rigidBodyOf(self: *App, entity: ecs.Entity) error{ NotABody, OutOfMemory }!*physics_lib.Body {
+    if (!self.world.has(entity, components.RigidBody2D)) return error.NotABody;
+    const id = self.bodies.idOf(entity) orelse blk: {
+        self.syncBodies() catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.NotABody,
+        };
+        break :blk self.bodies.idOf(entity) orelse return error.NotABody;
+    };
+    const held = self.physics.body(id) orelse return error.NotABody;
+    held.wake();
+    return held;
+}
+
+/// A kick: the body's velocity changed at once by `impulse` over its mass -
+/// a jump, a bullet, an explosion. At `offset` from its middle, in the
+/// world's directions, it turns too. Only a dynamic body moves.
+pub fn applyImpulse(self: *App, body: ecs.Entity, impulse: math.Vec2, offset: math.Vec2) error{ NotABody, OutOfMemory }!void {
+    const held = try self.rigidBodyOf(body);
+    held.applyImpulse(impulse, held.position().add(offset));
+}
+
+/// A push for the next physics step, at `offset` from the body's middle: a
+/// thruster, wind. Given again every step it keeps pushing - from `fixed`.
+pub fn applyForce(self: *App, body: ecs.Entity, force: math.Vec2, offset: math.Vec2) error{ NotABody, OutOfMemory }!void {
+    const held = try self.rigidBodyOf(body);
+    held.applyForceAt(force, held.position().add(offset));
+}
+
+/// A turning push for the next physics step, clockwise on screen.
+pub fn applyTorque(self: *App, body: ecs.Entity, torque: f32) error{ NotABody, OutOfMemory }!void {
+    const held = try self.rigidBodyOf(body);
+    held.applyTorque(torque);
+}
+
+/// A turning kick: the spin changed at once.
+pub fn applyTorqueImpulse(self: *App, body: ecs.Entity, impulse: f32) error{ NotABody, OutOfMemory }!void {
+    const held = try self.rigidBodyOf(body);
+    held.applyAngularImpulse(impulse);
 }
 
 /// A collider under a point.
@@ -6127,15 +6269,22 @@ pub fn collisionObjectOf(self: *App, collider: ecs.Entity) ?ecs.Entity {
     return Bodies.objectOf(&self.world, collider);
 }
 
-/// The bodies inside `area` now, as many as `found` holds. Empty, with a
-/// word in the log, for an area that is not monitoring.
-pub fn overlappingBodies(self: *App, area: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
-    return self.areas.overlapping(self, area, false, found);
+/// The bodies inside `area` now: a list good until the next such question.
+/// Empty, with a word in the log, for an area that is not monitoring.
+pub fn overlappingBodies(self: *App, area: ecs.Entity) Allocator.Error![]const ecs.Entity {
+    return self.overlapsOf(area, false);
 }
 
-/// The other areas inside `area` now, as many as `found` holds.
-pub fn overlappingAreas(self: *App, area: ecs.Entity, found: []ecs.Entity) []ecs.Entity {
-    return self.areas.overlapping(self, area, true, found);
+/// The other areas inside `area` now, good until the next such question.
+pub fn overlappingAreas(self: *App, area: ecs.Entity) Allocator.Error![]const ecs.Entity {
+    return self.overlapsOf(area, true);
+}
+
+fn overlapsOf(self: *App, area: ecs.Entity, areas: bool) Allocator.Error![]const ecs.Entity {
+    try self.overlaps_found.ensureTotalCapacity(self.gpa, self.areas.objects.count());
+    const found = self.areas.overlapping(self, area, areas, self.overlaps_found.allocatedSlice());
+    self.overlaps_found.items.len = found.len;
+    return self.overlaps_found.items;
 }
 
 /// Whether any body at all is inside `area`.
@@ -7304,8 +7453,8 @@ test "the tile set says which tiles are solid, and they become one body" {
 
     try testing.expectEqual(@as(usize, 1), app.physics.bodyCount());
     try testing.expectEqual(@as(usize, 1), app.physics.shapeCount());
-    const hit = app.castRay(.init(8, -8), .init(8, 24), .{}) orelse return error.TestExpectedEqual;
-    try testing.expect(hit.entity.eql(map));
+    const hit = app.castRay(.init(8, -8), .init(8, 24), 0xFFFF_FFFF, false) orelse return error.TestExpectedEqual;
+    try testing.expect(hit.shape.eql(map));
 
     _ = try app.setTile(map, 0, 0, .empty);
     _ = try app.setTile(map, 1, 0, .empty);
@@ -7374,14 +7523,14 @@ test "a tile's own shape is a polygon, turned the way its cell is" {
 
     // The ramp rises to the right: at its left edge only the last two
     // pixels are solid, at its right edge all but the first two.
-    try testing.expect(app.castRay(.init(2, 0), .init(2, 10), .{}) == null);
-    try testing.expect(app.castRay(.init(14, 0), .init(14, 10), .{}) != null);
+    try testing.expect(app.castRay(.init(2, 0), .init(2, 10), 0xFFFF_FFFF, false) == null);
+    try testing.expect(app.castRay(.init(14, 0), .init(14, 10), 0xFFFF_FFFF, false) != null);
 
     // Flipped, it rises to the left instead.
     _ = try app.setTile(map, 0, 0, tilemap.Cell.at(0, 0, 0).with(tilemap.Cell.flip_h, true));
     try app.syncBodies();
-    try testing.expect(app.castRay(.init(2, 0), .init(2, 10), .{}) != null);
-    try testing.expect(app.castRay(.init(14, 0), .init(14, 10), .{}) == null);
+    try testing.expect(app.castRay(.init(2, 0), .init(2, 10), 0xFFFF_FFFF, false) != null);
+    try testing.expect(app.castRay(.init(14, 0), .init(14, 10), 0xFFFF_FFFF, false) == null);
 }
 
 test "a rigid body detects a tile floor below its collider" {
@@ -9426,7 +9575,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 45), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 46), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

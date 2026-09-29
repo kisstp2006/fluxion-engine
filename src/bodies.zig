@@ -52,13 +52,18 @@ pub const Contact = struct {
 
 /// What a ray hit first.
 pub const RayHit = struct {
-    /// `.none` for a shape the engine did not make.
-    entity: Entity,
+    /// The collision object it hit: a body, an area, or a collider's own
+    /// static body. See `App.collisionObjectOf`.
+    collider: Entity,
+    /// The collider it hit; `.none` for a shape the engine did not make.
+    shape: Entity,
     point: Vec2,
     /// Out of the surface it hit.
     normal: Vec2,
     /// How far along, from zero at the start to one at the end.
     fraction: f32,
+
+    pub const reflect_name = "RayHit";
 };
 
 /// By entity index.
@@ -1030,10 +1035,12 @@ pub fn ended(self: *const Bodies, fixed: bool) []const Contact {
     return if (fixed) self.ended_step.items else self.ended_frame.items;
 }
 
-pub fn castRay(self: *const Bodies, app: *App, from: Vec2, to: Vec2, filter: physics.Filter) ?RayHit {
-    const hit = app.physics.castRay(from, to.sub(from), filter) orelse return null;
+pub fn castRay(self: *const Bodies, app: *App, from: Vec2, to: Vec2, options: physics.RayOptions) ?RayHit {
+    const hit = app.physics.castRay(from, to.sub(from), options) orelse return null;
+    const shape = self.entityOf(app, hit.shape) orelse Entity.none;
     return .{
-        .entity = self.entityOf(app, hit.shape) orelse .none,
+        .collider = if (shape.isNone()) .none else objectOf(&app.world, shape) orelse shape,
+        .shape = shape,
         .point = hit.point,
         .normal = hit.normal,
         .fraction = hit.fraction,
@@ -1194,8 +1201,8 @@ test "a ray finds what it hits first, and a point what is under it" {
     const far = try app.world.spawnWith(.{ Transform2D.at(100, 0), Collider2D.rectangle(5, 5) });
     try app.syncBodies();
 
-    const hit = app.castRay(.init(0, 0), .init(200, 0), .{}).?;
-    try testing.expect(hit.entity.eql(near));
+    const hit = app.castRay(.init(0, 0), .init(200, 0), 0xFFFF_FFFF, false).?;
+    try testing.expect(hit.shape.eql(near) and hit.collider.eql(near));
     try testing.expectApproxEqAbs(@as(f32, 45), hit.point.x, 0.001);
     try testing.expectApproxEqAbs(@as(f32, -1), hit.normal.x, 0.001);
 

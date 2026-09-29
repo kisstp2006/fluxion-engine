@@ -76,6 +76,18 @@ test "a character falls onto the floor and stands on it, walks, and stops at a w
     try testing.expectEqual(@as(f32, 0), stopped.velocity.x);
     try testing.expectApproxEqAbs(@as(f32, 179.5), app.world.get(player, Transform2D).?.x, 0.3);
     try testing.expectApproxEqAbs(@as(f32, 69.5), app.world.get(player, Transform2D).?.y, 0.3);
+
+    // What the last move met, in order: the wall among them, by the
+    // collision object it is.
+    const count = app.slideCollisionCount(player);
+    try testing.expect(count >= 1);
+    var met_wall = false;
+    for (0..count) |i| {
+        if (app.slideCollision(player, @intCast(i)).?.collider.eql(it.wall)) met_wall = true;
+    }
+    try testing.expect(met_wall);
+    try testing.expect(app.slideCollision(player, count) == null);
+    try testing.expect(app.lastSlideCollision(player) != null);
 }
 
 test "on a slope a character stands still, and walking down it keeps to it" {
