@@ -105,12 +105,15 @@ pub const View = struct {
     /// What one camera sees from where it is placed, at this size.
     pub fn through(camera: Camera2D, placed: Transform2D, width: f32, height: f32) View {
         const scale = pixelsPerUnit(camera, width, height);
+        // The camera's own scale multiplies the zoom.
+        const zoom_x = positive(scale * placed.scale_x);
+        const zoom_y = positive(scale * placed.scale_y);
+        const middle = camera.limited(camera.looking(placed), width / (2 * zoom_x), height / (2 * zoom_y));
         return .{
-            .x = placed.x,
-            .y = placed.y,
-            // The camera's own scale multiplies the zoom.
-            .zoom_x = positive(scale * placed.scale_x),
-            .zoom_y = positive(scale * placed.scale_y),
+            .x = middle.x,
+            .y = middle.y,
+            .zoom_x = zoom_x,
+            .zoom_y = zoom_y,
             .rotation = camera.rotation + placed.rotation,
             .width = width,
             .height = height,

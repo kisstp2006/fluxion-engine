@@ -1165,17 +1165,16 @@ fn advance(app: *App, e: Entity, sprite: *AnimatedSprite2D, delta: f32, said: *S
 /// The fields of the `Sprite` beside an `AnimatedSprite2D` that it writes
 /// every frame, and not the Sprite's to say: an editor shows them as the
 /// animated sprite's.
-pub const driven_sprite_fields = [_][]const u8{ "texture", "region", "width", "height", "pivot_x", "pivot_y" };
+pub const driven_sprite_fields = [_][]const u8{ "texture", "region", "flip_h", "flip_v", "width", "height", "pivot_x", "pivot_y" };
 
 /// The frame `sprite` is on, in `drawn`: nothing drawn when there is none.
 pub fn drawInto(app: *App, sprite: *const AnimatedSprite2D, drawn: *Sprite) void {
     const frame = frameShown(app, sprite) orelse return hide(drawn);
     const shown = frame.shown(&app.assets) orelse return hide(drawn);
     drawn.texture = frame.texture;
-    var region = shown.region;
-    if (sprite.flip_h) region = region.flippedX();
-    if (sprite.flip_v) region = region.flippedY();
-    drawn.region = region;
+    drawn.region = shown.region;
+    drawn.flip_h = sprite.flip_h;
+    drawn.flip_v = sprite.flip_v;
     drawn.width = shown.width;
     drawn.height = shown.height;
     const middle: f32 = if (sprite.centered) 0.5 else 0;

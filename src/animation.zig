@@ -554,6 +554,8 @@ pub const AnimationPlayer = extern struct {
     next: [name_len]u8 = @splat(0),
     /// Whether the pass has looked at it yet, and so at `autoplay`.
     started: bool = false,
+    /// Played from its end toward its start: `playBackwards`.
+    backwards: bool = false,
 
     pub const Request = enum(u8) { none, play, stop, seek };
 
@@ -575,22 +577,64 @@ pub const AnimationPlayer = extern struct {
         .from = .{attr.Hidden{}},
         .next = .{attr.Hidden{}},
         .started = .{attr.Hidden{}},
+        .backwards = .{attr.Hidden{}},
     };
     pub const reflect_methods = .{
-        .play = .{attr.Params{ .names = &.{"name"} }},
+        .play = .{ attr.Params{ .names = &.{"name"} }, attr.defaults(.{""}) },
+        .playBackwards = .{attr.Params{ .names = &.{"name"} }},
+        .pause = .{},
         .stop = .{},
         .seek = .{attr.Params{ .names = &.{"position"} }},
         .queue = .{attr.Params{ .names = &.{"name"} }},
+        .clearQueue = .{},
+        .isPlaying = .{},
         .currentName = .{},
     };
 
-    /// Play `name` from its start, at the next pass.
+    /// Play `name` from its start, at the next pass. With no name, what it
+    /// played last goes on from where it was: after `pause`.
     pub fn play(self: *AnimationPlayer, name: []const u8) void {
+        self.paused = false;
+        if (name.len == 0) {
+            if (self.playing or self.request == .play) return;
+            self.request = .play;
+            self.wanted = self.current;
+            self.from = self.position;
+            self.playing = true;
+            return;
+        }
         self.request = .play;
         setName(&self.wanted, name);
         self.from = 0;
+        self.backwards = false;
         self.playing = true;
     }
+
+    /// Play `name` from its end toward its start, at the next pass.
+    pub fn playBackwards(self: *AnimationPlayer, name: []const u8) void {
+        self.play(name);
+        self.from = from_the_end;
+        self.backwards = true;
+    }
+
+    /// Hold it where it is; `play()` goes on from there.
+    pub fn pause(self: *AnimationPlayer) void {
+        self.paused = true;
+    }
+
+    /// Whether it plays now: not stopped, finished or paused.
+    pub fn isPlaying(self: *const AnimationPlayer) bool {
+        return self.playing and !self.paused;
+    }
+
+    /// Forget what `queue` asked for.
+    pub fn clearQueue(self: *AnimationPlayer) void {
+        self.next = @splat(0);
+    }
+
+    /// Where `playBackwards` starts: the animation's end, known only once
+    /// the pass finds the animation.
+    const from_the_end: f32 = -1;
 
     /// Stop, back at the start, saying nothing.
     pub fn stop(self: *AnimationPlayer) void {
@@ -729,11 +773,13 @@ fn advance(app: *App, e: Entity, player: *AnimationPlayer, delta: f32, flowing: 
         player.playing = false;
         return;
     };
-    player.position += delta * player.speed;
+    const direction: f32 = if (player.backwards) -1 else 1;
+    player.position += delta * player.speed * direction;
     const length = animation.length;
     var ended = false;
     switch (animation.loop) {
-        .none => if (player.position >= length or player.position < 0) {
+        // Ended at the end it goes toward, or past either.
+        .none => if (player.position >= length or player.position < 0 or (player.backwards and player.position <= 0)) {
             player.position = std.math.clamp(player.position, 0, length);
             ended = true;
         },
@@ -757,13 +803,13 @@ fn start(app: *App, e: Entity, player: *AnimationPlayer, name: []const u8, from:
         player.playing = false;
         return;
     };
-    if (library.find(name) == null) {
+    const animation = library.find(name) orelse {
         log.warn("{f} has no animation called {s} to play", .{ e, name });
         player.playing = false;
         return;
-    }
+    };
     setName(&player.current, name);
-    player.position = from;
+    player.position = if (from == AnimationPlayer.from_the_end) animation.length else from;
     player.playing = true;
     try app.animation_players.said.append(app.gpa, .{ .entity = e, .started = true, .name = player.current });
     try poseOf(app, e, player);

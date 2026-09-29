@@ -264,6 +264,11 @@ pub const Sprite = extern struct {
 
     blend: Blend = .alpha,
 
+    /// Drawn mirrored, left to right or top to bottom, in the same place: a
+    /// character facing the other way.
+    flip_h: bool = false,
+    flip_v: bool = false,
+
     /// Where a sprite sits within its layer: lower is drawn first. At zero, a
     /// layer's sprites are grouped by texture, one draw call each. Copying
     /// `transform.y` in here sorts a top-down game by feet, at the cost of
@@ -278,7 +283,17 @@ pub const Sprite = extern struct {
         .height = .{attr.Doc{ .text = "World units; zero is the region's height in texels" }},
         .pivot_x = .{attr.Range{ .min = 0, .max = 1 }},
         .pivot_y = .{attr.Range{ .min = 0, .max = 1 }},
+        .flip_h = .{attr.Doc{ .text = "Mirrored left to right" }},
+        .flip_v = .{attr.Doc{ .text = "Mirrored top to bottom" }},
     };
+
+    /// The part of the texture drawn, mirrored as its flips say.
+    pub fn shownRegion(self: Sprite) Region {
+        var region = self.region;
+        if (self.flip_h) region = region.flippedX();
+        if (self.flip_v) region = region.flippedY();
+        return region;
+    }
 
     /// A sprite showing the whole of a texture at its own size.
     pub fn of(texture: assets.TextureHandle) Sprite {
@@ -363,13 +378,72 @@ pub const Camera2D = extern struct {
     /// does not have is not drawn through it. See `Appearance.render_layers`.
     cull_mask: u32 = 0xFFFF_FFFF,
 
+    /// Where it looks, moved from where it is, turned with it: a shake, a
+    /// look ahead of a runner.
+    offset: math.Vec2 = .zero,
+
+    /// The edges of the world it never shows past: a level's walls. The
+    /// middle of what it shows is kept far enough in; a level narrower than
+    /// the screen is shown in the middle.
+    limit_left: f32 = -no_limit,
+    limit_top: f32 = -no_limit,
+    limit_right: f32 = no_limit,
+    limit_bottom: f32 = no_limit,
+
+    /// Following where it is at `smoothing_speed` - the part of the way it
+    /// closes each second, roughly - rather than at once.
+    smoothing: bool = false,
+    smoothing_speed: f32 = 5,
+
+    /// Where its smoothing has got to, and whether it has started: the
+    /// engine's, each frame. Never saved.
+    shown: math.Vec2 = .zero,
+    following: bool = false,
+
+    /// Far enough that no level reaches it: a limit not set.
+    pub const no_limit: f32 = 10_000_000;
+
     pub const reflect_name = "Camera2D";
     pub const reflect_fields = .{
         .cull_mask = .{ attr.Layers{ .names = .render_2d }, attr.Doc{ .text = "The render layers it sees" } },
         .fit_width = .{attr.Doc{ .text = "Always shown whole; zero is no fit" }},
         .fit_height = .{attr.Doc{ .text = "Always shown whole; zero is no fit" }},
         .rotation = .{ attr.Angle{}, attr.Doc{ .text = "Clockwise on screen; the world turns the other way" } },
+        .offset = .{attr.Doc{ .text = "Where it looks, moved from where it is: a shake" }},
+        .limit_left = .{attr.Doc{ .text = "The world's left edge it never shows past" }},
+        .limit_top = .{attr.Doc{ .text = "The world's top edge it never shows past" }},
+        .limit_right = .{attr.Doc{ .text = "The world's right edge it never shows past" }},
+        .limit_bottom = .{attr.Doc{ .text = "The world's bottom edge it never shows past" }},
+        .smoothing = .{attr.Doc{ .text = "Following where it is smoothly, not at once" }},
+        .smoothing_speed = .{attr.Doc{ .text = "How fast it catches up" }},
+        .shown = .{ attr.Hidden{}, attr.Unsaved{} },
+        .following = .{ attr.Hidden{}, attr.Unsaved{} },
     };
+
+    /// Where it would look now: its place and its offset, turned with it.
+    pub fn target(self: Camera2D, placed: Transform2D) math.Vec2 {
+        const turn = self.rotation + placed.rotation;
+        const c = @cos(turn);
+        const s = @sin(turn);
+        return .init(placed.x + self.offset.x * c - self.offset.y * s, placed.y + self.offset.x * s + self.offset.y * c);
+    }
+
+    /// Where it looks, before its limits: where its smoothing has got to,
+    /// else its target.
+    pub fn looking(self: Camera2D, placed: Transform2D) math.Vec2 {
+        return if (self.smoothing and self.following) self.shown else self.target(placed);
+    }
+
+    /// A middle kept inside the limits, seeing `half_width` and
+    /// `half_height` either side of it.
+    pub fn limited(self: Camera2D, at: math.Vec2, half_width: f32, half_height: f32) math.Vec2 {
+        return .init(within(at.x, self.limit_left, self.limit_right, half_width), within(at.y, self.limit_top, self.limit_bottom, half_height));
+    }
+
+    fn within(at: f32, low: f32, high: f32, half: f32) f32 {
+        if (high - low <= 2 * half) return (low + high) / 2;
+        return std.math.clamp(at, low + half, high - half);
+    }
 
     pub fn atZoom(zoom: f32) Camera2D {
         return .{ .zoom = zoom };
@@ -753,8 +827,8 @@ test "a cell of a strip is the strip divided up" {
     try testing.expectApproxEqAbs(@as(f32, 1), r.v1, 0.0001);
 }
 
-test "a sprite's blend mode fits in the padding it already had" {
-    try testing.expectEqual(64, @sizeOf(Sprite));
+test "a sprite's small fields pack together" {
+    try testing.expectEqual(68, @sizeOf(Sprite));
 }
 
 test "mirroring swaps the horizontal edges and leaves the vertical ones" {

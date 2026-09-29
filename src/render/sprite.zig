@@ -535,7 +535,7 @@ pub const Renderer = struct {
                     assets.get(assets.white) orelse continue;
                 // A picture drawn into on a backend that counts rows from
                 // the bottom is shown turned over.
-                const region = if (texture.upside_down) sprite.region.flippedY() else sprite.region;
+                const region = if (texture.upside_down) sprite.shownRegion().flippedY() else sprite.shownRegion();
 
                 const size = spriteSize(sprite, texture);
                 const drawn_width = size.width * transform.scale_x;

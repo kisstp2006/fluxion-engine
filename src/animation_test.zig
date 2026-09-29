@@ -142,6 +142,45 @@ test "a player starts by itself, holds while paused, and is posed where a seek p
     try testing.expectApproxEqAbs(@as(f32, 50), app.world.get(it.child, Transform2D).?.x, 0.001);
 }
 
+test "a player plays backwards from the end, pauses and goes on, forgets its queue, and says what its library has" {
+    const app = try quartered();
+    defer app.destroy();
+    Heard.reset();
+    const it = try rigged(app);
+    app.world.get(it.root, AnimationPlayer).?.playBackwards("fade");
+    _ = try app.step();
+    // From the end, a quarter back.
+    try testing.expectApproxEqAbs(@as(f32, 0.75), app.world.get(it.root, AnimationPlayer).?.position, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 75), app.world.get(it.child, Transform2D).?.x, 0.001);
+
+    // Paused, it holds; played with no name, it goes on from there.
+    app.world.get(it.root, AnimationPlayer).?.pause();
+    try testing.expect(!app.world.get(it.root, AnimationPlayer).?.isPlaying());
+    _ = try app.step();
+    try testing.expectApproxEqAbs(@as(f32, 0.75), app.world.get(it.root, AnimationPlayer).?.position, 0.001);
+    app.world.get(it.root, AnimationPlayer).?.play("");
+    try testing.expect(app.world.get(it.root, AnimationPlayer).?.isPlaying());
+    for (0..3) |_| _ = try app.step();
+    // Back at the start, and finished there.
+    try testing.expectEqual(@as(f32, 0), app.world.get(it.root, AnimationPlayer).?.position);
+    try testing.expectEqual(@as(f32, 0), app.world.get(it.child, Transform2D).?.x);
+    try testing.expectEqual(@as(usize, 1), Heard.finished);
+
+    // A queue forgotten is not played.
+    app.world.get(it.root, AnimationPlayer).?.play("fade");
+    app.world.get(it.root, AnimationPlayer).?.queue("blink");
+    app.world.get(it.root, AnimationPlayer).?.clearQueue();
+    for (0..5) |_| _ = try app.step();
+    try testing.expectEqualStrings("fade", app.world.get(it.root, AnimationPlayer).?.currentName());
+
+    const names = try app.animationNames(it.root);
+    try testing.expectEqual(@as(usize, 4), names.len);
+    try testing.expectEqualStrings("spin", names[1]);
+    try testing.expect(app.hasAnimation(it.root, "bob") and !app.hasAnimation(it.root, "walk"));
+    try testing.expectEqual(@as(f32, 1), app.animationLength(it.root, "fade"));
+    try testing.expectEqual(@as(f32, 0), app.animationLength(it.child, "fade"));
+}
+
 test "a scene writes a player's library as its file, and an animation from Flux" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

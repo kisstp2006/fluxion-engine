@@ -156,6 +156,14 @@ pub const Control = extern struct {
         full_rect,
     };
 
+    /// The pointer came over it, and went; it took the keys, and lost them.
+    pub const signals = .{
+        .mouse_entered = struct {},
+        .mouse_exited = struct {},
+        .focus_entered = struct {},
+        .focus_exited = struct {},
+    };
+
     pub const reflect_name = "Control";
     pub const reflect_attributes = .{
         attr.Property{ .name = "type_variation", .get = "variationSlice", .set = "setVariation" },
@@ -434,7 +442,9 @@ pub const Button = extern struct {
         .hovered = .{attr.ReadOnly{}},
         .held = .{attr.ReadOnly{}},
     };
-    pub const signals = .{ .pressed = struct {}, .toggled = struct { pressed: bool } };
+    /// Pressed is a press let go over it; `button_down` and `button_up` are
+    /// the button going down on it and coming up again.
+    pub const signals = .{ .pressed = struct {}, .toggled = struct { pressed: bool }, .button_down = struct {}, .button_up = struct {} };
 };
 
 pub const CheckBox = extern struct {
@@ -679,10 +689,19 @@ pub const Nodes = struct {
     preview_canvas: ?struct { width: f32, height: f32, x: f32, y: f32 } = null,
     preview_interface: Interface = .{},
     enabled: bool = false,
+    /// Whether the pointer was over each control and it had the keys, as of
+    /// the frame it was last drawn: what its `mouse_entered` and the rest are
+    /// said by.
+    seen: std.AutoArrayHashMapUnmanaged(Entity, Seen) = .empty,
+    /// Moved on each frame, so a control not drawn in one is found.
+    seen_mark: u32 = 0,
+
+    const Seen = struct { hovered: bool = false, focused: bool = false, mark: u32 = 0 };
 
     pub fn deinit(self: *Nodes, gpa: std.mem.Allocator) void {
         self.textures.deinit(gpa);
         self.customs.deinit(gpa);
+        self.seen.deinit(gpa);
         if (self.preview_ui) |*held_ui| held_ui.deinit();
         self.preview_interface.deinit();
         self.* = .{};
@@ -699,9 +718,40 @@ pub const Nodes = struct {
     fn draw(app: *App) !void {
         const self = &app.control_nodes;
         self.tooltip_under = .none;
+        self.seen_mark +%= 1;
         try self.drawRoots(.{ .app = app, .layout = &app.ui, .interactive = true });
+        try self.forgetUnseen(app);
         try self.tooltip(app);
         app.interface.textures = self.textures.items;
+    }
+
+    /// Say what changed for a control since the frame before: the pointer
+    /// over it or not, the keys its or not.
+    fn notice(self: *Nodes, app: *App, entity: Entity, hovered: bool) !void {
+        const focused = app.hasFocus(entity);
+        const entry = try self.seen.getOrPut(app.gpa, entity);
+        const was: Seen = if (entry.found_existing) entry.value_ptr.* else .{};
+        entry.value_ptr.* = .{ .hovered = hovered, .focused = focused, .mark = self.seen_mark };
+        if (hovered and !was.hovered) try app.signal(entity, Control, .mouse_entered).emit(.{});
+        if (!hovered and was.hovered) try app.signal(entity, Control, .mouse_exited).emit(.{});
+        if (focused and !was.focused) try app.signal(entity, Control, .focus_entered).emit(.{});
+        if (!focused and was.focused) try app.signal(entity, Control, .focus_exited).emit(.{});
+    }
+
+    /// A control not drawn this frame - hidden, taken away, dead - has the
+    /// pointer and the keys no more.
+    fn forgetUnseen(self: *Nodes, app: *App) !void {
+        var at = self.seen.count();
+        while (at > 0) {
+            at -= 1;
+            const held = self.seen.values()[at];
+            if (held.mark == self.seen_mark) continue;
+            const entity = self.seen.keys()[at];
+            self.seen.swapRemoveAt(at);
+            if (!app.world.has(entity, Control)) continue;
+            if (held.hovered) try app.signal(entity, Control, .mouse_exited).emit(.{});
+            if (held.focused) try app.signal(entity, Control, .focus_exited).emit(.{});
+        }
     }
 
     /// The widest a tooltip is, in the interface's units, before its lines
@@ -877,6 +927,7 @@ pub const Nodes = struct {
         context.layout.open(declared);
         defer context.layout.close();
         if (own.interactive and app.textOf(entity, Control, "tooltip_text").len > 0 and context.layout.hovered()) self.tooltip_under = entity;
+        if (own.interactive) try self.notice(app, entity, control.mouse_filter != .ignore and context.layout.hovered());
         try self.content(own, entity);
         try self.children(context, entity, depth + 1);
         if (popup) |held| if (own.interactive) {
@@ -1078,7 +1129,10 @@ pub const Nodes = struct {
                 return;
             }
             button.hovered = context.interactive and context.layout.hovered();
+            const was_held = button.held;
             button.held = context.interactive and !button.disabled and context.layout.pressed();
+            if (button.held and !was_held) try app.signal(entity, Button, .button_down).emit(.{});
+            if (!button.held and was_held) try app.signal(entity, Button, .button_up).emit(.{});
             if (context.interactive and !button.disabled and context.layout.justReleased()) {
                 if (button.toggle_mode) {
                     button.button_pressed = !button.button_pressed;

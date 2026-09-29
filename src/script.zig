@@ -1691,6 +1691,12 @@ pub const Calls = struct {
     readData: *const fn (self: *Scripts, contents: *const data_file.Contents, source: []const u8) anyerror!flux.Value,
     /// A script's struct as a data file's text: `app.writeData`.
     writeData: *const fn (self: *Scripts, value: flux.Value) anyerror![]u8,
+    /// Keep a script's function while the engine holds it - a tween's
+    /// step - and let it go.
+    hold: *const fn (self: *Scripts, callable: flux.Value) anyerror!void,
+    release: *const fn (self: *Scripts, callable: flux.Value) void,
+    /// Call a script's function now, with a value or with none.
+    callNow: *const fn (self: *Scripts, callable: flux.Value, value: ?property.Value) void,
 };
 
 /// Where in the frame `Calls.pass` is called.
@@ -1805,6 +1811,9 @@ pub const Scripts = struct {
                 .structFields = structFields,
                 .readData = readData,
                 .writeData = writeData,
+                .hold = holdCallable,
+                .release = releaseCallable,
+                .callNow = callNow,
             },
             .resolver = .{
                 .context = app,
@@ -2864,6 +2873,34 @@ pub const Scripts = struct {
         }
     }
 
+    fn holdCallable(self: *Scripts, callable: flux.Value) anyerror!void {
+        switch (callable.tag) {
+            .function, .method, .native => {},
+            else => return error.NotCallable,
+        }
+        try self.vm.hold(callable);
+    }
+
+    fn releaseCallable(self: *Scripts, callable: flux.Value) void {
+        self.vm.release(callable);
+    }
+
+    fn callNow(self: *Scripts, callable: flux.Value, value: ?property.Value) void {
+        var given: [1]flux.Value = undefined;
+        const args: []const flux.Value = if (value) |held| blk: {
+            given[0] = scriptValueOf(self.vm, held) catch return;
+            break :blk &given;
+        } else &.{};
+        self.vm.setBudget(self.options.budget);
+        _ = self.vm.call(callable, args) catch |err| {
+            self.failures += 1;
+            switch (err) {
+                error.Panic => self.writePanic(null, "a tween's call in"),
+                error.OutOfMemory => {},
+            }
+        };
+    }
+
     fn callDeferred(self: *Scripts, callable: flux.Value) anyerror!void {
         switch (callable.tag) {
             .function, .method, .native => {},
@@ -3442,7 +3479,13 @@ const animated_value_type: flux.HostType = .{
 };
 
 fn animatedToScript(vm: *flux.Vm, value: reflect.Value) flux.Vm.Error!flux.Value {
-    return switch (value.asConst(property.Value).?.*) {
+    return scriptValueOf(vm, value.asConst(property.Value).?.*);
+}
+
+/// A tweened value as a script has it: a number, a `vec2`, a `color`, a
+/// bool or a name.
+fn scriptValueOf(vm: *flux.Vm, value: property.Value) flux.Vm.Error!flux.Value {
+    return switch (value) {
         .number => |n| .float(n),
         .vec2 => |xy| .vec2(xy[0], xy[1]),
         .color => |rgba| try vm.newColor(rgba),

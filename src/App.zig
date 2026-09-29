@@ -695,6 +695,8 @@ connected_pads: [Input.max_pads]u8 = undefined,
 slide_collisions: std.AutoArrayHashMapUnmanaged(ecs.Entity, std.ArrayList(character.Collision)) = .empty,
 /// What the overlap questions hand out.
 overlaps_found: std.ArrayList(ecs.Entity) = .empty,
+/// What `animationNames` hands out.
+names_found: std.ArrayList([]const u8) = .empty,
 scene_roots: std.ArrayListUnmanaged(ecs.Entity) = .empty,
 /// The scene `changeScene` asked for, opened at the end of the frame.
 scene_next: ?scenes_mod.SceneHandle = null,
@@ -1272,6 +1274,7 @@ pub fn destroy(self: *App) void {
     for (self.slide_collisions.values()) |*met| met.deinit(gpa);
     self.slide_collisions.deinit(gpa);
     self.overlaps_found.deinit(gpa);
+    self.names_found.deinit(gpa);
     self.inherited.deinit(gpa);
     self.freeInstances();
     self.instances.deinit(gpa);
@@ -1784,15 +1787,16 @@ pub fn step(self: *App) anyerror!bool {
     self.forgetDeadInstances();
     self.unknown_components.forgetDead(self.gpa, &self.world);
     self.exports.forgetDead(&self.world);
-    self.tweens.forgetDead(self.gpa, &self.world);
+    self.tweens.forgetDead(self);
     self.texts.forgetDead(self.gpa, &self.world);
     self.shader_params.forgetDead(self.gpa, &self.world);
     self.views.forgetDead(self.gpa, &self.world, &self.assets, components.RenderView);
     self.animation_players.forgetDead(self.gpa, &self.world);
     self.signals.forgetDead(&self.world);
-    // Every animated sprite's frame in its Sprite, after all that could
-    // change it.
+    // Every animated sprite's frame in its Sprite, and every smoothed
+    // camera a step nearer, after all that could change them.
     try sprite_frames_mod.show(self);
+    try self.followCameras();
     if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
 
     // What the systems changed of how things show is seen by the drawing.
@@ -3485,6 +3489,84 @@ pub fn tweenEase(self: *App, tween_entity: ecs.Entity, ease: math.ease.Kind) !vo
     (try self.tweens.planOf(self.gpa, tween_entity)).ease = ease;
 }
 
+/// A step that calls a script's function when it is reached: a sound when
+/// a panel is in, a door shut at the end. `t.tweenCallback(self.shut)`.
+pub fn tweenCallback(self: *App, tween_entity: ecs.Entity, function: script_mod.flux.Value) !void {
+    try self.addCallStep(tween_entity, function, .{ .seconds = 0 });
+}
+
+/// A step that calls a script's function with each value from `from` to
+/// `to` over `seconds`, along the curve: a score counted up, a colour a
+/// shader is given.
+pub fn tweenMethod(self: *App, tween_entity: ecs.Entity, function: script_mod.flux.Value, from: property_mod.Value, to: property_mod.Value, seconds: f32) !void {
+    try self.addCallStep(tween_entity, function, .{ .seconds = @max(seconds, 0), .start_at = from, .to = to, .along = true });
+}
+
+fn addCallStep(self: *App, tween_entity: ecs.Entity, function: script_mod.flux.Value, given: tween_mod.Step) !void {
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return error.NotATween;
+    const scripts = self.scripts orelse return error.NoScripts;
+    try scripts.calls.hold(scripts, function);
+    errdefer scripts.calls.release(scripts, function);
+    const plan = try self.tweens.planOf(self.gpa, tween_entity);
+    var made = given;
+    made.call = function;
+    made.ease = plan.ease;
+    made.with_before = plan.parallel and plan.steps.items.len > 0;
+    try plan.steps.append(self.gpa, made);
+}
+
+/// The step added last starts from `from`, rather than from what its
+/// property holds when it starts: a fade in from nothing.
+pub fn tweenFrom(self: *App, tween_entity: ecs.Entity, from: property_mod.Value) !void {
+    (try self.lastTweenStep(tween_entity)).start_at = from;
+}
+
+/// The step added last moves by its value from where it starts, rather than
+/// to it: forty to the right of wherever it is.
+pub fn tweenRelative(self: *App, tween_entity: ecs.Entity) !void {
+    (try self.lastTweenStep(tween_entity)).relative = true;
+}
+
+/// The step added last waits `seconds` before it starts.
+pub fn tweenDelay(self: *App, tween_entity: ecs.Entity, seconds: f32) !void {
+    (try self.lastTweenStep(tween_entity)).delay = @max(seconds, 0);
+}
+
+fn lastTweenStep(self: *App, tween_entity: ecs.Entity) error{ NotATween, NoStep }!*tween_mod.Step {
+    if (!self.world.has(tween_entity, tween_mod.Tween)) return error.NotATween;
+    const plan = self.tweens.by.getPtr(tween_entity) orelse return error.NoStep;
+    if (plan.steps.items.len == 0) return error.NoStep;
+    return &plan.steps.items[plan.steps.items.len - 1];
+}
+
+/// The animations an `AnimationPlayer`'s library holds, in its order: a list
+/// good until the next such question.
+pub fn animationNames(self: *App, player: ecs.Entity) Allocator.Error![]const []const u8 {
+    self.names_found.clearRetainingCapacity();
+    const held = self.world.get(player, animation_mod.AnimationPlayer) orelse return self.names_found.items;
+    const library = self.animation_libraries.get(held.library) orelse return self.names_found.items;
+    for (library.animations.items) |*animation| try self.names_found.append(self.gpa, animation.name);
+    return self.names_found.items;
+}
+
+/// Whether an `AnimationPlayer`'s library has an animation of that name.
+pub fn hasAnimation(self: *App, player: ecs.Entity, name: []const u8) bool {
+    return self.playerAnimation(player, name) != null;
+}
+
+/// How many seconds an animation of an `AnimationPlayer` lasts; nought for
+/// one it has not.
+pub fn animationLength(self: *App, player: ecs.Entity, name: []const u8) f32 {
+    const animation = self.playerAnimation(player, name) orelse return 0;
+    return animation.length;
+}
+
+fn playerAnimation(self: *App, player: ecs.Entity, name: []const u8) ?*const animation_mod.Animation {
+    const held = self.world.get(player, animation_mod.AnimationPlayer) orelse return null;
+    const library = self.animation_libraries.get(held.library) orelse return null;
+    return library.find(name);
+}
+
 /// Read a `.anim` file - an animation library - or find the one read from
 /// there already. What an `AnimationPlayer` plays; see `animation.zig`.
 pub fn loadAnimations(self: *App, path: []const u8) !animation_mod.AnimationLibraryHandle {
@@ -4484,7 +4566,7 @@ pub fn clearWorld(self: *App) void {
     self.scene_now = .none;
     self.signals.clear();
     self.audio.clear();
-    self.tweens.clear(self.gpa);
+    self.tweens.clear(self);
     self.texts.clear(self.gpa);
     self.shader_params.clear(self.gpa);
     self.views.clear(&self.assets);
@@ -4993,6 +5075,14 @@ pub const reflect_methods = .{
     .tweenInterval = .{attr.Params{ .names = &.{ "tween", "seconds" } }},
     .tweenParallel = .{attr.Params{ .names = &.{ "tween", "together" } }},
     .tweenEase = .{attr.Params{ .names = &.{ "tween", "ease" } }},
+    .animationNames = .{attr.Params{ .names = &.{"player"} }},
+    .hasAnimation = .{attr.Params{ .names = &.{ "player", "name" } }},
+    .animationLength = .{attr.Params{ .names = &.{ "player", "name" } }},
+    .tweenCallback = .{attr.Params{ .names = &.{ "tween", "function" } }},
+    .tweenMethod = .{attr.Params{ .names = &.{ "tween", "function", "from", "to", "seconds" } }},
+    .tweenFrom = .{attr.Params{ .names = &.{ "tween", "from" } }},
+    .tweenRelative = .{attr.Params{ .names = &.{"tween"} }},
+    .tweenDelay = .{attr.Params{ .names = &.{ "tween", "seconds" } }},
     .grabFocus = .{attr.Params{ .names = &.{"entity"} }},
     .hasFocus = .{attr.Params{ .names = &.{"entity"} }},
     .releaseFocus = .{},
@@ -5057,6 +5147,8 @@ pub const reflect_methods = .{
     .worldToScreen = .{attr.Params{ .names = &.{ "x", "y" } }},
     .pointerInWorld = .{},
     .pointerOnScreen = .{},
+    .screenCenter = .{attr.Params{ .names = &.{"camera"} }},
+    .resetSmoothing = .{attr.Params{ .names = &.{"camera"} }},
     .warpPointer = .{attr.Params{ .names = &.{ "x", "y" } }},
     .screenSize = .{},
     .overlapPoint = .{attr.Params{ .names = &.{"point"} }},
@@ -7126,6 +7218,40 @@ pub fn cameraView(self: *App, entity: ecs.Entity) ?View {
     const placed = self.drawnTransform(entity) orelse return null;
     const size = if (self.world.get(entity, components.RenderView)) |own| [2]f32{ @floatFromInt(own.width), @floatFromInt(own.height) } else self.gameSize();
     return .through(camera.*, placed, size[0], size[1]);
+}
+
+/// A smoothed camera's frame toward where it is: `Camera2D.smoothing`. With
+/// no time going by - an editor's frame - it is where it is.
+fn followCameras(self: *App) !void {
+    var it = try ecs.Query(.{components.Camera2D}).over(&self.world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(components.Camera2D), chunk.entities) |*camera, entity| {
+            const placed = self.drawnTransform(entity) orelse continue;
+            const aim = camera.target(placed);
+            const delta = self.time.delta;
+            if (!camera.smoothing or !camera.following or delta <= 0) {
+                camera.shown = aim;
+            } else {
+                const closed = 1 - @exp(-camera.smoothing_speed * delta);
+                camera.shown = camera.shown.add(aim.sub(camera.shown).scale(closed));
+            }
+            camera.following = true;
+        }
+    }
+}
+
+/// Where the middle of what a camera shows is in the world: after its
+/// offset, its smoothing and its limits.
+pub fn screenCenter(self: *App, camera: ecs.Entity) ?math.Vec2 {
+    const view = self.cameraView(camera) orelse return null;
+    return .init(view.x, view.y);
+}
+
+/// Put a smoothed camera where it is at once: after a teleport, a new
+/// level.
+pub fn resetSmoothing(self: *App, camera: ecs.Entity) void {
+    const held = self.world.get(camera, components.Camera2D) orelse return;
+    held.following = false;
 }
 
 /// The corners of what a camera shows, in the world, clockwise from the
@@ -10693,6 +10819,47 @@ test "the game's chance is the same from the same seed, and keeps to the ranges 
     try testing.expectEqual(@as(i64, 0), app.randomIndex(0));
     try testing.expect(!app.randomChance(0));
     try testing.expect(app.randomChance(1));
+}
+
+test "a camera looks past its offset, stops at its limits, and catches up when smoothed" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100 });
+    defer app.destroy();
+    app.time.source = .{ .fixed = 0.1 };
+    const camera = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Camera2D{
+        .offset = .init(10, 0),
+        .limit_left = 0,
+        .limit_right = 1000,
+    } });
+    _ = try app.step();
+    // A screen two hundred wide shows a hundred either side: at the left
+    // edge its middle is kept a hundred in.
+    try testing.expectEqual(math.Vec2.init(100, 0), app.screenCenter(camera).?);
+    try testing.expectApproxEqAbs(@as(f32, 0), app.cameraCorners(camera).?[0].x, 0.001);
+
+    // Away from the edges, it looks past its place by its offset.
+    app.world.get(camera, components.Transform2D).?.x = 500;
+    _ = try app.step();
+    try testing.expectEqual(math.Vec2.init(510, 0), app.screenCenter(camera).?);
+
+    // Smoothed, it is part of the way there after a frame, and nearly there
+    // after many.
+    app.world.get(camera, components.Camera2D).?.smoothing = true;
+    app.world.get(camera, components.Transform2D).?.x = 700;
+    _ = try app.step();
+    const partway = app.screenCenter(camera).?.x;
+    try testing.expect(partway > 510 and partway < 710);
+    for (0..40) |_| _ = try app.step();
+    try testing.expectApproxEqAbs(@as(f32, 710), app.screenCenter(camera).?.x, 0.1);
+
+    // Reset, it is there at once.
+    app.world.get(camera, components.Transform2D).?.x = 300;
+    app.resetSmoothing(camera);
+    _ = try app.step();
+    try testing.expectEqual(math.Vec2.init(310, 0), app.screenCenter(camera).?);
+
+    // A level narrower than the screen is shown in the middle.
+    app.world.get(camera, components.Camera2D).?.limit_right = 50;
+    try testing.expectEqual(math.Vec2.init(25, 0), app.screenCenter(camera).?);
 }
 
 test "a camera's frame is what it shows at the game's size, and an editor's screen is over what the current one shows" {

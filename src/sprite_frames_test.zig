@@ -412,8 +412,10 @@ test "the Sprite beside it shows its frame: the part, flipped, its size, and its
     const e = try app.world.spawnWith(.{ Transform2D.at(0, 0), Sprite{ .tint = .rgba(1, 0, 0, 1), .layer = 3 }, sprite });
     _ = try app.step();
     const drawn = app.world.get(e, Sprite).?;
-    try testing.expectEqual(@as(f32, 0.5), drawn.region.u0);
-    try testing.expectEqual(@as(f32, 0.25), drawn.region.u1);
+    try testing.expectEqual(@as(f32, 0.25), drawn.region.u0);
+    try testing.expectEqual(@as(f32, 0.5), drawn.region.u1);
+    try testing.expect(drawn.flip_h and !drawn.flip_v);
+    try testing.expectEqual(@as(f32, 0.5), drawn.shownRegion().u0);
     try testing.expectEqual(@as(f32, 4), drawn.width);
     try testing.expectEqual(@as(f32, 4), drawn.height);
     try testing.expectEqual(@as(f32, 0.25), drawn.pivot_x);
@@ -428,8 +430,9 @@ test "the Sprite beside it shows its frame: the part, flipped, its size, and its
     of(app, e).flip_v = true;
     _ = try app.step();
     try testing.expectEqual(@as(f32, 0), drawn.pivot_x);
-    try testing.expectEqual(@as(f32, 1), drawn.region.v0);
-    try testing.expectEqual(@as(f32, 0), drawn.region.v1);
+    try testing.expect(!drawn.flip_h and drawn.flip_v);
+    try testing.expectEqual(@as(f32, 1), drawn.shownRegion().v0);
+    try testing.expectEqual(@as(f32, 0), drawn.shownRegion().v1);
 
     // With nothing to show, it shows nothing - not a white texel.
     of(app, e).sprite_frames = .none;

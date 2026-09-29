@@ -187,6 +187,85 @@ fn click(app: *App, x: f32, y: f32) !void {
     _ = try app.step();
 }
 
+/// What a control and a button said, in the order they said it.
+const Said = struct {
+    var words: [16][]const u8 = undefined;
+    var count: usize = 0;
+
+    fn reset() void {
+        count = 0;
+    }
+
+    fn note(word: []const u8) void {
+        if (count < words.len) words[count] = word;
+        count += 1;
+    }
+
+    fn entered(_: *App, _: struct {}) !void {
+        note("entered");
+    }
+    fn exited(_: *App, _: struct {}) !void {
+        note("exited");
+    }
+    fn focused(_: *App, _: struct {}) !void {
+        note("focused");
+    }
+    fn unfocused(_: *App, _: struct {}) !void {
+        note("unfocused");
+    }
+    fn down(_: *App, _: struct {}) !void {
+        note("down");
+    }
+    fn up(_: *App, _: struct {}) !void {
+        note("up");
+    }
+};
+
+test "a control says when the pointer comes and goes and when it takes and loses the keys, and a button when it goes down and up" {
+    const it = try withCanvas();
+    const app = it.app;
+    defer app.destroy();
+    Said.reset();
+    var place = fixed(100, 50);
+    place.position = .anchored;
+    const button = try app.world.spawnWith(.{ place, Parent.of(it.root), Button{} });
+    try app.signal(button, Control, .mouse_entered).connectFn(Said.entered, .{});
+    try app.signal(button, Control, .mouse_exited).connectFn(Said.exited, .{});
+    try app.signal(button, Control, .focus_entered).connectFn(Said.focused, .{});
+    try app.signal(button, Control, .focus_exited).connectFn(Said.unfocused, .{});
+    try app.signal(button, Button, .button_down).connectFn(Said.down, .{});
+    try app.signal(button, Button, .button_up).connectFn(Said.up, .{});
+    pointAt(app, 300, 150);
+    for (0..2) |_| _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), Said.count);
+
+    pointAt(app, 10, 10);
+    for (0..2) |_| _ = try app.step();
+    try testing.expectEqual(@as(usize, 1), Said.count);
+    try testing.expectEqualStrings("entered", Said.words[0]);
+
+    press(app, 10, 10, true);
+    _ = try app.step();
+    press(app, 10, 10, false);
+    _ = try app.step();
+    pointAt(app, 300, 150);
+    for (0..2) |_| _ = try app.step();
+    // The press gave it the keys; let go of, and taken again.
+    app.releaseFocus();
+    for (0..2) |_| _ = try app.step();
+    app.grabFocus(button);
+    for (0..2) |_| _ = try app.step();
+    // Gone, it says nothing more.
+    app.world.despawn(button);
+    for (0..2) |_| _ = try app.step();
+
+    const said = Said.words[0..@min(Said.count, Said.words.len)];
+    var joined: std.ArrayList(u8) = .empty;
+    defer joined.deinit(testing.allocator);
+    for (said) |word| try joined.print(testing.allocator, "{s} ", .{word});
+    try testing.expectEqualStrings("entered focused down up exited unfocused focused ", joined.items);
+}
+
 test "a layer over another lets the pointer through to what is under it, and so does a veil that ignores it" {
     const it = try withCanvas();
     const app = it.app;

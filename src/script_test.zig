@@ -2178,6 +2178,50 @@ test "a script moves a property with a tween" {
     try testing.expectEqual(@as(f32, 30), app.world.get(mover, Transform2D).?.y);
 }
 
+test "a script's tween moves by a value, starts from one, waits, counts along and calls back" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("mover.flux",
+        \\var counted = -1.0;
+        \\var called = 0;
+        \\struct Mover {
+        \\    fn ready(self) {
+        \\        const t = self.entity.tween();
+        \\        t.tweenProperty(self.entity, "Transform2D.x", 40.0, 0.5);
+        \\        t.tweenRelative();
+        \\        t.tweenProperty(self.entity, "Transform2D.y", 100.0, 0.5);
+        \\        t.tweenFrom(60.0);
+        \\        t.tweenDelay(0.25);
+        \\        t.tweenMethod(self.count, 0.0, 10.0, 0.5);
+        \\        t.tweenCallback(self.done);
+        \\    }
+        \\    fn count(self, value: float) {
+        \\        counted = value;
+        \\    }
+        \\    fn done(self) {
+        \\        called += 1;
+        \\    }
+        \\}
+    );
+    const mover = try app.world.spawnWith(.{ Transform2D.at(10, 0), Script.of(file) });
+    // A quarter of a second a frame: the first step's half.
+    _ = try app.step();
+    try testing.expectEqual(@as(f32, 30), app.world.get(mover, Transform2D).?.x);
+    // Forty on from where it was, then the wait before the second.
+    for (0..2) |_| _ = try app.step();
+    try testing.expectEqual(@as(f32, 50), app.world.get(mover, Transform2D).?.x);
+    try testing.expectEqual(@as(f32, 60), app.world.get(mover, Transform2D).?.y);
+    for (0..2) |_| _ = try app.step();
+    try testing.expectEqual(@as(f32, 100), app.world.get(mover, Transform2D).?.y);
+    // Counted along, then called back once.
+    _ = try app.step();
+    try testing.expectEqual(@as(f64, 5), global(app, file, "counted").asFloat());
+    for (0..3) |_| _ = try app.step();
+    try testing.expectEqual(@as(f64, 10), global(app, file, "counted").asFloat());
+    try testing.expectEqual(@as(i64, 1), global(app, file, "called").asInt());
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
 test "a script asks the tree, a group, how things show, the time, the keys, the mouse and the system" {
     const app = try scripted(.{});
     defer app.destroy();

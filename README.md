@@ -964,6 +964,13 @@ app.world.get(walker, fx.AnimatedSprite2D).?.play("run", 1, false);
   `loops` - nought is for ever - and `paused` are its own; it says `finished` and goes when it is done, and
   despawning it is killing it. It runs while its entity runs, so a pause
   holds it, and Flux calls all of it by the same names.
+- **The step just added can be shaped**: `tweenFrom(tween, value)` starts it
+  there rather than where its field is, `tweenRelative(tween)` moves it by
+  its value - forty on from wherever it is - and `tweenDelay(tween, seconds)`
+  waits before it starts. A script's function is a step too:
+  `t.tweenCallback(self.shut)` calls it once when it is reached, and
+  `t.tweenMethod(self.show, 0.0, 100.0, 1.0)` with each value along the way
+  - a score counted up. The scripts hold the function while the tween does.
 - **An animation library is a `.anim` file** of named animations: a length,
   a loop - once, round again, or back and forth - and tracks. A track moves
   one property of the player's own entity, or of one under it by name or by
@@ -973,7 +980,11 @@ app.world.get(walker, fx.AnimatedSprite2D).?.play("run", 1, false);
   `library`, `autoplay`, `speed` and `paused`; `play(name)`, `stop()`,
   `seek(to)` and `queue(name)` - the one after this - ask the engine's pass,
   once a frame before the `.update` systems; `current`, `playing` and
-  `position` say what it found. `animation_started` and
+  `position` say what it found. `playBackwards(name)` plays from the end to
+  the start, `pause()` holds it and `play()` with no name goes on from
+  there, `isPlaying()` says whether it plays, and `clearQueue()` forgets the
+  next. `app.animationNames(player)`, `hasAnimation(player, name)` and
+  `animationLength(player, name)` say what its library holds. `animation_started` and
   `animation_finished` say so with the animation's name. A frame with no
   time moves nothing: an editor poses a scene with `fx.animation.pose`.
 - **Sprite frames are a `.frames` file** of named animations, each a
@@ -991,7 +1002,7 @@ app.world.get(walker, fx.AnimatedSprite2D).?.play("run", 1, false);
   path)` writes it. `app.addGridFrames` makes them from the cells of a sheet,
   as the `creatures` example does.
 - **An `AnimatedSprite2D` plays them in the `Sprite` beside it**: the
-  Sprite's texture, region - mirrored by `flip_h` and `flip_v` -, size, which
+  Sprite's texture, region, `flip_h` and `flip_v`, size, which
   is the frame's in texels, and pivot, which `centered` and `offset` say, are
   its to write; the Sprite's tint, layer and blend stay the Sprite's.
   - `play(name, custom_speed, from_end)` plays an animation - with no name
@@ -1155,6 +1166,8 @@ _ = try world.spawnWith(.{
 - **The whole instance buffer goes up in one call.** Not one per sprite: on
   Direct3D 11 a dynamic buffer is re-sent whole on every map, so a call per
   sprite is quadratic in the number of sprites.
+- **`flip_h` and `flip_v` mirror a sprite** where it is: a character facing
+  the other way, with no negative scale to turn its children round too.
 - **A sprite with no texture is a rectangle of solid colour**, because the
   renderer falls back to a one-texel white texture and the tint does the rest.
   One pipeline, no branch in the shader, no artwork for a health bar.
@@ -1207,6 +1220,13 @@ _ = try world.spawnWith(.{
   area is on screen in any window, with `zoom` multiplying it - or the
   project's stretch fits the whole game to the window at once: see
   [Made at one size](#-made-at-one-size).
+- **A camera follows as a game wants.** `offset` moves where it looks, turned
+  with it - a shake, a look ahead; `limit_left`, `limit_top`, `limit_right`
+  and `limit_bottom` are the world's edges it never shows past, a level
+  narrower than the screen shown in its middle; `smoothing` catches up at
+  `smoothing_speed` rather than at once, and `app.resetSmoothing(camera)`
+  puts it there after a teleport. `app.screenCenter(camera)` is where the
+  middle of what it shows is, all of that counted.
 - **The pointer is found in the world through the same camera.**
   `app.pointerInWorld()`, `app.screenToWorld(x, y)` and
   `app.worldToScreen(x, y)` run the view the renderer draws with, forwards
@@ -1573,8 +1593,10 @@ app.grabFocus(play);                                                            
   everything in it bigger or smaller about its middle, and the layout does
   not move. A paused game's controls do not answer the pointer, unless their
   `Processing` says so. See [Pause](#️-pause).
-- **They say what happened as signals**: `pressed` and
-  `toggled` on a button, `toggled` on a check box, `text_changed` and
+- **They say what happened as signals**: `mouse_entered`, `mouse_exited`,
+  `focus_entered` and `focus_exited` on any control - a sound on hover -
+  `pressed`, `toggled`, `button_down` and `button_up` on a button,
+  `toggled` on a check box, `text_changed` and
   `text_submitted` on a line edit, `value_changed` on a slider,
   `tab_changed` on tabs, `revealed` on a rich text, `closed` on a popup -
   connected in code or kept in a scene.

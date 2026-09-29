@@ -19,6 +19,12 @@
 //! `tweenEase` named last - `quad_out`, `back_in`, ... - or in a straight line.
 //! `tweenInterval` waits. See `property.zig` for what a property is.
 //!
+//! **The step just added** can start from a value of its own (`tweenFrom`),
+//! move by its value rather than to it (`tweenRelative`), and wait before it
+//! starts (`tweenDelay`). A script's function is a step too: called once
+//! when it is reached (`tweenCallback`), or with each value along the way
+//! (`tweenMethod`) - held by the scripts while the tween holds it.
+//!
 //! **Moved by the engine** once a frame before the `.update` systems, while
 //! the tween's entity runs: one made under a pause menu goes on while the
 //! game is paused, and one under the game waits. A frame with no time moves
@@ -36,6 +42,7 @@ const math = @import("fluxion_math");
 const App = @import("App.zig");
 const attr = @import("attr.zig");
 const property_mod = @import("property.zig");
+const flux = @import("script.zig").flux;
 
 const Entity = ecs.Entity;
 const Property = property_mod.Property;
@@ -71,17 +78,35 @@ pub const Tween = extern struct {
 /// One step of a tween.
 pub const Step = struct {
     target: Entity = .none,
-    /// Null for a wait.
+    /// Null for a wait, or a call.
     property: ?Property = null,
     to: Value = .{ .number = 0 },
     seconds: f32,
     ease: math.ease.Kind = .linear,
     /// Starts with the step before it, rather than after it.
     with_before: bool = false,
-    /// What the property held when the step started, this time through.
+    /// Seconds it waits, after the ones it starts with have started.
+    delay: f32 = 0,
+    /// Where it starts, rather than what its property holds then.
+    start_at: ?Value = null,
+    /// It moves by `to` from where it starts, rather than to it.
+    relative: bool = false,
+    /// A script's function it calls, held by the scripts: `.null` for none.
+    call: flux.Value = .null,
+    /// Its function is called with each value from `start_at` to `to`, not
+    /// once at the end.
+    along: bool = false,
+    /// What the property held when the step started, this time through,
+    /// and where it goes.
     from: ?Value = null,
+    aim: Value = .{ .number = 0 },
     /// Done, this time through.
     finished: bool = false,
+
+    /// How long it takes, its wait with it.
+    fn length(self: Step) f32 {
+        return self.delay + self.seconds;
+    }
 };
 
 /// Each tween's steps, and what the steps added next are like.
@@ -104,8 +129,8 @@ pub const Tweens = struct {
     }
 
     /// Every tween is gone: the world was cleared.
-    pub fn clear(self: *Tweens, gpa: Allocator) void {
-        for (self.by.values()) |*plan| plan.steps.deinit(gpa);
+    pub fn clear(self: *Tweens, app: *App) void {
+        for (self.by.values()) |*plan| forget(app, plan);
         self.by.clearRetainingCapacity();
     }
 
@@ -117,14 +142,22 @@ pub const Tweens = struct {
     }
 
     /// Let go of the plans of the tweens that died.
-    pub fn forgetDead(self: *Tweens, gpa: Allocator, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Tweens, app: *App) void {
         var at = self.by.count();
         while (at > 0) {
             at -= 1;
-            if (world.isAlive(self.by.keys()[at])) continue;
-            self.by.values()[at].steps.deinit(gpa);
+            if (app.world.isAlive(self.by.keys()[at])) continue;
+            forget(app, &self.by.values()[at]);
             self.by.swapRemoveAt(at);
         }
+    }
+
+    /// A plan's steps let go of, and the functions they held.
+    fn forget(app: *App, plan: *Plan) void {
+        if (app.scripts) |scripts| for (plan.steps.items) |step| {
+            if (step.call.tag != .null) scripts.calls.release(scripts, step.call);
+        };
+        plan.steps.deinit(app.gpa);
     }
 };
 
@@ -185,20 +218,31 @@ fn advance(app: *App, plan: *Plan, elapsed: f32) f32 {
         var end = first + 1;
         while (end < steps.len and steps[end].with_before) end += 1;
         var length: f32 = 0;
-        for (steps[first..end]) |step| length = @max(length, step.seconds);
+        for (steps[first..end]) |step| length = @max(length, step.length());
 
         if (elapsed >= start) for (steps[first..end]) |*step| {
             if (step.finished) continue;
-            const local = elapsed - start;
+            const local = elapsed - start - step.delay;
+            if (local < 0) continue;
             const t: f32 = if (step.seconds > 0) std.math.clamp(local / step.seconds, 0, 1) else 1;
             if (step.property) |held| {
-                if (step.from == null) step.from = held.read(app, step.target) orelse {
-                    // Its entity, or its component, is gone.
-                    step.finished = true;
-                    continue;
-                };
-                const value = if (t >= 1) step.to else step.from.?.lerp(step.to, step.ease.apply(t));
+                if (step.from == null) {
+                    step.from = step.start_at orelse held.read(app, step.target) orelse {
+                        // Its entity, or its component, is gone.
+                        step.finished = true;
+                        continue;
+                    };
+                    step.aim = if (step.relative) step.from.?.plus(step.to) else step.to;
+                }
+                const value = if (t >= 1) step.aim else step.from.?.lerp(step.aim, step.ease.apply(t));
                 _ = held.write(app, step.target, value);
+            } else if (step.call.tag != .null) {
+                if (app.scripts) |scripts| {
+                    if (step.along) {
+                        const from = step.start_at orelse step.to;
+                        scripts.calls.callNow(scripts, step.call, if (t >= 1) step.to else from.lerp(step.to, step.ease.apply(t)));
+                    } else if (t >= 1) scripts.calls.callNow(scripts, step.call, null);
+                }
             }
             if (t >= 1) step.finished = true;
         };
