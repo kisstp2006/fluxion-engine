@@ -204,7 +204,7 @@ fn count(app: *App) !void {
 fn laser(app: *App) !void {
     const from: Vec2 = .init(24, laser_y);
     const to: Vec2 = .init(field_width - 24, laser_y);
-    if (app.castRay(from, to, .{})) |hit| {
+    if (app.castRay(from, to, 0xFFFF_FFFF, false)) |hit| {
         app.debug.with(.{ .width = 2 }).line2d(from, hit.point, .red);
         app.debug.cross2d(hit.point, 8, .yellow);
     } else {

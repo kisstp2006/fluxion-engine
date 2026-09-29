@@ -165,6 +165,9 @@ pub fn build(b: *std.Build) void {
         });
         b.installArtifact(exe);
         example_step.dependOn(&b.addInstallArtifact(exe, .{}).step);
+        // The tests compile them too, so a change to the engine that breaks
+        // one is found where the change is made.
+        test_step.dependOn(&exe.step);
 
         const run = b.addRunArtifact(exe);
         run.step.dependOn(b.getInstallStep());
