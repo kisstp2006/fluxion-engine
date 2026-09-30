@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-1-Clause
 
 //! The program a game is shipped as. The editor's export takes a copy of it
-//! for each platform, writes the game's key into it, and puts the game's
-//! pack inside it or beside it: see the engine's `shipped.zig`.
+//! for each platform, named after the game, and puts the game's pack beside
+//! it: see the engine's `shipped.zig`.
 //!
 //! It opens the pack it finds, and in it the project, as the game opened in
 //! the editor: its boot splash, its autoloads, its main scene, its scripts
@@ -11,7 +11,7 @@
 //! program with no console.
 //!
 //! ```bash
-//! game                        # the pack inside it, or Game.fxpack beside it
+//! game                        # Game.fxpack beside it
 //! game --pack other.fxpack    # that pack instead
 //! game --root my-game         # a project's folder, no pack: a quick look
 //! game --frames 300 --capture shot.png
@@ -31,10 +31,6 @@ const shipped = fx.shipped;
 
 const log = std.log.scoped(.game);
 const android = builtin.abi.isAndroid();
-
-/// Where the export writes the game's key: in the program only once, found
-/// by its magic.
-export var fluxion_key_slot: shipped.Slot = .unwritten();
 
 pub const std_options: std.Options = .{ .logFn = logFn };
 
@@ -75,11 +71,9 @@ fn run(gpa: std.mem.Allocator, io: std.Io, flags: Flags) !void {
     // A project's folder when one is named, and no pack is: a game looked at
     // without exporting it.
     const pack: ?fx.vfs.Pack = if (flags.app.root != null and flags.pack == null) null else pack: {
-        const keys = shipped.Slot.keys(&fluxion_key_slot);
-        break :pack shipped.openPack(gpa, io, flags.pack, .{ .key = keys.key, .signed_by = keys.public }) catch |err| {
+        break :pack shipped.openPack(gpa, io, flags.pack) catch |err| {
             switch (err) {
-                error.NoGame => log.err("there is no game here: no pack inside this program, and none beside it", .{}),
-                error.KeyNeeded, error.WrongKey, error.NotSigned => log.err("the game's pack is not this program's: {t}", .{err}),
+                error.NoGame => log.err("there is no game here: no pack beside this program", .{}),
                 else => log.err("the game's pack did not open: {t}", .{err}),
             }
             return err;

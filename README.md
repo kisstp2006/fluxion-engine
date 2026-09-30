@@ -2315,7 +2315,7 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
 ## 🚚 A shipped game
 
 ```zig
-const pack = try fx.vfs.Pack.openFile(gpa, io, "Game.fxpack", .{ .key = key });
+const pack = try fx.vfs.Pack.openFile(gpa, io, "Game.fxpack", .{});
 const app = try fx.App.create(gpa, .{ .io = io, .pack = pack, .open_project = true });
 ```
 
@@ -2325,8 +2325,8 @@ zig build -Dtarget=x86_64-linux-gnu.2.31           # a Linux one, from any syste
 zig build -Dtarget=aarch64-linux-android           # zig-out/lib/libmain.so, with the Android NDK
 ```
 
-- **A shipped game is a pack**: its files in one, from fluxion-vfs, sealed
-  and signed if it asks. `App.Options.pack` makes `res://`, `uid://` and the
+- **A shipped game is a pack**: its files in one, from fluxion-vfs, its
+  scripts compiled if the export asks. `App.Options.pack` makes `res://`, `uid://` and the
   project file the pack's; the App owns it from `create` on. Every loader
   reads through the project, so a texture, a scene, a script or a sound
   reads the same from a pack as from a folder - in the background too. A
@@ -2335,22 +2335,16 @@ zig build -Dtarget=aarch64-linux-android           # zig-out/lib/libmain.so, wit
 - **The pack's `project.uids` stands for the `.uid` files**: a line a file,
   `uid://... res://...`.
 - **`runtime/` is the program a game is shipped as.** It finds its pack -
-  `--pack`, else one written onto its own end, else `<its name>.fxpack`
-  beside it, and on Android the APK's `assets/game.fxpack` - and opens the
-  project in it: boot splash, autoloads, main scene, scripts. `--root` runs a
-  project's folder instead. Its log goes to standard error and to
-  `logs/game.log` in the player's folder. A release build on Windows has no
-  console. On Android it is `libmain.so`, the library the platform's
+  `--pack`, else `<its name>.fxpack` beside it, and on Android the APK's
+  `assets/game.fxpack` - and opens the project in it: boot splash,
+  autoloads, main scene, scripts. `--root` runs a project's folder instead.
+  Its log goes to standard error and to `logs/game.log` in the player's
+  folder. A release build on Windows has no console, and none has debug
+  information. On Android it is `libmain.so`, the library the platform's
   activity loads; the NDK is `-Dandroid-ndk`, `ANDROID_NDK_HOME`, or the
   newest in the Android SDK, and the lowest Android is 10 (API 29).
-- **`fx.shipped` is what the program and the editor's export share**: the
-  trailer a pack written onto a program ends in (before a Windows signature,
-  when the program is signed after), and the `Slot` the export writes the
-  pack's key into - mixed with a mask, and found by its magic in the
-  program's writable data. So a program is built once, and each game's key
-  goes into its own copy. The key has to be in the program for the program
-  to open its pack: sealing keeps a pack's files from being looked through,
-  not from a determined person with the program in hand.
+- **`fx.shipped` says where the pack is**, for the runtime and for an
+  export that puts it there.
 
 ## 💾 Saves and settings
 
