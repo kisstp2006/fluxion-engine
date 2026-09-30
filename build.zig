@@ -132,6 +132,21 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(runtime);
     test_step.dependOn(&runtime.step);
 
+    // The notices the libraries built into the runtime ask a program made
+    // from them to carry - what an export writes beside a game as
+    // LICENSES.txt - a file each. The runtime's own licence asks for none,
+    // and nor do the Boost licence and CC0 the rest are under.
+    const notices = b.addWriteFiles();
+    _ = notices.addCopyFile(b.path("LICENSE"), "fluxion-engine.txt");
+    const noticed = [_]struct { []const u8, *std.Build.Dependency }{
+        .{ "fluxion-ecs", ecs },         .{ "fluxion-rhi", rhi },             .{ "fluxion-image", image },
+        .{ "fluxion-font", typeface },   .{ "fluxion-debugdraw", debugdraw }, .{ "fluxion-ui", ui },
+        .{ "fluxion-physics", physics }, .{ "fluxion-script", script },       .{ "fluxion-vfs", vfs },
+    };
+    for (noticed) |entry| _ = notices.addCopyFile(entry[1].path("LICENSE"), b.fmt("{s}.txt", .{entry[0]}));
+    _ = notices.addCopyFile(.{ .cwd_relative = b.pathJoin(&.{ b.graph.zig_lib_directory.path orelse ".", "..", "LICENSE" }) }, "zig-standard-library.txt");
+    b.addNamedLazyPath("notices", notices.getDirectory());
+
     // zig build docs -> zig-out/docs
     const docs_lib = b.addLibrary(.{
         .name = "fluxion-engine",
@@ -201,7 +216,7 @@ pub fn build(b: *std.Build) void {
 
 /// The lowest Android the runtime is for: 10. The platform's activity is
 /// compiled for it too.
-const android_api = 29;
+pub const android_api = 29;
 
 /// Build `library` against the Android NDK's C library and system
 /// libraries, for the Android it is compiled for. A build with no NDK to find

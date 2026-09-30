@@ -21,8 +21,8 @@
         // the 3D one that is not written yet, the 2D one, the interface -
         // goes through this and through nothing else.
         .fluxion_rhi = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-rhi#a9722e15f0a347685006085c0580500bdd964be0",
-            .hash = "fluxion_rhi-0.1.0--pvwD5DUDwB3k7sfsM0WQdGC26ThB_zZKAhK47QzH6d3",
+            .url = "git+https://github.com/kisstp2006/fluxion-rhi#890e7190e89bd1c9ba7ec410ecbd503832620f57",
+            .hash = "fluxion_rhi-0.1.0--pvwD7PZDwDHoOoU3bPobC3oGKmc3HYw7R3DsOt90SJW",
         },
 
         // Windows, input and the event loop. A library may not depend on
@@ -42,8 +42,8 @@
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.
         .fluxion_image = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-image#71517095d2154f12daa136e4740faa3ed1eb6500",
-            .hash = "fluxion_image-0.1.0-fyJkdVuyAgBtSj4e-PwUA2rG1XYBYYUFrWmMUpnP0ZPO",
+            .url = "git+https://github.com/kisstp2006/fluxion-image#9ff412f8f52e6f1f4a11ec9243d3b838dc2707fd",
+            .hash = "fluxion_image-0.1.0-fyJkdX63AgAIqyVQwGugPiHxv-Gpnghf9wpRLAqoBZZf",
         },
 
         // The sprite shader, written once and emitted as GLSL and as HLSL.
@@ -135,8 +135,8 @@
         // Packs: a shipped game's files in one, sealed and signed if it
         // asks, which `res://` is read out of.
         .fluxion_vfs = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-vfs#711b2525e4fcbb63d0e5af68d5386c433cb56ec8",
-            .hash = "fluxion_vfs-0.1.0-L2GtlbG1AwDtsc7DRVOsglEfHOMJB1S1Pziuu8rmYEez",
+            .url = "git+https://github.com/kisstp2006/fluxion-vfs#185e749d9e238f8460db1aeff57b5f884b2bb6eb",
+            .hash = "fluxion_vfs-0.1.0-L2GtldS6AwCPxotzolOY8cFvMvh90kx5m0t4jGS75VvD",
         },
     },
     .paths = .{
