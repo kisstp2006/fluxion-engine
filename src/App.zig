@@ -7149,8 +7149,9 @@ pub fn setWindowIcon(self: *App, images: []const platform.IconImage) Window.Erro
 }
 
 /// The sizes a window's picture is made in: what the systems draw one at,
-/// in a title bar and a task switcher, at the usual display scales.
-const window_icon_sides = [_]u32{ 16, 20, 24, 32, 40, 48, 64, 128, 256 };
+/// in a title bar and a task switcher, at display scales from 100% to 300%,
+/// smallest first.
+const window_icon_sides = [_]u32{ 16, 20, 24, 28, 32, 40, 48, 56, 64, 96, 128, 256 };
 
 /// The project file's `application.icon` on the window, when it names one:
 /// what the game shows in the taskbar. The picture can be any size; the
@@ -7172,12 +7173,17 @@ fn useProjectIcon(self: *App) void {
     };
     defer art.deinit(self.gpa);
 
+    // The largest from the picture, and the rest from that one, so a picture
+    // of any size is gone over once.
     var made: [window_icon_sides.len]Image = undefined;
     var sizes: [window_icon_sides.len]platform.IconImage = undefined;
     var count: usize = 0;
     defer for (made[0..count]) |*one| one.deinit(self.gpa);
-    for (window_icon_sides) |side| {
-        made[count] = art.icon(self.gpa, side, side) catch |err| {
+    var left: usize = window_icon_sides.len;
+    while (left > 0) {
+        left -= 1;
+        const side = window_icon_sides[left];
+        made[count] = (if (count == 0) art.icon(self.gpa, side, side) else made[0].resized(self.gpa, side, side, true)) catch |err| {
             return log.warn("the project's icon {s} was not put on the window: {t}", .{ path, err });
         };
         sizes[count] = .{ .pixels = made[count].pixels, .width = side, .height = side };
