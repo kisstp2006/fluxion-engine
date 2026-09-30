@@ -29,7 +29,8 @@ const typeface = @import("fluxion_font");
 const Assets = @import("../assets.zig");
 const components = @import("../components.zig");
 const hierarchy = @import("../hierarchy.zig");
-const Inherited = @import("../inherited.zig").Inherited;
+const inherited_mod = @import("../inherited.zig");
+const Inherited = inherited_mod.Inherited;
 const tilemap = @import("../tilemap.zig");
 const tileset = @import("../tileset.zig");
 const view_mod = @import("view.zig");
@@ -223,6 +224,46 @@ fn radixSort(ranked: []Ranked, room: []Ranked) void {
     }
     if (from.ptr != ranked.ptr) @memcpy(ranked, from);
 }
+
+/// What a drawn thing's material gives it.
+const DrawnWith = struct { shader: ShaderHandle = .none, params: u32 = no_params };
+
+/// What only some of the things a walk finds have, read a chunk at a time:
+/// a thing with none of it is a root, looks as nothing above it says, and
+/// has no material and no view's picture - and nothing is looked up for it.
+const Has = struct {
+    parents: ?[]const components.Parent,
+    own_looks: bool,
+    material: bool,
+    view_texture: bool,
+
+    fn of(chunk: anytype) Has {
+        return .{
+            .parents = chunk.optional(components.Parent),
+            .own_looks = chunk.optional(inherited_mod.Appearance) != null or chunk.optional(inherited_mod.Processing) != null,
+            .material = chunk.optional(shaders_mod.Material) != null,
+            .view_texture = chunk.optional(components.ViewTexture) != null,
+        };
+    }
+
+    fn parentOf(self: Has, row: usize) ecs.Entity {
+        const held = self.parents orelse return .none;
+        return held[row].entity;
+    }
+
+    /// What it is under everything above it: the defaults for a root with
+    /// nothing of its own.
+    fn looks(self: Has, gpa: Allocator, world: *ecs.World, inherited: *Inherited, entity: ecs.Entity, row: usize) inherited_mod.Resolved {
+        if (!self.own_looks and self.parentOf(row).isNone()) return .{};
+        return inherited.of(gpa, world, entity);
+    }
+
+    /// Where it is in the world: its own transform, for a root.
+    fn placed(self: Has, world: *ecs.World, snapshots: *const hierarchy.Snapshots, entity: ecs.Entity, row: usize, local: Transform2D, alpha: f32) ?Transform2D {
+        if (self.parentOf(row).isNone()) return hierarchy.stepped(snapshots, entity, local, alpha);
+        return hierarchy.resolve(world, snapshots, entity, local, alpha);
+    }
+};
 
 /// The four corners of the unit square, as a triangle strip.
 const quad_corners = [8]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
@@ -731,18 +772,19 @@ pub const Renderer = struct {
         while (it.next()) |chunk| {
             const transforms = chunk.slice(Transform2D);
             const sprites = chunk.slice(Sprite);
+            const has: Has = .of(chunk);
 
-            for (transforms, sprites, chunk.entities) |local, sprite, entity| {
+            for (transforms, sprites, chunk.entities, 0..) |local, sprite, entity, row| {
                 if (!sprite.visible or sprite.tint.a <= 0) continue;
-                const looks = inherited.of(gpa, world, entity);
+                const looks = has.looks(gpa, world, inherited, entity, row);
                 const tint = looks.tint(sprite.tint);
                 if (!looks.visible or tint.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
-                const picture = self.pictureOf(world, entity, sprite.texture) orelse continue;
+                const picture = if (has.view_texture) (self.pictureOf(world, entity, sprite.texture) orelse continue) else sprite.texture;
 
                 // Interpolated, then carried through whatever it hangs from.
                 // What cannot be placed - its parent died this frame, or its
                 // chain is a cycle - is not drawn.
-                const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse continue;
+                const transform = has.placed(world, snapshots, entity, row, local, alpha) orelse continue;
 
                 // A handle that no longer resolves draws as the white texel:
                 // a coloured rectangle is a bug somebody notices.
@@ -764,7 +806,7 @@ pub const Renderer = struct {
 
                 const c = @cos(transform.rotation);
                 const s = @sin(transform.rotation);
-                const drawn_with = try self.materialOf(gpa, world, entity);
+                const drawn_with: DrawnWith = if (has.material) try self.materialOf(gpa, world, entity) else .{};
 
                 try self.items.append(gpa, .{
                     .key = sortKey(looks.layer(sprite.layer), picture),
@@ -963,7 +1005,7 @@ pub const Renderer = struct {
 
     /// The shader an entity's `Material` names - when it compiled - and the
     /// set of numbers it gives it; none for a plain picture.
-    fn materialOf(self: *Renderer, gpa: Allocator, world: *ecs.World, entity: ecs.Entity) !struct { shader: ShaderHandle = .none, params: u32 = no_params } {
+    fn materialOf(self: *Renderer, gpa: Allocator, world: *ecs.World, entity: ecs.Entity) !DrawnWith {
         const held = world.get(entity, shaders_mod.Material) orelse return .{};
         const table = self.shaders orelse return .{};
         const compiled = table.compiledOf(held.shader) orelse return .{};
@@ -1069,11 +1111,12 @@ pub const Renderer = struct {
         while (it.next()) |chunk| {
             const transforms = chunk.slice(Transform2D);
             const labels = chunk.slice(Text2D);
+            const has: Has = .of(chunk);
 
-            for (transforms, labels, chunk.entities) |local, label, entity| {
+            for (transforms, labels, chunk.entities, 0..) |local, label, entity, row| {
                 const run = (self.texts orelse return).get(entity, text_key);
                 if (!label.visible or run.len == 0 or label.color.a <= 0) continue;
-                const looks = inherited.of(gpa, world, entity);
+                const looks = has.looks(gpa, world, inherited, entity, row);
                 if (!looks.visible or looks.modulate.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
                 // A scene's words are UTF-8 by the time they are read, but a
                 // label's bytes can be written by hand, and the walk through
@@ -1081,7 +1124,7 @@ pub const Renderer = struct {
                 if (!std.unicode.utf8ValidateSlice(run)) continue;
 
                 // Not drawn when it cannot be placed, as with a sprite.
-                const transform = hierarchy.resolve(world, snapshots, entity, local, alpha) orelse continue;
+                const transform = has.placed(world, snapshots, entity, row, local, alpha) orelse continue;
                 const face = assets.fontOf(label.font) orelse continue;
 
                 var shown = label;

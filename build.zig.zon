@@ -13,8 +13,8 @@
         // The world, and everything in it. An entity is a thing in the scene,
         // with no inheritance and no virtual call.
         .fluxion_ecs = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-ecs#7905188fa3819d72069a4b6e3dbb5522b31295cc",
-            .hash = "fluxion_ecs-0.1.0-YgvFeMQGAgA8uFZCmikJGwfGQdJeCdY5z15xMWz0XSPn",
+            .url = "git+https://github.com/kisstp2006/fluxion-ecs#428a05a0799a257c52455df031918fdbf234fad0",
+            .hash = "fluxion_ecs-0.1.0-YgvFeBkQAgDtQksXV9YleCjUaYm1HddX7S9Oowj2LWhP",
         },
 
         // One way to draw, on whichever API the machine has. Every layer -
