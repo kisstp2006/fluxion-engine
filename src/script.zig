@@ -2687,6 +2687,12 @@ pub const Scripts = struct {
         return switch (event) {
             .key => app.ui.wantsKeyboard(),
             .mouse_button, .mouse_motion, .wheel => app.input.isHandled() or app.ui.wantsPointer(),
+            // A finger a touch button holds, or the first finger over what
+            // took the mouse it is as well.
+            .touch, .touch_motion => {
+                const finger = app.input.touchOf(event.finger().?) orelse return false;
+                return finger.on_button or (finger.mouse and app.input.mouse_from_touch and (app.input.isHandled() or app.ui.wantsPointer()));
+            },
             .pad_button => false,
         };
     }

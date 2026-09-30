@@ -541,6 +541,43 @@ const turn = app.input.pointer.dx;
   their mouse back, and the lock is still a lock when they come back to it. A
   lock asked for while the window is in the background waits for it.
 
+### Fingers on a touch screen
+
+```zig
+for (app.input.touches()) |finger| {
+    if (finger.pressed) spark(app.screenToWorld(finger.position.x, finger.position.y));
+    if (finger.down()) drag(finger.finger, finger.relative);
+}
+```
+
+- **Every finger is a `Touch` of its own**, on Android and in a browser:
+  `finger`, its number from the frame it touches to the frame it is lifted,
+  `position` in the frame's pixels as the pointer's, `start`, `relative`
+  (this frame's moving), `pressure`, and the edges `pressed` and `released`
+  - a finger lifted is there one last frame with `released`, and `canceled`
+  when the system took it. `input.touches()` is this frame's fingers in the
+  order they touched, `touchOf(finger)` one of them, `fingersDown()` how many
+  are down. From a script: `app.touchCount()`, `app.touchAt(i)`,
+  `app.touchOf(finger)`, `app.fingersDown()`.
+- **The first finger is the mouse as well**: the one that touches when no
+  other is down moves the pointer and holds the left button until it is
+  lifted, so the interface, picking and a game made for a mouse work under a
+  finger. A project turns that off with `touch.mouse_from_touch`, and makes
+  the left button a finger - to try a touch game with a mouse - with
+  `touch.touch_from_mouse`; `app.setMouseFromTouch` and
+  `app.setTouchFromMouse` as it runs.
+- **`app.hasTouchscreen()`**: Android, or a screen a finger has touched.
+- **A `TouchButton` is a control fingers press**, as many at once as there
+  are fingers - the interface answers one pointer, the first finger's.
+  Beside a `Control` and what draws it, it is pressed by a finger that
+  touches inside, until that finger is lifted; with `passby_press`, by any
+  finger on it, until it slides off. It says `pressed` and `released`, is
+  `down` while held, and holds its `action` down meanwhile, as
+  `pressAction` would - a game made for keys plays by touch with nothing of
+  its own. `visibility = .touchscreen_only` draws it only on a touch screen.
+  Worked out each frame before the actions, from where the interface laid
+  it out.
+
 ## 🪟 The window
 
 ```zig
@@ -3070,7 +3107,7 @@ struct Guard {
   event: InputEvent)` hears what nothing took - not a script's
   `app.setInputAsHandled()`, and not the interface, which takes a key while
   a field has the keys and the pointer over what it draws.
-  - Each kind is a type of its own, asked for with `is`: a `KeyEvent` has `key`, `virtual_key`, `pressed`, `echo` and `mods`; a `MouseButtonEvent` `button`, `pressed`, `double_click`, `position`, `buttons` and `mods`; a `MouseMotionEvent` `position`, `relative`, `buttons` and `mods`; a `WheelEvent` `delta`, `position`, `buttons` and `mods`; a `PadButtonEvent` `button`, `pad` and `pressed`. `mods` has `shift`, `control`, `alt` and `super`.
+  - Each kind is a type of its own, asked for with `is`: a `KeyEvent` has `key`, `virtual_key`, `pressed`, `echo` and `mods`; a `MouseButtonEvent` `button`, `pressed`, `double_click`, `position`, `buttons` and `mods`; a `MouseMotionEvent` `position`, `relative`, `buttons` and `mods`; a `WheelEvent` `delta`, `position`, `buttons` and `mods`; a `TouchEvent` `finger`, `pressed`, `canceled`, `position` and `pressure`; a `TouchMotionEvent` `finger`, `position`, `relative` and `pressure`; a `PadButtonEvent` `button`, `pad` and `pressed`. `mods` has `shift`, `control`, `alt` and `super`.
   - Inside `if (event is KeyEvent)`, after an `and`, and past an `if (!(event is KeyEvent)) return;`, the event is a `KeyEvent`. A field only some kinds have is a mistake elsewhere, and the compiler names the kinds that have it.
   - Every kind has `isAction("jump")`, `isActionPressed`, `isActionReleased` and `describe()`, by the project's actions.
   - `app.bindAction("jump", event)` binds what was pressed to an action, and `app.clearAction("jump")` unbinds it: a key-remapping screen, saved with `app.saveInputMap()`.

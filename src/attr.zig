@@ -98,6 +98,10 @@ pub const ProjectFile = struct {
 /// an editor offers to choose from.
 pub const AudioBus = struct {};
 
+/// Text that names one of the project's input actions - its own and the
+/// built-in ones - which an editor offers to choose from.
+pub const InputAction = struct {};
+
 /// Text that names a locale - `hu-HU`, `en-US` - which an editor offers
 /// from a list, and takes any the system knows.
 pub const Locale = struct {};

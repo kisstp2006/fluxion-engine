@@ -19,6 +19,7 @@ const View = @import("render/view.zig").View;
 const attr = @import("attr.zig");
 const hierarchy = @import("hierarchy.zig");
 const Appearance = @import("inherited.zig").Appearance;
+const TouchButton = @import("touch.zig").TouchButton;
 const theme_file = @import("theme.zig");
 const shaders_mod = @import("shaders.zig");
 
@@ -892,6 +893,11 @@ pub const Nodes = struct {
         if (app.world.get(entity, Appearance)) |looks| {
             if (!looks.visible) return;
             tint = looks.modulate;
+        }
+        // Shown only on a touch screen, and this is none - but in an editor,
+        // which lays it out where the game would.
+        if (app.world.get(entity, TouchButton)) |button| {
+            if (context.layout == &app.ui and !button.shown(app.input.touchscreen)) return;
         }
         const own = context.at(entity);
         const popup = app.world.get(entity, Popup);

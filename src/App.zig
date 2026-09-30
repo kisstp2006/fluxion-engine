@@ -64,6 +64,7 @@ const drawing_mod = @import("drawing.zig");
 const particles_mod = @import("particles.zig");
 const lights_mod = @import("lights.zig");
 const timer = @import("timer.zig");
+const touch_mod = @import("touch.zig");
 const tilemap = @import("tilemap.zig");
 const geometry = @import("geometry.zig");
 const AssetKind = @import("asset_kind.zig").AssetKind;
@@ -504,6 +505,8 @@ window: ?Window = null,
 /// The program's other windows, each with an interface of its own: see
 /// `openToolWindow`.
 tool_windows: std.ArrayList(*ToolWindow) = .empty,
+/// The actions the touch buttons held last frame. See `touch.zig`.
+touch_actions: std.ArrayList(touch_mod.ActionName) = .empty,
 device: rhi.Device,
 /// What the frame is drawn into: a swapchain image, or a texture when there
 /// is no window.
@@ -930,6 +933,10 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     // The project's actions over the built-in ones.
     const project_actions: []const Input.Action = if (!options.project_input) &.{} else if (self.project.settings) |held| held.input.actions else &.{};
     try self.input.actions.reset(gpa, project_actions);
+    if (options.project_input) if (self.project.settings) |held| {
+        self.input.mouse_from_touch = held.touch.mouse_from_touch;
+        self.input.touch_from_mouse = held.touch.touch_from_mouse;
+    };
     errdefer self.input.deinit(gpa);
     // The sound device, and the project's buses on it.
     self.audio = audio_mod.Audio.init(gpa, options.audio, options.headless, if (self.project.settings) |held| held.audio.buses else &.{}) catch |err| return switch (err) {
@@ -1017,6 +1024,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         control.TabContainer,
         control.TextureRect,
         control.NinePatchRect,
+        touch_mod.TouchButton,
     }) catch |err| switch (err) {
         error.ComponentNameTaken => unreachable,
         error.OutOfMemory => return error.OutOfMemory,
@@ -1369,6 +1377,7 @@ pub fn destroy(self: *App) void {
 
     while (self.tool_windows.pop()) |tool| self.dropToolWindow(tool);
     self.tool_windows.deinit(gpa);
+    self.touch_actions.deinit(gpa);
     if (self.offscreen) |t| self.device.destroyTexture(t);
     if (self.surface) |s| self.device.destroySurface(s);
     self.device.deinit();
@@ -1683,8 +1692,10 @@ pub fn step(self: *App) anyerror!bool {
         tool.resized = false;
         if (tool.surface) |surface| try self.device.resizeSurface(surface, tool.width, tool.height);
     }
-    // Every action from this frame's keys, buttons and sticks, for the
-    // interface and the first system alike.
+    // The touch buttons the fingers press, and the actions they hold; then
+    // every action from this frame's keys, buttons, sticks and those, for
+    // the interface and the first system alike.
+    try touch_mod.update(self);
     self.input.updateActions();
     for (self.tool_windows.items) |tool| tool.input.updateActions();
     self.fitFrame();
@@ -5319,6 +5330,15 @@ pub const reflect_methods = .{
     .mouseButtonDown = .{attr.Params{ .names = &.{"button"} }},
     .mouseButtonJustPressed = .{attr.Params{ .names = &.{"button"} }},
     .mouseButtonJustReleased = .{attr.Params{ .names = &.{"button"} }},
+    .touchCount = .{},
+    .touchAt = .{attr.Params{ .names = &.{"index"} }},
+    .touchOf = .{attr.Params{ .names = &.{"finger"} }},
+    .fingersDown = .{},
+    .hasTouchscreen = .{},
+    .setMouseFromTouch = .{attr.Params{ .names = &.{"on"} }},
+    .mouseFromTouch = .{},
+    .setTouchFromMouse = .{attr.Params{ .names = &.{"on"} }},
+    .touchFromMouse = .{},
     .connectedPads = .{},
     .padConnected = .{ attr.Params{ .names = &.{"pad"} }, attr.defaults(.{@as(?u8, null)}) },
     .padButtonDown = .{ attr.Params{ .names = &.{ "button", "pad" } }, attr.defaults(.{@as(?u8, null)}) },
@@ -6011,6 +6031,64 @@ pub fn mouseButtonJustPressed(self: *const App, button: platform.MouseButton) bo
 /// Whether a mouse button came up this frame, or since the last fixed step.
 pub fn mouseButtonJustReleased(self: *const App, button: platform.MouseButton) bool {
     return self.input.buttonJustReleased(button);
+}
+
+/// How many fingers this frame has: every one down, and every one lifted
+/// this frame. See `Input.touches`.
+pub fn touchCount(self: *const App) usize {
+    return self.input.touches().len;
+}
+
+/// This frame's `index`th finger, in the order they touched; null past the
+/// last.
+///
+/// ```
+/// for (i in 0..app.touchCount()) {
+///     const finger = app.touchAt(i).?;
+///     if (finger.pressed) spark(app.screenToWorld(finger.position.x, finger.position.y));
+/// }
+/// ```
+pub fn touchAt(self: *const App, index: usize) ?Input.Touch {
+    const all = self.input.touches();
+    return if (index < all.len) all[index] else null;
+}
+
+/// A finger of this frame by its number; null for none.
+pub fn touchOf(self: *const App, finger: u32) ?Input.Touch {
+    return self.input.touchOf(finger);
+}
+
+/// How many fingers are down now.
+pub fn fingersDown(self: *const App) usize {
+    return self.input.fingersDown();
+}
+
+/// Whether this is a touch screen: Android, or a screen a finger has
+/// touched. What a game asks before it shows its touch buttons.
+pub fn hasTouchscreen(self: *const App) bool {
+    return self.input.touchscreen;
+}
+
+/// Whether the first finger is the mouse as well: the project's
+/// `touch.mouse_from_touch`. Off, a finger moves no pointer and presses no
+/// button, and the interface is for the mouse alone.
+pub fn setMouseFromTouch(self: *App, on: bool) void {
+    self.input.mouse_from_touch = on;
+}
+
+pub fn mouseFromTouch(self: *const App) bool {
+    return self.input.mouse_from_touch;
+}
+
+/// Whether the left mouse button is a finger as well: the project's
+/// `touch.touch_from_mouse`, to try a game made for a touch screen with a
+/// mouse.
+pub fn setTouchFromMouse(self: *App, on: bool) void {
+    self.input.touch_from_mouse = on;
+}
+
+pub fn touchFromMouse(self: *const App) bool {
+    return self.input.touch_from_mouse;
 }
 
 /// One controller slot, or every connected controller for null.
@@ -10082,7 +10160,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 52), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 53), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

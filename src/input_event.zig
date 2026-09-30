@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! One thing the player did, as one value of its own kind: a key, a mouse
-//! button, the pointer moving, the wheel turning, a controller's button.
+//! button, the pointer moving, the wheel turning, a finger on a touch screen,
+//! a controller's button.
 //! What a script's `input(self, event)` and `unhandled_input` are handed -
 //! asked which with `is`:
 //!
@@ -116,6 +117,37 @@ pub const WheelEvent = struct {
     pub const reflect_name = "WheelEvent";
 };
 
+/// A finger touched a touch screen, or was lifted from it.
+pub const TouchEvent = struct {
+    /// Which finger: the same number from the frame it touches to the frame
+    /// it is lifted. See `Input.Touch`.
+    finger: u32 = 0,
+    /// Touched, or lifted.
+    pressed: bool = false,
+    /// Lifted by the system rather than the player - a gesture of its own,
+    /// the app sent away: whatever the finger was doing should not happen.
+    canceled: bool = false,
+    /// In the frame's pixels, as a mouse button's.
+    position: Vec2 = .zero,
+    /// How hard it presses, from nought to one.
+    pressure: f32 = 1,
+
+    pub const reflect_name = "TouchEvent";
+};
+
+/// A finger moved on a touch screen: one a frame for each finger, with its
+/// moving added up.
+pub const TouchMotionEvent = struct {
+    finger: u32 = 0,
+    /// In the frame's pixels.
+    position: Vec2 = .zero,
+    /// How far it moved to get there.
+    relative: Vec2 = .zero,
+    pressure: f32 = 1,
+
+    pub const reflect_name = "TouchMotionEvent";
+};
+
 /// A controller's button pressed or let go.
 pub const PadButtonEvent = struct {
     button: platform.GamepadButton = .a,
@@ -132,6 +164,8 @@ pub const InputEvent = union(enum) {
     mouse_button: MouseButtonEvent,
     mouse_motion: MouseMotionEvent,
     wheel: WheelEvent,
+    touch: TouchEvent,
+    touch_motion: TouchMotionEvent,
     pad_button: PadButtonEvent,
 
     pub const reflect_name = "InputEvent";
@@ -186,13 +220,15 @@ pub const InputEvent = union(enum) {
         };
     }
 
-    /// Where the pointer is, for the pointer's events; null for a key's and
-    /// a controller's.
+    /// Where the pointer or the finger is, for their events; null for a
+    /// key's and a controller's.
     pub fn position(self: InputEvent) ?Vec2 {
         return switch (self) {
             .mouse_button => |b| b.position,
             .mouse_motion => |m| m.position,
             .wheel => |w| w.position,
+            .touch => |t| t.position,
+            .touch_motion => |t| t.position,
             .key, .pad_button => null,
         };
     }
@@ -204,9 +240,20 @@ pub const InputEvent = union(enum) {
             .mouse_button => |*b| b.position = place,
             .mouse_motion => |*m| m.position = place,
             .wheel => |*w| w.position = place,
+            .touch => |*t| t.position = place,
+            .touch_motion => |*t| t.position = place,
             .key, .pad_button => {},
         }
         return moved;
+    }
+
+    /// The finger a touch screen's event is about; null for any other.
+    pub fn finger(self: InputEvent) ?u32 {
+        return switch (self) {
+            .touch => |t| t.finger,
+            .touch_motion => |t| t.finger,
+            else => null,
+        };
     }
 
     pub fn buttons(self: InputEvent) ButtonMask {
@@ -214,7 +261,7 @@ pub const InputEvent = union(enum) {
             .mouse_button => |b| b.buttons,
             .mouse_motion => |m| m.buttons,
             .wheel => |w| w.buttons,
-            .key, .pad_button => .none,
+            .key, .touch, .touch_motion, .pad_button => .none,
         };
     }
 
@@ -224,18 +271,19 @@ pub const InputEvent = union(enum) {
             .mouse_button => |b| b.mods,
             .mouse_motion => |m| m.mods,
             .wheel => |w| w.mods,
-            .pad_button => .{},
+            .touch, .touch_motion, .pad_button => .{},
         };
     }
 
     /// The input it is, as an action binds it: what `app.bindAction` gives
-    /// the action. Null for motion and the wheel.
+    /// the action. Null for motion, the wheel and a finger - a finger holds
+    /// an action through a `TouchButton`.
     pub fn binding(self: InputEvent) ?actions.Binding {
         return switch (self) {
             .key => |k| .keyOf(k.key),
             .mouse_button => |b| .mouseButtonOf(b.button),
             .pad_button => |p| .padButtonOf(p.button),
-            .mouse_motion, .wheel => null,
+            .mouse_motion, .wheel, .touch, .touch_motion => null,
         };
     }
 
@@ -244,7 +292,8 @@ pub const InputEvent = union(enum) {
             .key => |k| k.pressed,
             .mouse_button => |b| b.pressed,
             .pad_button => |p| p.pressed,
-            .mouse_motion, .wheel => false,
+            .touch => |t| t.pressed,
+            .mouse_motion, .wheel, .touch_motion => false,
         };
     }
 
@@ -301,6 +350,12 @@ test "an event says what it is, whichever kind it is" {
     try testing.expect(!clicked.isReleased(.left));
     try testing.expect(clicked.buttons().has(.left));
     try testing.expectEqual(@as(f32, 9), clicked.at(.init(9, 9)).position().?.x);
+
+    const touched: InputEvent = .{ .touch = .{ .finger = 3, .pressed = true, .position = .init(7, 8) } };
+    try testing.expectEqual(@as(?u32, 3), touched.finger());
+    try testing.expectEqual(@as(f32, 8), touched.position().?.y);
+    try testing.expect(touched.binding() == null);
+    try testing.expect(moved.finger() == null);
 
     const key: InputEvent = .{ .key = .{ .key = .space, .pressed = true } };
     try testing.expect(key.position() == null);

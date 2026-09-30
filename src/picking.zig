@@ -102,7 +102,12 @@ pub fn update(self: *Picking, app: *App) !void {
     self.found.clearRetainingCapacity();
     self.found_shapes.clearRetainingCapacity();
     var stopped = false;
+    // The mouse picks, and the first finger through it; the fingers' own
+    // events are not the pointer's.
+    var pointed = false;
     for (events) |event| {
+        if (event.finger() != null) continue;
+        pointed = true;
         if (stopped) {
             if (releaseOf(event)) |button| try self.letGo(app, button, false);
             continue;
@@ -112,7 +117,7 @@ pub fn update(self: *Picking, app: *App) !void {
         try self.deliver(app, event);
         if (app.input.isHandled()) stopped = true;
     }
-    if (events.len == 0) {
+    if (!pointed) {
         // No event: what it is over is still worked out, so a thing that
         // moves under a pointer standing still is entered.
         try self.gather(app, app.pointerInWorld());

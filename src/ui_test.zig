@@ -48,6 +48,105 @@ fn press(app: *App, x: f32, y: f32, down: bool) void {
     app.input.apply(.{ .mouse_button = .{ .window = .none, .button = .left, .action = if (down) .press else .release, .mods = .{}, .x = x, .y = y } });
 }
 
+fn touch(app: *App, finger: u32, phase: @import("fluxion_platform").event.TouchPhase, x: f32, y: f32) void {
+    app.input.apply(.{ .touch = .{ .window = .none, .finger = finger, .phase = phase, .x = x, .y = y } });
+}
+
+const TouchButton = @import("touch.zig").TouchButton;
+
+const Pressed = struct {
+    var presses: u32 = 0;
+    var releases: u32 = 0;
+
+    fn pressed(_: *App, _: struct {}) !void {
+        presses += 1;
+    }
+
+    fn released(_: *App, _: struct {}) !void {
+        releases += 1;
+    }
+};
+
+test "two touch buttons are held at once by two fingers, and hold their actions while they are" {
+    const it = try withCanvas();
+    const app = it.app;
+    defer app.destroy();
+    try app.input.actions.add(testing.allocator, .{ .name = "jump" });
+    try app.input.actions.add(testing.allocator, .{ .name = "fire" });
+
+    var left = fixed(80, 80);
+    left.setAnchorsPreset(.bottom_left);
+    var right = fixed(80, 80);
+    right.setAnchorsPreset(.bottom_right);
+    var jumping: TouchButton = .{};
+    jumping.setAction("jump");
+    var firing: TouchButton = .{};
+    firing.setAction("fire");
+    const jump = try app.world.spawnWith(.{ left, jumping, Parent.of(it.root) });
+    const fire = try app.world.spawnWith(.{ right, firing, Parent.of(it.root) });
+    Pressed.presses = 0;
+    Pressed.releases = 0;
+    try app.signal(jump, TouchButton, .pressed).connectFn(Pressed.pressed, .{});
+    try app.signal(jump, TouchButton, .released).connectFn(Pressed.released, .{});
+    for (0..2) |_| _ = try app.step();
+
+    // A finger on each, touching inside: both held, both actions down.
+    touch(app, 3, .down, 20, 180);
+    touch(app, 5, .down, 380, 150);
+    _ = try app.step();
+    try testing.expect(app.world.get(jump, TouchButton).?.down);
+    try testing.expect(app.world.get(fire, TouchButton).?.down);
+    try testing.expect(app.input.actionDown("jump") and app.input.actionJustPressed("jump"));
+    try testing.expect(app.input.actionDown("fire"));
+    try testing.expectEqual(@as(u32, 1), Pressed.presses);
+    try testing.expect(app.input.touchOf(3).?.on_button);
+
+    // One lifted: its button and its action let go, the other held.
+    touch(app, 3, .up, 20, 180);
+    _ = try app.step();
+    try testing.expect(!app.world.get(jump, TouchButton).?.down);
+    try testing.expect(!app.input.actionDown("jump"));
+    try testing.expect(app.input.actionDown("fire"));
+    try testing.expectEqual(@as(u32, 1), Pressed.releases);
+
+    // A button gone lets go of its action.
+    app.world.despawn(fire);
+    _ = try app.step();
+    try testing.expect(!app.input.actionDown("fire"));
+
+    // A finger touching outside presses nothing.
+    touch(app, 7, .down, 200, 20);
+    _ = try app.step();
+    try testing.expect(!app.world.get(jump, TouchButton).?.down);
+}
+
+test "a touch button for a touch screen is drawn where one has been touched, and a mouse can be a finger" {
+    const it = try withCanvas();
+    const app = it.app;
+    defer app.destroy();
+    app.input.touchscreen = false;
+    const button = try app.world.spawnWith(.{ fixed(60, 60), TouchButton{ .visibility = .touchscreen_only }, Parent.of(it.root) });
+    for (0..2) |_| _ = try app.step();
+    try testing.expect(boxOf(app, button) == null);
+
+    // The left button, as a finger, does not make this a touch screen.
+    app.setTouchFromMouse(true);
+    press(app, 10, 10, true);
+    _ = try app.step();
+    try testing.expect(!app.hasTouchscreen());
+    press(app, 10, 10, false);
+
+    // A finger does, and the button is drawn and pressed from then on.
+    touch(app, 1, .down, 150, 150);
+    touch(app, 1, .up, 150, 150);
+    for (0..2) |_| _ = try app.step();
+    try testing.expect(app.hasTouchscreen());
+    try testing.expect(boxOf(app, button) != null);
+    press(app, 10, 10, true);
+    _ = try app.step();
+    try testing.expect(app.world.get(button, TouchButton).?.down);
+}
+
 test "a control held between two points stretches with its parent, and one pinned to a point grows from it" {
     const it = try withCanvas();
     const app = it.app;

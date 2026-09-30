@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! What the keyboard, the mouse and the controllers did, as a thing to ask.
+//! What the keyboard, the mouse, the fingers on a touch screen and the
+//! controllers did, as a thing to ask.
 //!
 //! ```zig
 //! fn steer(app: *App) !void {
@@ -33,14 +34,20 @@
 //! A game asks for its actions rather than its keys - `actionDown("jump")`
 //! - and a project says which keys, buttons and sticks they are: see
 //! `actions` and `updateActions`.
+//!
+//! Every finger on a touch screen is a `Touch` of its own, for the frame it
+//! touches to the frame it is lifted: see `touches`. The first finger is the
+//! mouse as well, unless `mouse_from_touch` says not.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 
 const platform = @import("fluxion_platform");
 const math = @import("fluxion_math");
 
 const actions_mod = @import("actions.zig");
+const attr = @import("attr.zig");
 const dialog = @import("dialog.zig");
 const events = @import("input_event.zig");
 
@@ -162,6 +169,20 @@ stick_deadzone: f32 = 0.2,
 
 /// The same for a trigger, which rests more reliably.
 trigger_deadzone: f32 = 0.1,
+
+/// This frame's fingers, in the order they touched: those down, and those
+/// lifted this frame. See `touches`.
+fingers: [max_fingers]Touch = undefined,
+finger_count: usize = 0,
+/// Whether the first finger's mouse is heard: the pointer it moves and the
+/// left button it holds. A project's `touch.mouse_from_touch`.
+mouse_from_touch: bool = true,
+/// Whether the left mouse button is a finger as well - `mouse_as_finger` -
+/// to try a game made for a touch screen with a mouse. A project's
+/// `touch.touch_from_mouse`.
+touch_from_mouse: bool = false,
+/// Whether this is a touch screen: Android, or a screen a finger touched.
+touchscreen: bool = builtin.abi.isAndroid(),
 
 /// Whether the window has the keyboard. For a game that pauses when nobody
 /// is looking at it.
@@ -480,6 +501,60 @@ pub const Wheel = struct {
     y: f32 = 0,
 };
 
+/// The most fingers followed at once.
+pub const max_fingers = 16;
+
+/// The finger the left mouse button is, when `touch_from_mouse` says it is
+/// one.
+pub const mouse_as_finger: u32 = std.math.maxInt(u32);
+
+/// One finger on a touch screen, as this frame has it.
+pub const Touch = struct {
+    /// Which finger: the same number from the frame it touches to the frame
+    /// it is lifted. Another may have the number afterwards.
+    finger: u32 = 0,
+    /// Where it is, in the frame's pixels, as the pointer's.
+    position: Vec2 = .zero,
+    /// Where it touched.
+    start: Vec2 = .zero,
+    /// How far it moved this frame.
+    relative: Vec2 = .zero,
+    /// How hard it presses, from nought to one.
+    pressure: f32 = 1,
+    /// It touched this frame.
+    pressed: bool = false,
+    /// It was lifted this frame, its last here.
+    released: bool = false,
+    /// Lifted by the system rather than the player: whatever it was doing
+    /// should not happen.
+    canceled: bool = false,
+    /// The mouse as well: the first finger. See `mouse_from_touch`.
+    mouse: bool = false,
+    /// A `TouchButton` holds it this frame.
+    on_button: bool = false,
+    /// A frame has seen it as it is: what that frame said of it - its edges,
+    /// its moving - goes at the next frame's top.
+    seen: bool = false,
+
+    pub const reflect_name = "Touch";
+    pub const reflect_fields = .{ .seen = .{attr.Hidden{}} };
+
+    /// This frame's news of it gone, once a frame has seen it: what it
+    /// says from here is new.
+    fn fresh(self: *Touch) void {
+        if (!self.seen) return;
+        self.pressed = false;
+        self.relative = .zero;
+        self.on_button = false;
+        self.seen = false;
+    }
+
+    /// Down now: touched and not lifted.
+    pub fn down(self: Touch) bool {
+        return !self.released;
+    }
+};
+
 pub const Typed = union(enum) {
     character: u21,
     key: platform.event.KeyEvent,
@@ -495,6 +570,29 @@ inline fn indexOf(key: platform.Key) ?usize {
     const raw = @intFromEnum(key);
     if (raw < 0 or raw >= key_span) return null;
     return @intCast(raw);
+}
+
+/// This frame's fingers, in the order they touched: every one down, and
+/// every one lifted this frame, with `released` set.
+pub fn touches(self: *const Input) []const Touch {
+    return self.fingers[0..self.finger_count];
+}
+
+/// A finger of this frame by its number, or null.
+pub fn touchOf(self: *const Input, finger: u32) ?Touch {
+    for (self.touches()) |held| {
+        if (held.finger == finger) return held;
+    }
+    return null;
+}
+
+/// How many fingers are down now.
+pub fn fingersDown(self: *const Input) usize {
+    var count: usize = 0;
+    for (self.touches()) |held| {
+        if (held.down()) count += 1;
+    }
+    return count;
 }
 
 /// Is this key down now?
@@ -901,6 +999,17 @@ pub fn beginFrame(self: *Input) void {
     self.typed_len = 0;
     self.handled = false;
 
+    // The fingers last frame saw lifted are gone, and the rest start the
+    // frame still; one given between frames is this frame's news.
+    var still_down: usize = 0;
+    for (self.fingers[0..self.finger_count]) |held| {
+        if (held.released and held.seen) continue;
+        self.fingers[still_down] = held;
+        self.fingers[still_down].fresh();
+        still_down += 1;
+    }
+    self.finger_count = still_down;
+
     // The pointer events a whole frame has had go; one given between
     // frames stays for this one, as a dialog's answer does.
     const keys_unseen = self.key_events_len - self.key_events_seen;
@@ -938,6 +1047,7 @@ pub fn endFrame(self: *Input) void {
     self.drops_seen = self.drops_len;
     self.pointer_events_seen = self.pointer_events_len;
     self.key_events_seen = self.key_events_len;
+    for (self.fingers[0..self.finger_count]) |*held| held.seen = true;
     self.happened_seen = self.happened;
 }
 
@@ -1064,6 +1174,7 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             self.pushTyped(.{ .character = c.codepoint });
         },
         .mouse_button => |b| {
+            if (b.from_touch and !self.mouse_from_touch) return;
             self.mods = b.mods;
             // A locked pointer has no position to report.
             if (!self.pointer.locked) {
@@ -1095,8 +1206,12 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 .buttons = self.buttonMask(),
                 .mods = b.mods,
             } });
+            if (self.touch_from_mouse and !b.from_touch and b.button == .left and b.action != .repeat and !self.pointer.locked) {
+                self.touched(mouse_as_finger, .init(self.pointer.x, self.pointer.y), if (b.action == .press) .down else .up, 1);
+            }
         },
         .cursor => |m| {
+            if (m.from_touch and !self.mouse_from_touch) return;
             if (self.pointer.locked) {
                 // Movement only, and only while the window has the keyboard:
                 // in the background, the hand on the mouse is using another
@@ -1113,6 +1228,13 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             self.pointer.dx += moved.x;
             self.pointer.dy += moved.y;
             self.pushMotion(moved);
+            if (self.touch_from_mouse and !m.from_touch and self.buttonDown(.left)) {
+                self.touched(mouse_as_finger, .init(self.pointer.x, self.pointer.y), .move, 1);
+            }
+        },
+        .touch => |t| {
+            self.touchscreen = true;
+            self.touched(t.finger, .init(self.frameX(t.x), self.frameY(t.y)), t.phase, t.pressure);
         },
         .cursor_enter => |s| self.pointer.inside = s.value,
         .scroll => |w| {
@@ -1157,6 +1279,63 @@ pub fn apply(self: *Input, ev: platform.Event) void {
     }
 }
 
+/// A finger touched, moved or was lifted, at `at` in the frame's pixels.
+fn touched(self: *Input, finger: u32, at: Vec2, phase: platform.event.TouchPhase, pressure: f32) void {
+    switch (phase) {
+        .down => {
+            if (self.liveFinger(finger) != null or self.finger_count == self.fingers.len) return;
+            // The platform's rule for the finger that is the mouse: the one
+            // that touches when no other is down.
+            const mouse = finger != mouse_as_finger and self.fingersDown() == 0;
+            self.fingers[self.finger_count] = .{ .finger = finger, .position = at, .start = at, .pressure = pressure, .pressed = true, .mouse = mouse };
+            self.finger_count += 1;
+            self.pushPointer(.{ .touch = .{ .finger = finger, .pressed = true, .position = at, .pressure = pressure } });
+        },
+        .move => {
+            const held = self.liveFinger(finger) orelse return;
+            held.fresh();
+            const by = at.sub(held.position);
+            held.position = at;
+            held.relative = held.relative.add(by);
+            held.pressure = pressure;
+            self.pushTouchMotion(finger, at, by, pressure);
+        },
+        .up, .cancel => {
+            const held = self.liveFinger(finger) orelse return;
+            held.fresh();
+            held.position = at;
+            held.released = true;
+            held.canceled = phase == .cancel;
+            self.pushPointer(.{ .touch = .{ .finger = finger, .canceled = held.canceled, .position = at, .pressure = pressure } });
+        },
+    }
+}
+
+/// A finger down now, by its number.
+fn liveFinger(self: *Input, finger: u32) ?*Touch {
+    for (self.fingers[0..self.finger_count]) |*held| {
+        if (held.finger == finger and held.down()) return held;
+    }
+    return null;
+}
+
+/// A finger's motion, added to its last motion this frame when nothing of
+/// that finger came since: a frame's moving is one event a finger.
+fn pushTouchMotion(self: *Input, finger: u32, at: Vec2, by: Vec2, pressure: f32) void {
+    var i = self.pointer_events_len;
+    while (i > self.pointer_events_seen) {
+        i -= 1;
+        const earlier = &self.pointer_events[i];
+        if (earlier.finger() != finger) continue;
+        if (earlier.* != .touch_motion) break;
+        earlier.touch_motion.position = at;
+        earlier.touch_motion.relative = earlier.touch_motion.relative.add(by);
+        earlier.touch_motion.pressure = pressure;
+        return;
+    }
+    self.pushPointer(.{ .touch_motion = .{ .finger = finger, .position = at, .relative = by, .pressure = pressure } });
+}
+
 /// Let go of everything, as if every key and button came up at once.
 pub fn releaseEverything(self: *Input) void {
     var keys = self.down.iterator(.{});
@@ -1172,6 +1351,11 @@ pub fn releaseEverything(self: *Input) void {
     self.down = .initEmpty();
     self.virtual_down = .initEmpty();
     self.button_down = .initEmpty();
+    for (self.fingers[0..self.finger_count]) |*held| {
+        if (!held.down()) continue;
+        held.released = true;
+        held.canceled = true;
+    }
 }
 
 /// One pointer event, dropped rather than grown, as the typed ones are.
@@ -1516,6 +1700,83 @@ test "a binding with a number out of range is no input, not a crash" {
 
 fn cursorEvent(x: f64, y: f64, dx: f64, dy: f64) platform.Event {
     return .{ .cursor = .{ .window = .none, .x = x, .y = y, .dx = dx, .dy = dy } };
+}
+
+fn touchEvent(finger: u32, phase: platform.event.TouchPhase, x: f64, y: f64) platform.Event {
+    return .{ .touch = .{ .window = .none, .finger = finger, .phase = phase, .x = x, .y = y } };
+}
+
+test "every finger is a touch of its own, from the frame it touches to the frame it is lifted" {
+    var input: Input = .{};
+    input.frame_origin = .init(100, 0);
+    input.frame_ratio = 0.5;
+
+    input.apply(touchEvent(4, .down, 300, 200));
+    input.apply(touchEvent(9, .down, 500, 100));
+    try testing.expect(input.touchscreen);
+    try testing.expectEqual(@as(usize, 2), input.fingersDown());
+    const first = input.touchOf(4).?;
+    try testing.expect(first.pressed and first.mouse);
+    try testing.expectEqual(@as(f32, 100), first.position.x);
+    try testing.expect(!input.touchOf(9).?.mouse);
+
+    // Moves in one frame are one event a finger, added up.
+    input.apply(touchEvent(4, .move, 310, 200));
+    input.apply(touchEvent(9, .move, 520, 100));
+    input.apply(touchEvent(4, .move, 320, 210));
+    const heard = input.pointerEvents();
+    try testing.expectEqual(@as(usize, 4), heard.len);
+    try testing.expectEqual(@as(f32, 10), heard[2].touch_motion.relative.x);
+    try testing.expectEqual(@as(f32, 5), heard[2].touch_motion.relative.y);
+    try testing.expectEqual(@as(?u32, 9), heard[3].finger());
+    try testing.expectEqual(@as(f32, 10), input.touchOf(4).?.relative.x);
+
+    // Lifted: there this frame, with `released`, and gone the next.
+    input.endFrame();
+    input.beginFrame();
+    try testing.expect(!input.touchOf(4).?.pressed);
+    input.apply(touchEvent(4, .up, 320, 210));
+    input.apply(touchEvent(9, .cancel, 520, 100));
+    try testing.expect(input.touchOf(4).?.released);
+    try testing.expect(input.touchOf(9).?.canceled);
+    try testing.expectEqual(@as(usize, 0), input.fingersDown());
+    try testing.expect(input.pointerEvents()[1].touch.canceled);
+    input.endFrame();
+    input.beginFrame();
+    try testing.expectEqual(@as(usize, 0), input.touches().len);
+
+    // A finger touched and lifted inside one frame is still seen.
+    input.apply(touchEvent(1, .down, 0, 0));
+    input.apply(touchEvent(1, .up, 0, 0));
+    try testing.expect(input.touchOf(1).?.pressed and input.touchOf(1).?.released);
+}
+
+test "the first finger's mouse is not heard when a project says so, and the mouse is a finger when it says that" {
+    var input: Input = .{};
+    input.mouse_from_touch = false;
+    input.apply(.{ .cursor = .{ .window = .none, .x = 50, .y = 60, .dx = 0, .dy = 0, .from_touch = true } });
+    input.apply(.{ .mouse_button = .{ .window = .none, .button = .left, .action = .press, .mods = .{}, .x = 50, .y = 60, .from_touch = true } });
+    try testing.expect(!input.buttonDown(.left));
+    try testing.expectEqual(@as(f32, 0), input.pointer.x);
+
+    input.touch_from_mouse = true;
+    input.apply(cursorEvent(10, 20, 0, 0));
+    input.apply(.{ .mouse_button = .{ .window = .none, .button = .left, .action = .press, .mods = .{}, .x = 10, .y = 20 } });
+    try testing.expect(input.touchOf(mouse_as_finger).?.pressed);
+    input.apply(cursorEvent(15, 20, 5, 0));
+    try testing.expectEqual(@as(f32, 5), input.touchOf(mouse_as_finger).?.relative.x);
+    input.apply(.{ .mouse_button = .{ .window = .none, .button = .left, .action = .release, .mods = .{}, .x = 15, .y = 20 } });
+    try testing.expect(input.touchOf(mouse_as_finger).?.released);
+    // A mouse is no touch screen.
+    try testing.expect(input.touchscreen == builtin.abi.isAndroid());
+}
+
+test "the window losing the keyboard lifts every finger" {
+    var input: Input = .{};
+    input.apply(touchEvent(2, .down, 0, 0));
+    input.apply(.{ .focus = .{ .window = .none, .value = false } });
+    try testing.expect(input.touchOf(2).?.canceled);
+    try testing.expectEqual(@as(usize, 0), input.fingersDown());
 }
 
 test "a locked pointer holds still, and only its movement counts" {

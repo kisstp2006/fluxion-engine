@@ -1943,6 +1943,55 @@ test "a script hears the player's input, takes it from the scripts after it, and
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
 }
 
+test "a script hears every finger, and asks the frame's fingers where they are" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const hand = try app.addScript("hand.flux",
+        \\var touched = 0;
+        \\var lifted = 0;
+        \\var moved = 0;
+        \\var most = 0;
+        \\var second_x = 0;
+        \\struct Hand {
+        \\    fn input(self, event: InputEvent) {
+        \\        if (event is TouchEvent) {
+        \\            if (event.pressed) {
+        \\                touched += 1;
+        \\            } else {
+        \\                lifted += 1;
+        \\            }
+        \\            if (app.fingersDown() > most) most = app.fingersDown();
+        \\            if (app.touchCount() > 1) second_x = int(app.touchAt(1).?.position.x);
+        \\        }
+        \\        if (event is TouchMotionEvent) moved += int(event.relative.x);
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(hand)});
+    _ = try app.step();
+
+    app.input.apply(fingered(1, .down, 10, 20));
+    app.input.apply(fingered(2, .down, 300, 40));
+    _ = try app.step();
+    app.input.apply(fingered(2, .move, 310, 40));
+    app.input.apply(fingered(2, .move, 315, 40));
+    _ = try app.step();
+    app.input.apply(fingered(1, .up, 10, 20));
+    app.input.apply(fingered(2, .up, 315, 40));
+    _ = try app.step();
+
+    try testing.expectEqual(@as(i64, 2), global(app, hand, "touched").asInt());
+    try testing.expectEqual(@as(i64, 2), global(app, hand, "lifted").asInt());
+    try testing.expectEqual(@as(i64, 15), global(app, hand, "moved").asInt());
+    try testing.expectEqual(@as(i64, 2), global(app, hand, "most").asInt());
+    try testing.expectEqual(@as(i64, 315), global(app, hand, "second_x").asInt());
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
+fn fingered(finger: u32, phase: @import("fluxion_platform").event.TouchPhase, x: f64, y: f64) @import("fluxion_platform").Event {
+    return .{ .touch = .{ .window = .none, .finger = finger, .phase = phase, .x = x, .y = y } };
+}
+
 test "a data file is its struct, made anew from Flux with the file's values" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

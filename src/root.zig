@@ -258,7 +258,15 @@ pub const KeyEvent = input_event.KeyEvent;
 pub const MouseButtonEvent = input_event.MouseButtonEvent;
 pub const MouseMotionEvent = input_event.MouseMotionEvent;
 pub const WheelEvent = input_event.WheelEvent;
+pub const TouchEvent = input_event.TouchEvent;
+pub const TouchMotionEvent = input_event.TouchMotionEvent;
 pub const PadButtonEvent = input_event.PadButtonEvent;
+
+/// One finger on a touch screen, as a frame has it: `app.input.touches()`.
+pub const Touch = @import("input.zig").Touch;
+/// A control fingers press, as many at once as there are fingers. See
+/// `touch.zig`.
+pub const TouchButton = @import("touch.zig").TouchButton;
 
 /// Which mouse buttons are held: `app.input.buttonMask()`.
 pub const ButtonMask = input_event.ButtonMask;

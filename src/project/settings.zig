@@ -451,6 +451,21 @@ test "a project's actions are written as the inputs they are, and read back the 
     try testing.expect(look.bindings[1].eql(.{ .key = .{ .key = .q, .physical = false } }));
 }
 
+/// How a touch screen and a mouse stand in for each other.
+pub const Touch = struct {
+    /// The first finger is the mouse as well: see `Input.mouse_from_touch`.
+    mouse_from_touch: bool = true,
+    /// The left mouse button is a finger as well: see
+    /// `Input.touch_from_mouse`.
+    touch_from_mouse: bool = false,
+
+    pub const reflect_attributes = .{attr.Label{ .text = "Touch" }};
+    pub const reflect_fields = .{
+        .mouse_from_touch = .{attr.Doc{ .text = "The first finger on a touch screen is the mouse as well: it moves the pointer and holds the left button, so the interface and whatever is made for a mouse work under a finger." }},
+        .touch_from_mouse = .{attr.Doc{ .text = "The left mouse button is a finger as well, so a game made for a touch screen - its touch buttons, its fingers - can be tried with a mouse." }},
+    };
+};
+
 /// What a project file says: a section a field.
 pub const Settings = struct {
     application: Application = .{},
@@ -463,6 +478,7 @@ pub const Settings = struct {
     internationalization: Internationalization = .{},
     scripting: Scripting = .{},
     input: InputMap = .{},
+    touch: Touch = .{},
     /// The memory the text above is kept in, and the file's keys this build
     /// has no section for.
     kept: settings_file.Kept = .{},
