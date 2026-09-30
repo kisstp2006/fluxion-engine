@@ -112,6 +112,26 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the engine test suite");
     test_step.dependOn(&run_tests.step);
 
+    // The program a game is shipped as: see runtime/main.zig. On Android it
+    // is the library the platform's activity loads, the APK's libmain.so.
+    // A release build on Windows opens a window and no console; the export
+    // can still turn a game's into one with a console.
+    const runtime_mod = b.createModule(.{
+        .root_source_file = b.path("runtime/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "fluxion_engine", .module = mod }},
+    });
+    const android = target.result.abi.isAndroid();
+    const runtime = if (android)
+        b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = runtime_mod })
+    else
+        b.addExecutable(.{ .name = "fluxion-runtime", .root_module = runtime_mod });
+    if (android) useAndroidNdk(b, runtime, b.option([]const u8, "android-ndk", "The Android NDK, for a build for Android (default: ANDROID_NDK_HOME, then the newest in the Android SDK's ndk folder)"));
+    if (target.result.os.tag == .windows and optimize != .Debug) runtime.subsystem = .windows;
+    b.installArtifact(runtime);
+    test_step.dependOn(&runtime.step);
+
     // zig build docs -> zig-out/docs
     const docs_lib = b.addLibrary(.{
         .name = "fluxion-engine",
@@ -152,7 +172,8 @@ pub fn build(b: *std.Build) void {
     };
 
     const example_step = b.step("examples", "Build every example");
-    for (examples) |example| {
+    // An Android program is the runtime's library: none of these is one.
+    if (!android) for (examples) |example| {
         const exe_mod = b.createModule(.{
             .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example.name})),
             .target = target,
@@ -175,7 +196,77 @@ pub fn build(b: *std.Build) void {
         run.step.dependOn(b.getInstallStep());
         if (b.args) |args| run.addArgs(args);
         b.step(example.step, example.about).dependOn(&run.step);
+    };
+}
+
+/// The lowest Android the runtime is for: 10. The platform's activity is
+/// compiled for it too.
+const android_api = 29;
+
+/// Build `library` against the Android NDK's C library and system
+/// libraries, for the Android it is compiled for. A build with no NDK to find
+/// fails, and says where it looked.
+fn useAndroidNdk(b: *std.Build, library: *std.Build.Step.Compile, asked: ?[]const u8) void {
+    const ndk = asked orelse findAndroidNdk(b) orelse {
+        library.step.dependOn(&b.addFail("a build for Android needs the Android NDK: -Dandroid-ndk=<path>, ANDROID_NDK_HOME, or one installed in the Android SDK").step);
+        return;
+    };
+    const host = switch (b.graph.host.result.os.tag) {
+        .windows => "windows-x86_64",
+        .macos => "darwin-x86_64",
+        else => "linux-x86_64",
+    };
+    const target = library.rootModuleTarget();
+    const triple = switch (target.cpu.arch) {
+        .aarch64 => "aarch64-linux-android",
+        .x86_64 => "x86_64-linux-android",
+        .arm => "arm-linux-androideabi",
+        .x86 => "i686-linux-android",
+        else => {
+            library.step.dependOn(&b.addFail("the Android NDK has no C library for this processor").step);
+            return;
+        },
+    };
+    const sysroot = b.pathJoin(&.{ ndk, "toolchains", "llvm", "prebuilt", host, "sysroot", "usr" });
+    const libraries = b.pathJoin(&.{ sysroot, "lib", triple, b.fmt("{d}", .{android_api}) });
+    const libc = b.addWriteFiles().add("android.libc", b.fmt(
+        \\include_dir={s}
+        \\sys_include_dir={s}
+        \\crt_dir={s}
+        \\msvc_lib_dir=
+        \\kernel32_lib_dir=
+        \\gcc_dir=
+        \\
+    , .{ b.pathJoin(&.{ sysroot, "include" }), b.pathJoin(&.{ sysroot, "include", triple }), libraries }));
+    library.setLibCFile(libc);
+    library.root_module.addLibraryPath(.{ .cwd_relative = libraries });
+    library.root_module.linkSystemLibrary("log", .{});
+}
+
+/// The Android NDK the environment names, or the newest one in the Android
+/// SDK: the SDK the environment names, or the one its installer puts in the
+/// user's folder.
+fn findAndroidNdk(b: *std.Build) ?[]const u8 {
+    const env = &b.graph.environ_map;
+    if (env.get("ANDROID_NDK_HOME")) |ndk| return ndk;
+    const sdk = env.get("ANDROID_HOME") orelse env.get("ANDROID_SDK_ROOT") orelse switch (b.graph.host.result.os.tag) {
+        .windows => b.pathJoin(&.{ env.get("LOCALAPPDATA") orelse return null, "Android", "Sdk" }),
+        .macos => b.pathJoin(&.{ env.get("HOME") orelse return null, "Library", "Android", "sdk" }),
+        else => b.pathJoin(&.{ env.get("HOME") orelse return null, "Android", "Sdk" }),
+    };
+    const io = b.graph.io;
+    const folder = b.pathJoin(&.{ sdk, "ndk" });
+    var dir = std.Io.Dir.cwd().openDir(io, folder, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+    var newest: ?[]const u8 = null;
+    var it = dir.iterate();
+    while (it.next(io) catch return null) |entry| {
+        if (entry.kind != .directory) continue;
+        const version = std.SemanticVersion.parse(entry.name) catch continue;
+        if (newest) |held| if (version.order(std.SemanticVersion.parse(held) catch unreachable) != .gt) continue;
+        newest = b.dupe(entry.name);
     }
+    return b.pathJoin(&.{ folder, newest orelse return null });
 }
 
 /// Every source file of the engine but its tests, as the arguments of `run`.
