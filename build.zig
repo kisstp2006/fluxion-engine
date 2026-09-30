@@ -263,6 +263,11 @@ fn useAndroidNdk(b: *std.Build, library: *std.Build.Step.Compile, asked: ?[]cons
     library.link_z_common_page_size = 16 << 10;
     library.root_module.addLibraryPath(.{ .cwd_relative = libraries });
     library.root_module.linkSystemLibrary("log", .{});
+    // LLVM and LLD, for a debug build too: Zig's own x86_64 code generator
+    // and linker, which one would take, lay the segments on 4 KB and out of
+    // order, and Android's loader refuses the library.
+    library.use_llvm = true;
+    library.use_lld = true;
 }
 
 /// The Android NDK the environment names, or the newest one in the Android
