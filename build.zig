@@ -257,6 +257,10 @@ fn useAndroidNdk(b: *std.Build, library: *std.Build.Step.Compile, asked: ?[]cons
         \\
     , .{ b.pathJoin(&.{ sysroot, "include" }), b.pathJoin(&.{ sysroot, "include", triple }), libraries }));
     library.setLibCFile(libc);
+    // A device may have pages of 16 KB, and maps the library's segments by
+    // them: none may be laid on a smaller step.
+    library.link_z_max_page_size = 16 << 10;
+    library.link_z_common_page_size = 16 << 10;
     library.root_module.addLibraryPath(.{ .cwd_relative = libraries });
     library.root_module.linkSystemLibrary("log", .{});
 }
