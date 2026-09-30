@@ -2049,6 +2049,25 @@ pub const Scripts = struct {
         self.files.get(handle.toId()).?.module = module;
     }
 
+    /// A script's compiled code, which `compile` loads again in a VM set up
+    /// as this one is, with none of its text: what a shipped game has in its
+    /// place. Only from scripts that do not run - `Options.run` off, an
+    /// editor's - since what ran holds values no file can. The caller frees
+    /// it. `error.CompileFailed` for a script whose text does not compile,
+    /// and `error.Unsaveable` for one that cannot be kept, their reasons in
+    /// the log.
+    pub fn saveCompiled(self: *Scripts, handle: ScriptHandle, gpa: Allocator, options: flux.image.SaveOptions) ![]u8 {
+        const file = self.files.get(handle.toId()) orelse return error.NoSuchScript;
+        const module = file.module orelse return error.CompileFailed;
+        return self.vm.saveCompiled(module, gpa, options) catch |err| switch (err) {
+            error.Unsaveable => {
+                self.sayDiagnostics(file.source);
+                return error.Unsaveable;
+            },
+            error.OutOfMemory => error.OutOfMemory,
+        };
+    }
+
     /// The handle of a file already read, by the path or name it was read by.
     pub fn find(self: *Scripts, source: []const u8) ?ScriptHandle {
         var it = self.files.iterator();

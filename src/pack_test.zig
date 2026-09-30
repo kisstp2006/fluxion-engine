@@ -25,6 +25,10 @@ const dot_uid = "uid://4b1a8e2c-7d3f-4a51-9c6e-2f0d8b7a1e93";
 /// A pack with a project file, a picture known by a UUID, a scene and a
 /// text in folders, sealed with `key` when there is one.
 fn buildPack(key: ?vfs.Pack.Key) ![]u8 {
+    return buildPackWith(key, &.{});
+}
+
+fn buildPackWith(key: ?vfs.Pack.Key, more: []const vfs.Pack.Builder.Item) ![]u8 {
     const pixels = [_]u8{ 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255 };
     const png = try image.png.encodeAlloc(gpa, .{ .width = 2, .height = 2, .pixels = &pixels, .row_pitch = 8 }, .{ .keep_alpha = true });
     defer gpa.free(png);
@@ -32,13 +36,17 @@ fn buildPack(key: ?vfs.Pack.Key) ![]u8 {
     defer gpa.free(level);
 
     const options: vfs.Pack.Builder.Options = if (key) |k| .{ .seal = .{ .key = k, .salt = [_]u8{3} ** 16 } } else .{};
-    return vfs.Pack.buildWith(gpa, options, &.{
+    var items: std.ArrayList(vfs.Pack.Builder.Item) = .empty;
+    defer items.deinit(gpa);
+    try items.appendSlice(gpa, &.{
         .{ .path = Project.file_name, .bytes = project_text },
         .{ .path = "art/dot.png", .bytes = png, .how = .store },
         .{ .path = "data/hello.txt", .bytes = hello_text },
         .{ .path = "levels/one.json", .bytes = level },
         .{ .path = Project.uid_table, .bytes = dot_uid ++ " res://art/dot.png\n" },
     });
+    try items.appendSlice(gpa, more);
+    return vfs.Pack.buildWith(gpa, options, items.items);
 }
 
 fn userRoot(tmp: *testing.TmpDir, buffer: []u8) ![]const u8 {
@@ -112,4 +120,52 @@ test "a sealed pack is the project once it is opened with its key" {
     const text = try app.readText(gpa, "res://data/hello.txt");
     defer gpa.free(text);
     try testing.expectEqualStrings(hello_text, text);
+}
+
+test "a script shipped compiled runs from the pack as its text did" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const io = testing.io;
+
+    // What an export does: the scripts compiled by an app that does not run
+    // them, the one importing the other.
+    try tmp.dir.writeFile(io, .{ .sub_path = "shared.flux", .data = "fn greeting() string { return \"compiled\"; }\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "main.flux", .data =
+        \\const shared = @import("res://shared.flux");
+        \\struct Main {
+        \\    fn ready(self) { print(shared.greeting()); }
+        \\}
+        \\
+    });
+    var root_buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const images = blk: {
+        const editor = try App.create(gpa, .{ .headless = true, .io = io, .root = root, .user_root = try userRoot(&tmp, &buffer) });
+        defer editor.destroy();
+        try editor.useScripts(.{ .run = false });
+        const main = try editor.compiledScript(try editor.loadScript("res://main.flux"), gpa, .{});
+        errdefer gpa.free(main);
+        const shared = try editor.compiledScript(try editor.loadScript("res://shared.flux"), gpa, .{ .lines = false });
+        break :blk [2][]u8{ main, shared };
+    };
+    defer for (images) |held| gpa.free(held);
+    try testing.expect(std.mem.indexOf(u8, images[0], "greeting") != null);
+
+    const bytes = try buildPackWith(null, &.{
+        .{ .path = "main.flux", .bytes = images[0] },
+        .{ .path = "shared.flux", .bytes = images[1] },
+    });
+    defer gpa.free(bytes);
+    const pack: vfs.Pack = try .fromBytes(gpa, bytes, .{});
+    const app = try App.create(gpa, .{ .headless = true, .io = io, .user_root = try userRoot(&tmp, &buffer), .pack = pack });
+    defer app.destroy();
+    var printed: [64]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&printed);
+    try app.useScripts(.{ .out = &out });
+    const main = try app.loadScript("res://main.flux");
+    _ = try app.world.spawnWith(.{@import("script.zig").Script.of(main)});
+    try app.startup();
+    _ = try app.step();
+    try testing.expectEqualStrings("compiled\n", out.buffered());
 }

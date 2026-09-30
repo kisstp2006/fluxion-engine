@@ -4818,6 +4818,13 @@ pub fn setScriptText(self: *App, handle: script_mod.ScriptHandle, text: []const 
     return scripts.setText(handle, text);
 }
 
+/// A script's compiled code, for a shipped game to load in place of its
+/// text: see `Scripts.saveCompiled`. Needs `useScripts` with `run` off.
+pub fn compiledScript(self: *App, handle: script_mod.ScriptHandle, gpa: Allocator, options: script_mod.flux.image.SaveOptions) ![]u8 {
+    const scripts = self.scripts orelse return error.ScriptsNotUsed;
+    return scripts.saveCompiled(handle, gpa, options);
+}
+
 /// The script read from `path`, if one was, spelt any way `Project` spells
 /// it.
 pub fn findScript(self: *App, path: []const u8) ?script_mod.ScriptHandle {
