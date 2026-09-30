@@ -244,29 +244,57 @@ fn useAndroidNdk(b: *std.Build, library: *std.Build.Step.Compile, asked: ?[]cons
 }
 
 /// The Android NDK the environment names, or the newest one in the Android
-/// SDK: the SDK the environment names, or the one its installer puts in the
-/// user's folder.
-fn findAndroidNdk(b: *std.Build) ?[]const u8 {
+/// SDK. Public for a build that builds the runtime for Android as a
+/// dependency, and would rather leave it out than fail with none.
+pub fn findAndroidNdk(b: *std.Build) ?[]const u8 {
+    if (b.graph.environ_map.get("ANDROID_NDK_HOME")) |ndk| return ndk;
+    const folder = b.pathJoin(&.{ findAndroidSdk(b) orelse return null, "ndk" });
+    return b.pathJoin(&.{ folder, newestVersion(b, folder, "") orelse return null });
+}
+
+/// The Android SDK the environment names, or the one its installer puts in
+/// the user's folder, if it is there.
+pub fn findAndroidSdk(b: *std.Build) ?[]const u8 {
     const env = &b.graph.environ_map;
-    if (env.get("ANDROID_NDK_HOME")) |ndk| return ndk;
     const sdk = env.get("ANDROID_HOME") orelse env.get("ANDROID_SDK_ROOT") orelse switch (b.graph.host.result.os.tag) {
         .windows => b.pathJoin(&.{ env.get("LOCALAPPDATA") orelse return null, "Android", "Sdk" }),
         .macos => b.pathJoin(&.{ env.get("HOME") orelse return null, "Library", "Android", "sdk" }),
         else => b.pathJoin(&.{ env.get("HOME") orelse return null, "Android", "Sdk" }),
     };
+    std.Io.Dir.cwd().access(b.graph.io, sdk, .{}) catch return null;
+    return sdk;
+}
+
+/// The name of the folder in `folder` with the highest version after
+/// `prefix` - `27.2.12479018` of the NDKs, `android-36` of the SDK's
+/// platforms - or null when there is none. A version may have one, two or
+/// three numbers.
+pub fn newestVersion(b: *std.Build, folder: []const u8, prefix: []const u8) ?[]const u8 {
     const io = b.graph.io;
-    const folder = b.pathJoin(&.{ sdk, "ndk" });
     var dir = std.Io.Dir.cwd().openDir(io, folder, .{ .iterate = true }) catch return null;
     defer dir.close(io);
     var newest: ?[]const u8 = null;
+    var newest_version: std.SemanticVersion = undefined;
     var it = dir.iterate();
     while (it.next(io) catch return null) |entry| {
-        if (entry.kind != .directory) continue;
-        const version = std.SemanticVersion.parse(entry.name) catch continue;
-        if (newest) |held| if (version.order(std.SemanticVersion.parse(held) catch unreachable) != .gt) continue;
+        if (entry.kind != .directory or !std.mem.startsWith(u8, entry.name, prefix)) continue;
+        const version = looseVersion(entry.name[prefix.len..]) orelse continue;
+        if (newest != null and version.order(newest_version) != .gt) continue;
         newest = b.dupe(entry.name);
+        newest_version = version;
     }
-    return b.pathJoin(&.{ folder, newest orelse return null });
+    return newest;
+}
+
+fn looseVersion(text: []const u8) ?std.SemanticVersion {
+    var parts: [3]usize = .{ 0, 0, 0 };
+    var it = std.mem.splitScalar(u8, text, '.');
+    for (&parts) |*part| {
+        const piece = it.next() orelse break;
+        part.* = std.fmt.parseInt(usize, piece, 10) catch return null;
+    }
+    if (it.next() != null) return null;
+    return .{ .major = parts[0], .minor = parts[1], .patch = parts[2] };
 }
 
 /// Every source file of the engine but its tests, as the arguments of `run`.
