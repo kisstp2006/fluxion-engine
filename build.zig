@@ -120,6 +120,9 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("runtime/main.zig"),
         .target = target,
         .optimize = optimize,
+        // A game as it ships carries no debug information: a debug build
+        // is the one to find a fault with.
+        .strip = optimize == .ReleaseFast or optimize == .ReleaseSmall,
         .imports = &.{.{ .name = "fluxion_engine", .module = mod }},
     });
     const android = target.result.abi.isAndroid();
