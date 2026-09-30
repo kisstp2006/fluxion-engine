@@ -336,6 +336,12 @@ pub fn setIcon(self: *Window, images: []const platform.IconImage) Error!void {
     try self.handle.setIcon(images);
 }
 
+/// Whether the program file has a picture of its own, which the window shows
+/// until it is given another: a Windows program exported with an icon.
+pub fn programIcon(self: *const Window) bool {
+    return self.ctx.programIcon();
+}
+
 /// How far in from each edge of the framebuffer the part of the window
 /// nothing covers starts: a phone's notch, its gesture bar, a page's
 /// safe area. Nought on every desktop. See `App.safeArea`.

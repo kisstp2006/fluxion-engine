@@ -131,7 +131,7 @@ pub const Application = struct {
         .name = .{ attr.Required{}, attr.Doc{ .text = "What the project is called: the game window's title, and what the project list shows." } },
         .description = .{ attr.Multiline{}, attr.Doc{ .text = "A line or two about the project, for the project list." } },
         .version = .{attr.Doc{ .text = "Which version of the game this is - 1.2.0, say - for its menus to show: app.gameVersion()." }},
-        .icon = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "The project's picture: the game window's icon, and the project list's." } },
+        .icon = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "The project's picture: the game window's icon, and the project list's. Any size and shape: it is fitted into a square at each size the system draws an icon. A Windows program exported with an icon of its own shows that one." } },
         .main_scene = .{ attr.ProjectFile{ .kind = .scene }, attr.Doc{ .text = "The scene the game opens with, and what Play runs." } },
         .tags = .{attr.Doc{ .text = "Words to find the project by in the project list." }},
         .max_fps = .{ attr.Range{ .min = 0, .max = 1000, .step = 1 }, attr.Advanced{}, attr.Doc{ .text = "The most frames a second the game draws; nought for no limit." } },

@@ -7138,30 +7138,52 @@ fn useProjectCursor(self: *App) void {
 const CustomCursor = struct { pixels: []u8, width: u32, height: u32, hot_x: u32, hot_y: u32 };
 
 /// The window's own picture, in the title bar, the task switcher and the
-/// dock: several sizes at once, and the system takes the one it wants. An
-/// empty list puts the system's own back. Nothing without a window, and
-/// `error.Unavailable` on Wayland, where a window's picture comes from its
-/// desktop file, and on Android.
+/// dock: several sizes at once, each at most `platform.IconImage.max_side`
+/// pixels across, and the system takes the one it wants. An empty list puts
+/// the system's own back: the program's icon, when it has one. Nothing
+/// without a window, and `error.Unavailable` on Wayland, where a window's
+/// picture comes from its desktop file, on Android, and for an image too
+/// large.
 pub fn setWindowIcon(self: *App, images: []const platform.IconImage) Window.Error!void {
     if (self.window) |*window| try window.setIcon(images);
 }
 
+/// The sizes a window's picture is made in: what the systems draw one at,
+/// in a title bar and a task switcher, at the usual display scales.
+const window_icon_sides = [_]u32{ 16, 20, 24, 32, 40, 48, 64, 128, 256 };
+
 /// The project file's `application.icon` on the window, when it names one:
-/// what the game shows in the taskbar. A picture that does not read is
-/// said, and the window keeps the system's.
+/// what the game shows in the taskbar. The picture can be any size; the
+/// window gets it at each of `window_icon_sides`. A program with an icon of
+/// its own - a Windows export - keeps that one, which its export made for
+/// it. A picture that does not read is said, and the window keeps the
+/// system's.
 fn useProjectIcon(self: *App) void {
     const settings = self.project.settings orelse return;
     const path = settings.application.icon;
-    if (path.len == 0 or self.window == null) return;
+    const window = if (self.window) |*one| one else return;
+    if (path.len == 0 or window.programIcon()) return;
     const bytes = self.project.readFileAlloc(self.gpa, path, .limited(text_limit)) catch |err| {
         return log.warn("the project's icon {s} did not read: {t}", .{ path, err });
     };
     defer self.gpa.free(bytes);
-    var decoded = image.decode(self.gpa, bytes) catch |err| {
+    var art = Image.decode(self.gpa, bytes) catch |err| {
         return log.warn("the project's icon {s} did not read: {t}", .{ path, err });
     };
-    defer decoded.deinit(self.gpa);
-    self.setWindowIcon(&.{.{ .pixels = decoded.pixels, .width = decoded.width, .height = decoded.height }}) catch |err| {
+    defer art.deinit(self.gpa);
+
+    var made: [window_icon_sides.len]Image = undefined;
+    var sizes: [window_icon_sides.len]platform.IconImage = undefined;
+    var count: usize = 0;
+    defer for (made[0..count]) |*one| one.deinit(self.gpa);
+    for (window_icon_sides) |side| {
+        made[count] = art.icon(self.gpa, side, side) catch |err| {
+            return log.warn("the project's icon {s} was not put on the window: {t}", .{ path, err });
+        };
+        sizes[count] = .{ .pixels = made[count].pixels, .width = side, .height = side };
+        count += 1;
+    }
+    self.setWindowIcon(&sizes) catch |err| {
         log.warn("the project's icon {s} was not put on the window: {t}", .{ path, err });
     };
 }

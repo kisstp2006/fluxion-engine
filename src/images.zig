@@ -153,41 +153,78 @@ pub const Image = struct {
     }
 
     /// A new image `width` by `height` of this one, each pixel the nearest,
-    /// or - `smooth` - the four nearest mixed.
+    /// or - `smooth` - mixed: of all the old pixels it covers where the
+    /// picture shrinks, so none is skipped over, and of the two nearest on
+    /// each side where it grows. The colours are mixed by how opaque each
+    /// pixel is, so a see-through one's colour does not show at an edge.
     pub fn resized(self: Image, gpa: Allocator, width: u32, height: u32, smooth: bool) Error!Image {
         if (width == 0 or height == 0 or width > max_side or height > max_side) return error.BadSize;
         const out: Image = .{ .width = width, .height = height, .pixels = try gpa.alloc(u8, @as(usize, width) * height * 4) };
-        const sx = @as(f32, @floatFromInt(self.width)) / @as(f32, @floatFromInt(width));
-        const sy = @as(f32, @floatFromInt(self.height)) / @as(f32, @floatFromInt(height));
-        for (0..height) |row| for (0..width) |column| {
-            const to = out.pixels[(row * width + column) * 4 ..][0..4];
-            // The middle of the new pixel, in the old one's pixels.
-            const fx = (@as(f32, @floatFromInt(column)) + 0.5) * sx - 0.5;
-            const fy = (@as(f32, @floatFromInt(row)) + 0.5) * sy - 0.5;
-            if (!smooth) {
+        if (!smooth) {
+            const sx = @as(f32, @floatFromInt(self.width)) / @as(f32, @floatFromInt(width));
+            const sy = @as(f32, @floatFromInt(self.height)) / @as(f32, @floatFromInt(height));
+            for (0..height) |row| for (0..width) |column| {
+                // The middle of the new pixel, in the old one's pixels.
+                const fx = (@as(f32, @floatFromInt(column)) + 0.5) * sx - 0.5;
+                const fy = (@as(f32, @floatFromInt(row)) + 0.5) * sy - 0.5;
                 const nx: usize = @intFromFloat(std.math.clamp(@round(fx), 0, @as(f32, @floatFromInt(self.width - 1))));
                 const ny: usize = @intFromFloat(std.math.clamp(@round(fy), 0, @as(f32, @floatFromInt(self.height - 1))));
-                to.* = self.pixels[(ny * self.width + nx) * 4 ..][0..4].*;
-                continue;
+                out.pixels[(row * width + column) * 4 ..][0..4].* = self.pixels[(ny * self.width + nx) * 4 ..][0..4].*;
+            };
+            return out;
+        }
+        errdefer gpa.free(out.pixels);
+
+        // Across first, into a picture as tall as this one, then down. Its
+        // colours are premultiplied, which is what makes a mix weigh them by
+        // how opaque they are.
+        const across = try gpa.alloc([4]f32, @as(usize, width) * self.height);
+        defer gpa.free(across);
+        for (0..width) |column| {
+            const span: Span = .of(column, self.width, width);
+            for (0..self.height) |row| {
+                var sum: [4]f32 = @splat(0);
+                for (span.first..span.last + 1) |from| {
+                    const weight = span.weight(from);
+                    const pixel = self.pixels[(row * self.width + from) * 4 ..][0..4];
+                    const alpha = @as(f32, @floatFromInt(pixel[3])) / 255;
+                    for (0..3) |c| sum[c] += weight * alpha * @as(f32, @floatFromInt(pixel[c]));
+                    sum[3] += weight * @as(f32, @floatFromInt(pixel[3]));
+                }
+                across[row * width + column] = sum;
             }
-            const x0f = std.math.clamp(@floor(fx), 0, @as(f32, @floatFromInt(self.width - 1)));
-            const y0f = std.math.clamp(@floor(fy), 0, @as(f32, @floatFromInt(self.height - 1)));
-            const x0: usize = @intFromFloat(x0f);
-            const y0: usize = @intFromFloat(y0f);
-            const x1 = @min(x0 + 1, self.width - 1);
-            const y1 = @min(y0 + 1, self.height - 1);
-            const tx = std.math.clamp(fx - x0f, 0, 1);
-            const ty = std.math.clamp(fy - y0f, 0, 1);
-            for (0..4) |c| {
-                const a: f32 = @floatFromInt(self.pixels[(y0 * self.width + x0) * 4 + c]);
-                const b: f32 = @floatFromInt(self.pixels[(y0 * self.width + x1) * 4 + c]);
-                const d: f32 = @floatFromInt(self.pixels[(y1 * self.width + x0) * 4 + c]);
-                const e: f32 = @floatFromInt(self.pixels[(y1 * self.width + x1) * 4 + c]);
-                const top = a + (b - a) * tx;
-                const bottom = d + (e - d) * tx;
-                to[c] = @intFromFloat(@round(std.math.clamp(top + (bottom - top) * ty, 0, 255)));
+        }
+        for (0..height) |row| {
+            const span: Span = .of(row, self.height, height);
+            for (0..width) |column| {
+                var sum: [4]f32 = @splat(0);
+                for (span.first..span.last + 1) |from| {
+                    const weight = span.weight(from);
+                    for (0..4) |c| sum[c] += weight * across[from * width + column][c];
+                }
+                const to = out.pixels[(row * width + column) * 4 ..][0..4];
+                const alpha = sum[3] / 255;
+                for (0..3) |c| to[c] = if (alpha > 0) byteOf(sum[c] / alpha) else 0;
+                to[3] = byteOf(sum[3]);
             }
-        };
+        }
+        return out;
+    }
+
+    /// The picture as an icon `side` pixels square: made to fit `room`
+    /// pixels across, its shape kept, in the middle of the square and
+    /// see-through around it. A `room` of `side` fills the square.
+    pub fn icon(self: Image, gpa: Allocator, side: u32, room: u32) Error!Image {
+        const fit = @min(
+            @as(f32, @floatFromInt(room)) / @as(f32, @floatFromInt(self.width)),
+            @as(f32, @floatFromInt(room)) / @as(f32, @floatFromInt(self.height)),
+        );
+        const width: u32 = @max(1, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(self.width)) * fit))));
+        const height: u32 = @max(1, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(self.height)) * fit))));
+        var small = try self.resized(gpa, width, height, true);
+        defer small.deinit(gpa);
+        const out = try init(gpa, side, side, .transparent);
+        out.blit(small, (@as(i64, side) - width) >> 1, (@as(i64, side) - height) >> 1);
         return out;
     }
 
@@ -238,6 +275,47 @@ pub const Image = struct {
         return image.jpeg.encodeAlloc(gpa, self.view(), .{ .quality = quality });
     }
 };
+
+/// Which pixels of a line `from` long one pixel `at` of the line `to` long
+/// is mixed of, and how much of each: the part of each it covers, where the
+/// line shrinks; the two nearest its middle, where it grows.
+const Span = struct {
+    first: usize,
+    last: usize,
+    /// Where the new pixel starts and ends, in the old ones: shrinking.
+    start: f32 = 0,
+    end: f32 = 0,
+    /// How far its middle is past `first`: growing.
+    past: ?f32 = null,
+
+    fn of(at: usize, from: u32, to: u32) Span {
+        const scale = @as(f32, @floatFromInt(from)) / @as(f32, @floatFromInt(to));
+        const i: f32 = @floatFromInt(at);
+        if (scale <= 1) {
+            const middle = std.math.clamp((i + 0.5) * scale - 0.5, 0, @as(f32, @floatFromInt(from - 1)));
+            const first: usize = @intFromFloat(@floor(middle));
+            return .{ .first = first, .last = @min(first + 1, from - 1), .past = middle - @floor(middle) };
+        }
+        const start = i * scale;
+        const end = @min((i + 1) * scale, @as(f32, @floatFromInt(from)));
+        const first: usize = @intFromFloat(@floor(start));
+        const last = @max(first, @min(@as(usize, @intFromFloat(@ceil(end))) -| 1, from - 1));
+        return .{ .first = first, .last = last, .start = start, .end = end };
+    }
+
+    fn weight(self: Span, at: usize) f32 {
+        if (self.past) |past| {
+            if (self.first == self.last) return 1;
+            return if (at == self.first) 1 - past else past;
+        }
+        const i: f32 = @floatFromInt(at);
+        return @max(0, @min(i + 1, self.end) - @max(i, self.start)) / (self.end - self.start);
+    }
+};
+
+fn byteOf(v: f32) u8 {
+    return @intFromFloat(@round(std.math.clamp(v, 0, 255)));
+}
 
 fn channel(v: f32) u8 {
     return @intFromFloat(@round(std.math.clamp(v, 0, 1) * 255));
@@ -340,4 +418,47 @@ test "an image is made smaller or bigger, sharp or smooth, and written as a PNG 
     const jpg_bytes = try smooth.encodeJpg(testing.allocator, 90);
     defer testing.allocator.free(jpg_bytes);
     try testing.expectEqual(image.Kind.jpeg, image.kindOf(jpg_bytes).?);
+}
+
+test "a picture made much smaller mixes every pixel it covers, by how opaque each is" {
+    // Stripes one pixel wide, black and white: a quarter of the width is
+    // the grey of both, not whichever stripes a sample landed on.
+    var stripes = try Image.init(testing.allocator, 64, 64, .black);
+    defer stripes.deinit(testing.allocator);
+    for (0..32) |i| stripes.fillRect(@intCast(i * 2 + 1), 0, 1, 64, .white);
+    var small = try stripes.resized(testing.allocator, 16, 16, true);
+    defer small.deinit(testing.allocator);
+    for (0..16) |x| try testing.expectApproxEqAbs(@as(f32, 0.5), small.getPixel(@intCast(x), 8).?.r, 0.01);
+
+    // Red beside see-through black: the edge is red, half as opaque, never
+    // darkened by a colour no one sees.
+    var edge = try Image.init(testing.allocator, 4, 2, .transparent);
+    defer edge.deinit(testing.allocator);
+    edge.fillRect(0, 0, 2, 2, .{ .r = 1, .g = 0, .b = 0, .a = 1 });
+    var half = try edge.resized(testing.allocator, 1, 1, true);
+    defer half.deinit(testing.allocator);
+    const mixed = half.getPixel(0, 0).?;
+    try testing.expectApproxEqAbs(@as(f32, 1), mixed.r, 0.01);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), mixed.a, 0.01);
+}
+
+test "an icon is the picture fitted in the middle of a see-through square" {
+    var wide = try Image.init(testing.allocator, 200, 100, .white);
+    defer wide.deinit(testing.allocator);
+    var made = try wide.icon(testing.allocator, 32, 32);
+    defer made.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 32), made.width);
+    try testing.expectEqual(@as(u32, 32), made.height);
+    // 32 by 16, from row 8 to 24.
+    try testing.expectEqual(@as(f32, 0), made.getPixel(16, 7).?.a);
+    try testing.expectEqual(@as(f32, 1), made.getPixel(16, 8).?.a);
+    try testing.expectEqual(@as(f32, 1), made.getPixel(16, 23).?.a);
+    try testing.expectEqual(@as(f32, 0), made.getPixel(16, 24).?.a);
+
+    // In a smaller room: 16 by 8 in the middle.
+    var roomy = try wide.icon(testing.allocator, 32, 16);
+    defer roomy.deinit(testing.allocator);
+    try testing.expectEqual(@as(f32, 0), roomy.getPixel(7, 16).?.a);
+    try testing.expectEqual(@as(f32, 1), roomy.getPixel(8, 12).?.a);
+    try testing.expectEqual(@as(f32, 0), roomy.getPixel(8, 11).?.a);
 }
