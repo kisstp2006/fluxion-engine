@@ -5005,10 +5005,8 @@ pub fn componentOf(self: *App, entity: ecs.Entity, name: []const u8) ?reflect.Va
 /// by name. A script's handle on a component looks itself up with this each
 /// time the script uses it.
 pub fn componentOfType(self: *App, entity: ecs.Entity, t: *const reflect.Type) ?reflect.Value {
-    for (self.scene_components.entries.items) |*entry| {
-        if (entry.type == t) return self.valueOf(entity, entry);
-    }
-    return null;
+    const entry = self.scene_components.findType(t) orelse return null;
+    return self.valueOf(entity, entry);
 }
 
 /// Every registered component an entity has, in the order they were

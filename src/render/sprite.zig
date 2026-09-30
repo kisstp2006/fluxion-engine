@@ -130,9 +130,6 @@ const Item = struct {
     key: u64,
     /// `Sprite.order`: sorted between the layer and the texture.
     order: f32,
-    /// Where in the walk it was found. The last tie-breaker, so equal sprites
-    /// keep their order from frame to frame: the sort is not stable.
-    sequence: u32,
     instance: Instance,
     texture: rhi.Texture,
     sampler: rhi.Sampler,
@@ -145,18 +142,26 @@ const Item = struct {
     /// Drawn as it is over the lit world, in a frame that is lit.
     unshaded: bool = false,
 
-    /// In the order drawn: in a lit frame, the lit before the unshaded.
-    fn before(lit: bool, a: Item, b: Item) bool {
-        if (lit and a.unshaded != b.unshaded) return !a.unshaded;
-        const layer_a = a.key >> 32;
-        const layer_b = b.key >> 32;
-        if (layer_a != layer_b) return layer_a < layer_b;
-        if (a.order != b.order) return a.order < b.order;
-        if (a.blend != b.blend) return @intFromEnum(a.blend) < @intFromEnum(b.blend);
-        if (!a.shader.eql(b.shader)) return a.shader.index < b.shader.index;
-        if (a.params != b.params) return a.params < b.params;
-        if (a.key != b.key) return a.key < b.key;
-        return a.sequence < b.sequence;
+    /// What it is drawn in the order of, as one number, most telling first:
+    /// in a lit frame the lit before the unshaded, then the layer, the order,
+    /// the blend, the shader, the set of numbers and the texture - the last
+    /// four so that what shares a draw is together. Two with the same key
+    /// are drawn in the order they were found, so they keep it from frame to
+    /// frame. A shader's index past 16 bits or a set's past 24 are taken as
+    /// the last there is: they sort together, which costs draws, not order.
+    fn rank(self: Item, lit: bool) u128 {
+        var out: u128 = @intFromBool(lit and self.unshaded);
+        out = (out << 16) | (self.key >> 32);
+        out = (out << 32) | orderBits(self.order);
+        out = (out << 4) | @intFromEnum(self.blend);
+        out = (out << 16) | @min(self.shader.index, 0xFFFF);
+        out = (out << 24) | @min(self.params, 0xFF_FFFF);
+        out = (out << 32) | (self.key & 0xFFFF_FFFF);
+        return out;
+    }
+
+    comptime {
+        std.debug.assert(@typeInfo(material.Blend).@"enum".fields.len <= 16);
     }
 
     fn sharesDrawWith(self: Item, other: Item) bool {
@@ -167,6 +172,57 @@ const Item = struct {
             std.meta.eql(self.sampler, other.sampler);
     }
 };
+
+/// A float's bits turned so that they compare as the float does: nought and
+/// minus nought alike.
+fn orderBits(order: f32) u32 {
+    const bits: u32 = @bitCast(if (order == 0) 0 else order);
+    return if (bits >> 31 != 0) ~bits else bits | 0x8000_0000;
+}
+
+/// One item's key and where it was found: what the frame sorts, small, so
+/// the sort moves little.
+const Ranked = struct {
+    key: u128,
+    at: u32,
+
+    fn before(_: void, a: Ranked, b: Ranked) bool {
+        return a.key < b.key or (a.key == b.key and a.at < b.at);
+    }
+};
+
+/// `ranked` in the order of its keys, those alike kept in the order they
+/// are in: a byte of the key at a time, from the lowest, leaving out the
+/// bytes every key has alike - most of them, in most frames - so a frame
+/// costs a few passes over its items rather than a comparison sort's many.
+/// `room` is as long as `ranked`.
+fn radixSort(ranked: []Ranked, room: []Ranked) void {
+    if (ranked.len < 2) return;
+    var differ: u128 = 0;
+    for (ranked) |one| differ |= one.key ^ ranked[0].key;
+    var from = ranked;
+    var to = room[0..ranked.len];
+    var byte: u8 = 0;
+    while (byte < 16) : (byte += 1) {
+        const shift: u7 = @intCast(byte * 8);
+        if (@as(u8, @truncate(differ >> shift)) == 0) continue;
+        var starts: [256]u32 = @splat(0);
+        for (from) |one| starts[@as(u8, @truncate(one.key >> shift))] += 1;
+        var sum: u32 = 0;
+        for (&starts) |*start| {
+            const count = start.*;
+            start.* = sum;
+            sum += count;
+        }
+        for (from) |one| {
+            const digit: u8 = @truncate(one.key >> shift);
+            to[starts[digit]] = one;
+            starts[digit] += 1;
+        }
+        std.mem.swap([]Ranked, &from, &to);
+    }
+    if (from.ptr != ranked.ptr) @memcpy(ranked, from);
+}
 
 /// The four corners of the unit square, as a triangle strip.
 const quad_corners = [8]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
@@ -235,6 +291,11 @@ pub const Renderer = struct {
 
     /// This frame's sprites, gathered and sorted. Kept for its capacity.
     items: std.ArrayList(Item) = .empty,
+    /// The frame's items ranked, and put in that order: kept from frame to
+    /// frame, as `items` is.
+    sort_keys: std.ArrayList(Ranked) = .empty,
+    sort_room: std.ArrayList(Ranked) = .empty,
+    sorted: std.ArrayList(Item) = .empty,
     /// An emitter's living particles, in the order they are drawn.
     ranks: std.ArrayList(u32) = .empty,
 
@@ -318,6 +379,9 @@ pub const Renderer = struct {
 
     pub fn deinit(self: *Renderer, gpa: Allocator) void {
         self.items.deinit(gpa);
+        self.sort_keys.deinit(gpa);
+        self.sort_room.deinit(gpa);
+        self.sorted.deinit(gpa);
         self.ranks.deinit(gpa);
         self.emptied.deinit(gpa);
         self.staging.deinit(gpa);
@@ -663,8 +727,6 @@ pub const Renderer = struct {
         self.tile_chunks_drawn = 0;
         self.tile_chunks_culled = 0;
 
-        var sequence: u32 = 0;
-
         var it = try Drawable.over(world);
         while (it.next()) |chunk| {
             const transforms = chunk.slice(Transform2D);
@@ -704,11 +766,9 @@ pub const Renderer = struct {
                 const s = @sin(transform.rotation);
                 const drawn_with = try self.materialOf(gpa, world, entity);
 
-                defer sequence += 1;
                 try self.items.append(gpa, .{
                     .key = sortKey(looks.layer(sprite.layer), picture),
                     .order = sprite.order,
-                    .sequence = sequence,
                     .texture = texture.gpu,
                     .sampler = assets.samplerFor(texture.filter, texture.wrap),
                     .blend = .of(sprite.blend),
@@ -720,11 +780,25 @@ pub const Renderer = struct {
             }
         }
 
-        try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view, &sequence);
-        try self.gatherParticles(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
-        try self.gatherWords(gpa, world, assets, snapshots, inherited, alpha, view, &sequence);
+        try self.gatherTiles(gpa, world, assets, tile_sets, snapshots, inherited, alpha, view);
+        try self.gatherParticles(gpa, world, assets, snapshots, inherited, alpha, view);
+        try self.gatherWords(gpa, world, assets, snapshots, inherited, alpha, view);
 
-        std.sort.pdq(Item, self.items.items, lit, Item.before);
+        try self.sortItems(gpa, lit);
+    }
+
+    /// The items in the order they are drawn in: see `Item.rank`.
+    fn sortItems(self: *Renderer, gpa: Allocator, lit: bool) !void {
+        const items = self.items.items;
+        try self.sort_keys.resize(gpa, items.len);
+        for (items, self.sort_keys.items, 0..) |item, *rank, at| rank.* = .{ .key = item.rank(lit), .at = @intCast(at) };
+        // A world that does not change its layers is found in order again.
+        if (std.sort.isSorted(Ranked, self.sort_keys.items, {}, Ranked.before)) return;
+        try self.sort_room.resize(gpa, items.len);
+        radixSort(self.sort_keys.items, self.sort_room.items);
+        try self.sorted.resize(gpa, items.len);
+        for (self.sort_keys.items, self.sorted.items) |rank, *to| to.* = items[rank.at];
+        std.mem.swap(std.ArrayList(Item), &self.items, &self.sorted);
     }
 
     /// Every emitter's living particles, one instance each, among the
@@ -739,7 +813,6 @@ pub const Renderer = struct {
         inherited: *Inherited,
         alpha: f32,
         view: View,
-        sequence: *u32,
     ) !void {
         const table = self.particles orelse return;
         const bounds = view.bounds();
@@ -807,12 +880,9 @@ pub const Renderer = struct {
                     const cells_down: f32 = @floatFromInt(down);
                     var region: components.Region = .{ .u0 = column / cells_across, .v0 = row / cells_down, .u1 = (column + 1) / cells_across, .v1 = (row + 1) / cells_down };
                     if (picture.upside_down) region = region.flippedY();
-
-                    sequence.* += 1;
                     try self.items.append(gpa, .{
                         .key = key,
                         .order = settings.order,
-                        .sequence = sequence.*,
                         .texture = picture.gpu,
                         .sampler = sampler,
                         .blend = .of(settings.blend),
@@ -839,18 +909,15 @@ pub const Renderer = struct {
         inherited: *Inherited,
         alpha: f32,
         view: View,
-        sequence: *u32,
     ) !void {
         const from = self.items.items.len;
-        const sequence_from = sequence.*;
         const culled_from = self.culled;
         self.emptied.clearRetainingCapacity();
         defer self.fit_only = false;
         while (true) {
-            self.layWords(gpa, world, assets, snapshots, inherited, alpha, view, sequence) catch |err| switch (err) {
+            self.layWords(gpa, world, assets, snapshots, inherited, alpha, view) catch |err| switch (err) {
                 error.AtlasFull => {
                     self.items.shrinkRetainingCapacity(from);
-                    sequence.* = sequence_from;
                     self.culled = culled_from;
                     const face = self.full.?;
                     if (std.mem.indexOfScalar(*Assets.Font, self.emptied.items, face) == null) {
@@ -878,10 +945,9 @@ pub const Renderer = struct {
         inherited: *Inherited,
         alpha: f32,
         view: View,
-        sequence: *u32,
     ) !void {
-        try self.gatherText(gpa, world, assets, snapshots, inherited, alpha, view, sequence);
-        try self.gatherDrawings(gpa, world, assets, snapshots, inherited, alpha, view, sequence);
+        try self.gatherText(gpa, world, assets, snapshots, inherited, alpha, view);
+        try self.gatherDrawings(gpa, world, assets, snapshots, inherited, alpha, view);
     }
 
     /// The texture a sprite shows: a render view's picture, for one with a
@@ -921,7 +987,6 @@ pub const Renderer = struct {
         inherited: *Inherited,
         alpha: f32,
         view: View,
-        sequence: *u32,
     ) !void {
         const bounds = view.bounds();
         var it = try TileChunks.over(world);
@@ -972,12 +1037,9 @@ pub const Renderer = struct {
                     const rotation = if (how.turned) placed.rotation - turn else placed.rotation;
                     const across = if (how.turned) tile_height * placed.scale_y else tile_width * placed.scale_x;
                     const down = if (how.turned) tile_width * placed.scale_x else tile_height * placed.scale_y;
-
-                    sequence.* += 1;
                     try self.items.append(gpa, .{
                         .key = sortKey(layer, picture.texture),
                         .order = map.order,
-                        .sequence = sequence.*,
                         .texture = texture.gpu,
                         .sampler = assets.samplerFor(texture.filter, texture.wrap),
                         .blend = .alpha,
@@ -1001,7 +1063,6 @@ pub const Renderer = struct {
         inherited: *Inherited,
         alpha: f32,
         view: View,
-        sequence: *u32,
     ) !void {
         const bounds = view.bounds();
         var it = try Labels.over(world);
@@ -1026,7 +1087,7 @@ pub const Renderer = struct {
                 var shown = label;
                 shown.color = looks.tint(label.color);
                 shown.layer = looks.layer(label.layer);
-                try self.layOut(gpa, assets, face, shown, run, transform, bounds, sequence, null, looks.unshaded);
+                try self.layOut(gpa, assets, face, shown, run, transform, bounds, null, looks.unshaded);
             }
         }
     }
@@ -1041,7 +1102,6 @@ pub const Renderer = struct {
         run: []const u8,
         transform: Transform2D,
         bounds: Bounds,
-        sequence: *u32,
         /// A drawing's key, so its words stay among its shapes in the order
         /// they were drawn; null for a label's own.
         drawn_key: ?u64,
@@ -1055,7 +1115,8 @@ pub const Renderer = struct {
 
         // The whole label against the camera, boxed generously: one test, not
         // one per letter.
-        const measured = measure(&face.face, scaled, run);
+        var widths: [max_measured_lines]f32 = undefined;
+        const measured = measureLines(&face.face, scaled, run, &widths);
         const reach = spriteRadius(
             measured.width * stretch * @abs(transform.scale_x),
             (measured.lines * line_height) * @abs(transform.scale_y),
@@ -1073,7 +1134,7 @@ pub const Renderer = struct {
             label.font.index);
 
         var line_start: usize = 0;
-        var line_index: f32 = 0;
+        var line_index: usize = 0;
 
         while (line_start <= run.len) {
             const end = std.mem.indexOfScalarPos(u8, run, line_start, '\n') orelse run.len;
@@ -1081,11 +1142,17 @@ pub const Renderer = struct {
 
             // The transform is the top left of the first line, so the first
             // baseline is one ascent below it.
-            const baseline = scaled.ascent() * stretch + line_index * line_height;
+            const baseline = scaled.ascent() * stretch + @as(f32, @floatFromInt(line_index)) * line_height;
+            const width = if (label.alignment == .left)
+                0
+            else if (line_index < widths.len)
+                widths[line_index]
+            else
+                lineWidth(&face.face, scaled, line);
             var pen: f32 = switch (label.alignment) {
                 .left => 0,
-                .center => -lineWidth(&face.face, scaled, line) * stretch / 2,
-                .right => -lineWidth(&face.face, scaled, line) * stretch,
+                .center => -width * stretch / 2,
+                .right => -width * stretch,
             };
 
             var previous_glyph: ?u16 = null;
@@ -1116,12 +1183,9 @@ pub const Renderer = struct {
 
                 // The glyph's top left, in the label's space, then the world's.
                 const placed = transform.apply(pen + entry.left * stretch, baseline - entry.top * stretch);
-
-                sequence.* += 1;
                 try self.items.append(gpa, .{
                     .key = key,
                     .order = label.order,
-                    .sequence = sequence.*,
                     .texture = face.texture,
                     // Linear: a zoomed camera draws glyphs at sizes they were
                     // not rasterised at.
@@ -1161,7 +1225,6 @@ pub const Renderer = struct {
         inherited: *Inherited,
         alpha: f32,
         view: View,
-        sequence: *u32,
     ) !void {
         const table = self.drawings orelse return;
         const bounds = view.bounds();
@@ -1196,7 +1259,6 @@ pub const Renderer = struct {
                     // were drawn in, whatever their pictures.
                     .key = sortKeyOf(looks.layer(held.layer), drawn_key_base | entity.index),
                     .order = held.order,
-                    .sequence = sequence,
                     .white = white.gpu,
                     .white_sampler = assets.samplerFor(white.filter, white.wrap),
                     .shader = drawn_with.shader,
@@ -1219,7 +1281,6 @@ pub const Renderer = struct {
         looks: @import("../inherited.zig").Resolved,
         key: u64,
         order: f32,
-        sequence: *u32,
         white: rhi.Texture,
         white_sampler: rhi.Sampler,
         shader: ShaderHandle,
@@ -1241,11 +1302,9 @@ pub const Renderer = struct {
         }
 
         fn put(self: *Pen, instance: Instance, texture: rhi.Texture, sampler: rhi.Sampler) !void {
-            self.sequence.* += 1;
             try self.renderer.items.append(self.gpa, .{
                 .key = self.key,
                 .order = self.order,
-                .sequence = self.sequence.*,
                 .texture = texture,
                 .sampler = sampler,
                 .blend = .alpha,
@@ -1357,7 +1416,7 @@ pub const Renderer = struct {
                     placed.y = start.y;
                     const shown = self.looks.tint(held.color);
                     const label: Text2D = .{ .font = held.font, .size = held.size, .color = shown, .order = self.order };
-                    try self.renderer.layOut(self.gpa, assets, face, label, run, placed, bounds, self.sequence, self.key, self.looks.unshaded);
+                    try self.renderer.layOut(self.gpa, assets, face, label, run, placed, bounds, self.key, self.looks.unshaded);
                 },
             }
         }
@@ -1401,18 +1460,28 @@ fn lineWidth(face: *const typeface.Font, scaled: typeface.Scaled, line: []const 
 }
 
 /// The widest line, and how many there are.
-fn measure(face: *const typeface.Font, scaled: typeface.Scaled, run: []const u8) struct {
-    width: f32,
-    lines: f32,
-} {
+fn measure(face: *const typeface.Font, scaled: typeface.Scaled, run: []const u8) Measured {
+    return measureLines(face, scaled, run, &.{});
+}
+
+const Measured = struct { width: f32, lines: f32 };
+
+/// How many lines' widths a label's layout keeps from measuring it, for
+/// their alignment; one with more measures the rest again.
+const max_measured_lines = 32;
+
+/// `measure`, with the width of each of the first lines put in `widths`.
+fn measureLines(face: *const typeface.Font, scaled: typeface.Scaled, run: []const u8, widths: []f32) Measured {
     var widest: f32 = 0;
-    var lines: f32 = 0;
+    var lines: usize = 0;
     var it = std.mem.splitScalar(u8, run, '\n');
     while (it.next()) |line| {
-        widest = @max(widest, lineWidth(face, scaled, line));
+        const width = lineWidth(face, scaled, line);
+        if (lines < widths.len) widths[lines] = width;
+        widest = @max(widest, width);
         lines += 1;
     }
-    return .{ .width = widest, .lines = lines };
+    return .{ .width = widest, .lines = @floatFromInt(lines) };
 }
 
 /// How far from its transform a sprite can reach, whatever its pivot and
@@ -1548,17 +1617,16 @@ test "sprites of one layer are grouped by texture" {
     try testing.expect(sortKey(0, second) < sortKey(1, first));
 }
 
-test "within a layer, order comes first, then blend, then texture, and sequence breaks the tie" {
+test "within a layer, order comes first, then blend, then texture, and where it was found breaks the tie" {
     const first: Assets.TextureHandle = .{ .index = 1, .generation = 1 };
     const second: Assets.TextureHandle = .{ .index = 2, .generation = 1 };
     const blank: Instance = .{ .place = @splat(0), .shape = @splat(0), .tint = @splat(0), .uv_rect = @splat(0) };
 
     const item = struct {
-        fn make(layer: i16, order: f32, texture: Assets.TextureHandle, sequence: u32) Item {
+        fn make(layer: i16, order: f32, texture: Assets.TextureHandle) Item {
             return .{
                 .key = sortKey(layer, texture),
                 .order = order,
-                .sequence = sequence,
                 .instance = blank,
                 .texture = .none,
                 .sampler = .none,
@@ -1566,32 +1634,65 @@ test "within a layer, order comes first, then blend, then texture, and sequence 
             };
         }
 
-        fn glowing(layer: i16, order: f32, texture: Assets.TextureHandle, sequence: u32) Item {
-            var out = make(layer, order, texture, sequence);
+        fn glowing(layer: i16, order: f32, texture: Assets.TextureHandle) Item {
+            var out = make(layer, order, texture);
             out.blend = .additive;
             return out;
         }
+
+        fn before(lit: bool, a: Item, b: Item) bool {
+            return a.rank(lit) < b.rank(lit);
+        }
     };
 
-    // A lower order draws first even on a later texture.
-    try testing.expect(Item.before(false, item.make(0, 1, second, 0), item.make(0, 2, first, 1)));
+    // A lower order draws first even on a later texture, and a negative one
+    // before nought.
+    try testing.expect(item.before(false, item.make(0, 1, second), item.make(0, 2, first)));
+    try testing.expect(item.before(false, item.make(0, -2, second), item.make(0, -1, first)));
+    try testing.expect(item.before(false, item.make(0, -0.5, second), item.make(0, 0, first)));
+    try testing.expectEqual(item.make(0, 0, first).rank(false), item.make(0, -0.0, first).rank(false));
     // The same order falls back to the texture, which keeps the batching.
-    try testing.expect(Item.before(false, item.make(0, 0, first, 5), item.make(0, 0, second, 0)));
-    // Everything equal: whichever was found first.
-    try testing.expect(Item.before(false, item.make(0, 0, first, 3), item.make(0, 0, first, 4)));
-    try testing.expect(!Item.before(false, item.make(0, 0, first, 4), item.make(0, 0, first, 3)));
+    try testing.expect(item.before(false, item.make(0, 0, first), item.make(0, 0, second)));
     // And the layer still wins over all of it.
-    try testing.expect(Item.before(false, item.make(-1, 100, second, 9), item.make(0, 0, first, 0)));
+    try testing.expect(item.before(false, item.make(-1, 100, second), item.make(0, 0, first)));
 
-    try testing.expect(Item.before(false, item.make(0, 0, second, 1), item.glowing(0, 0, first, 0)));
-    try testing.expect(Item.before(false, item.glowing(0, -1, first, 2), item.make(0, 0, second, 1)));
+    try testing.expect(item.before(false, item.make(0, 0, second), item.glowing(0, 0, first)));
+    try testing.expect(item.before(false, item.glowing(0, -1, first), item.make(0, 0, second)));
 
     // In a lit frame what is unshaded comes after all that is lit, whatever
     // its layer; in one that is not, the layer decides.
-    var sign = item.make(-5, 0, first, 0);
+    var sign = item.make(-5, 0, first);
     sign.unshaded = true;
-    try testing.expect(Item.before(true, item.make(3, 0, second, 1), sign));
-    try testing.expect(Item.before(false, sign, item.make(3, 0, second, 1)));
+    try testing.expect(item.before(true, item.make(3, 0, second), sign));
+    try testing.expect(item.before(false, sign, item.make(3, 0, second)));
+
+    // Everything equal: whichever was found first, however many there are.
+    const a = Ranked{ .key = item.make(0, 0, first).rank(false), .at = 3 };
+    const b = Ranked{ .key = a.key, .at = 4 };
+    try testing.expect(Ranked.before({}, a, b));
+    try testing.expect(!Ranked.before({}, b, a));
+}
+
+test "the sort puts keys in order and keeps the order of those alike" {
+    var prng = std.Random.DefaultPrng.init(3);
+    const random = prng.random();
+    var ranked: [500]Ranked = undefined;
+    var room: [500]Ranked = undefined;
+    for (&ranked, 0..) |*one, at| {
+        // A few layers and textures, and an order: bytes far apart.
+        const layer: u128 = random.uintLessThan(u8, 4);
+        const texture: u128 = random.uintLessThan(u8, 3);
+        one.* = .{ .key = (layer << 112) | (@as(u128, orderBits(@floatFromInt(random.intRangeAtMost(i8, -2, 2)))) << 80) | texture, .at = @intCast(at) };
+    }
+    var expected = ranked;
+    std.sort.pdq(Ranked, &expected, {}, Ranked.before);
+    radixSort(&ranked, &room);
+    try testing.expectEqualSlices(Ranked, &expected, &ranked);
+    // One alike throughout, and one of none, are left as they are.
+    var same = [_]Ranked{ .{ .key = 5, .at = 0 }, .{ .key = 5, .at = 1 } };
+    radixSort(&same, room[0..2]);
+    try testing.expectEqual(@as(u32, 0), same[0].at);
+    radixSort(ranked[0..0], room[0..0]);
 }
 
 test "a sprite with no size of its own takes the texture's" {

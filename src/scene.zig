@@ -202,6 +202,9 @@ const FileInfo = struct {
 /// What scenes can hold, and what each component is called in one.
 pub const Registry = struct {
     entries: std.ArrayList(Entry) = .empty,
+    /// Where in `entries` each type is, by its reflected id: a script finds
+    /// a component by its type at every use.
+    by_type: std.AutoHashMapUnmanaged(u64, u32) = .empty,
 
     pub const Error = error{
         /// Another type is registered under that name. Declare
@@ -269,6 +272,7 @@ pub const Registry = struct {
 
     pub fn deinit(self: *Registry, gpa: Allocator) void {
         self.entries.deinit(gpa);
+        self.by_type.deinit(gpa);
     }
 
     /// Let scenes hold `T`s, under `name`, which must outlive the registry.
@@ -279,7 +283,10 @@ pub const Registry = struct {
             if (entry.key == key) return;
             if (std.mem.eql(u8, entry.name, name)) return error.ComponentNameTaken;
         }
-        try self.entries.append(gpa, .of(T, name));
+        const entry: Entry = .of(T, name);
+        try self.by_type.put(gpa, entry.type.id, @intCast(self.entries.items.len));
+        errdefer _ = self.by_type.remove(entry.type.id);
+        try self.entries.append(gpa, entry);
     }
 
     pub fn find(self: *const Registry, name: []const u8) ?*const Entry {
@@ -291,10 +298,9 @@ pub const Registry = struct {
 
     /// The one registered for the type `t`.
     pub fn findType(self: *const Registry, t: *const reflect.Type) ?*const Entry {
-        for (self.entries.items) |*entry| {
-            if (entry.type.same(t)) return entry;
-        }
-        return null;
+        const at = self.by_type.get(t.id) orelse return null;
+        const entry = &self.entries.items[at];
+        return if (entry.type.same(t)) entry else null;
     }
 };
 
