@@ -316,13 +316,16 @@ fn addTexture(
 }
 
 /// A texture to draw into, `width` by `height` and cleared: what a
-/// `RenderView` draws its picture in. `upside_down` is whether the backend
-/// counts its rows from the bottom, so that what shows it turns it over.
-pub fn addRenderTexture(self: *Assets, width: u32, height: u32, filter: rhi.Filter, upside_down: bool, label: []const u8) Error!TextureHandle {
+/// `RenderView` draws its picture in. `clear` is the colour it is mostly
+/// cleared to (see `rhi.TextureDesc.clear_color`). `upside_down` is whether
+/// the backend counts its rows from the bottom, so that what shows it turns
+/// it over.
+pub fn addRenderTexture(self: *Assets, width: u32, height: u32, filter: rhi.Filter, clear: [4]f32, upside_down: bool, label: []const u8) Error!TextureHandle {
     const gpu = try self.device.createTexture(.{
         .width = @max(width, 1),
         .height = @max(height, 1),
         .usage = .{ .sampled = true, .render_target = true },
+        .clear_color = clear,
         .label = label,
     });
     errdefer self.device.destroyTexture(gpu);
@@ -338,7 +341,7 @@ pub fn addRenderTexture(self: *Assets, width: u32, height: u32, filter: rhi.Filt
 
 /// Make a texture to draw into `width` by `height`, if it is not: its
 /// handle stays, and what it held is gone.
-pub fn resizeRenderTexture(self: *Assets, handle: TextureHandle, width: u32, height: u32, filter: rhi.Filter) Error!void {
+pub fn resizeRenderTexture(self: *Assets, handle: TextureHandle, width: u32, height: u32, filter: rhi.Filter, clear: [4]f32) Error!void {
     const texture = self.textures.get(handle.toId()) orelse return;
     texture.filter = filter;
     if (texture.width == @max(width, 1) and texture.height == @max(height, 1)) return;
@@ -346,6 +349,7 @@ pub fn resizeRenderTexture(self: *Assets, handle: TextureHandle, width: u32, hei
         .width = @max(width, 1),
         .height = @max(height, 1),
         .usage = .{ .sampled = true, .render_target = true },
+        .clear_color = clear,
         .label = "render view",
     });
     self.device.destroyTexture(texture.gpu);

@@ -313,6 +313,14 @@ pub const Renderer = struct {
     fit_only: bool = false,
     /// Whether that has been said.
     said_full: bool = false,
+    /// Each label's letters as last laid out, by its entity: one whose
+    /// words, font, size and atlas are as they were is only placed again.
+    /// See `layOut`.
+    laid: std.AutoArrayHashMapUnmanaged(u64, Laid) = .empty,
+    /// A drawing's words, laid out each time they are drawn.
+    loose: Laid = .{},
+    /// Counts the times the words are gathered, for `Laid.used`.
+    text_clock: u64 = 0,
 
     /// A picture, coloured: what a sprite with no material is drawn with,
     /// and the light buffer is laid over the world with.
@@ -425,6 +433,9 @@ pub const Renderer = struct {
         self.sorted.deinit(gpa);
         self.ranks.deinit(gpa);
         self.emptied.deinit(gpa);
+        for (self.laid.values()) |*held| held.glyphs.deinit(gpa);
+        self.laid.deinit(gpa);
+        self.loose.glyphs.deinit(gpa);
         self.staging.deinit(gpa);
         self.param_sets.deinit(gpa);
         self.param_bytes.deinit(gpa);
@@ -956,6 +967,8 @@ pub const Renderer = struct {
         const culled_from = self.culled;
         self.emptied.clearRetainingCapacity();
         defer self.fit_only = false;
+        self.text_clock += 1;
+        defer self.forgetLaidOut(gpa);
         while (true) {
             self.layWords(gpa, world, assets, snapshots, inherited, alpha, view) catch |err| switch (err) {
                 error.AtlasFull => {
@@ -975,6 +988,21 @@ pub const Renderer = struct {
                 else => return err,
             };
             return;
+        }
+    }
+
+    /// Let go of the layouts of labels not drawn for a while: gone, hidden,
+    /// or seen by no camera.
+    fn forgetLaidOut(self: *Renderer, gpa: Allocator) void {
+        const every = 64;
+        if (self.text_clock % every != 0) return;
+        var i = self.laid.count();
+        while (i > 0) {
+            i -= 1;
+            const held = &self.laid.values()[i];
+            if (held.used + every >= self.text_clock) continue;
+            held.glyphs.deinit(gpa);
+            self.laid.swapRemoveAt(i);
         }
     }
 
@@ -1130,12 +1158,13 @@ pub const Renderer = struct {
                 var shown = label;
                 shown.color = looks.tint(label.color);
                 shown.layer = looks.layer(label.layer);
-                try self.layOut(gpa, assets, face, shown, run, transform, bounds, null, looks.unshaded);
+                try self.layOut(gpa, assets, face, shown, run, transform, bounds, null, entity, looks.unshaded);
             }
         }
     }
 
-    /// Walk one label's characters, and put a quad where each one goes.
+    /// Put a quad where each of one label's letters goes: laid out again
+    /// only when what it is laid out from changed. See `Laid`.
     fn layOut(
         self: *Renderer,
         gpa: Allocator,
@@ -1148,26 +1177,39 @@ pub const Renderer = struct {
         /// A drawing's key, so its words stay among its shapes in the order
         /// they were drawn; null for a label's own.
         drawn_key: ?u64,
+        /// The label's entity, whose layout is kept; none for a drawing's
+        /// words.
+        kept_for: ecs.Entity,
         unshaded: bool,
     ) !void {
         const size = GlyphSize.of(label.size);
-        const pixels = size.pixels;
-        const stretch = size.stretch;
-        const scaled = face.face.at(@floatFromInt(pixels));
-        const line_height = scaled.lineHeight() * label.line_spacing * stretch;
+        const scaled = face.face.at(@floatFromInt(size.pixels));
+        const line_height = scaled.lineHeight() * label.line_spacing * size.stretch;
+
+        const laid = if (kept_for.isNone()) &self.loose else laid: {
+            const found = try self.laid.getOrPut(gpa, kept_for.toInt());
+            if (!found.found_existing) found.value_ptr.* = .{};
+            break :laid found.value_ptr;
+        };
+        laid.used = self.text_clock;
+        const hash = layoutHash(face, label, run);
+        if (laid.hash != hash or kept_for.isNone()) {
+            var widths: [max_measured_lines]f32 = undefined;
+            const measured = measureLines(&face.face, scaled, run, &widths);
+            laid.hash = hash;
+            laid.width = measured.width * size.stretch;
+            laid.height = measured.lines * line_height;
+            laid.whole = false;
+        }
 
         // The whole label against the camera, boxed generously: one test, not
-        // one per letter.
-        var widths: [max_measured_lines]f32 = undefined;
-        const measured = measureLines(&face.face, scaled, run, &widths);
-        const reach = spriteRadius(
-            measured.width * stretch * @abs(transform.scale_x),
-            (measured.lines * line_height) * @abs(transform.scale_y),
-        );
+        // one per letter. Letters off screen are not drawn into the atlas.
+        const reach = spriteRadius(laid.width * @abs(transform.scale_x), laid.height * @abs(transform.scale_y));
         if (!bounds.admits(transform.x, transform.y, reach)) {
             self.culled += 1;
             return;
         }
+        if (!laid.whole) try self.layLetters(gpa, face, label, run, scaled, line_height, size, laid);
 
         const c = @cos(transform.rotation);
         const sn = @sin(transform.rotation);
@@ -1175,7 +1217,51 @@ pub const Renderer = struct {
             assets.default_font.index
         else
             label.font.index);
+        // Linear: a zoomed camera draws glyphs at sizes they were not
+        // rasterised at.
+        const sampler = assets.samplerFor(.linear, .clamp_to_edge);
+        try self.items.ensureUnusedCapacity(gpa, laid.glyphs.items.len);
+        for (laid.glyphs.items) |glyph| {
+            const placed = transform.apply(glyph.x, glyph.y);
+            self.items.appendAssumeCapacity(.{
+                .key = key,
+                .order = label.order,
+                .texture = face.texture,
+                .sampler = sampler,
+                .blend = .alpha,
+                .unshaded = unshaded,
+                // The pivot is the corner the pen worked out.
+                .instance = .quad(
+                    placed.x,
+                    placed.y,
+                    glyph.width * transform.scale_x,
+                    glyph.height * transform.scale_y,
+                    0,
+                    0,
+                    c,
+                    sn,
+                    .{ label.color.r, label.color.g, label.color.b, label.color.a },
+                    glyph.uv,
+                ),
+            });
+        }
+    }
 
+    /// Walk one label's characters, and find where each goes in its own
+    /// space and in the atlas, drawing into the atlas what is not there yet.
+    fn layLetters(
+        self: *Renderer,
+        gpa: Allocator,
+        face: *Assets.Font,
+        label: Text2D,
+        run: []const u8,
+        scaled: typeface.Scaled,
+        line_height: f32,
+        size: GlyphSize,
+        laid: *Laid,
+    ) !void {
+        const stretch = size.stretch;
+        laid.glyphs.clearRetainingCapacity();
         var line_start: usize = 0;
         var line_index: usize = 0;
 
@@ -1186,12 +1272,7 @@ pub const Renderer = struct {
             // The transform is the top left of the first line, so the first
             // baseline is one ascent below it.
             const baseline = scaled.ascent() * stretch + @as(f32, @floatFromInt(line_index)) * line_height;
-            const width = if (label.alignment == .left)
-                0
-            else if (line_index < widths.len)
-                widths[line_index]
-            else
-                lineWidth(&face.face, scaled, line);
+            const width = if (label.alignment == .left) 0 else lineWidth(&face.face, scaled, line);
             var pen: f32 = switch (label.alignment) {
                 .left => 0,
                 .center => -width * stretch / 2,
@@ -1209,12 +1290,12 @@ pub const Renderer = struct {
                 }
                 previous_glyph = index;
 
-                const entry = face.atlas.glyph(&face.face, index, pixels) catch |err| switch (err) {
+                const entry = face.atlas.glyph(&face.face, index, size.pixels) catch |err| switch (err) {
                     // Room is made and the frame's words laid out again - but
                     // for the last pass of a frame that has none to make,
                     // which leaves the rest of this label out.
                     error.AtlasFull => {
-                        if (self.fit_only) break;
+                        if (self.fit_only) return;
                         self.full = face;
                         return error.AtlasFull;
                     },
@@ -1224,30 +1305,13 @@ pub const Renderer = struct {
 
                 if (entry.width == 0) continue;
 
-                // The glyph's top left, in the label's space, then the world's.
-                const placed = transform.apply(pen + entry.left * stretch, baseline - entry.top * stretch);
-                try self.items.append(gpa, .{
-                    .key = key,
-                    .order = label.order,
-                    .texture = face.texture,
-                    // Linear: a zoomed camera draws glyphs at sizes they were
-                    // not rasterised at.
-                    .sampler = assets.samplerFor(.linear, .clamp_to_edge),
-                    .blend = .alpha,
-                    .unshaded = unshaded,
-                    // The pivot is the corner the pen worked out.
-                    .instance = .quad(
-                        placed.x,
-                        placed.y,
-                        entry.width * stretch * transform.scale_x,
-                        entry.height * stretch * transform.scale_y,
-                        0,
-                        0,
-                        c,
-                        sn,
-                        .{ label.color.r, label.color.g, label.color.b, label.color.a },
-                        .{ entry.u0, entry.v0, entry.u1, entry.v1 },
-                    ),
+                // The glyph's top left, in the label's space.
+                try laid.glyphs.append(gpa, .{
+                    .x = pen + entry.left * stretch,
+                    .y = baseline - entry.top * stretch,
+                    .width = entry.width * stretch,
+                    .height = entry.height * stretch,
+                    .uv = .{ entry.u0, entry.v0, entry.u1, entry.v1 },
                 });
             }
 
@@ -1255,6 +1319,7 @@ pub const Renderer = struct {
             line_start = end + 1;
             line_index += 1;
         }
+        laid.whole = true;
     }
 
     /// What each `Drawing2D` holds, its shapes put in the world: at its layer
@@ -1459,7 +1524,7 @@ pub const Renderer = struct {
                     placed.y = start.y;
                     const shown = self.looks.tint(held.color);
                     const label: Text2D = .{ .font = held.font, .size = held.size, .color = shown, .order = self.order };
-                    try self.renderer.layOut(self.gpa, assets, face, label, run, placed, bounds, self.key, self.looks.unshaded);
+                    try self.renderer.layOut(self.gpa, assets, face, label, run, placed, bounds, self.key, .none, self.looks.unshaded);
                 },
             }
         }
@@ -1512,6 +1577,43 @@ const Measured = struct { width: f32, lines: f32 };
 /// How many lines' widths a label's layout keeps from measuring it, for
 /// their alignment; one with more measures the rest again.
 const max_measured_lines = 32;
+
+/// One label laid out: see `Renderer.laid`.
+const Laid = struct {
+    /// What it was laid out from. See `layoutHash`; nought for nothing.
+    hash: u64 = 0,
+    /// The last `Renderer.text_clock` it was drawn at.
+    used: u64 = 0,
+    /// How far it reaches in its own space, for the camera's test.
+    width: f32 = 0,
+    height: f32 = 0,
+    /// Whether `glyphs` holds every letter: not before the label was first
+    /// on screen, nor when the atlas had no room for them all.
+    whole: bool = false,
+    glyphs: std.ArrayList(LaidGlyph) = .empty,
+};
+
+/// A letter of a label, in the label's space: its top left, its size, and
+/// where it is in the atlas.
+const LaidGlyph = struct {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    uv: [4]f32,
+};
+
+/// What a label is laid out from: its words, its size and lines, and the
+/// atlas its letters are in, which is new each time it is emptied or grows
+/// and so tells its font too.
+fn layoutHash(face: *const Assets.Font, label: Text2D, run: []const u8) u64 {
+    var hasher: std.hash.Wyhash = .init(face.atlas.generation);
+    hasher.update(run);
+    hasher.update(std.mem.asBytes(&label.size));
+    hasher.update(std.mem.asBytes(&label.line_spacing));
+    hasher.update(std.mem.asBytes(&label.alignment));
+    return hasher.final() | 1;
+}
 
 /// `measure`, with the width of each of the first lines put in `widths`.
 fn measureLines(face: *const typeface.Font, scaled: typeface.Scaled, run: []const u8, widths: []f32) Measured {

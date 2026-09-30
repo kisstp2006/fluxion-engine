@@ -21,8 +21,8 @@
         // the 3D one that is not written yet, the 2D one, the interface -
         // goes through this and through nothing else.
         .fluxion_rhi = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-rhi#1834f69f132abc2ffc740ff3374d87dae311dcbc",
-            .hash = "fluxion_rhi-0.1.0--pvwD0stEACtfeFTRB53wPp3L_5GsjN8UEOaFH-mB_PY",
+            .url = "git+https://github.com/kisstp2006/fluxion-rhi#58fc60a6082c4c52303e6d0a8f50a8382dde8382",
+            .hash = "fluxion_rhi-0.1.0--pvwDw8-EADbClQPDX4Vtj5NWYNxKrAdawSrctJst-eE",
         },
 
         // Windows, input and the event loop. A library may not depend on
@@ -111,8 +111,8 @@
         // fluxion-reflect and fluxion-json are pinned where these are, so a
         // `reflect.Value` is one type across the two.
         .fluxion_script = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-script#6e88ed2239ad7d343b05a4c24c1fcda8b4f19f2b",
-            .hash = "fluxion_script-0.1.0-rt2DKsTPFAAi1EQSe-xuLPeJHh87JUQcLj1dT4cBgzaA",
+            .url = "git+https://github.com/kisstp2006/fluxion-script#0eb62f2b741edaf5cf5b66ffdafad6ab0071433e",
+            .hash = "fluxion_script-0.1.0-rt2DKlPbFABG_qjoeivdCgDp-fj_joI5TQUBmdMAlHNj",
         },
 
         // Generational handles: what the asset tables hand out, and what a

@@ -66,6 +66,11 @@ max_fixed_steps: u32 = 8,
 
 max_fps: ?f32 = null,
 
+/// The most frames a second while no window of the program has the
+/// keyboard: a game or a tool left in the background. Null for no cap past
+/// `max_fps`.
+background_fps: ?f32 = null,
+
 next_frame: std.Io.Timestamp = .zero,
 
 /// Set by `stepOnce`, and spent by the next frame.

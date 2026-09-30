@@ -260,6 +260,7 @@ pub const Lighting = struct {
             .width = @max(width, 1),
             .height = @max(height, 1),
             .usage = .{ .sampled = true, .render_target = true },
+            .clear_color = self.clearColor().array(),
             .label = "light",
         });
         if (!oldest.texture.isNone()) self.device.destroyTexture(oldest.texture);

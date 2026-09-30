@@ -122,16 +122,16 @@ pub const Screen = struct {
         self.* = undefined;
     }
 
-    /// A texture of this size to draw the frame into: the one made last
-    /// time, or a new one when the size changed.
-    pub fn frameOf(self: *Screen, width: u32, height: u32) !rhi.Texture {
-        return (try self.pictureOf(&self.frame, width, height, "frame")).texture;
+    /// A texture of this size to draw the frame into, cleared to `clear`:
+    /// the one made last time, or a new one when the size changed.
+    pub fn frameOf(self: *Screen, width: u32, height: u32, clear: Color) !rhi.Texture {
+        return (try self.pictureOf(&self.frame, width, height, clear.array(), "frame")).texture;
     }
 
     /// What is drawn in `from` so far, copied where a shader can read it
     /// while more is drawn into `from`. Nothing may be in a pass.
     pub fn copyOf(self: *Screen, from: rhi.Texture, width: u32, height: u32, sampler: rhi.Sampler) !rhi.Texture {
-        const into = try self.pictureOf(&self.copy, width, height, "frame copy");
+        const into = try self.pictureOf(&self.copy, width, height, .{ 0, 0, 0, 0 }, "frame copy");
         try self.blit(from, .{ .texture = into.texture }, .{ .width = @floatFromInt(width), .height = @floatFromInt(height) }, sampler, null);
         self.copies += 1;
         return into.texture;
@@ -160,7 +160,7 @@ pub const Screen = struct {
         try self.device.submit();
     }
 
-    fn pictureOf(self: *Screen, slot: *?Picture, width: u32, height: u32, label: []const u8) !Picture {
+    fn pictureOf(self: *Screen, slot: *?Picture, width: u32, height: u32, clear: [4]f32, label: []const u8) !Picture {
         if (slot.*) |held| {
             if (held.width == width and held.height == height) return held;
             self.device.destroyTexture(held.texture);
@@ -170,6 +170,7 @@ pub const Screen = struct {
             .width = @max(width, 1),
             .height = @max(height, 1),
             .usage = .{ .sampled = true, .render_target = true },
+            .clear_color = clear,
             .label = label,
         });
         slot.* = .{ .texture = texture, .width = width, .height = height };
@@ -183,9 +184,9 @@ test "a frame is drawn into a picture of its size, copied, and put on a target" 
     var screen: Screen = try .init(testing.allocator, &device);
     defer screen.deinit();
 
-    const frame = try screen.frameOf(320, 180);
+    const frame = try screen.frameOf(320, 180, .black);
     // Kept while the size stays, remade when it changes.
-    try testing.expectEqual(frame, try screen.frameOf(320, 180));
+    try testing.expectEqual(frame, try screen.frameOf(320, 180, .black));
     const sampler = try device.createSampler(.{});
     defer device.destroySampler(sampler);
     _ = try screen.copyOf(frame, 320, 180, sampler);
@@ -194,6 +195,6 @@ test "a frame is drawn into a picture of its size, copied, and put on a target" 
     const surface = try device.createSurface(.{ .width = 640, .height = 480 });
     defer device.destroySurface(surface);
     try screen.present(frame, .{ .surface = surface }, .{ .y = 60, .width = 640, .height = 360 }, sampler, .black);
-    _ = try screen.frameOf(640, 360);
+    _ = try screen.frameOf(640, 360, .black);
     try testing.expectEqual(@as(u32, 640), screen.frame.?.width);
 }

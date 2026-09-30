@@ -1179,6 +1179,7 @@ fn openDisplay(self: *App, gpa: Allocator, options: Options, resolved: Resolved,
             .width = width,
             .height = height,
             .usage = .{ .sampled = true, .render_target = true },
+            .clear_color = resolved.background.array(),
             .label = "headless target",
         });
     }
@@ -1874,8 +1875,27 @@ fn stepPhysics(self: *App) !void {
 }
 
 fn waitForNextFrame(self: *App, minimized: bool) !void {
-    const target_fps: f32 = if (minimized) fps_while_minimized else self.time.max_fps orelse return;
+    const target_fps: f32 = if (minimized) fps_while_minimized else self.frameCap() orelse return;
     try self.time.sleepUntilNextFrame(target_fps);
+}
+
+/// The frames a second this frame is held to: `max_fps`, and
+/// `background_fps` too while no window of the program has the keyboard.
+fn frameCap(self: *const App) ?f32 {
+    const cap = self.time.max_fps;
+    const behind = self.time.background_fps orelse return cap;
+    if (self.inForeground()) return cap;
+    return if (cap) |held| @min(held, behind) else behind;
+}
+
+/// Whether one of the program's windows - its own, or a tool window - has
+/// the keyboard. Without a window, always.
+pub fn inForeground(self: *const App) bool {
+    if (self.input.focused) return true;
+    for (self.tool_windows.items) |tool| {
+        if (tool.focused) return true;
+    }
+    return false;
 }
 
 /// The engine's own keys, after the game's `.input` systems.
@@ -1953,6 +1973,7 @@ pub fn openToolWindow(self: *App, desc: ToolWindow.Desc) !*ToolWindow {
             .width = tool.width,
             .height = tool.height,
             .usage = .{ .sampled = true, .render_target = true },
+            .clear_color = tool.background,
             .label = "tool window",
         });
     }
@@ -3914,10 +3935,10 @@ fn drawViews(self: *App) !void {
 fn viewPicture(self: *App, entity: ecs.Entity, view: components.RenderView) !Assets.TextureHandle {
     const filter: rhi.Filter = if (view.filter == .linear) .linear else .nearest;
     if (self.views.textureOf(entity)) |held| {
-        try self.assets.resizeRenderTexture(held, view.width, view.height, filter);
+        try self.assets.resizeRenderTexture(held, view.width, view.height, filter, view.clear_color.array());
         return held;
     }
-    const made = try self.assets.addRenderTexture(view.width, view.height, filter, self.drawnUpsideDown(), "render view");
+    const made = try self.assets.addRenderTexture(view.width, view.height, filter, view.clear_color.array(), self.drawnUpsideDown(), "render view");
     errdefer self.assets.unload(made);
     try self.views.textures.put(self.gpa, entity, made);
     return made;
@@ -5398,6 +5419,9 @@ pub const reflect_methods = .{
     .backendInUse = .{},
     .setMaxFps = .{attr.Params{ .names = &.{"fps"} }},
     .maxFps = .{},
+    .setBackgroundFps = .{attr.Params{ .names = &.{"fps"} }},
+    .backgroundFps = .{},
+    .inForeground = .{},
     .fps = .{},
     .frameCount = .{},
     .elapsed = .{},
@@ -6995,6 +7019,19 @@ pub fn maxFps(self: *const App) f32 {
     return self.time.max_fps orelse 0;
 }
 
+/// Hold the frames to at most `fps` a second while no window of the program
+/// has the keyboard, nought for no other cap than `setMaxFps`'s: less work,
+/// and less power, for a game nobody is looking at. `time.background_fps`
+/// from Zig.
+pub fn setBackgroundFps(self: *App, limit: f32) void {
+    self.time.background_fps = if (limit > 0) limit else null;
+}
+
+/// The cap on frames a second in the background, nought for none.
+pub fn backgroundFps(self: *const App) f32 {
+    return self.time.background_fps orelse 0;
+}
+
 /// Lay the interface out this many times larger, over what the display and
 /// the stretch ask for: a settings menu's interface size. One is as it is.
 /// `interface.zoom` from Zig.
@@ -7350,7 +7387,7 @@ fn drawLayers(self: *App, into: rhi.RenderTarget, width: f32, height: f32) !void
     const frame_width: f32 = @floatFromInt(frame.width);
     const frame_height: f32 = @floatFromInt(frame.height);
     if (!frame.apart and !self.readsScreen()) return self.drawLayersInto(into, frame, frame_width, frame_height);
-    const picture = try self.screen.frameOf(frame.width, frame.height);
+    const picture = try self.screen.frameOf(frame.width, frame.height, self.background);
     try self.drawLayersInto(.{ .texture = picture }, frame, frame_width, frame_height);
     // A picture scaled to the window is sampled as the project's textures
     // are; a canvas is one pixel to one.
@@ -7577,6 +7614,7 @@ pub fn capture(self: *App, gpa: Allocator, width: u32, height: u32) ![]u8 {
         .width = width,
         .height = height,
         .usage = .{ .sampled = true, .render_target = true },
+        .clear_color = self.background.array(),
         .label = "capture",
     });
     defer self.device.destroyTexture(texture);
@@ -8110,6 +8148,50 @@ test "a label becomes one quad per letter" {
     app.frames_left = 1;
     _ = try app.step();
     try testing.expectEqual(@as(usize, 3), face.atlas.count());
+}
+
+test "a label is laid out once, and again when its words or its atlas change" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 320, .height = 240, .io = threaded.io(), .fixed_frame_time = true });
+    defer app.destroy();
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch
+        return error.SkipZigTest;
+
+    const label = try app.world.spawnWith(.{ components.Transform2D.at(20, 20), components.Text2D{} });
+    try app.setText(label, components.Text2D, "text", "Hi!");
+    try app.run();
+    app.running = true;
+    app.frames_left = null;
+    const first = app.sprites.laid.get(label.toInt()).?.hash;
+    const left = app.sprites.items.items[0].instance.place[0];
+
+    // Moved, it is placed again from the same layout: a few frames on, past
+    // the steps it is drawn between.
+    app.world.get(label, components.Transform2D).?.x = 60;
+    for (0..3) |_| _ = try app.step();
+    try testing.expectEqual(first, app.sprites.laid.get(label.toInt()).?.hash);
+    try testing.expectApproxEqAbs(left + 40, app.sprites.items.items[0].instance.place[0], 0.001);
+
+    // New words are laid out anew.
+    try app.setText(label, components.Text2D, "text", "Hello");
+    _ = try app.step();
+    const second = app.sprites.laid.get(label.toInt()).?;
+    try testing.expect(second.hash != first);
+    try testing.expectEqual(@as(usize, 5), second.glyphs.items.len);
+    try testing.expectEqual(@as(u32, 5), app.sprites.drawn);
+
+    // So are the words of an atlas emptied since: their places in it are gone.
+    app.assets.fontOf(.none).?.atlas.clear();
+    _ = try app.step();
+    try testing.expect(app.sprites.laid.get(label.toInt()).?.hash != second.hash);
+    try testing.expectEqual(@as(u32, 5), app.sprites.drawn);
+    try testing.expectEqual(@as(usize, 4), app.assets.fontOf(.none).?.atlas.count());
+
+    // A label gone is let go of in time.
+    app.world.despawn(label);
+    for (0..130) |_| _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.sprites.laid.count());
 }
 
 test "the frame count ends the loop" {
@@ -9818,6 +9900,23 @@ test "a frame cap slows the loop down to it" {
 
     try app.run();
     try testing.expect(app.time.elapsed >= 0.03);
+}
+
+test "a program in the background is held to its background cap" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 6, .io = testing.io });
+    defer app.destroy();
+    app.setMaxFps(1000);
+    app.setBackgroundFps(100);
+    try testing.expectEqual(@as(?f32, 1000), app.frameCap());
+
+    app.input.focused = false;
+    try testing.expect(!app.inForeground());
+    try testing.expectEqual(@as(?f32, 100), app.frameCap());
+    try app.run();
+    try testing.expect(app.time.elapsed >= 0.03);
+
+    app.setBackgroundFps(0);
+    try testing.expectEqual(@as(?f32, 1000), app.frameCap());
 }
 
 const Scribble = struct {

@@ -70,6 +70,11 @@ pixels: []u8,
 /// Whether anything has been added since the texture was last uploaded.
 dirty: bool = false,
 
+/// Tells what this atlas holds from what any atlas held before: new with
+/// each atlas and each `clear`, so what was laid out against it knows
+/// whether the places it found in the image still hold.
+generation: u64,
+
 /// The shelf being filled: how far up the image it starts, how tall it is,
 /// and how far along it the next glyph goes.
 shelf_top: u32 = padding,
@@ -93,7 +98,15 @@ pub fn init(gpa: Allocator, width: u32, height: u32) Allocator.Error!Atlas {
         .width = width,
         .height = height,
         .pixels = pixels,
+        .generation = nextGeneration(),
     };
+}
+
+/// The last `generation` handed out, in the whole program.
+var generations: std.atomic.Value(u64) = .init(0);
+
+fn nextGeneration() u64 {
+    return generations.fetchAdd(1, .monotonic) + 1;
 }
 
 pub fn deinit(self: *Atlas) void {
@@ -201,6 +214,7 @@ pub fn clear(self: *Atlas) void {
     self.shelf_height = 0;
     self.pen = padding;
     self.dirty = true;
+    self.generation = nextGeneration();
 }
 
 /// How many glyphs are cached. One per letter per size.
