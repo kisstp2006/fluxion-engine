@@ -772,6 +772,11 @@ if (!app.input.focused) app.setPaused(true);
 - **A project caps its frames with `application.max_fps`** - nought for no
   cap - and a game's `Options.max_fps` overrules it. A settings menu sets it
   with `app.setMaxFps(60)` and reads it with `maxFps()`, from a script too.
+- **In the background, fewer frames**: `app.setBackgroundFps(30)`
+  (`time.background_fps`) holds the frames to 30 a second while no window of
+  the program - its own or a tool window - has the keyboard
+  (`app.inForeground()`); nought, the default, for no other cap. A minimised
+  window draws ten a second whatever these say.
 - **What a counter on screen shows**: `app.fps()`, the frames of the last
   whole second (`time.frames_per_second`; `time.fps()` is the last frame's
   alone), `app.frameCount()` and `app.elapsed()`, the game's seconds since it
