@@ -39,14 +39,15 @@ pub const Load = struct {
     /// Everything the thread touches is its own or behind these atomics:
     /// memory from an allocator that takes calls from any thread.
     gpa: Allocator,
-    io: std.Io,
     kind: AssetKind,
     /// The file as it is found: `res://`, `user://`, or the system's own.
     source: []u8,
-    /// Where it is on the disc, worked out before the thread starts.
+    /// What `files` reads it by, worked out before the thread starts: the
+    /// system's path, or a `res://` one in a pack.
     file: []u8,
-    /// The project's root, for the files a scene names.
-    root: []u8,
+    /// The project's reading, for the file and the ones a scene names. The
+    /// project outlives every load.
+    files: Project.Files,
     state: std.atomic.Value(State) = .init(.reading),
     /// Steps done, and how many there are: one for the file and one for each
     /// picture and sound a scene names, once the file has said how many.
@@ -136,7 +137,7 @@ pub const Load = struct {
     }
 
     fn readFile(self: *Load) !void {
-        self.bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, self.file, self.gpa, .limited(@import("file_table.zig").file_limit));
+        self.bytes = try self.files.read(self.gpa, self.file, .limited(@import("file_table.zig").file_limit));
         switch (self.kind) {
             .texture => try self.decode(self.source, self.bytes),
             .scene => try self.findNamed(),
@@ -175,9 +176,7 @@ pub const Load = struct {
     }
 
     fn decodeFile(self: *Load, source: []const u8) !void {
-        const file = try Project.underRoot(self.gpa, self.root, source);
-        defer self.gpa.free(file);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, file, self.gpa, .limited(@import("file_table.zig").file_limit));
+        const bytes = try self.files.read(self.gpa, source, .limited(@import("file_table.zig").file_limit));
         defer self.gpa.free(bytes);
         try self.decode(source, bytes);
     }
@@ -191,9 +190,7 @@ pub const Load = struct {
     }
 
     fn readSound(self: *Load, source: []const u8) !void {
-        const file = try Project.underRoot(self.gpa, self.root, source);
-        defer self.gpa.free(file);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(self.io, file, self.gpa, .limited(@import("file_table.zig").file_limit));
+        const bytes = try self.files.read(self.gpa, source, .limited(@import("file_table.zig").file_limit));
         errdefer self.gpa.free(bytes);
         const named = try self.gpa.dupe(u8, source);
         errdefer self.gpa.free(named);
@@ -212,7 +209,6 @@ pub const Load = struct {
         const gpa = self.gpa;
         gpa.free(self.source);
         gpa.free(self.file);
-        gpa.free(self.root);
         gpa.free(self.bytes);
         for (self.pictures.items) |held| gpa.free(held);
         self.pictures.deinit(gpa);

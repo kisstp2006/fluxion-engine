@@ -375,11 +375,8 @@ pub const Audio = struct {
         const source = try app.project.canonical(self.gpa, path);
         defer self.gpa.free(source);
         if (self.find(source)) |known| return known;
-        const io = app.io orelse return error.NoIo;
 
-        const file = try app.project.osPath(self.gpa, source);
-        defer self.gpa.free(file);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .limited(file_table.file_limit));
+        const bytes = try app.project.readFileAlloc(self.gpa, source, .limited(file_table.file_limit));
         defer self.gpa.free(bytes);
         if (Project.isProjectPath(source)) {
             _ = app.project.uidOf(source) catch |err|

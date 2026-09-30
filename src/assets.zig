@@ -151,6 +151,9 @@ pub const Error = error{
 /// The biggest font file read: far past any typeface a game ships, and short
 /// of reading a wrongly named video into memory.
 const font_limit = 32 << 20;
+/// The most a picture's file is read: a 16K by 16K PNG with nothing in it to
+/// compress is a gigabyte, and one worth drawing is a fraction of that.
+const picture_limit = 256 << 20;
 
 /// How a font should be opened.
 pub const FontOptions = struct {
@@ -355,13 +358,12 @@ pub fn resizeRenderTexture(self: *Assets, handle: TextureHandle, width: u32, hei
 /// name: `res://art/hero.png`, `uid://...`, or the operating system's path.
 /// Loading a file twice makes two textures - `findTexture` first.
 pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !TextureHandle {
-    const io = self.io orelse return Error.NoIo;
     const source = try self.project.canonical(self.gpa, path);
     errdefer self.gpa.free(source);
-    const file = try self.project.osPath(self.gpa, source);
-    defer self.gpa.free(file);
+    const bytes = try self.project.readFileAlloc(self.gpa, source, .limited(picture_limit));
+    defer self.gpa.free(bytes);
 
-    var decoded = try image.readFile(self.gpa, io, file, .{});
+    var decoded = try image.decode(self.gpa, bytes);
     defer decoded.deinit(self.gpa);
     self.learnUid(source);
 
@@ -519,13 +521,9 @@ pub fn loadSystemFont(self: *Assets, options: FontOptions) !FontHandle {
 /// Open a TrueType file from the disc, named as `loadTexture` names one - or
 /// one font of a collection, by `options.member`.
 pub fn loadFont(self: *Assets, path: []const u8, options: FontOptions) !FontHandle {
-    const io = self.io orelse return Error.NoIo;
     const source = try self.project.canonical(self.gpa, path);
     errdefer self.gpa.free(source);
-    const file = try self.project.osPath(self.gpa, source);
-    defer self.gpa.free(file);
-
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .limited(font_limit));
+    const bytes = try self.project.readFileAlloc(self.gpa, source, .limited(font_limit));
     defer self.gpa.free(bytes);
     self.learnUid(source);
 
@@ -639,11 +637,10 @@ pub fn flushFonts(self: *Assets) !void {
 pub fn reloadTexture(self: *Assets, handle: TextureHandle) !bool {
     const texture = self.textures.get(handle.toId()) orelse return false;
     if (texture.source.len == 0) return false;
-    const io = self.io orelse return Error.NoIo;
-    const file = try self.project.osPath(self.gpa, texture.source);
-    defer self.gpa.free(file);
+    const bytes = try self.project.readFileAlloc(self.gpa, texture.source, .limited(picture_limit));
+    defer self.gpa.free(bytes);
 
-    var decoded = try image.readFile(self.gpa, io, file, .{});
+    var decoded = try image.decode(self.gpa, bytes);
     defer decoded.deinit(self.gpa);
 
     if (decoded.width == texture.width and decoded.height == texture.height) {
@@ -672,12 +669,8 @@ pub fn reloadTexture(self: *Assets, handle: TextureHandle) !bool {
 pub fn reloadFont(self: *Assets, handle: FontHandle) !bool {
     const font = (self.fonts.get(handle.toId()) orelse return false).*;
     if (font.source.len == 0) return false;
-    const io = self.io orelse return Error.NoIo;
-    const file = try self.project.osPath(self.gpa, font.source);
-    defer self.gpa.free(file);
-
     // Read into memory the font keeps, since the face holds views into it.
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .limited(font_limit));
+    const bytes = try self.project.readFileAlloc(self.gpa, font.source, .limited(font_limit));
     errdefer self.gpa.free(bytes);
     const face: typeface.Font = try .initMember(bytes, font.member);
     var atlas: Atlas = try .init(self.gpa, font.atlas.width, font.atlas.height);

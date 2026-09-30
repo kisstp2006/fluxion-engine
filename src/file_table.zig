@@ -86,11 +86,8 @@ pub fn Table(comptime H: type) type {
             const source = try app.project.canonical(app.gpa, path);
             defer app.gpa.free(source);
             if (self.find(source)) |known| return known;
-            const io = app.io orelse return error.NoIo;
 
-            const file = try app.project.osPath(app.gpa, source);
-            defer app.gpa.free(file);
-            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, app.gpa, .limited(file_limit));
+            const bytes = try app.project.readFileAlloc(app.gpa, source, .limited(file_limit));
             errdefer app.gpa.free(bytes);
             if (Project.isProjectPath(source)) {
                 _ = app.project.uidOf(source) catch |err|
@@ -127,10 +124,7 @@ pub fn Table(comptime H: type) type {
         pub fn reload(self: *Self, app: *App, handle: H) !bool {
             const held = self.table.get(toId(handle)) orelse return false;
             if (!held.on_disc) return false;
-            const io = app.io orelse return error.NoIo;
-            const file = try app.project.osPath(app.gpa, held.source);
-            defer app.gpa.free(file);
-            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, app.gpa, .limited(file_limit));
+            const bytes = try app.project.readFileAlloc(app.gpa, held.source, .limited(file_limit));
             app.gpa.free(held.bytes);
             held.bytes = bytes;
             return true;

@@ -294,14 +294,11 @@ pub const Themes = struct {
         // One read already under this very name is the one meant, whether it
         // came from a file or from text a tool gave.
         if (self.find(path)) |known| return known;
-        const io = app.io orelse return error.NoIo;
         const source = try app.project.canonical(app.gpa, path);
         defer app.gpa.free(source);
         if (self.find(source)) |known| return known;
 
-        const file = try app.project.osPath(app.gpa, source);
-        defer app.gpa.free(file);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, file, app.gpa, .limited(file_limit));
+        const text = try app.project.readFileAlloc(app.gpa, source, .limited(file_limit));
         defer app.gpa.free(text);
         if (Project.isProjectPath(source)) {
             _ = app.project.uidOf(source) catch |err|
@@ -381,10 +378,7 @@ pub const Themes = struct {
     pub fn reload(self: *Themes, app: *App, handle: ThemeHandle) !bool {
         const held = self.table.get(handle.toId()) orelse return false;
         if (!held.on_disc) return false;
-        const io = app.io orelse return error.NoIo;
-        const file = try app.project.osPath(app.gpa, held.source);
-        defer app.gpa.free(file);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, file, app.gpa, .limited(file_limit));
+        const text = try app.project.readFileAlloc(app.gpa, held.source, .limited(file_limit));
         defer app.gpa.free(text);
         try self.setText(app, handle, text);
         return true;

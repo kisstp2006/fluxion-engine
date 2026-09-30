@@ -1703,6 +1703,14 @@ const Stamp = struct {
         const stat = std.Io.Dir.cwd().statFile(io, path, .{}) catch return null;
         return .{ .modified = stat.mtime.nanoseconds, .size = stat.size };
     }
+
+    /// The stamp of the file a script's path names, or none where it has no
+    /// file of its own on the disc - in a pack, which never changes.
+    fn ofPath(app: *App, io: std.Io, source: []const u8) ?Stamp {
+        const file = app.project.osPath(app.gpa, source) catch return null;
+        defer app.gpa.free(file);
+        return .of(io, file);
+    }
 };
 
 /// The methods the engine calls on a script's instance: what each is passed
@@ -1978,12 +1986,10 @@ pub const Scripts = struct {
         defer app.gpa.free(source);
         if (self.find(source)) |known| return known;
 
-        const file = try app.project.osPath(app.gpa, source);
-        defer app.gpa.free(file);
         // Looked at before it is read: a save between the two is seen at the
         // next look, not taken for what was read.
-        const stamp: ?Stamp = .of(io, file);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, file, app.gpa, .limited(file_limit));
+        const stamp: ?Stamp = .ofPath(app, io, source);
+        const text = try app.project.readFileAlloc(app.gpa, source, .limited(file_limit));
         if (Project.isProjectPath(source)) {
             _ = app.project.uidOf(source) catch |err|
                 log.warn("the {s} file beside {s} does not read: {t}", .{ Project.uid_extension, source, err });
@@ -2079,10 +2085,8 @@ pub const Scripts = struct {
         const file = self.files.get(handle.toId()) orelse return false;
         if (!file.on_disc) return false;
         const io = app.io orelse return error.NoIo;
-        const path = try app.project.osPath(app.gpa, file.source);
-        defer app.gpa.free(path);
-        const stamp: ?Stamp = .of(io, path);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, path, app.gpa, .limited(file_limit));
+        const stamp: ?Stamp = .ofPath(app, io, file.source);
+        const text = try app.project.readFileAlloc(app.gpa, file.source, .limited(file_limit));
         defer app.gpa.free(text);
         try self.setText(handle, text);
         // Looked up again: the new code's defaults can load a script.
@@ -3825,7 +3829,6 @@ fn scriptsUnder(app: *App, arena: Allocator, folder: []const u8, found: *std.Arr
 /// editor outside the engine names it by where it is on the disk.
 fn loadImport(context: ?*anyopaque, gpa: Allocator, from: []const u8, path: []const u8) anyerror!flux.Vm.Loader.Loaded {
     const app: *App = @ptrCast(@alignCast(context.?));
-    const io = app.io orelse return error.NoIo;
     const importing = try app.project.canonical(gpa, from);
     defer gpa.free(importing);
     const wanted = if (std.mem.indexOf(u8, path, "://") != null)
@@ -3838,9 +3841,7 @@ fn loadImport(context: ?*anyopaque, gpa: Allocator, from: []const u8, path: []co
     defer gpa.free(wanted);
     const name = try app.project.canonical(gpa, wanted);
     errdefer gpa.free(name);
-    const file = try app.project.osPath(gpa, name);
-    defer gpa.free(file);
-    const source = try std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(16 << 20));
+    const source = try app.project.readFileAlloc(gpa, name, .limited(16 << 20));
     return .{ .name = name, .source = source };
 }
 

@@ -35,6 +35,7 @@ const typeface = @import("fluxion_font");
 const physics_lib = @import("fluxion_physics");
 const json = @import("fluxion_json");
 const reflect = @import("fluxion_reflect");
+const vfs = @import("fluxion_vfs");
 const Uuid = @import("fluxion_id").Uuid;
 
 const Assets = @import("assets.zig");
@@ -111,7 +112,7 @@ pub const Error = error{
     NoDisplay,
 } || Allocator.Error || rhi.Error || Window.Error || Assets.Error ||
     sprite.Error || ecs.Jobs.Error || debugdraw_rhi.Error || Project.InitError ||
-    Project.ReadError || BackendError;
+    Project.ReadError || Project.PackError || BackendError;
 
 /// Which drawing API to open.
 pub const Backend = enum {
@@ -282,6 +283,11 @@ pub const Options = struct {
     /// A test gives its own; so may a game kept on a stick, with its saves
     /// beside it. See `Project.userRoot`.
     user_root: ?[]const u8 = null,
+
+    /// The pack a shipped game is: `res://`, `uid://` and the project file
+    /// are read out of it instead of `root`. The App owns it from `create`
+    /// on, whether `create` succeeds or not. See `Project.usePack`.
+    pack: ?vfs.Pack = null,
 
     /// Where the project file went wrong, when it did: `create` fails then,
     /// and says it in the log as well.
@@ -804,6 +810,11 @@ started: bool = false,
 
 /// Open everything, in the order the pieces depend on each other.
 pub fn create(gpa: Allocator, options: Options) Error!*App {
+    // The pack is the App's from here: it is let go of on the way out of a
+    // failure, until the project has it.
+    var pack = options.pack;
+    errdefer if (pack) |*held| if (options.io) |io| held.deinit(io);
+
     const self = try gpa.create(App);
     errdefer gpa.destroy(self);
 
@@ -900,6 +911,10 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     errdefer self.project.deinit();
     if (options.user_root) |held| self.project.user_root = try gpa.dupe(u8, held);
     if (options.title) |held| self.project.fallback_name = try gpa.dupe(u8, held);
+    if (pack) |held| {
+        pack = null;
+        try self.project.usePack(held);
+    }
     // Before the backend is chosen: the project's renderer chooses it, and
     // the window has to know whether it is OpenGL's. A project file that is
     // wrong stops the start, and says why - where the caller asked for it,
@@ -3416,8 +3431,7 @@ pub fn saveScene(self: *App, path: []const u8, options: scene.SaveOptions) !void
 /// };
 /// ```
 pub fn readScene(self: *App, path: []const u8, options: scene.LoadOptions) !scene.Loaded {
-    const io = self.io orelse return error.NoIo;
-    return scene.load(self, io, path, options);
+    return scene.load(self, path, options);
 }
 
 /// Read a scene's file to make things of, or find the one read from there
@@ -4286,7 +4300,7 @@ fn showBootSplash(self: *App, splash: Project.Application.BootSplash) void {
 ///
 /// `error.NotAnAsset` for a file the engine does not read by its ending.
 pub fn loadInBackground(self: *App, path: []const u8) !void {
-    const io = self.io orelse return error.NoIo;
+    if (self.io == null) return error.NoIo;
     // Memory any thread can ask for, since the load's thread does.
     const gpa = std.heap.smp_allocator;
     const source = try self.project.canonical(gpa, path);
@@ -4296,13 +4310,15 @@ pub fn loadInBackground(self: *App, path: []const u8) !void {
         gpa.free(source);
         return;
     }
-    const file = try self.project.osPath(gpa, source);
+    // A pack's file is read out of the pack, by its own name.
+    const file = if (self.project.pack != null and Project.isProjectPath(source))
+        try gpa.dupe(u8, source)
+    else
+        try self.project.osPath(gpa, source);
     errdefer gpa.free(file);
-    const root = try gpa.dupe(u8, self.project.root);
-    errdefer gpa.free(root);
     const load = try gpa.create(background_mod.Load);
     errdefer gpa.destroy(load);
-    load.* = .{ .gpa = gpa, .io = io, .kind = kind, .source = source, .file = file, .root = root };
+    load.* = .{ .gpa = gpa, .kind = kind, .source = source, .file = file, .files = self.project.files() };
     try self.loads.append(self.gpa, load);
     if (background_mod.threaded) {
         load.thread = std.Thread.spawn(.{}, background_mod.Load.run, .{load}) catch null;
@@ -4428,10 +4444,7 @@ pub fn createScene(self: *App, path: []const u8, options: scene.SaveOptions) !vo
 /// many entities and which files - read without loading it. Null for a file
 /// that is not a scene. Free it with `Info.deinit`. See `scene.readInfo`.
 pub fn sceneInfo(self: *App, path: []const u8, diagnostics: ?*json.Diagnostics) !?scene.Info {
-    const io = self.io orelse return error.NoIo;
-    const file = try self.project.osPath(self.gpa, path);
-    defer self.gpa.free(file);
-    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, self.gpa, .unlimited);
+    const bytes = try self.project.readFileAlloc(self.gpa, path, .unlimited);
     defer self.gpa.free(bytes);
     return scene.readInfo(self.gpa, bytes, diagnostics);
 }
@@ -4443,10 +4456,7 @@ pub const text_limit = 64 << 20;
 /// system's own - in `gpa`'s memory, for the caller to free.
 /// `error.FileNotFound` where there is none.
 pub fn readText(self: *App, gpa: Allocator, path: []const u8) ![]u8 {
-    const io = self.io orelse return error.NoIo;
-    const file = try self.project.osPath(self.gpa, path);
-    defer self.gpa.free(file);
-    return std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(text_limit));
+    return self.project.readFileAlloc(gpa, path, .limited(text_limit));
 }
 
 /// Write `text` to the file at `path`, over what it held, making the
@@ -4465,6 +4475,7 @@ pub fn writeText(self: *App, path: []const u8, text: []const u8) !void {
 
 /// Whether there is a file or a folder at `path`.
 pub fn fileExists(self: *App, path: []const u8) bool {
+    if (self.project.packInfo(path) != null) return true;
     const io = self.io orelse return false;
     const file = self.project.osPath(self.gpa, path) catch return false;
     defer self.gpa.free(file);
@@ -4506,6 +4517,9 @@ pub const Listing = struct {
 /// The names in the folder at `path`, sorted, a folder's ending with `/`.
 /// `error.FileNotFound` where there is none.
 pub fn listDir(self: *App, gpa: Allocator, path: []const u8) !Listing {
+    if (self.project.pack != null and Project.isProjectPath(path)) {
+        return .{ .names = (try self.project.packListing(gpa, path)) orelse return error.FileNotFound };
+    }
     const io = self.io orelse return error.NoIo;
     const file = try self.project.osPath(self.gpa, path);
     defer self.gpa.free(file);
@@ -4563,6 +4577,11 @@ pub const FileInfo = struct {
 /// The size of the file at `path`, when it was last written, and whether it
 /// is a folder. `error.FileNotFound` where there is none.
 pub fn fileInfo(self: *App, path: []const u8) !FileInfo {
+    if (self.project.pack != null and Project.isProjectPath(path)) {
+        const info = self.project.packInfo(path) orelse return error.FileNotFound;
+        // A pack keeps no times: it was all made at once.
+        return .{ .size = info.size, .modified = .{ .us = 0 }, .folder = info.folder };
+    }
     const io = self.io orelse return error.NoIo;
     const file = try self.project.osPath(self.gpa, path);
     defer self.gpa.free(file);
@@ -4584,6 +4603,13 @@ pub fn isDir(self: *App, path: []const u8) bool {
 /// The SHA-256 of the file at `path`: the same file, the same 32 bytes -
 /// whether a download finished whole, or a save is the one the game wrote.
 pub fn fileSha256(self: *App, path: []const u8) ![32]u8 {
+    if (self.project.pack != null and Project.isProjectPath(path)) {
+        const bytes = try self.project.readFileAlloc(self.gpa, path, .unlimited);
+        defer self.gpa.free(bytes);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        return digest;
+    }
     const io = self.io orelse return error.NoIo;
     const file = try self.project.osPath(self.gpa, path);
     defer self.gpa.free(file);
@@ -7017,10 +7043,9 @@ pub fn setCustomCursor(self: *App, texture: Assets.TextureHandle, shape: CursorS
 /// The same from a picture's file - `res://`, `user://` or the system's -
 /// read without making a texture of it.
 pub fn setCustomCursorFile(self: *App, path: []const u8, shape: CursorShape, hotspot: math.Vec2) !void {
-    const io = self.io orelse return error.NoIo;
-    const file = try self.project.osPath(self.gpa, path);
-    defer self.gpa.free(file);
-    var decoded = try image.readFile(self.gpa, io, file, .{});
+    const bytes = try self.project.readFileAlloc(self.gpa, path, .limited(text_limit));
+    defer self.gpa.free(bytes);
+    var decoded = try image.decode(self.gpa, bytes);
     defer decoded.deinit(self.gpa);
     const hot_x: u32 = @intFromFloat(std.math.clamp(@round(hotspot.x), 0, @as(f32, @floatFromInt(decoded.width -| 1))));
     const hot_y: u32 = @intFromFloat(std.math.clamp(@round(hotspot.y), 0, @as(f32, @floatFromInt(decoded.height -| 1))));
@@ -7118,12 +7143,11 @@ fn useProjectIcon(self: *App) void {
     const settings = self.project.settings orelse return;
     const path = settings.application.icon;
     if (path.len == 0 or self.window == null) return;
-    const io = self.io orelse return;
-    const source = self.project.canonical(self.gpa, path) catch return;
-    defer self.gpa.free(source);
-    const file = self.project.osPath(self.gpa, source) catch return;
-    defer self.gpa.free(file);
-    var decoded = image.readFile(self.gpa, io, file, .{}) catch |err| {
+    const bytes = self.project.readFileAlloc(self.gpa, path, .limited(text_limit)) catch |err| {
+        return log.warn("the project's icon {s} did not read: {t}", .{ path, err });
+    };
+    defer self.gpa.free(bytes);
+    var decoded = image.decode(self.gpa, bytes) catch |err| {
         return log.warn("the project's icon {s} did not read: {t}", .{ path, err });
     };
     defer decoded.deinit(self.gpa);
@@ -7551,10 +7575,9 @@ pub fn saveCapture(self: *App, path: []const u8) !void {
 /// A picture's file - a PNG or a JPEG, `res://`, `user://` or the system's -
 /// as an image to read and change, in `gpa`'s memory. See `images`.
 pub fn readImage(self: *App, gpa: Allocator, path: []const u8) !Image {
-    const io = self.io orelse return error.NoIo;
-    const file = try self.project.osPath(self.gpa, path);
-    defer self.gpa.free(file);
-    const decoded = try image.readFile(gpa, io, file, .{});
+    const bytes = try self.project.readFileAlloc(self.gpa, path, .limited(text_limit));
+    defer self.gpa.free(bytes);
+    const decoded = try image.decode(gpa, bytes);
     return .{ .width = decoded.width, .height = decoded.height, .pixels = decoded.pixels };
 }
 

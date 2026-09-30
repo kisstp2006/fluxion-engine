@@ -416,6 +416,14 @@ pub const ui = @import("fluxion_ui");
 /// game's own settings and saves can be.
 pub const json = @import("fluxion_json");
 
+/// Packs: the files of a shipped game in one, sealed and signed if it asks,
+/// which `App.Options.pack` reads `res://` out of.
+pub const vfs = @import("fluxion_vfs");
+
+/// Where a shipped game's program finds its pack, and keeps the pack's key:
+/// what the runtime reads and the export writes.
+pub const shipped = @import("shipped.zig");
+
 /// Rigid bodies in the plane: what `App.physics` is, for joints, gravity and
 /// anything else a body can do.
 pub const physics = @import("fluxion_physics");
@@ -511,6 +519,8 @@ test {
     _ = @import("scenes_test.zig");
     _ = @import("script.zig");
     _ = @import("script_test.zig");
+    _ = @import("pack_test.zig");
+    _ = shipped;
     _ = Project;
     _ = settings_file;
     _ = @import("config.zig");

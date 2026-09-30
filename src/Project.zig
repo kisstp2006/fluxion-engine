@@ -32,6 +32,13 @@
 //! file beside it and tells the project where the UUID is now, and
 //! `copyFile` gives a copy a UUID of its own, so two files never share one.
 //! Neither ever writes over a file.
+//!
+//! **A shipped game's project is a pack.** `usePack` puts one where the root
+//! was: `res://` and `uid://` are read out of it, its table of UUIDs stands
+//! for the `.uid` files, and a project path has no file of its own on the
+//! disc to write, move or hand to another program - `error.InPack`. Every
+//! read the engine makes goes through `readFileAlloc`, or `files` on another
+//! thread, so nothing else has to know which the project is.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -41,6 +48,7 @@ const Allocator = std.mem.Allocator;
 const json = @import("fluxion_json");
 const Uuid = @import("fluxion_id").Uuid;
 const folders = @import("fluxion_platform").folders;
+const vfs = @import("fluxion_vfs");
 
 const project_file = @import("project/settings.zig");
 
@@ -103,6 +111,10 @@ pub const user_scheme = "user://";
 /// What is added to a file's name for the file its UUID is kept in.
 pub const uid_extension = ".uid";
 
+/// The file in a pack that stands for the project's `.uid` files: a line for
+/// each, `uid://...` and the `res://` path, a space between.
+pub const uid_table = "project.uids";
+
 pub const Error = error{
     /// A `res://` path that climbs out of the project with `..`, or that
     /// names a root or a drive of its own.
@@ -117,11 +129,28 @@ pub const Error = error{
 
 pub const InitError = std.Io.Dir.OpenError || std.Io.Dir.RealPathError || Allocator.Error;
 
+/// What `osPath` can say, besides what any path can.
+pub const PathError = Error || error{
+    /// A project path in a game whose project is a pack: there is no file of
+    /// its own on the disc, to write, move or hand to another program.
+    InPack,
+};
+
+/// What a pack the project reads can say, besides what reading any file can.
+pub const PackError = error{
+    /// A file of the pack whose bytes are not what its index says: damaged,
+    /// or changed since it was made.
+    Corrupt,
+};
+
+/// What reading a file can say: see `readFileAlloc`.
+pub const ReadFileError = PathError || PackError || std.Io.Dir.ReadFileAllocError || error{NoIo};
+
 /// What reading a `.uid` file can say, besides what reading any file can.
 pub const UidError = error{
     /// A `.uid` file that does not hold a UUID.
     InvalidUid,
-} || Error || std.Io.Dir.ReadFileAllocError;
+} || PathError || std.Io.Dir.ReadFileAllocError;
 
 gpa: Allocator,
 io: ?std.Io,
@@ -154,6 +183,9 @@ source: std.Random.DefaultCsprng,
 /// Where `user://` is, once `userRoot` has worked it out - or set first: a
 /// test's folder, a game kept on a stick with its saves beside it. Owned.
 user_root: ?[]u8 = null,
+/// The pack `res://` is read from, when the game shipped as one: see
+/// `usePack`. Owned.
+pack: ?*vfs.Pack = null,
 /// What the game is called when the project file does not say: the folder
 /// `user://` is under is named after it. Owned.
 fallback_name: ?[]u8 = null,
@@ -180,8 +212,20 @@ pub fn init(gpa: Allocator, io: ?std.Io, root: ?[]const u8) InitError!Project {
 /// Read the project file at the root into `settings`. A root with none is
 /// left with none, and is still somewhere to read files from; one that is
 /// wrong is an error, with what and where in `diagnostics`.
-pub fn loadSettings(self: *Project, diagnostics: ?*json.Diagnostics) ReadError!void {
+pub fn loadSettings(self: *Project, diagnostics: ?*json.Diagnostics) (ReadError || PackError)!void {
     const io = self.io orelse return;
+    if (self.pack != null) {
+        const bytes = self.readFileAlloc(self.gpa, scheme ++ file_name, .limited(1 << 20)) catch |err| switch (err) {
+            error.FileNotFound => return,
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.Corrupt,
+        };
+        defer self.gpa.free(bytes);
+        const parsed = try project_file.parse(self.gpa, bytes, scheme ++ file_name, diagnostics);
+        if (self.settings) |*old| old.deinit();
+        self.settings = parsed;
+        return;
+    }
     const read = readSettings(self.gpa, io, self.root, diagnostics) catch |err| switch (err) {
         error.FileNotFound => return,
         else => |e| return e,
@@ -199,6 +243,10 @@ fn absoluteDirectory(gpa: Allocator, io: std.Io, path: []const u8) InitError![]u
 }
 
 pub fn deinit(self: *Project) void {
+    if (self.pack) |pack| {
+        pack.deinit(self.io.?);
+        self.gpa.destroy(pack);
+    }
     if (self.settings) |*held| held.deinit();
     self.forget();
     self.by_uid.deinit(self.gpa);
@@ -267,16 +315,167 @@ pub fn canonical(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
 
 /// The operating system's path for any path the engine takes: `res://` under
 /// the root, `uid://` wherever its file is, `user://` under `userRoot`, any
-/// other path as it is. The caller frees it.
-pub fn osPath(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
+/// other path as it is. The caller frees it. A project path has none in a
+/// game whose project is a pack: `error.InPack`.
+pub fn osPath(self: *Project, gpa: Allocator, path: []const u8) PathError![]u8 {
     if (std.mem.startsWith(u8, path, user_scheme)) return joinUnder(gpa, try self.userRoot(), path[user_scheme.len..]);
     const project_path = if (std.mem.startsWith(u8, path, uid_scheme))
         try self.pathOfUidPath(path)
     else
         path;
     if (!std.mem.startsWith(u8, project_path, scheme)) return gpa.dupe(u8, path);
+    if (self.pack != null) return error.InPack;
 
     return underRoot(gpa, self.root, project_path);
+}
+
+// -------------------------------------------------------------------------
+// Reading
+// -------------------------------------------------------------------------
+
+/// Make `pack` the project: `res://` and `uid://` are read out of it from
+/// now on, and its table of UUIDs is the one the `.uid` files would have
+/// been. The project owns it from here, whatever this says, and closes it
+/// with itself. Before anything is loaded: what was read from the root
+/// before stays what it was.
+pub fn usePack(self: *Project, pack: vfs.Pack) (Allocator.Error || PackError || error{NoIo})!void {
+    // With no `Io` there is nothing a pack could have been opened with.
+    const io = self.io orelse return error.NoIo;
+    const held = self.gpa.create(vfs.Pack) catch |err| {
+        var dropped = pack;
+        dropped.deinit(io);
+        return err;
+    };
+    held.* = pack;
+    if (self.pack) |old| {
+        old.deinit(io);
+        self.gpa.destroy(old);
+    }
+    self.pack = held;
+    self.forget();
+    // The table is all there is: nothing on the disc to look through.
+    self.scanned = true;
+
+    var source = held.source();
+    const table = source.read(io, self.gpa, uid_table, .limited(64 << 20)) catch |err| switch (err) {
+        error.FileNotFound => return,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.Corrupt,
+    };
+    defer self.gpa.free(table);
+    var lines = std.mem.tokenizeAny(u8, table, "\r\n");
+    while (lines.next()) |line| {
+        // The table is the exporter's, never a person's: a line it would not
+        // write is damage.
+        const cut = std.mem.indexOfScalar(u8, line, ' ') orelse return error.Corrupt;
+        const uid = parseUid(line[0..cut]) orelse return error.Corrupt;
+        const path = line[cut + 1 ..];
+        if (!std.mem.startsWith(u8, path, scheme)) return error.Corrupt;
+        try self.remember(uid, path);
+    }
+}
+
+/// The whole of the file at `path`, however it is named: out of the pack for
+/// a `res://` or `uid://` path when the project is one, off the disc for any
+/// other, and for any path when it is not. The caller frees it.
+pub fn readFileAlloc(self: *Project, gpa: Allocator, path: []const u8, limit: std.Io.Limit) ReadFileError![]u8 {
+    const io = self.io orelse return error.NoIo;
+    if (self.pack != null and isProjectPath(path)) {
+        const named = try self.canonical(gpa, path);
+        defer gpa.free(named);
+        return self.files().read(gpa, named, limit);
+    }
+    const file = try self.osPath(gpa, path);
+    defer gpa.free(file);
+    return std.Io.Dir.cwd().readFileAlloc(io, file, gpa, limit);
+}
+
+/// What the pack says of the file or folder at `path`: a folder is a path
+/// some file of the pack is under. Null for one it does not hold, or when
+/// the project is no pack.
+pub fn packInfo(self: *Project, path: []const u8) ?PackInfo {
+    const pack = self.pack orelse return null;
+    const named = self.canonical(self.gpa, path) catch return null;
+    defer self.gpa.free(named);
+    if (!std.mem.startsWith(u8, named, scheme)) return null;
+    const inside = named[scheme.len..];
+    if (inside.len == 0) return .{ .size = 0, .folder = true };
+    if (pack.find(inside)) |entry| return .{ .size = entry.size, .folder = false };
+    for (pack.entries()) |entry| {
+        if (under(entry.path, inside) != null) return .{ .size = 0, .folder = true };
+    }
+    return null;
+}
+
+pub const PackInfo = struct { size: u64, folder: bool };
+
+/// The names in the pack's folder at `path`, as `App.listDir` gives a
+/// folder's: sorted, a folder's ending with `/`. Null for a path the pack
+/// does not hold, or when the project is no pack.
+pub fn packListing(self: *Project, gpa: Allocator, path: []const u8) Allocator.Error!?[][]u8 {
+    const pack = self.pack orelse return null;
+    const named = self.canonical(gpa, path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    defer gpa.free(named);
+    if (!std.mem.startsWith(u8, named, scheme)) return null;
+    const inside = named[scheme.len..];
+
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (names.items) |name| gpa.free(name);
+        names.deinit(gpa);
+    }
+    var found = inside.len == 0;
+    for (pack.entries()) |entry| {
+        // The entries are sorted, so a folder's names come together and a
+        // name met twice in a row is the one folder.
+        const rest = if (inside.len == 0) entry.path else (under(entry.path, inside) orelse continue);
+        const inner = if (inside.len == 0) rest else rest[1..];
+        if (inner.len == 0) continue;
+        found = true;
+        const cut = std.mem.indexOfScalar(u8, inner, '/');
+        const name = if (cut) |at| inner[0 .. at + 1] else inner;
+        if (names.items.len > 0 and std.mem.eql(u8, names.items[names.items.len - 1], name)) continue;
+        try names.append(gpa, try gpa.dupe(u8, name));
+    }
+    if (!found) {
+        names.deinit(gpa);
+        return null;
+    }
+    return try names.toOwnedSlice(gpa);
+}
+
+/// What reads the game's files by name and touches nothing else of the
+/// project: what a thread of its own is given. It holds the root and the
+/// pack, which the project must outlive.
+pub const Files = struct {
+    io: std.Io,
+    root: []const u8,
+    pack: ?*vfs.Pack,
+
+    /// The file at `path`: a `res://` path out of the pack, or under the
+    /// root; any other path as it is.
+    pub fn read(self: Files, gpa: Allocator, path: []const u8, limit: std.Io.Limit) ReadFileError![]u8 {
+        if (self.pack) |pack| if (std.mem.startsWith(u8, path, scheme)) {
+            var source = pack.source();
+            return source.read(self.io, gpa, path[scheme.len..], limit) catch |err| switch (err) {
+                error.FileNotFound => error.FileNotFound,
+                error.TooLarge => error.StreamTooLong,
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.Corrupt,
+            };
+        };
+        const file = try underRoot(gpa, self.root, path);
+        defer gpa.free(file);
+        return std.Io.Dir.cwd().readFileAlloc(self.io, file, gpa, limit);
+    }
+};
+
+/// The project's reading, for another thread. See `Files`.
+pub fn files(self: *const Project) Files {
+    return .{ .io = self.io.?, .root = self.root, .pack = self.pack };
 }
 
 /// Where a `res://` path is under `root`: `osPath` with no project, and so
@@ -341,7 +540,14 @@ pub fn localPath(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
     const given = self.userRoot() catch return named;
     const user = try std.fs.path.resolve(gpa, &.{ self.cwd, given });
     defer gpa.free(user);
-    const file = try self.osPath(gpa, named);
+    // A pack's files have no place on the disc to be inside the player's.
+    const file = self.osPath(gpa, named) catch |err| switch (err) {
+        error.InPack => return named,
+        else => |e| {
+            gpa.free(named);
+            return e;
+        },
+    };
     defer gpa.free(file);
     const absolute = try std.fs.path.resolve(gpa, &.{ self.cwd, file });
     defer gpa.free(absolute);
@@ -432,6 +638,8 @@ pub fn knownUid(self: *const Project, project_path: []const u8) ?Uuid {
 /// none.
 pub fn uidOf(self: *Project, project_path: []const u8) UidError!?Uuid {
     if (self.by_path.get(project_path)) |known| return known;
+    // A pack's table is every UUID it has.
+    if (self.pack != null) return null;
     const io = self.io orelse return null;
     const file = try self.osPath(self.gpa, project_path);
     defer self.gpa.free(file);

@@ -1092,17 +1092,12 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
 
 /// Read the scene at `path` - `res://`, `uid://` or the operating system's -
 /// into `app`'s world. See `App.loadScene`.
-pub fn load(app: *App, io: std.Io, path: []const u8, options: LoadOptions) anyerror!Loaded {
+pub fn load(app: *App, path: []const u8, options: LoadOptions) anyerror!Loaded {
     if (options.diagnostics) |d| {
         d.* = .{};
         d.setFile(path);
     }
-    const file = app.project.osPath(app.gpa, path) catch |err| {
-        if (options.diagnostics) |d| d.setMessage("cannot find the file: {t}", .{err});
-        return err;
-    };
-    defer app.gpa.free(file);
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, file, app.gpa, .unlimited) catch |err| {
+    const bytes = app.project.readFileAlloc(app.gpa, path, .unlimited) catch |err| {
         if (options.diagnostics) |d| d.setMessage("cannot read the file: {t}", .{err});
         return err;
     };

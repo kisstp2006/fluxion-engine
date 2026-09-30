@@ -124,10 +124,7 @@ pub const Shaders = struct {
         const source = try app.project.canonical(app.gpa, path);
         defer app.gpa.free(source);
         if (self.find(source)) |known| return known;
-        const io = app.io orelse return error.NoIo;
-        const file = try app.project.osPath(app.gpa, source);
-        defer app.gpa.free(file);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, file, app.gpa, .limited(file_table.file_limit));
+        const text = try app.project.readFileAlloc(app.gpa, source, .limited(file_table.file_limit));
         defer app.gpa.free(text);
         if (Project.isProjectPath(source)) {
             _ = app.project.uidOf(source) catch |err|
@@ -186,10 +183,7 @@ pub const Shaders = struct {
     pub fn reload(self: *Shaders, app: *App, handle: ShaderHandle) !bool {
         const held = self.table.get(toId(handle)) orelse return false;
         if (!held.on_disc) return false;
-        const io = app.io orelse return error.NoIo;
-        const file = try app.project.osPath(app.gpa, held.source);
-        defer app.gpa.free(file);
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, file, app.gpa, .limited(file_table.file_limit));
+        const text = try app.project.readFileAlloc(app.gpa, held.source, .limited(file_table.file_limit));
         defer app.gpa.free(text);
         try self.setText(app, handle, text);
         return true;
