@@ -6043,7 +6043,7 @@ pub fn touchCount(self: *const App) usize {
 /// last.
 ///
 /// ```
-/// for (i in 0..app.touchCount()) {
+/// for (0..app.touchCount()) |i| {
 ///     const finger = app.touchAt(i).?;
 ///     if (finger.pressed) spark(app.screenToWorld(finger.position.x, finger.position.y));
 /// }
