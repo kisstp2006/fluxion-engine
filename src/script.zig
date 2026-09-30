@@ -1817,6 +1817,10 @@ pub const Scripts = struct {
     calls: Calls,
     /// How a component handle finds its component again.
     resolver: flux.Resolver,
+    /// The components handles found last, by entity and type: a script
+    /// reads a component's fields one after another, and each read finds
+    /// it again. Good while the world's make-up has not changed.
+    found: [found_slots]Found = @splat(.{}),
     /// What scripts reach as `files`.
     file_access: FileAccess,
     /// What scripts reach as `time`.
@@ -1912,7 +1916,7 @@ pub const Scripts = struct {
                 .callNow = callNow,
             },
             .resolver = .{
-                .context = app,
+                .context = self,
                 .resolve = findComponent,
                 .why = "its entity was despawned, or the component was taken off",
             },
@@ -2506,6 +2510,8 @@ pub const Scripts = struct {
 
     /// Every instance let go of, each with its `exit`: the world was cleared.
     fn clear(self: *Scripts) void {
+        // A new world counts its changes from nought again.
+        self.found = @splat(.{});
         // The table's connections go with the world; so do their signals.
         for (self.bridges.items) |held| {
             self.vm.release(held.signal);
@@ -3229,10 +3235,29 @@ pub const Scripts = struct {
     }
 };
 
-/// Where a component a script holds is now.
+/// How many components `Scripts.found` keeps.
+const found_slots = 64;
+
+/// A component a handle found, and the world's `structure` then: the cell
+/// stays where it is until something is spawned, despawned, added or taken
+/// off.
+const Found = struct {
+    key: u64 = 0,
+    type: ?*const reflect.Type = null,
+    structure: u64 = 0,
+    value: reflect.Value = undefined,
+};
+
+/// Where a component a script holds is now: where it was last time, when
+/// the world's make-up has not changed since.
 fn findComponent(context: ?*anyopaque, key: u64, t: *const reflect.Type) ?reflect.Value {
-    const app: *App = @ptrCast(@alignCast(context.?));
-    return app.componentOfType(.fromInt(key), t);
+    const self: *Scripts = @ptrCast(@alignCast(context.?));
+    const structure = self.app.world.structure;
+    const spot = &self.found[@intCast((key *% 0x9E37_79B9_7F4A_7C15 ^ @intFromPtr(t) >> 4) % found_slots)];
+    if (spot.type == t and spot.key == key and spot.structure == structure) return spot.value;
+    const value = self.app.componentOfType(.fromInt(key), t) orelse return null;
+    spot.* = .{ .key = key, .type = t, .structure = structure, .value = value };
+    return value;
 }
 
 /// A script's emit, heard by the engine's signal table as well: the signal
