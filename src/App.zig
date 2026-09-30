@@ -1114,7 +1114,10 @@ fn openDisplay(self: *App, gpa: Allocator, options: Options, resolved: Resolved,
             .present_mode = resolved.vsync_mode.present(),
         }) catch |err| {
             self.window = null;
-            if (Window.isAbsent(err)) return Error.NoDisplay;
+            if (Window.isAbsent(err)) {
+                log.info("no window could be opened: {t}", .{err});
+                return Error.NoDisplay;
+            }
             return err;
         };
         self.clipboard.system = &self.window.?.ctx;

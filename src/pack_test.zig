@@ -95,6 +95,14 @@ test "a game that shipped as a pack reads its project, pictures, scenes and text
     try testing.expect(app.loadStatus("res://levels/one.json") == .done);
     _ = try app.readScene("res://levels/one.json", .{});
 
+    // A path that is the system's stays so, though the working directory
+    // holds it: a system font is read from the disc, not from the pack.
+    const system_path = try std.fs.path.join(gpa, &.{ app.project.cwd, "some.ttf" });
+    defer gpa.free(system_path);
+    const kept = try app.project.canonical(gpa, system_path);
+    defer gpa.free(kept);
+    try testing.expectEqualStrings(system_path, kept);
+
     // A pack is never written, and the player's folder still is.
     try testing.expectError(error.InPack, app.writeText("res://data/new.txt", "no"));
     try app.writeText("user://save.txt", "yes");

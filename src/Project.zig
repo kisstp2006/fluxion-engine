@@ -304,6 +304,10 @@ pub fn canonical(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
     // from an image, `image://3` - is a name, kept as it is.
     if (std.mem.indexOf(u8, path, "://") != null) return gpa.dupe(u8, path);
     if (self.io == null) return gpa.dupe(u8, path);
+    // A pack is no folder: another path is the system's, whatever the
+    // working directory is - on Android that is the root of it all, which
+    // would take the system's fonts for the game's files.
+    if (self.pack != null) return gpa.dupe(u8, path);
 
     const absolute = try std.fs.path.resolve(gpa, &.{ self.cwd, path });
     const inside = self.within(absolute) orelse return absolute;

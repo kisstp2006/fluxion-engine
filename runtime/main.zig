@@ -81,6 +81,8 @@ fn run(gpa: std.mem.Allocator, io: std.Io, flags: Flags) !void {
     };
 
     var options = flags.app.apply(.{});
+    // Android has OpenGL ES and Vulkan, and the engine draws with Vulkan.
+    if (android and flags.app.backend == null) options.backend = .vulkan;
     options.io = io;
     options.pack = pack;
     options.open_project = true;

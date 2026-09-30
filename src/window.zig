@@ -16,6 +16,7 @@
 //! pointing at the old one. `App` is on the heap for the same reason.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const platform = @import("fluxion_platform");
@@ -226,6 +227,7 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
         .gl = if (desc.gl) .{ .major = 3, .minor = 3, .profile = .core } else null,
     });
     errdefer self.handle.destroy();
+    if (comptime builtin.abi.isAndroid()) try self.awaitSurface();
 
     if (desc.gl) {
         try self.handle.makeContextCurrent();
@@ -240,6 +242,18 @@ pub fn open(self: *Window, gpa: Allocator, desc: Desc) Error!void {
     self.height = fb[1];
     self.focused = self.handle.isFocused();
     self.content_scale = self.handle.contentScale()[0];
+}
+
+/// Android gives a window its surface a moment after the program starts,
+/// and takes it away when the app goes to the background: nothing is made
+/// to draw into it before there is one.
+fn awaitSurface(self: *Window) Error!void {
+    var waited: u32 = 0;
+    while (self.handle.native() == 0) : (waited += 1) {
+        // Fifteen seconds, and the system has not given one.
+        if (waited >= 300) return error.NoDisplay;
+        try self.ctx.pumpWait(50);
+    }
 }
 
 pub fn close(self: *Window) void {
