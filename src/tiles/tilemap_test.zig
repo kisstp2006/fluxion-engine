@@ -59,7 +59,7 @@ test "a map's chunks go when the map does" {
     app.world.despawn(map);
     try app.run();
     try testing.expect(!app.world.isAlive(chunk));
-    try testing.expectEqual(@as(usize, 0), app.tile_chunks.count());
+    try testing.expectEqual(@as(usize, 0), app.tile_chunks.by_key.count());
 }
 
 test "the tile set says which tiles are solid, and they become one body" {

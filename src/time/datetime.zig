@@ -43,6 +43,37 @@ const script_mod = @import("../script/script.zig");
 
 const file = @This();
 
+/// The culture a game writes dates and times in: the one chosen, else the
+/// project's, else the player's own - opened the first time it is asked for.
+pub const CultureChoice = struct {
+    /// The tag `choose` was given, over the project's.
+    chosen: ?[]u8 = null,
+    opened: ?*Culture = null,
+
+    pub fn deinit(self: *CultureChoice, gpa: std.mem.Allocator) void {
+        if (self.opened) |held| held.close();
+        if (self.chosen) |tag| gpa.free(tag);
+    }
+
+    /// The culture chosen - or the project's `project_tag` - opened now if
+    /// it is not yet.
+    pub fn culture(self: *CultureChoice, gpa: std.mem.Allocator, project_tag: []const u8) std.mem.Allocator.Error!*Culture {
+        if (self.opened) |held| return held;
+        const made = try Culture.open(gpa, self.chosen orelse project_tag);
+        self.opened = made;
+        return made;
+    }
+
+    /// Write as `tag` does from now on; an empty one is the player's own.
+    pub fn choose(self: *CultureChoice, gpa: std.mem.Allocator, tag: []const u8) std.mem.Allocator.Error!void {
+        const copy = try gpa.dupe(u8, tag);
+        if (self.chosen) |old| gpa.free(old);
+        self.chosen = copy;
+        if (self.opened) |held| held.close();
+        self.opened = null;
+    }
+};
+
 pub const Culture = culture_mod.Culture;
 pub const Width = culture_mod.Width;
 pub const Style = culture_mod.Style;

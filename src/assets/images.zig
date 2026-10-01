@@ -21,7 +21,10 @@ const testing = std.testing;
 
 const image = @import("fluxion_image");
 
+const App = @import("../App.zig");
+const Assets = @import("assets.zig");
 const Color = @import("../math/color.zig").Color;
+const game_files = @import("../files/game_files.zig");
 
 pub const Image = struct {
     width: u32,
@@ -275,6 +278,68 @@ pub const Image = struct {
         return image.jpeg.encodeAlloc(gpa, self.view(), .{ .quality = quality });
     }
 };
+
+/// A picture's file - a PNG or a JPEG, `res://`, `user://` or the system's -
+/// as an image to read and change, in `gpa`'s memory. See `images`.
+pub fn read(app: *App, gpa: Allocator, path: []const u8) !Image {
+    const bytes = try app.project.readFileAlloc(app.gpa, path, .limited(game_files.text_limit));
+    defer app.gpa.free(bytes);
+    const decoded = try image.decode(gpa, bytes);
+    return .{ .width = decoded.width, .height = decoded.height, .pixels = decoded.pixels };
+}
+
+pub const SaveOptions = struct {
+    /// A JPEG's, from 1 to 100.
+    quality: u8 = 90,
+};
+
+/// Write an image to `path`: a JPEG for a `.jpg` or a `.jpeg`, a PNG for a
+/// `.png`, and `error.UnknownImageFormat` for any other ending. Written
+/// beside the old and put in its place, as `writeText` does.
+pub fn save(app: *App, picture: Image, path: []const u8, options: SaveOptions) !void {
+    const ending = std.fs.path.extension(path);
+    const bytes = if (std.ascii.eqlIgnoreCase(ending, ".png"))
+        try picture.encodePng(app.gpa)
+    else if (std.ascii.eqlIgnoreCase(ending, ".jpg") or std.ascii.eqlIgnoreCase(ending, ".jpeg"))
+        try picture.encodeJpg(app.gpa, options.quality)
+    else
+        return error.UnknownImageFormat;
+    defer app.gpa.free(bytes);
+    try app.writeText(path, bytes);
+}
+
+/// The frame drawn again into an image the window's size: a save's
+/// thumbnail, a photo mode's picture.
+pub fn capture(app: *App, gpa: Allocator) !Image {
+    const pixels = try app.capture(gpa, app.width, app.height);
+    return .{ .width = app.width, .height = app.height, .pixels = pixels };
+}
+
+/// What a texture holds, read back from the GPU: a render view's picture, a
+/// texture made from an image and changed since.
+pub fn ofTexture(app: *App, gpa: Allocator, texture: Assets.TextureHandle) !Image {
+    const held = app.assets.get(texture) orelse return error.NoSuchTexture;
+    const pixels = try app.device.readTexture(held.gpu, gpa);
+    const out: Image = .{ .width = held.width, .height = held.height, .pixels = pixels };
+    if (held.upside_down) out.flipY();
+    return out;
+}
+
+/// An image made a texture to draw, found by the name it is given -
+/// `image://1`, `image://2`... - which is what a script hands a sprite. See
+/// `updateTexture`.
+pub fn toTexture(app: *App, picture: Image, options: Assets.LoadOptions) !Assets.TextureHandle {
+    app.assets.images_made +%= 1;
+    var name: [32]u8 = undefined;
+    const source = try std.fmt.bufPrint(&name, "image://{d}", .{app.assets.images_made});
+    return app.assets.adoptTexture(source, picture.width, picture.height, picture.pixels, options);
+}
+
+/// Give a texture an image's pixels: in place for the same size, made anew
+/// for another, the handle the same either way.
+pub fn updateTexture(app: *App, texture: Assets.TextureHandle, picture: Image) !void {
+    try app.assets.setTexturePixels(texture, picture.width, picture.height, picture.pixels);
+}
 
 /// Which pixels of a line `from` long one pixel `at` of the line `to` long
 /// is mixed of, and how much of each: the part of each it covers, where the

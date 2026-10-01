@@ -25,7 +25,6 @@ const typeface = @import("fluxion_font");
 const Assets = @import("../assets/assets.zig");
 const Clipboard = @import("../platform/clipboard.zig");
 const Input = @import("../input/input.zig");
-const Window = @import("../platform/window.zig");
 
 const Interface = @This();
 const log = std.log.scoped(.fluxion_engine);
@@ -120,7 +119,6 @@ font_reloads: u32 = 0,
 /// This frame's, from `ui.end`.
 commands: []const ui.RenderCommand = &.{},
 
-
 /// Unscaled seconds since the first frame: what animated text moves on.
 seconds: f64 = 0,
 
@@ -166,6 +164,55 @@ pub fn addFont(self: *Interface, handle: Assets.FontHandle) error{TooManyFonts}!
     self.other_fonts[self.other_font_count] = handle;
     self.other_font_count += 1;
     return self.other_font_count;
+}
+
+/// This frame's faces, filled into `faces` from the fonts: `font` first,
+/// then each `addFont` gave it. A font that has been let go of takes the
+/// first face's place, so the indices after it stay where they are. None at
+/// all when `font` has no face, which lays the interface out and draws no
+/// text.
+pub fn fillFaces(self: *Interface, assets: *Assets) []const *const typeface.Font {
+    const faces = &self.faces;
+    faces.len = 0;
+    const first = &(assets.fontOf(self.font) orelse return faces.slice()).face;
+    faces.items[0] = first;
+    const others = self.other_fonts[0..self.other_font_count];
+    for (others, faces.items[1..][0..others.len]) |handle, *face| {
+        face.* = if (assets.fontOf(handle)) |font| &font.face else first;
+    }
+    faces.len = @intCast(1 + others.len);
+    return faces.slice();
+}
+
+/// How an interface element is pinned to a point in the world: see
+/// `openAt`.
+pub const WorldPlacement = struct {
+    anchor_x: ui.AlignX = .center,
+    anchor_y: ui.AlignY = .bottom,
+    offset: ui.geometry.Vec2 = .{ .x = 0, .y = 0 },
+    z_index: i16 = 0,
+    clip: bool = false,
+};
+
+/// Open an element floating over `screen`, a point of the screen in pixels,
+/// pinned there as `placement` says. Closed like any `ui.open`.
+pub fn openAt(self: *const Interface, layout: *ui.Ui, screen: ui.geometry.Vec2, declaration: ui.Declaration, placement: WorldPlacement) void {
+    const scale = if (self.scale > 0) self.scale else 1;
+    var placed = declaration;
+    placed.floating = .{
+        .attach = .root,
+        .anchor = .{
+            .element_x = placement.anchor_x,
+            .element_y = placement.anchor_y,
+        },
+        .offset = .{
+            .x = screen.x / scale + placement.offset.x,
+            .y = screen.y / scale + placement.offset.y,
+        },
+        .z_index = placement.z_index,
+        .clip = placement.clip,
+    };
+    layout.open(placed);
 }
 
 /// The surface this frame is laid out on.

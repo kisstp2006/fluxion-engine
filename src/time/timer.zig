@@ -24,8 +24,6 @@
 //! a timer in the scene it edits.
 
 const std = @import("std");
-const testing = std.testing;
-const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
 
@@ -33,7 +31,6 @@ const App = @import("../App.zig");
 const attr = @import("../reflect/attr.zig");
 
 const Entity = ecs.Entity;
-const log = std.log.scoped(.fluxion_engine);
 
 pub const Timer = extern struct {
     /// Seconds from starting to `timeout`, and between two when it repeats.

@@ -108,7 +108,7 @@ test "the pointer takes the shape its control asks for, the game's default elsew
     const pixels = [_]u8{ 255, 0, 0, 255 } ** (4 * 4);
     try image.png.writeFile(testing.allocator, testing.io, path, .{ .width = 4, .height = 4, .pixels = &pixels, .row_pitch = 16 }, .{});
     try app.setCustomCursorFile(path, .pointing_hand, .init(9, 1));
-    const held = app.custom_cursors[@intFromEnum(CursorShape.pointing_hand)].?;
+    const held = app.cursors.custom[@intFromEnum(CursorShape.pointing_hand)].?;
     try testing.expectEqual(@as(u32, 4), held.width);
     try testing.expectEqual(@as(u32, 3), held.hot_x);
     try testing.expectEqual(@as(u32, 1), held.hot_y);
@@ -116,10 +116,10 @@ test "the pointer takes the shape its control asks for, the game's default elsew
     const huge = try testing.allocator.alloc(u8, 257 * 1 * 4);
     defer testing.allocator.free(huge);
     try testing.expectError(error.CursorTooLarge, app.setCustomCursorPixels(.{ .pixels = huge, .width = 257, .height = 1 }, .pointing_hand));
-    try testing.expectEqual(@as(u32, 4), app.custom_cursors[@intFromEnum(CursorShape.pointing_hand)].?.width);
+    try testing.expectEqual(@as(u32, 4), app.cursors.custom[@intFromEnum(CursorShape.pointing_hand)].?.width);
 
     try app.setCustomCursorPixels(null, .pointing_hand);
-    try testing.expect(app.custom_cursors[@intFromEnum(CursorShape.pointing_hand)] == null);
+    try testing.expect(app.cursors.custom[@intFromEnum(CursorShape.pointing_hand)] == null);
     try testing.expectError(error.FileNotFound, app.setCustomCursorFile("res://nowhere.png", .arrow, .init(0, 0)));
 }
 

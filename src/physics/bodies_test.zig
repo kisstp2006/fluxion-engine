@@ -6,7 +6,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const Bodies = @import("bodies.zig");
 const App = @import("../App.zig");
 const earth = @import("../test_helpers.zig").earth;
 const Area2D = components.Area2D;

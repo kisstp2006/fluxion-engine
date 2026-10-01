@@ -379,6 +379,8 @@ const Document = struct {
 /// Every animation library read, and the handles they are found by.
 pub const Libraries = struct {
     table: Table = .empty,
+    /// What `namesOf` hands out.
+    names: std.ArrayList([]const u8) = .empty,
 
     pub fn deinit(self: *Libraries, gpa: Allocator) void {
         var it = self.table.iterator();
@@ -387,6 +389,25 @@ pub const Libraries = struct {
             gpa.free(entry.value.source);
         }
         self.table.deinit(gpa);
+        self.names.deinit(gpa);
+    }
+
+    /// The animation called `name` of an `AnimationPlayer`'s library, or
+    /// null for none: a player with no library read, or none of that name.
+    pub fn ofPlayer(self: *Libraries, world: *ecs.World, player: Entity, name: []const u8) ?*const Animation {
+        const held = world.get(player, AnimationPlayer) orelse return null;
+        const library = self.get(held.library) orelse return null;
+        return library.find(name);
+    }
+
+    /// The animations an `AnimationPlayer`'s library holds, in its order: a
+    /// list good until the next such question.
+    pub fn namesOf(self: *Libraries, gpa: Allocator, world: *ecs.World, player: Entity) Allocator.Error![]const []const u8 {
+        self.names.clearRetainingCapacity();
+        const held = world.get(player, AnimationPlayer) orelse return self.names.items;
+        const library = self.get(held.library) orelse return self.names.items;
+        for (library.animations.items) |*animation| try self.names.append(gpa, animation.name);
+        return self.names.items;
     }
 
     /// Read a `.anim` file, or find the one read from there already. One

@@ -16,11 +16,14 @@ const std = @import("std");
 const testing = std.testing;
 
 const ecs = @import("fluxion_ecs");
+const math = @import("fluxion_math");
 const components = @import("components.zig");
 
+const Allocator = std.mem.Allocator;
 const Transform2D = components.Transform2D;
 const Parent = components.Parent;
 const Entity = ecs.Entity;
+const Vec2 = math.Vec2;
 
 /// What an entity hangs from, `.none` for a root.
 pub fn parentOf(world: *const ecs.World, entity: Entity) Entity {
@@ -126,6 +129,219 @@ pub fn resolveEntity(
 ) ?Transform2D {
     const local = world.get(entity, Transform2D) orelse return null;
     return resolve(world, snapshots, entity, local.*, alpha);
+}
+
+/// Resolving against no snapshots is resolving where things are, not where
+/// they are drawn.
+const still: Snapshots = .empty;
+
+/// Where an entity really is, with every parent above it applied. Null
+/// when it has no transform, or when something it hangs from was despawned
+/// this frame. The result has no parent, so writing
+/// it over the entity's own transform lets go while keeping it in place.
+///
+/// Where it is, not where it is drawn: an entity that `interpolate`s is drawn
+/// between its last two fixed steps, which `drawnTransform` says.
+pub fn worldTransform(world: *ecs.World, entity: Entity) ?Transform2D {
+    return resolveEntity(world, &still, entity, 1);
+}
+
+/// What a call that writes where an entity is can fail with.
+pub const PlaceError = error{
+    /// It has no `Transform2D` to write.
+    NoTransform,
+    /// Something above it cannot be placed: a parent despawned this frame,
+    /// or a chain deeper than `Transform2D.max_depth`.
+    Unplaced,
+};
+
+/// Put an entity where `placed` says in the world, and keep its parent: its
+/// own transform becomes the one that, under its parents, lands there. Its
+/// parent, its inherit switches and its `interpolate` stay its own;
+/// `placed`'s are not read.
+pub fn setWorldTransform(world: *ecs.World, entity: Entity, placed: Transform2D) PlaceError!void {
+    const above = try parentPlace(world, entity);
+    const own = world.get(entity, Transform2D) orelse return error.NoTransform;
+    const at = above.unapply(placed.x, placed.y);
+    own.x = at.x;
+    own.y = at.y;
+    own.rotation = if (own.inherit_rotation) placed.rotation - above.rotation else placed.rotation;
+    own.scale_x = if (own.inherit_scale) placed.scale_x / nonZero(above.scale_x) else placed.scale_x;
+    own.scale_y = if (own.inherit_scale) placed.scale_y / nonZero(above.scale_y) else placed.scale_y;
+}
+
+/// Where an entity's parent is in the world: nothing at all for none, or
+/// for a living parent with no transform of its own, which places nothing.
+fn parentPlace(world: *ecs.World, entity: Entity) PlaceError!Transform2D {
+    const above = parentOf(world, entity);
+    if (above.isNone()) return .{};
+    if (world.get(above, Transform2D) == null and world.isAlive(above)) return .{};
+    return worldTransform(world, above) orelse error.Unplaced;
+}
+
+/// A scale of zero is left out rather than divided by, as `unapply` does.
+fn nonZero(scale: f32) f32 {
+    return if (scale != 0) scale else 1;
+}
+
+/// The world transform of an entity to write, or why there is none.
+fn placeOf(world: *ecs.World, entity: Entity) PlaceError!Transform2D {
+    if (!world.has(entity, Transform2D)) return error.NoTransform;
+    return worldTransform(world, entity) orelse error.Unplaced;
+}
+
+/// Where an entity is in the world.
+pub fn globalPosition(world: *ecs.World, entity: Entity) ?Vec2 {
+    const placed = worldTransform(world, entity) orelse return null;
+    return .init(placed.x, placed.y);
+}
+
+pub fn setGlobalPosition(world: *ecs.World, entity: Entity, position: Vec2) PlaceError!void {
+    var placed = try placeOf(world, entity);
+    placed.x = position.x;
+    placed.y = position.y;
+    try setWorldTransform(world, entity, placed);
+}
+
+/// Which way an entity faces in the world, in radians.
+pub fn globalRotation(world: *ecs.World, entity: Entity) ?f32 {
+    const placed = worldTransform(world, entity) orelse return null;
+    return placed.rotation;
+}
+
+pub fn setGlobalRotation(world: *ecs.World, entity: Entity, radians: f32) PlaceError!void {
+    var placed = try placeOf(world, entity);
+    placed.rotation = radians;
+    try setWorldTransform(world, entity, placed);
+}
+
+/// How big an entity is in the world.
+pub fn globalScale(world: *ecs.World, entity: Entity) ?Vec2 {
+    const placed = worldTransform(world, entity) orelse return null;
+    return .init(placed.scale_x, placed.scale_y);
+}
+
+pub fn setGlobalScale(world: *ecs.World, entity: Entity, scale: Vec2) PlaceError!void {
+    var placed = try placeOf(world, entity);
+    placed.scale_x = scale.x;
+    placed.scale_y = scale.y;
+    try setWorldTransform(world, entity, placed);
+}
+
+/// Move an entity by `offset` in the world, whatever its parents have done
+/// to its axes.
+pub fn globalTranslate(world: *ecs.World, entity: Entity, offset: Vec2) PlaceError!void {
+    const placed = try placeOf(world, entity);
+    try setGlobalPosition(world, entity, .init(placed.x + offset.x, placed.y + offset.y));
+}
+
+/// A point in the world, in an entity's own space.
+pub fn toLocal(world: *ecs.World, entity: Entity, global_point: Vec2) ?Vec2 {
+    const placed = worldTransform(world, entity) orelse return null;
+    const local = placed.unapply(global_point.x, global_point.y);
+    return .init(local.x, local.y);
+}
+
+/// A point in an entity's own space, in the world.
+pub fn toGlobal(world: *ecs.World, entity: Entity, local_point: Vec2) ?Vec2 {
+    const placed = worldTransform(world, entity) orelse return null;
+    const global = placed.apply(local_point.x, local_point.y);
+    return .init(global.x, global.y);
+}
+
+/// How far an entity would turn to face a point with its `+x`, in radians,
+/// measured in its own space and scale.
+pub fn getAngleTo(world: *ecs.World, entity: Entity, point: Vec2) ?f32 {
+    const local = toLocal(world, entity, point) orelse return null;
+    const own = world.get(entity, Transform2D).?;
+    return std.math.atan2(local.y * own.scale_y, local.x * own.scale_x);
+}
+
+/// Turn an entity so that its `+x` faces a point in the world.
+pub fn lookAt(world: *ecs.World, entity: Entity, point: Vec2) PlaceError!void {
+    const angle = getAngleTo(world, entity, point) orelse return if (world.has(entity, Transform2D)) error.Unplaced else error.NoTransform;
+    world.get(entity, Transform2D).?.rotation += angle;
+}
+
+/// Where an entity is in the space of `ancestor`, something it hangs from.
+/// Nothing moved for the entity itself, and null for an entity `ancestor`
+/// is not above.
+pub fn getRelativeTransformToParent(world: *ecs.World, entity: Entity, ancestor: Entity) ?Transform2D {
+    var chain: [Transform2D.max_depth]Transform2D = undefined;
+    var depth: usize = 0;
+    var at = entity;
+    while (!at.eql(ancestor)) {
+        if (depth == chain.len) return null;
+        const own = world.get(at, Transform2D) orelse return null;
+        const above = parentOf(world, at);
+        if (above.isNone()) return null;
+        chain[depth] = own.*;
+        depth += 1;
+        at = above;
+    }
+    var placed: Transform2D = .{};
+    while (depth > 0) {
+        depth -= 1;
+        placed = Transform2D.compose(placed, chain[depth]);
+    }
+    return placed;
+}
+
+/// Move an entity along its own `+x`, in its parent's space. By `delta`
+/// units, or with `scaled` by `delta` of its own scaled lengths.
+pub fn moveLocalX(world: *ecs.World, entity: Entity, delta: f32, scaled: bool) PlaceError!void {
+    const own = world.get(entity, Transform2D) orelse return error.NoTransform;
+    moveAlong(own, .init(@cos(own.rotation) * own.scale_x, @sin(own.rotation) * own.scale_x), delta, scaled);
+}
+
+/// The same along its own `+y`.
+pub fn moveLocalY(world: *ecs.World, entity: Entity, delta: f32, scaled: bool) PlaceError!void {
+    const own = world.get(entity, Transform2D) orelse return error.NoTransform;
+    moveAlong(own, .init(-@sin(own.rotation) * own.scale_y, @cos(own.rotation) * own.scale_y), delta, scaled);
+}
+
+fn moveAlong(own: *Transform2D, axis: Vec2, delta: f32, scaled: bool) void {
+    const along = if (scaled) axis else axis.norm();
+    own.x += along.x * delta;
+    own.y += along.y * delta;
+}
+
+/// Turn an entity by `radians` more.
+pub fn rotate(world: *ecs.World, entity: Entity, radians: f32) PlaceError!void {
+    const own = world.get(entity, Transform2D) orelse return error.NoTransform;
+    own.rotation += radians;
+}
+
+/// Multiply an entity's scale by `ratio`.
+pub fn applyScale(world: *ecs.World, entity: Entity, ratio: Vec2) PlaceError!void {
+    const own = world.get(entity, Transform2D) orelse return error.NoTransform;
+    own.scale_x *= ratio.x;
+    own.scale_y *= ratio.y;
+}
+
+/// Whether `entity` hangs from `ancestor`, however far down.
+pub fn hangsFrom(world: *const ecs.World, entity: Entity, ancestor: Entity) bool {
+    var at = parentOf(world, entity);
+    var depth: usize = 0;
+    while (!at.isNone() and depth < 256) : (depth += 1) {
+        if (at.eql(ancestor)) return true;
+        at = parentOf(world, at);
+    }
+    return false;
+}
+
+/// Remember where every interpolating transform is, before a step moves it.
+/// Refilled rather than added to, so the dead drop out; the capacity stays.
+pub fn snapshot(gpa: Allocator, world: *ecs.World, snapshots: *Snapshots) !void {
+    snapshots.clearRetainingCapacity();
+
+    var it = try ecs.Query(.{Transform2D}).over(world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(Transform2D), chunk.entities) |current, entity| {
+            if (!current.interpolate) continue;
+            try snapshots.put(gpa, entity, .of(current));
+        }
+    }
 }
 
 test "an unparented transform is already the world one" {

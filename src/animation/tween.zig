@@ -34,7 +34,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const testing = std.testing;
 
 const ecs = @import("fluxion_ecs");
 const math = @import("fluxion_math");
@@ -160,6 +159,105 @@ pub const Tweens = struct {
         plan.steps.deinit(app.gpa);
     }
 };
+
+/// A tween: an entity of its own, hanging from `owner` - `.none` for the
+/// top of the tree - whose steps move properties over time, and which goes
+/// once it is done. See `tween.zig`.
+pub fn make(app: *App, owner: Entity) !Entity {
+    const made = try app.spawn(owner);
+    errdefer app.world.despawn(made);
+    try app.world.add(made, Tween{});
+    return made;
+}
+
+/// A step of `tween_entity`: the property `path` of `moved` - see
+/// `property.zig` - moved from what it holds when the step starts to `to`,
+/// over `seconds`.
+pub fn addProperty(app: *App, tween_entity: Entity, moved: Entity, path: []const u8, to: Value, seconds: f32) !void {
+    if (!app.world.has(tween_entity, Tween)) return error.NotATween;
+    const compiled = try Property.compile(app, path);
+    if (to.as(compiled.kind) == null) return error.WrongKindOfValue;
+    const plan = try app.tweens.planOf(app.gpa, tween_entity);
+    try plan.steps.append(app.gpa, .{
+        .target = moved,
+        .property = compiled,
+        .to = to,
+        .seconds = @max(seconds, 0),
+        .ease = plan.ease,
+        .with_before = plan.parallel and plan.steps.items.len > 0,
+    });
+}
+
+/// A step that waits `seconds`.
+pub fn addInterval(app: *App, tween_entity: Entity, seconds: f32) !void {
+    if (!app.world.has(tween_entity, Tween)) return error.NotATween;
+    const plan = try app.tweens.planOf(app.gpa, tween_entity);
+    try plan.steps.append(app.gpa, .{ .seconds = @max(seconds, 0), .with_before = plan.parallel and plan.steps.items.len > 0 });
+}
+
+/// The steps added after this start together with the one before them,
+/// rather than after it.
+pub fn setParallel(app: *App, tween_entity: Entity, together: bool) !void {
+    if (!app.world.has(tween_entity, Tween)) return error.NotATween;
+    (try app.tweens.planOf(app.gpa, tween_entity)).parallel = together;
+}
+
+/// The curve the steps added after this move by: `.linear`, `.quad_out`,
+/// `.back_in`, `.elastic_out`, ...
+pub fn setEase(app: *App, tween_entity: Entity, ease: math.ease.Kind) !void {
+    if (!app.world.has(tween_entity, Tween)) return error.NotATween;
+    (try app.tweens.planOf(app.gpa, tween_entity)).ease = ease;
+}
+
+/// A step that calls a script's function when it is reached: a sound when
+/// a panel is in, a door shut at the end. `t.tweenCallback(app.shut)`.
+pub fn addCallback(app: *App, tween_entity: Entity, function: flux.Value) !void {
+    try addCall(app, tween_entity, function, .{ .seconds = 0 });
+}
+
+/// A step that calls a script's function with each value from `from` to
+/// `to` over `seconds`, along the curve: a score counted up, a colour a
+/// shader is given.
+pub fn addMethod(app: *App, tween_entity: Entity, function: flux.Value, from: Value, to: Value, seconds: f32) !void {
+    try addCall(app, tween_entity, function, .{ .seconds = @max(seconds, 0), .start_at = from, .to = to, .along = true });
+}
+
+fn addCall(app: *App, tween_entity: Entity, function: flux.Value, given: Step) !void {
+    if (!app.world.has(tween_entity, Tween)) return error.NotATween;
+    const scripts = app.scripts orelse return error.NoScripts;
+    try scripts.calls.hold(scripts, function);
+    errdefer scripts.calls.release(scripts, function);
+    const plan = try app.tweens.planOf(app.gpa, tween_entity);
+    var made = given;
+    made.call = function;
+    made.ease = plan.ease;
+    made.with_before = plan.parallel and plan.steps.items.len > 0;
+    try plan.steps.append(app.gpa, made);
+}
+
+/// The step added last starts from `from`, rather than from what its
+/// property holds when it starts: a fade in from nothing.
+pub fn startFrom(app: *App, tween_entity: Entity, from: Value) !void {
+    (try lastStep(app, tween_entity)).start_at = from;
+}
+
+/// The step added last moves by its value from where it starts, rather than
+/// to it: forty to the right of wherever it is.
+pub fn makeRelative(app: *App, tween_entity: Entity) !void {
+    (try lastStep(app, tween_entity)).relative = true;
+}
+
+/// The step added last waits `seconds` before it starts.
+pub fn setDelay(app: *App, tween_entity: Entity, seconds: f32) !void {
+    (try lastStep(app, tween_entity)).delay = @max(seconds, 0);
+}
+
+fn lastStep(app: *App, tween_entity: Entity) error{ NotATween, NoStep }!*Step {
+    if (!app.world.has(tween_entity, Tween)) return error.NotATween;
+    const plan = app.tweens.by.getPtr(tween_entity) orelse return error.NoStep;
+    if (plan.steps.items.len == 0) return error.NoStep;
+    return &plan.steps.items[plan.steps.items.len - 1];
+}
 
 /// Move every tween on by `delta` seconds. What `App.step` calls.
 pub fn update(app: *App, delta: f32) !void {

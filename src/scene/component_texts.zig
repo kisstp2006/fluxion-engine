@@ -22,6 +22,9 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
+const reflect = @import("fluxion_reflect");
+
+const App = @import("../App.zig");
 const attr = @import("../reflect/attr.zig");
 
 const Entity = ecs.Entity;
@@ -52,6 +55,25 @@ pub fn declared(comptime T: type) []const attr.Text {
         }
         return found;
     }
+}
+
+/// The text `property` a component's type keeps beside it, if it keeps one.
+pub fn attributeOf(owner: *const reflect.Type, property: []const u8) ?*const attr.Text {
+    for (owner.attributes.slice()) |*attribute| {
+        const text = attribute.as(attr.Text) orelse continue;
+        if (std.mem.eql(u8, text.name, property)) return text;
+    }
+    return null;
+}
+
+/// Say `text` in a component's text by the names a scene gives them: see
+/// `App.setTextNamed`. The component has to be registered and keep a text
+/// of that name.
+pub fn setNamed(app: *App, entity: Entity, component: []const u8, property: []const u8, text: []const u8) !void {
+    if (!app.world.isAlive(entity)) return error.NoSuchEntity;
+    const entry = app.scene_components.find(component) orelse return error.NoSuchComponent;
+    if (attributeOf(entry.type, property) == null) return error.NoSuchText;
+    try app.texts.set(app.gpa, entity, keyOf(component, property), text);
 }
 
 /// The key of `T`'s text `property`, and a build that stops if `T` keeps no

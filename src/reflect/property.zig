@@ -23,7 +23,6 @@
 //! `[N]u8` - an animated sprite's `animation` -, cut to fit the field.
 
 const std = @import("std");
-const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const math = @import("fluxion_math");

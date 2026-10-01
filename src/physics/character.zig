@@ -42,7 +42,6 @@
 //! into it, and how a one-way platform holds it only from above.
 
 const std = @import("std");
-const testing = std.testing;
 
 const ecs = @import("fluxion_ecs");
 const math = @import("fluxion_math");
@@ -72,6 +71,42 @@ pub const Collision = struct {
     remainder: Vec2 = .zero,
 
     pub const reflect_name = "Collision";
+};
+
+/// What each character's last `moveAndSlide` met, in order: a wall, then
+/// the floor it slid down onto.
+pub const Slides = struct {
+    by_entity: std.AutoArrayHashMapUnmanaged(Entity, std.ArrayList(Collision)) = .empty,
+
+    pub fn deinit(self: *Slides, gpa: std.mem.Allocator) void {
+        for (self.by_entity.values()) |*met| met.deinit(gpa);
+        self.by_entity.deinit(gpa);
+    }
+
+    /// An empty list for a move of `e` about to start.
+    fn restart(self: *Slides, gpa: std.mem.Allocator, e: Entity) !*std.ArrayList(Collision) {
+        const met = try self.by_entity.getOrPut(gpa, e);
+        if (!met.found_existing) met.value_ptr.* = .empty;
+        met.value_ptr.clearRetainingCapacity();
+        return met.value_ptr;
+    }
+
+    /// What `e`'s last move met, in order.
+    pub fn of(self: *const Slides, e: Entity) []const Collision {
+        const met = self.by_entity.getPtr(e) orelse return &.{};
+        return met.items;
+    }
+
+    /// Forget the slides of the dead.
+    pub fn forgetDead(self: *Slides, gpa: std.mem.Allocator, world: *const ecs.World) void {
+        var at = self.by_entity.count();
+        while (at > 0) {
+            at -= 1;
+            if (world.isAlive(self.by_entity.keys()[at])) continue;
+            self.by_entity.values()[at].deinit(gpa);
+            self.by_entity.swapRemoveAt(at);
+        }
+    }
 };
 
 pub const Error = error{
@@ -114,16 +149,14 @@ pub fn moveAndSlide(app: *App, e: Entity) Error!bool {
     var motion = state.velocity.scale(app.time.delta);
     var collided = false;
 
-    const met = try app.slide_collisions.getOrPut(app.gpa, e);
-    if (!met.found_existing) met.value_ptr.* = .empty;
-    met.value_ptr.clearRetainingCapacity();
+    const met = try app.slide_collisions.restart(app.gpa, e);
 
     var slides: u32 = 0;
     while (slides < @max(state.max_slides, 1)) : (slides += 1) {
         if (motion.lenSq() == 0) break;
         const hit = try step(app, e, body, motion, state.safe_margin) orelse break;
         collided = true;
-        try app.slide_collisions.getPtr(e).?.append(app.gpa, hit);
+        try met.append(app.gpa, hit);
         var rest = hit.remainder;
         switch (kindOf(state, up, hit.normal)) {
             .floor => {

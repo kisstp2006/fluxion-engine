@@ -52,7 +52,6 @@ const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
 const attr = @import("../reflect/attr.zig");
 const file_table = @import("../assets/file_table.zig");
-const View = @import("../render/view.zig").View;
 
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;

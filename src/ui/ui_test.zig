@@ -15,6 +15,7 @@ const script = @import("../script/script.zig");
 const Assets = @import("../assets/assets.zig");
 const Color = @import("../math/color.zig").Color;
 const ToolWindow = @import("tool_window.zig");
+const Interface = @import("interface.zig");
 const inherited_mod = @import("../scene/inherited.zig");
 const platform = @import("fluxion_platform");
 const typeface = @import("fluxion_font");
@@ -990,4 +991,31 @@ test "the interface is laid out at the game's zoom times the display's scale" {
     app.interface.zoom = 1.25;
     _ = try app.step();
     try testing.expectEqual(@as(f32, 1.25), app.interface.scale);
+}
+
+test "an interface font let go of draws in the first, and the indices after it keep their fonts" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    const words = app.assets.loadSystemFont(.{ .atlas = 64 }) catch return error.SkipZigTest;
+    const mono = app.assets.loadSystemFont(.{ .atlas = 64, .mono = true }) catch return error.SkipZigTest;
+    app.interface.font = words;
+    // A handle to nothing, as one to a font since let go of is.
+    const gone: Assets.FontHandle = .{ .index = 99, .generation = 7 };
+    try testing.expectEqual(@as(u16, 1), try app.interface.addFont(gone));
+    try testing.expectEqual(@as(u16, 2), try app.interface.addFont(mono));
+
+    const faces = app.interface.fillFaces(&app.assets);
+    try testing.expectEqual(@as(usize, 3), faces.len);
+    try testing.expectEqual(faces[0], faces[1]);
+    try testing.expectEqual(&app.assets.fontOf(mono).?.face, faces[2]);
+    // An index past the end is measured in the first, as it is drawn.
+    try testing.expectEqual(faces[0], app.interface.faces.faceFor(3));
+    try testing.expectEqual(faces[0], app.interface.faces.faceFor(9));
+
+    // As many as the table holds, and not one more.
+    for (3..Interface.max_fonts) |n| {
+        const filler: Assets.FontHandle = .{ .index = @intCast(100 + n), .generation = 1 };
+        try testing.expectEqual(@as(u16, @intCast(n)), try app.interface.addFont(filler));
+    }
+    try testing.expectError(error.TooManyFonts, app.interface.addFont(.{ .index = 500, .generation = 1 }));
 }

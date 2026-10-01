@@ -58,11 +58,14 @@ pairs: std.AutoArrayHashMapUnmanaged(ShapePair, Between) = .empty,
 objects: std.AutoArrayHashMapUnmanaged(ObjectPair, Count) = .empty,
 /// Areas already told that a question with `monitoring` off is empty.
 warned: std.AutoHashMapUnmanaged(Entity, void) = .empty,
+/// What `overlappingList` hands out.
+listed: std.ArrayList(Entity) = .empty,
 
 pub fn deinit(self: *Areas, gpa: Allocator) void {
     self.pairs.deinit(gpa);
     self.objects.deinit(gpa);
     self.warned.deinit(gpa);
+    self.listed.deinit(gpa);
     self.* = undefined;
 }
 
@@ -211,6 +214,15 @@ pub fn overlapping(self: *Areas, app: *App, area: Entity, areas: bool, into: []E
         count += 1;
     }
     return into[0..count];
+}
+
+/// `overlapping`, into a list of the areas' own: good until the next such
+/// question.
+pub fn overlappingList(self: *Areas, app: *App, area: Entity, areas: bool) Allocator.Error![]const Entity {
+    try self.listed.ensureTotalCapacity(app.gpa, self.objects.count());
+    const inside = self.overlapping(app, area, areas, self.listed.allocatedSlice());
+    self.listed.items.len = inside.len;
+    return self.listed.items;
 }
 
 pub fn any(self: *Areas, app: *App, area: Entity, areas: bool) bool {

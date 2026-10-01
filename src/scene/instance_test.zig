@@ -7,7 +7,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const ecs = @import("fluxion_ecs");
 const image = @import("fluxion_image");
 const Uuid = @import("fluxion_id").Uuid;
 
@@ -17,7 +16,6 @@ const components = @import("components.zig");
 const scene = @import("scene.zig");
 const script = @import("../script/script.zig");
 
-const Entity = ecs.Entity;
 const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
 const Area2D = components.Area2D;
@@ -279,13 +277,13 @@ test "a scene read in the background has its pictures made when it is taken" {
     try app.loadInBackground("res://level.json");
     // Asked twice, it is still one load.
     try app.loadInBackground("res://./level.json");
-    try testing.expectEqual(@as(usize, 1), app.loads.items.len);
+    try testing.expectEqual(@as(usize, 1), app.loads.list.items.len);
     // Nothing waits on it but this test.
     var frames: usize = 0;
     while (app.loadProgress("res://level.json") < 1 and frames < 1000) : (frames += 1) _ = try app.step();
     try testing.expectEqual(@as(f32, 1), app.loadProgress("res://level.json"));
     const level = try app.loadScene("res://level.json");
-    try testing.expectEqual(@as(usize, 0), app.loads.items.len);
+    try testing.expectEqual(@as(usize, 0), app.loads.list.items.len);
     // The picture is a texture already, which the scene finds rather than reads.
     try testing.expect(app.assets.findTexture("res://hero.png") != null);
     try app.openScene(level);
@@ -293,13 +291,13 @@ test "a scene read in the background has its pictures made when it is taken" {
     try testing.expect(app.world.get(hero, Sprite).?.texture.eql(app.assets.findTexture("res://hero.png").?));
     // Read now, it is read: nothing more to load.
     try app.loadInBackground("res://level.json");
-    try testing.expectEqual(@as(usize, 0), app.loads.items.len);
+    try testing.expectEqual(@as(usize, 0), app.loads.list.items.len);
     try testing.expectEqual(@as(f32, 1), app.loadProgress("res://level.json"));
 
     // A scene that is not there says so when it is taken.
     try app.loadInBackground("res://nowhere.json");
     try testing.expectError(error.FileNotFound, app.loadScene("res://nowhere.json"));
-    try testing.expectEqual(@as(usize, 0), app.loads.items.len);
+    try testing.expectEqual(@as(usize, 0), app.loads.list.items.len);
 }
 
 /// A short WAV of silence: sixteen bits, one channel, 8 kHz.
@@ -341,7 +339,7 @@ test "a picture, a sound, and a scene's sounds are read in the background, and t
     try app.loadInBackground("res://hero.png");
     try app.loadInBackground("res://step.wav");
     try testing.expectError(error.NotAnAsset, app.loadInBackground("res://notes.txt"));
-    try testing.expectEqual(@as(usize, 2), app.loads.items.len);
+    try testing.expectEqual(@as(usize, 2), app.loads.list.items.len);
 
     // Waited for, the picture is a texture.
     try app.finishLoad("res://hero.png");
@@ -353,7 +351,7 @@ test "a picture, a sound, and a scene's sounds are read in the background, and t
     var frames: usize = 0;
     while (app.loadStatus("res://step.wav") == .loading and frames < 1000) : (frames += 1) _ = try app.step();
     const step = try app.loadAudio("res://step.wav");
-    try testing.expectEqual(@as(usize, 0), app.loads.items.len);
+    try testing.expectEqual(@as(usize, 0), app.loads.list.items.len);
     try testing.expectEqual(step, app.findAudio("res://step.wav").?);
 
     // A scene brings the sounds it names along.

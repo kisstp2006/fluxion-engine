@@ -207,6 +207,9 @@ glow: TextureHandle = .none,
 /// How a texture is sampled when what loads it does not say: the project's
 /// `rendering.default_texture_filter`.
 default_filter: rhi.Filter = .nearest,
+/// How many textures have been made from images: the number in the next
+/// one's name, `image://N`. See `images.toTexture`.
+images_made: u32 = 0,
 
 samplers: Samplers,
 

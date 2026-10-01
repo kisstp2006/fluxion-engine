@@ -37,7 +37,7 @@ pub const Time = @import("time/frame_time.zig");
 pub const Assets = @import("assets/assets.zig");
 pub const Interface = @import("ui/interface.zig");
 pub const ToolWindow = @import("ui/tool_window.zig");
-pub const WorldUi = @import("ui/world_ui.zig");
+pub const WorldPlacement = @import("ui/interface.zig").WorldPlacement;
 pub const Clipboard = @import("platform/clipboard.zig");
 
 /// Spawns, despawns, adds and removes that wait for the system asking for
@@ -510,44 +510,32 @@ test {
     _ = @import("tiles/tilemap_test.zig");
     _ = @import("time/frame_time_test.zig");
     _ = @import("time/timer_test.zig");
+    _ = @import("ui/control_test.zig");
     _ = @import("ui/ui_test.zig");
 
     _ = @import("App.zig");
     _ = @import("animation/animation.zig");
-    _ = @import("animation/sprite_frames.zig");
-    _ = @import("animation/tween.zig");
     _ = @import("assets/asset_kind.zig");
     _ = @import("assets/assets.zig");
-    _ = @import("assets/background_load.zig");
     _ = @import("assets/data_files.zig");
     _ = @import("assets/file_table.zig");
     _ = @import("assets/images.zig");
-    _ = @import("assets/scene_table.zig");
     _ = @import("audio/audio.zig");
     _ = @import("core/commands.zig");
     _ = @import("core/event_channels.zig");
     _ = @import("core/schedule.zig");
     _ = @import("core/signals.zig");
-    _ = @import("core/states.zig");
     _ = @import("files/config_file.zig");
     _ = @import("files/pack_locator.zig");
     _ = @import("files/sealed.zig");
     _ = @import("input/actions.zig");
-    _ = @import("input/input.zig");
     _ = @import("input/input_event.zig");
     _ = @import("math/color.zig");
     _ = @import("math/geometry.zig");
-    _ = @import("physics/areas.zig");
-    _ = @import("physics/bodies.zig");
-    _ = @import("physics/character.zig");
-    _ = @import("physics/picking.zig");
     _ = @import("platform/clipboard.zig");
-    _ = @import("platform/dialog.zig");
-    _ = @import("platform/window.zig");
     _ = @import("project/Project.zig");
     _ = @import("project/settings.zig");
     _ = @import("project/settings_file.zig");
-    _ = @import("reflect/attr.zig");
     _ = @import("reflect/property.zig");
     _ = @import("render/GlyphAtlas.zig");
     _ = @import("render/debug_views.zig");
@@ -555,19 +543,17 @@ test {
     _ = @import("render/lighting.zig");
     _ = @import("render/lights.zig");
     _ = @import("render/material.zig");
-    _ = @import("render/particles.zig");
+    _ = @import("render/render_components.zig");
     _ = @import("render/screen.zig");
     _ = @import("render/shader_edit.zig");
     _ = @import("render/shaders.zig");
     _ = @import("render/sprite.zig");
     _ = @import("render/stretch.zig");
     _ = @import("render/view.zig");
-    _ = @import("render/view_textures.zig");
     _ = @import("scene/component_texts.zig");
     _ = @import("scene/components.zig");
     _ = @import("scene/hierarchy.zig");
     _ = @import("scene/inherited.zig");
-    _ = @import("scene/scene.zig");
     _ = @import("script/script.zig");
     _ = @import("script/script_exports.zig");
     _ = @import("tiles/tilemap.zig");
@@ -575,13 +561,9 @@ test {
     _ = @import("time/datetime.zig");
     _ = @import("time/frame_time.zig");
     _ = @import("time/game_clocks.zig");
-    _ = @import("time/timer.zig");
-    _ = @import("ui/control.zig");
     _ = @import("ui/interface.zig");
     _ = @import("ui/theme.zig");
-    _ = @import("ui/tool_window.zig");
     _ = @import("ui/touch_button.zig");
-    _ = @import("ui/world_ui.zig");
 }
 
 test "every name this file exports is one that exists" {

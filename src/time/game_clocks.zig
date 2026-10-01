@@ -25,6 +25,7 @@ const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
+const App = @import("../App.zig");
 const datetime = @import("datetime.zig");
 
 const DateTime = datetime.DateTime;
@@ -80,6 +81,12 @@ pub const Clock = struct {
 
     pub fn time(self: *const Clock) DateTime {
         return DateTime.fromWallMicroseconds(self.reading);
+    }
+
+    /// Show `to`'s fields, whatever its zone.
+    pub fn setTime(self: *Clock, to: DateTime) void {
+        self.reading = to.wallMicroseconds();
+        self.leftover = 0;
     }
 };
 
@@ -158,6 +165,14 @@ pub const Clocks = struct {
     /// Whether an owner's clock runs this frame.
     pub const Runs = enum { runs, still, gone };
 };
+
+/// Whether a clock runs this frame in `app`: as its owner does, or, with
+/// none, while the game is not paused.
+pub fn runsIn(app: *App, owner: ?Entity) Clocks.Runs {
+    const entity = owner orelse return if (app.paused) .still else .runs;
+    if (!app.world.isAlive(entity)) return .gone;
+    return if (app.isProcessing(entity)) .runs else .still;
+}
 
 fn turned(before: i64, after: i64, size: i64) u64 {
     return @intCast(@max(0, @divFloor(after, size) - @divFloor(before, size)));

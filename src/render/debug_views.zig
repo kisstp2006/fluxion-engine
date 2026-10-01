@@ -28,7 +28,6 @@ const debugdraw = @import("fluxion_debugdraw");
 
 const App = @import("../App.zig");
 const components = @import("../scene/components.zig");
-const View = @import("view.zig").View;
 
 const Vec2 = math.Vec2;
 const Color = debugdraw.Color;

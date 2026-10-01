@@ -7,7 +7,6 @@
 //! names do: no component holds one.
 
 const std = @import("std");
-const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
@@ -177,6 +176,17 @@ const still: hierarchy.Snapshots = .empty;
 
 /// Smaller than this, a shape has no area the solver can divide by.
 const least_size = 1e-3;
+
+/// The physics' settings as the engine keeps them, whatever a game passed:
+/// two colliders touch when either one's mask has the other's layer, a
+/// pair's friction is the smaller of the two, and its bounce the two added.
+pub fn withEngineRules(settings: physics.Settings) physics.Settings {
+    var kept = settings;
+    kept.filter_rule = .either;
+    kept.friction_mix = .minimum;
+    kept.restitution_mix = .sum_clamped;
+    return kept;
+}
 
 pub fn deinit(self: *Bodies, gpa: Allocator) void {
     self.bodies.deinit(gpa);

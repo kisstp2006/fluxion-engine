@@ -23,10 +23,19 @@ const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
 
+const rhi = @import("fluxion_rhi");
+
+const App = @import("../App.zig");
 const Assets = @import("../assets/assets.zig");
-const ViewTexture = @import("../scene/components.zig").ViewTexture;
+const components = @import("../scene/components.zig");
+const hierarchy = @import("../scene/hierarchy.zig");
+const View = @import("view.zig").View;
 
 const Entity = ecs.Entity;
+const Transform2D = components.Transform2D;
+const Camera2D = components.Camera2D;
+const RenderView = components.RenderView;
+const ViewTexture = components.ViewTexture;
 
 pub const Views = struct {
     textures: std.AutoHashMapUnmanaged(Entity, Assets.TextureHandle) = .empty,
@@ -49,7 +58,7 @@ pub const Views = struct {
     }
 
     /// Let go of the pictures of views that are gone, or are views no more.
-    pub fn forgetDead(self: *Views, gpa: Allocator, world: *const ecs.World, assets: *Assets, comptime RenderView: type) void {
+    pub fn forgetDead(self: *Views, gpa: Allocator, world: *const ecs.World, assets: *Assets) void {
         var dead: std.ArrayList(Entity) = .empty;
         defer dead.deinit(gpa);
         var it = self.textures.keyIterator();
@@ -68,3 +77,45 @@ pub const Views = struct {
         self.textures.clearRetainingCapacity();
     }
 };
+
+/// Draw what each active `RenderView` sees into its picture: before the
+/// screen, so what shows one shows this frame's. See `view_textures.zig`.
+pub fn drawAll(app: *App) !void {
+    var it = try ecs.Query(.{ Transform2D, Camera2D, RenderView }).over(&app.world);
+    while (it.next()) |chunk| {
+        const places = chunk.slice(Transform2D);
+        const cameras = chunk.slice(Camera2D);
+        const views = chunk.slice(RenderView);
+        for (places, cameras, views, chunk.entities) |local, camera, view, entity| {
+            if (!view.active) continue;
+            const placed = hierarchy.resolve(&app.world, &app.snapshots, entity, local, app.time.alpha()) orelse continue;
+            const picture = try pictureOf(app, entity, view);
+            const gpu = (app.assets.get(picture) orelse continue).gpu;
+            app.sprites.drawing = entity;
+            defer app.sprites.drawing = .none;
+            const through: View = .through(camera, placed, @floatFromInt(@max(view.width, 1)), @floatFromInt(@max(view.height, 1)));
+            try app.sprites.draw(app.gpa, &app.world, &app.assets, &app.tile_sets, &app.snapshots, &app.inherited, .{ .texture = gpu }, through, view.clear_color, app.time.alpha());
+        }
+    }
+}
+
+/// A render view's picture, at the size it says now.
+pub fn pictureOf(app: *App, entity: Entity, view: RenderView) !Assets.TextureHandle {
+    const filter: rhi.Filter = if (view.filter == .linear) .linear else .nearest;
+    if (app.views.textureOf(entity)) |held| {
+        try app.assets.resizeRenderTexture(held, view.width, view.height, filter, view.clear_color.array());
+        return held;
+    }
+    const made = try app.assets.addRenderTexture(view.width, view.height, filter, view.clear_color.array(), app.drawnUpsideDown(), "render view");
+    errdefer app.assets.unload(made);
+    try app.views.textures.put(app.gpa, entity, made);
+    return made;
+}
+
+/// The picture a `RenderView` draws, as a texture: to put on a sprite, a
+/// texture rect, or anything else a texture goes, from code. Made now if it
+/// has not drawn one yet; `error.NotAView` for an entity with no view.
+pub fn textureOfView(app: *App, view: Entity) !Assets.TextureHandle {
+    const held = app.world.get(view, RenderView) orelse return error.NotAView;
+    return pictureOf(app, view, held.*);
+}

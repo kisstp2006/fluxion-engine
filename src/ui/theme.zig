@@ -275,7 +275,27 @@ pub const Theme = struct {
 };
 
 /// Every theme read, and the handles they are found by.
+/// The theme the project names, and the path it was named by.
+const ProjectTheme = struct {
+    handle: ThemeHandle = .none,
+    bytes: [512]u8 = undefined,
+    len: usize = 0,
+
+    fn path(self: *const ProjectTheme) []const u8 {
+        return self.bytes[0..self.len];
+    }
+
+    fn remember(self: *ProjectTheme, named: []const u8) void {
+        self.len = @min(named.len, self.bytes.len);
+        @memcpy(self.bytes[0..self.len], named[0..self.len]);
+    }
+};
+
 pub const Themes = struct {
+    /// The theme the project file names for every control, and the path it
+    /// was read by: see `ofProject`.
+    project: ProjectTheme = .{},
+
     table: Table = .empty,
 
     pub fn deinit(self: *Themes, gpa: Allocator) void {
@@ -385,6 +405,26 @@ pub const Themes = struct {
     }
 
     /// The handle of a theme read already, by the path or name it was read by.
+    /// The theme the project file names for its whole interface -
+    /// `gui.theme` - which every control is drawn with under the one it
+    /// names itself; `.none` for the engine's own look. Read the first time
+    /// it is asked for, and again when the project file names another.
+    pub fn ofProject(self: *Themes, app: *App) ThemeHandle {
+        const named = if (app.project.settings) |settings| settings.gui.theme else "";
+        const held = &self.project;
+        if (std.mem.eql(u8, held.path(), named)) return held.handle;
+        held.remember(named);
+        held.handle = .none;
+        if (named.len == 0) return .none;
+        // Kept even when it does not read, so that it is said once and not a
+        // frame.
+        held.handle = self.load(app, named) catch |err| blk: {
+            log.warn("the project's theme {s} did not read: {t}", .{ named, err });
+            break :blk .none;
+        };
+        return held.handle;
+    }
+
     pub fn find(self: *Themes, source: []const u8) ?ThemeHandle {
         var it = self.table.iterator();
         while (it.next()) |entry| {

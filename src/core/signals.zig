@@ -651,6 +651,33 @@ pub const Signals = struct {
         return found[0..count];
     }
 
+    /// How many connections `source`'s signals have, known or not.
+    pub fn connectionCount(self: *const Signals, source: Entity) usize {
+        const list = self.from.getPtr(source) orelse return 0;
+        return list.items.len;
+    }
+
+    /// Make `entity`'s emits do nothing, or let them be heard again.
+    pub fn setBlocked(self: *Signals, entity: Entity, on: bool) Allocator.Error!void {
+        if (on) try self.blocked.put(self.gpa, entity, {}) else _ = self.blocked.remove(entity);
+    }
+
+    pub fn isBlocked(self: *const Signals, entity: Entity) bool {
+        return self.blocked.contains(entity);
+    }
+
+    /// Let a connection call `f` by `name`: see `App.addMethod`.
+    pub fn addMethod(self: *Signals, name: []const u8, comptime f: anytype) Allocator.Error!void {
+        const entry = try self.methods.getOrPut(self.gpa, name);
+        if (!entry.found_existing) {
+            entry.key_ptr.* = self.gpa.dupe(u8, name) catch |err| {
+                self.methods.removeByPtr(entry.key_ptr);
+                return err;
+            };
+        }
+        entry.value_ptr.* = registered(f);
+    }
+
     /// Every connection of `source`'s signals.
     pub fn connectionsFrom(self: *const Signals, source: Entity, found: []Connection) []Connection {
         const list = self.from.getPtr(source) orelse return found[0..0];

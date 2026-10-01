@@ -532,6 +532,29 @@ pub fn centerOn(self: *Window, index: usize) Error!void {
     try self.setPosition(x, y);
 }
 
+/// Filling the screen if it is a window, a window if it fills the screen.
+pub fn toggleFullscreen(self: *Window) Error!void {
+    try self.setMode(switch (self.mode()) {
+        .fullscreen, .exclusive_fullscreen => .windowed,
+        else => .fullscreen,
+    });
+}
+
+/// Put the window on a screen: in the middle of it as a window, or filling
+/// it where it fills the one it is on.
+pub fn moveToScreen(self: *Window, index: usize) Error!void {
+    const was = self.mode();
+    const filling = was == .fullscreen or was == .exclusive_fullscreen;
+    if (filling) try self.setMode(.windowed);
+    try self.centerOn(index);
+    if (filling) try self.setMode(was);
+}
+
+/// Put the window in the middle of the screen it is on.
+pub fn center(self: *Window) Error!void {
+    try self.centerOn(self.screen() orelse self.primaryScreen() orelse return error.Unavailable);
+}
+
 /// Fill the monitor the window is on, or go back to being a window. The size
 /// is read back at once, so `App.create` makes its swapchain at the right
 /// size.

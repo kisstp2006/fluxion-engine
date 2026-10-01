@@ -6,7 +6,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const App = @import("../App.zig");
 const ConfigFile = @import("config_file.zig").ConfigFile;
 const Project = @import("../project/Project.zig");
 const components = @import("../scene/components.zig");

@@ -38,6 +38,7 @@ const testing = std.testing;
 const ecs = @import("fluxion_ecs");
 const math = @import("fluxion_math");
 
+const App = @import("../App.zig");
 const attr = @import("../reflect/attr.zig");
 const Assets = @import("../assets/assets.zig");
 const Color = @import("../math/color.zig").Color;
@@ -188,6 +189,100 @@ pub const Drawings = struct {
         }
     }
 };
+
+/// What can go wrong drawing: the entity is gone, or there is no room.
+pub const DrawError = ecs.World.Error || error{NoSuchEntity};
+
+fn pictureFor(app: *App, entity: Entity) DrawError!*Picture {
+    if (!app.world.isAlive(entity)) return error.NoSuchEntity;
+    if (!app.world.has(entity, Drawing2D)) try app.world.add(entity, Drawing2D{});
+    return app.drawings.pictureOf(app.gpa, entity);
+}
+
+/// A straight line `width` wide.
+pub fn drawLine(app: *App, entity: Entity, from: Vec2, to: Vec2, color: Color, width: f32) DrawError!void {
+    const picture = try pictureFor(app, entity);
+    picture.cover(from, width);
+    picture.cover(to, width);
+    try picture.add(app.gpa, .{ .line = .{ .from = from, .to = to, .color = color, .width = width } });
+}
+
+/// A box from `position`, `size` big: filled, or its edges `width` wide.
+pub fn drawRect(app: *App, entity: Entity, position: Vec2, size: Vec2, color: Color, filled: bool, width: f32) DrawError!void {
+    const picture = try pictureFor(app, entity);
+    picture.cover(position, width);
+    picture.cover(position.add(size), width);
+    try picture.add(app.gpa, .{ .rect = .{ .at = position, .size = size, .color = color, .filled = filled, .width = width } });
+}
+
+/// A circle: filled, or its edge `width` wide.
+pub fn drawCircle(app: *App, entity: Entity, center: Vec2, radius: f32, color: Color, filled: bool, width: f32) DrawError!void {
+    const picture = try pictureFor(app, entity);
+    picture.cover(center, radius + width);
+    try picture.add(app.gpa, .{ .circle = .{ .center = center, .radius = radius, .color = color, .filled = filled, .width = width } });
+}
+
+/// Part of a circle's edge, from `start_angle` round to `end_angle`, in
+/// radians clockwise on screen from the right.
+pub fn drawArc(app: *App, entity: Entity, center: Vec2, radius: f32, start_angle: f32, end_angle: f32, color: Color, width: f32) DrawError!void {
+    const picture = try pictureFor(app, entity);
+    picture.cover(center, radius + width);
+    try picture.add(app.gpa, .{ .arc = .{ .center = center, .radius = radius, .start = start_angle, .end = end_angle, .color = color, .width = width } });
+}
+
+/// Lines joining the points in turn: a path, a graph.
+pub fn drawPolyline(app: *App, entity: Entity, points: []const Vec2, color: Color, width: f32) DrawError!void {
+    if (points.len < 2) return;
+    const picture = try pictureFor(app, entity);
+    const first = try picture.keepPoints(app.gpa, points, width);
+    try picture.add(app.gpa, .{ .polyline = .{ .first = first, .count = @intCast(points.len), .color = color, .width = width } });
+}
+
+/// The shape the points go round, filled: any shape whose sides do not
+/// cross, either way round.
+pub fn drawPolygon(app: *App, entity: Entity, points: []const Vec2, color: Color) DrawError!void {
+    const picture = try pictureFor(app, entity);
+    try picture.addPolygon(app.gpa, points, color);
+}
+
+/// A picture from `position`, `size` big - its own size for nought - its
+/// colours multiplied by `modulate`.
+pub fn drawTexture(app: *App, entity: Entity, texture: Assets.TextureHandle, position: Vec2, size: Vec2, modulate: Color) DrawError!void {
+    const picture = try pictureFor(app, entity);
+    const shown: Vec2 = if (size.x == 0 and size.y == 0) if (app.assets.get(texture)) |held| .init(@floatFromInt(held.width), @floatFromInt(held.height)) else size else size;
+    picture.cover(position, 0);
+    picture.cover(position.add(shown), 0);
+    try picture.add(app.gpa, .{ .texture = .{ .texture = texture, .at = position, .size = size, .color = modulate } });
+}
+
+/// Words, their first line's top left at `position`, `size` pixels high in
+/// `font` - the first one loaded for none.
+pub fn drawText(app: *App, entity: Entity, text: []const u8, position: Vec2, color: Color, size: f32, font: Assets.FontHandle) DrawError!void {
+    const picture = try pictureFor(app, entity);
+    const first = try picture.keepWords(app.gpa, text);
+    var lines: f32 = 1;
+    var widest: usize = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var count: f32 = 0;
+    while (it.next()) |line| : (count += 1) widest = @max(widest, line.len);
+    lines = @max(count, 1);
+    picture.cover(position, 0);
+    picture.cover(position.add(.init(@as(f32, @floatFromInt(widest)) * size, lines * size * 1.5)), 0);
+    try picture.add(app.gpa, .{ .text = .{ .first = first, .len = @intCast(text.len), .at = position, .color = color, .size = size, .font = font } });
+}
+
+/// Everything an entity has drawn taken away.
+pub fn clearDrawing(app: *App, entity: Entity) void {
+    const picture = app.drawings.get(entity) orelse return;
+    picture.clear();
+}
+
+/// Ask an entity's script to draw it again - its `draw(app)`, on an
+/// emptied picture - at the end of this frame.
+pub fn queueRedraw(app: *App, entity: Entity) DrawError!void {
+    if (!app.world.isAlive(entity)) return error.NoSuchEntity;
+    (try app.drawings.pictureOf(app.gpa, entity)).wanted = true;
+}
 
 /// How many straight pieces a circle of `radius` is drawn in: enough that
 /// it looks round, few enough to cost little.

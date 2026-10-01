@@ -372,6 +372,29 @@ pub const Params = struct {
     }
 };
 
+/// The field `name` of `entity`'s material's shader, or null for none: one
+/// its shader has not, or a shader that did not compile.
+pub fn paramField(app: *App, entity: Entity, name: []const u8) ?material.Field {
+    const held = app.world.get(entity, Material) orelse return null;
+    const drawn = app.shaders.get(held.shader) orelse return null;
+    for (drawn.params()) |field| {
+        if (std.mem.eql(u8, field.name, name)) return field;
+    }
+    return null;
+}
+
+/// What `entity`'s material gives its shader's field `name` - its own, or
+/// else the file's - as the floats `pack` puts in the buffer, into
+/// `out`. Null for a field its shader does not have.
+pub fn paramOrDefault(app: *App, entity: Entity, name: []const u8, out: *[16]f32) ?[]const f32 {
+    const field = paramField(app, entity, name) orelse return null;
+    const count = componentsOf(field.ty);
+    out.* = @splat(0);
+    if (field.default) |first| @memcpy(out[0..@min(first.len, count)], first[0..@min(first.len, count)]);
+    if (app.shader_params.get(entity, name)) |own| @memcpy(out[0..@min(own.len, count)], own[0..@min(own.len, count)]);
+    return out[0..count];
+}
+
 /// How many floats a field of this type is given as.
 pub fn componentsOf(ty: shader.Type) u32 {
     return switch (ty) {

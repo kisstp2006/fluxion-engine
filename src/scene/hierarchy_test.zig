@@ -354,7 +354,7 @@ test "a parent's children keep the order they are put in, and a new one comes la
     // The dead give their places back.
     app.world.despawn(b);
     _ = try app.step();
-    try testing.expect(!app.sibling_ranks.contains(b));
+    try testing.expect(!app.tree.ranks.contains(b));
     try testing.expect(app.siblingIndex(b) == null);
     try testing.expectError(error.NoSuchEntity, app.setSiblingIndex(b, 0));
     try testing.expectEqualSlices(ecs.Entity, &.{ c, a, d }, app.childrenOf(parent, &found));

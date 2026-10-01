@@ -147,8 +147,8 @@ test "the names of the dead are given back at the end of the frame" {
     // The flame went with the ship, and both names with them.
     try testing.expect(app.find("flame") == null);
     try testing.expect(app.find("buoy").?.eql(buoy));
-    try testing.expectEqual(@as(usize, 1), app.names.count());
-    try testing.expectEqual(@as(u32, 1), app.by_name.count());
+    try testing.expectEqual(@as(usize, 1), app.names.of_entity.count());
+    try testing.expectEqual(@as(u32, 1), app.names.by_name.count());
 }
 
 test "a name is its siblings' own: two parents may each have a child of it, and a clash takes the next free one" {
@@ -276,12 +276,12 @@ test "an entity given a UUID keeps it, and the dead ones are forgotten at the en
     try testing.expect(given.eql(try app.ensureUuid(thing)));
 
     app.world.despawn(thing);
-    try testing.expectEqual(@as(usize, 1), app.uuids.count());
+    try testing.expectEqual(@as(usize, 1), app.uuids.of_entity.count());
     _ = try app.step();
-    try testing.expectEqual(@as(usize, 0), app.uuids.count());
-    try testing.expectEqual(@as(usize, 0), app.by_uuid.count());
+    try testing.expectEqual(@as(usize, 0), app.uuids.of_entity.count());
+    try testing.expectEqual(@as(usize, 0), app.uuids.by_uuid.count());
 
     _ = try app.ensureUuid(try app.world.spawn());
     app.clearWorld();
-    try testing.expectEqual(@as(usize, 0), app.uuids.count());
+    try testing.expectEqual(@as(usize, 0), app.uuids.of_entity.count());
 }

@@ -18,6 +18,14 @@ const json = @import("fluxion_json");
 const parseFlags = App.parseFlags;
 const helpers = @import("test_helpers.zig");
 const pressOf = helpers.pressOf;
+const display = @import("app/display.zig");
+const Resolved = @import("app/options.zig").Resolved;
+const Color = @import("math/color.zig").Color;
+const geometry = @import("math/geometry.zig");
+const stretching = @import("render/stretch.zig");
+const VsyncMode = App.VsyncMode;
+const WindowMode = App.WindowMode;
+const InitialPosition = App.InitialPosition;
 
 fn spawnOne(app: *App) anyerror!void {
     _ = try app.world.spawnWith(.{
@@ -163,9 +171,12 @@ test "a stretch, the physics' steps and the game's version change as a game says
     try testing.expectEqual(Project.Renderer.compatibility, app.rendererInUse());
 }
 
+/// A system that takes two milliseconds on the clock systems are timed by:
+/// a sleep can wake early, which a test of the timing cannot have.
 const Nap = struct {
     fn run(_: *App) anyerror!void {
-        try testing.io.sleep(.fromMilliseconds(1), .awake);
+        const start: std.Io.Timestamp = .now(testing.io, .awake);
+        while (start.durationTo(.now(testing.io, .awake)).nanoseconds < 2 * std.time.ns_per_ms) {}
     }
 };
 
@@ -177,7 +188,7 @@ test "each system's time over the last frame is kept under its name" {
 
     const nap = app.schedule.systemsIn(.update)[0];
     try testing.expectEqualStrings("nap", nap.name);
-    try testing.expect(nap.time_last_frame.nanoseconds >= std.time.ns_per_ms / 2);
+    try testing.expect(nap.time_last_frame.nanoseconds >= std.time.ns_per_ms);
 }
 
 test "a frame cap slows the loop down to it" {
@@ -417,4 +428,111 @@ test "the game's chance is the same from the same seed, and keeps to the ranges 
     try testing.expectEqual(@as(i64, 0), app.randomIndex(0));
     try testing.expect(!app.randomChance(0));
     try testing.expect(app.randomChance(1));
+}
+
+test "resized is true for the one frame the size changed in, and no other" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240 });
+    defer app.destroy();
+
+    try app.startup();
+    _ = try app.step();
+    try testing.expect(!app.resized);
+
+    // What `step` does when the window reports a new size, done by hand.
+    try display.adoptSize(app, 400, 300);
+    try testing.expect(app.resized);
+    try testing.expectEqual(@as(u32, 400), app.width);
+    try testing.expectEqual(@as(u32, 300), app.height);
+
+    // The next frame is at the new size, and the news is old.
+    _ = try app.step();
+    try testing.expect(!app.resized);
+    try testing.expectEqual(@as(u32, 400), app.width);
+}
+
+test "a project's file is read as it starts, and a root with none starts as before" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffers: [2][160]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffers[0], ".zig-cache/tmp/{s}", .{tmp.sub_path});
+
+    const bare = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+    try testing.expect(bare.project.settings == null);
+    try testing.expectEqualStrings("fluxion", display.titleOf(.{}, bare.project.settings));
+    bare.destroy();
+
+    try Project.writeSettings(testing.allocator, testing.io, root, .{
+        .application = .{ .name = "Meadow", .tags = &.{"2d"} },
+        .physics_2d = .{ .default_gravity = 981, .default_linear_damp = 0.25 },
+    });
+    // By the folder, or by the file itself, as a file association gives it.
+    const file = try std.fmt.bufPrint(&buffers[1], "{s}/" ++ Project.file_name, .{root});
+    for ([_][]const u8{ root, file }) |given| {
+        const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = given });
+        defer app.destroy();
+        const settings = app.project.settings.?;
+        try testing.expectEqualStrings("Meadow", settings.application.name);
+        try testing.expectEqualStrings("2d", settings.application.tags[0]);
+        try testing.expect(std.mem.endsWith(u8, app.project.root, &tmp.sub_path));
+        try testing.expectEqualStrings("Meadow", display.titleOf(.{}, settings));
+        try testing.expectEqualStrings("Pong", display.titleOf(.{ .title = "Pong" }, settings));
+        // Its physics over the game's, which it would have had with none.
+        try testing.expectEqual(@as(f32, 981), app.physics.gravity.y);
+        try testing.expectEqual(@as(f32, 0.25), app.physics_2d.default_linear_damp);
+    }
+}
+
+test "the window, the frame and the clock are the game's, then the project's, then the engine's" {
+    const said: Project.Settings = .{
+        .application = .{ .name = "Wide", .max_fps = 30 },
+        .display = .{ .width = 1600, .height = 900, .vsync_mode = .disabled, .mode = .fullscreen, .borderless = true, .initial_position = .absolute, .position = .init(40, 30), .keep_screen_on = false, .stretch_scale = 2, .stretch_scale_mode = .integer },
+        .rendering = .{ .clear_color = .hex(0x102030) },
+        .physics_2d = .{ .ticks_per_second = 120, .max_steps_per_frame = 3 },
+        .gui = .{ .scale = 1.5 },
+    };
+    const project: Resolved = .of(.{}, &said, said.physics_2d);
+    try testing.expectEqual(@as(u32, 1600), project.width);
+    try testing.expectEqual(@as(u32, 900), project.height);
+    try testing.expectEqual(VsyncMode.disabled, project.vsync_mode);
+    try testing.expectEqual(WindowMode.fullscreen, project.window_mode);
+    try testing.expect(project.borderless and !project.always_on_top and !project.keep_screen_on);
+    try testing.expectEqual(InitialPosition.absolute, project.initial_position);
+    try testing.expectEqual(geometry.Vec2i.init(40, 30), project.position);
+    try testing.expectEqual(@as(f32, 2), project.stretch.scale);
+    try testing.expectEqual(stretching.ScaleMode.integer, project.stretch.scale_mode);
+    try testing.expectEqual(@as(u32, 3), project.max_fixed_steps);
+    try testing.expectEqual(@as(f32, 1.5), project.interface_zoom);
+    try testing.expectEqual(Color.hex(0x102030), project.background);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), project.fixed_delta, 1e-6);
+    try testing.expectEqual(@as(?f32, 30), project.max_fps);
+
+    // What the game says in code overrules its project, and only that.
+    const game: Resolved = .of(.{ .width = 800, .window_mode = .windowed, .fixed_delta = 0.5 }, &said, said.physics_2d);
+    try testing.expectEqual(@as(u32, 800), game.width);
+    try testing.expectEqual(@as(u32, 900), game.height);
+    try testing.expectEqual(WindowMode.windowed, game.window_mode);
+    try testing.expectEqual(@as(f32, 0.5), game.fixed_delta);
+
+    // With no project file, the sections' own defaults.
+    const bare: Resolved = .of(.{}, null, .{});
+    try testing.expectEqual(@as(u32, 1280), bare.width);
+    try testing.expectEqual(@as(u32, 720), bare.height);
+    try testing.expect(bare.resizable and !bare.borderless and bare.keep_screen_on);
+    try testing.expectEqual(VsyncMode.enabled, bare.vsync_mode);
+    try testing.expectEqual(WindowMode.windowed, bare.window_mode);
+    try testing.expectEqual(InitialPosition.center_of_primary_screen, bare.initial_position);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 60.0), bare.fixed_delta, 1e-6);
+    try testing.expect(bare.max_fps == null);
+
+    // And a game opened in a project's folder takes them.
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [160]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try Project.writeSettings(testing.allocator, testing.io, root, said);
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+    defer app.destroy();
+    try testing.expectEqual(@as(u32, 1600), app.width);
+    try testing.expectEqual(Color.hex(0x102030), app.background);
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), app.time.fixed_delta, 1e-6);
 }

@@ -2124,9 +2124,9 @@ test "a script gives the pointer a picture and a default shape" {
     _ = try app.step();
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
     try testing.expect(global(app, file, "crosshair").asBool());
-    const hand = app.custom_cursors[@intFromEnum(App.CursorShape.pointing_hand)].?;
+    const hand = app.cursors.custom[@intFromEnum(App.CursorShape.pointing_hand)].?;
     try testing.expectEqual(@as(u32, 2), hand.hot_x);
-    try testing.expect(app.custom_cursors[@intFromEnum(App.CursorShape.arrow)] != null);
+    try testing.expect(app.cursors.custom[@intFromEnum(App.CursorShape.arrow)] != null);
 }
 
 test "a script keeps its saves in the player's files: added to, copied, told of, sealed, and as settings and data" {

@@ -121,6 +121,79 @@ pub fn Iterator(comptime T: type) type {
     };
 }
 
+/// Every type of event sent, by type: what `App.send` sends into and
+/// `App.events` reads from.
+pub const Channels = struct {
+    by_type: std.AutoArrayHashMapUnmanaged(usize, Channel) = .empty,
+
+    pub fn deinit(self: *Channels, gpa: Allocator) void {
+        for (self.by_type.values()) |channel| channel.deinit(channel.events, gpa);
+        self.by_type.deinit(gpa);
+    }
+
+    /// Send an event: every reader of its type sees it once, this frame or
+    /// the next.
+    pub fn send(self: *Channels, gpa: Allocator, event: anytype) Allocator.Error!void {
+        const channel = try self.channelOf(gpa, @TypeOf(event));
+        try channel.send(gpa, event);
+    }
+
+    /// The events of one type, this frame's and last frame's. None when
+    /// nothing ever sent one.
+    pub fn events(self: *const Channels, comptime T: type) *const Events(T) {
+        const found = self.by_type.get(typeKey(T)) orelse return &Events(T).empty;
+        return @ptrCast(@alignCast(found.events));
+    }
+
+    /// Last frame's events go, and this frame's become last frame's: at the
+    /// top of every frame.
+    pub fn update(self: *Channels) void {
+        for (self.by_type.values()) |channel| channel.update(channel.events);
+    }
+
+    fn channelOf(self: *Channels, gpa: Allocator, comptime T: type) Allocator.Error!*Events(T) {
+        const entry = try self.by_type.getOrPut(gpa, typeKey(T));
+        if (entry.found_existing) return @ptrCast(@alignCast(entry.value_ptr.events));
+        const made = gpa.create(Events(T)) catch |err| {
+            self.by_type.swapRemoveAt(entry.index);
+            return err;
+        };
+        made.* = .{};
+        entry.value_ptr.* = .of(T, made);
+        return made;
+    }
+};
+
+/// One type's events, with what the frame and the end do to them.
+const Channel = struct {
+    events: *anyopaque,
+    update: *const fn (events: *anyopaque) void,
+    deinit: *const fn (events: *anyopaque, gpa: Allocator) void,
+
+    fn of(comptime T: type, made: *Events(T)) Channel {
+        const Shim = struct {
+            fn update(p: *anyopaque) void {
+                const held: *Events(T) = @ptrCast(@alignCast(p));
+                held.update();
+            }
+            fn deinit(p: *anyopaque, gpa: Allocator) void {
+                const held: *Events(T) = @ptrCast(@alignCast(p));
+                held.deinit(gpa);
+                gpa.destroy(held);
+            }
+        };
+        return .{ .events = made, .update = Shim.update, .deinit = Shim.deinit };
+    }
+};
+
+/// A number for each type, the same for as long as the program runs: the
+/// address of a variable only that type's instance of this has.
+fn typeKey(comptime T: type) usize {
+    return @intFromPtr(&struct {
+        var marker: ?*const T = null;
+    }.marker);
+}
+
 test "a reader sees each event once, over the two frames it lives" {
     const gpa = testing.allocator;
     var events: Events(u32) = .{};

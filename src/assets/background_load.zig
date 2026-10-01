@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-3-Clause
+
 //! A file read while the game goes on, on a thread of its own - or on a
 //! page, which has none, a piece a frame. What needs the GPU, the mixer and
 //! the world is left for the game's own thread, when the file is taken:
@@ -21,20 +22,22 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
-const testing = std.testing;
 
 const image = @import("fluxion_image");
 
 const json = @import("fluxion_json");
 
+const App = @import("../App.zig");
 const AssetKind = @import("asset_kind.zig").AssetKind;
 const Project = @import("../project/Project.zig");
+
+const log = std.log.scoped(.fluxion_engine);
 
 /// Whether a load has a thread of its own, or is worked a piece a frame.
 pub const threaded = !builtin.single_threaded and !builtin.target.cpu.arch.isWasm();
 
-/// One file on its way. Made by `App.loadInBackground`, and let go of when
-/// `App.loadAsset` - or a kind's own load - takes it.
+/// One file on its way. Made by `start`, and let go of when `App.loadAsset`
+/// - or a kind's own load - takes it.
 pub const Load = struct {
     /// Everything the thread touches is its own or behind these atomics:
     /// memory from an allocator that takes calls from any thread.
@@ -226,3 +229,156 @@ pub const Load = struct {
         self.heard.deinit(gpa);
     }
 };
+
+/// Every file reading in the background, each made with memory any thread
+/// can ask for.
+pub const Loads = struct {
+    list: std.ArrayListUnmanaged(*Load) = .empty,
+
+    /// Every load let go of, done or not.
+    pub fn deinit(self: *Loads, gpa: Allocator) void {
+        while (self.list.pop()) |load| destroy(load);
+        self.list.deinit(gpa);
+    }
+
+    /// The load of the file at `source`, as `Project.canonical` spells it.
+    pub fn of(self: *const Loads, source: []const u8) ?*Load {
+        for (self.list.items) |load| if (std.mem.eql(u8, load.source, source)) return load;
+        return null;
+    }
+
+    /// A piece of each load's work, where a load has no thread of its own:
+    /// once a frame.
+    pub fn work(self: *Loads) void {
+        if (threaded) return;
+        for (self.list.items) |load| _ = load.work();
+    }
+
+    /// A load let go of, whether it was taken or not.
+    fn drop(self: *Loads, load: *Load) void {
+        for (self.list.items, 0..) |held, at| {
+            if (held != load) continue;
+            _ = self.list.swapRemove(at);
+            break;
+        }
+        destroy(load);
+    }
+
+    fn destroy(load: *Load) void {
+        load.deinit();
+        load.gpa.destroy(load);
+    }
+};
+
+/// Read a file beside the game on a thread of its own: see
+/// `App.loadInBackground`. `error.NotAnAsset` for a file the engine does
+/// not read by its ending.
+pub fn start(app: *App, path: []const u8) !void {
+    if (app.io == null) return error.NoIo;
+    // Memory any thread can ask for, since the load's thread does.
+    const gpa = std.heap.smp_allocator;
+    const source = try app.project.canonical(gpa, path);
+    errdefer gpa.free(source);
+    const kind = kindOf(source) orelse return error.NotAnAsset;
+    if (isRead(app, kind, source) or app.loads.of(source) != null) {
+        gpa.free(source);
+        return;
+    }
+    // A pack's file is read out of the pack, by its own name.
+    const file = if (app.project.pack != null and Project.isProjectPath(source))
+        try gpa.dupe(u8, source)
+    else
+        try app.project.osPath(gpa, source);
+    errdefer gpa.free(file);
+    const load = try gpa.create(Load);
+    errdefer gpa.destroy(load);
+    load.* = .{ .gpa = gpa, .kind = kind, .source = source, .file = file, .files = app.project.files() };
+    try app.loads.list.append(app.gpa, load);
+    if (threaded) {
+        load.thread = std.Thread.spawn(.{}, Load.run, .{load}) catch null;
+        // No thread to be had: a piece a frame, as on a page.
+        if (load.thread == null) load.run();
+    }
+}
+
+/// How far the file at `path` has got, from nought to one: one once it is
+/// read, in the background or not, and nought while nothing is reading it.
+pub fn progress(app: *App, path: []const u8) f32 {
+    const named = app.project.canonical(app.gpa, path) catch return 0;
+    defer app.gpa.free(named);
+    if (kindOf(named)) |kind| if (isRead(app, kind, named)) return 1;
+    const load = app.loads.of(named) orelse return 0;
+    // One only once it can be taken without a wait.
+    return if (load.done()) 1 else @min(load.progress(), 0.99);
+}
+
+/// Where a file is in `start`: `done` once it is read - in the background or
+/// not - `failed` for a load that did not read, which says why when it is
+/// taken, and `none` when nothing is reading it.
+pub const LoadStatus = enum { none, loading, done, failed };
+
+pub fn status(app: *App, path: []const u8) LoadStatus {
+    const named = app.project.canonical(app.gpa, path) catch return .none;
+    defer app.gpa.free(named);
+    if (kindOf(named)) |kind| if (isRead(app, kind, named)) return .done;
+    const load = app.loads.of(named) orelse return .none;
+    if (!load.done()) return .loading;
+    return if (load.failure != null) .failed else .done;
+}
+
+/// Wait for the background load of `path`, if there is one, and make what
+/// it read what it is: the next load of the file finds it. What went wrong
+/// is its error. Nothing when nothing is reading it.
+pub fn finish(app: *App, path: []const u8) !void {
+    if (app.loads.list.items.len == 0) return;
+    const named = try app.project.canonical(app.gpa, path);
+    defer app.gpa.free(named);
+    if (app.loads.of(named)) |load| try take(app, load);
+}
+
+/// What a file is to `start`: what its ending says, and a scene for a
+/// `.json`, which is the one a game loads.
+fn kindOf(path: []const u8) ?AssetKind {
+    if (AssetKind.ofPath(path)) |kind| return kind;
+    return if (std.ascii.endsWithIgnoreCase(path, ".json")) .scene else null;
+}
+
+/// Whether the file at `path`, of `kind`, is read into its table.
+fn isRead(app: *App, kind: AssetKind, path: []const u8) bool {
+    return switch (kind) {
+        inline else => |k| app.findAsset(k.Handle(), path) != null,
+    };
+}
+
+/// What a load read, once it is done - waited for, if it is not - made what
+/// it is: the pictures textures, the sounds clips, the scene a scene. The
+/// engine's other files are read again by their own loads, which is quick.
+/// The load is let go of either way. A file that did not read is its error.
+fn take(app: *App, load: *Load) !void {
+    defer app.loads.drop(load);
+    load.join();
+    while (load.work()) {}
+    if (load.failure) |err| return err;
+    for (load.decoded.items) |picture| {
+        if (app.assets.findTexture(picture.source) != null) continue;
+        _ = app.assets.adoptTexture(picture.source, picture.width, picture.height, picture.pixels, .{}) catch |err|
+            log.warn("the picture {s} did not reach the GPU: {t}", .{ picture.source, err });
+    }
+    for (load.heard.items) |sound| {
+        if (app.audio.find(sound.source) != null) continue;
+        _ = app.audio.adopt(app, sound.source, sound.bytes) catch |err|
+            log.warn("the sound {s} was not taken: {t}", .{ sound.source, err });
+    }
+    switch (load.kind) {
+        .scene => if (app.scenes.find(load.source) == null) {
+            _ = try app.scenes.add(app.gpa, load.source, load.bytes);
+        },
+        .audio => if (app.audio.find(load.source) == null) {
+            _ = try app.audio.adopt(app, load.source, load.bytes);
+        },
+        .font => if (app.assets.findFont(load.source) == null) {
+            _ = try app.assets.adoptFont(load.source, load.bytes, .{});
+        },
+        else => {},
+    }
+}

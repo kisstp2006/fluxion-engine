@@ -9,14 +9,12 @@ const std = @import("std");
 const testing = std.testing;
 
 const ecs = @import("fluxion_ecs");
-const math = @import("fluxion_math");
 
 const App = @import("../App.zig");
 const components = @import("../scene/components.zig");
 const script = @import("../script/script.zig");
 
 const Entity = ecs.Entity;
-const Vec2 = math.Vec2;
 const Transform2D = components.Transform2D;
 const Collider2D = components.Collider2D;
 const CharacterBody2D = components.CharacterBody2D;

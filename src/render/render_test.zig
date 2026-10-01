@@ -141,7 +141,7 @@ test "a colour rect with a material is drawn by its shader, in the box the inter
         Parent.of(root),
     });
     _ = try app.step();
-    try testing.expectEqual(@as(usize, 1), app.control_nodes.customs.items.len);
+    try testing.expectEqual(@as(usize, 1), app.control_tree.customs.items.len);
     var boxes: usize = 0;
     for (app.interface.commands) |command| {
         if (command.config == .custom) boxes += 1;
@@ -264,7 +264,7 @@ test "a texture rect with a view texture shows the view's picture" {
     _ = try app.step();
     const gpu = app.assets.get(picture).?.gpu;
     var found = false;
-    for (app.control_nodes.textures.items) |held| found = found or std.meta.eql(held, gpu);
+    for (app.control_tree.textures.items) |held| found = found or std.meta.eql(held, gpu);
     try testing.expect(found);
     try testing.expectError(error.NotAView, app.viewTexture(root));
 }

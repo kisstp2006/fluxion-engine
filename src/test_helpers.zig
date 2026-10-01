@@ -62,7 +62,7 @@ pub const Paused = struct {
     }
 };
 
-/// A project of a test's own, with a PNG in it: see `scene.zig`'s `Game`.
+/// A project of a test's own, with a PNG in it: see `scene/scene_test.zig`'s `Game`.
 pub const Files = struct {
     tmp: testing.TmpDir,
     buffer: [128]u8 = undefined,

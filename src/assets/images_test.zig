@@ -5,7 +5,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const App = @import("../App.zig");
 const Assets = @import("assets.zig");
 const Image = @import("images.zig").Image;
 const helpers = @import("../test_helpers.zig");
