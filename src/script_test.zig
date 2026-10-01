@@ -1988,6 +1988,58 @@ test "a script hears every finger, and asks the frame's fingers where they are" 
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
 }
 
+test "a script hears a tap, a double tap, a swipe and a pinch, and asks what two fingers did" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const hand = try app.addScript("gestures.flux",
+        \\var taps = 0;
+        \\var doubled = false;
+        \\var swiped = "";
+        \\var zoom = 1.0;
+        \\var spread = 1.0;
+        \\struct Gestures {
+        \\    fn input(self, event: InputEvent) {
+        \\        if (event is TapEvent) {
+        \\            taps += 1;
+        \\            if (event.count == 2) doubled = true;
+        \\        }
+        \\        if (event is SwipeEvent and event.direction == .left) swiped = "left";
+        \\        if (event is PinchEvent) zoom = zoom * event.factor;
+        \\    }
+        \\    fn update(self, dt: float) {
+        \\        const two = app.twoFingers();
+        \\        if (two.active) spread = two.scale;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(hand)});
+    _ = try app.step();
+
+    const frames = [_][]const @import("fluxion_platform").Event{
+        &.{fingered(1, .down, 100, 100)},
+        &.{fingered(1, .up, 100, 100)},
+        &.{fingered(2, .down, 102, 100)},
+        &.{fingered(2, .up, 102, 100)},
+        &.{fingered(3, .down, 600, 100)},
+        &.{fingered(3, .move, 400, 100)},
+        &.{fingered(3, .move, 200, 100)},
+        &.{fingered(3, .up, 100, 100)},
+        &.{ fingered(4, .down, 100, 300), fingered(5, .down, 200, 300) },
+        &.{ fingered(4, .move, 50, 300), fingered(5, .move, 250, 300) },
+    };
+    for (frames) |happened| {
+        for (happened) |event| app.input.apply(event);
+        _ = try app.step();
+    }
+
+    try testing.expectEqual(@as(i64, 2), global(app, hand, "taps").asInt());
+    try testing.expect(global(app, hand, "doubled").asBool());
+    try testing.expectEqualStrings("left", globalText(app, hand, "swiped"));
+    try testing.expectApproxEqAbs(@as(f64, 2), global(app, hand, "zoom").asFloat(), 0.0001);
+    try testing.expectApproxEqAbs(@as(f64, 2), global(app, hand, "spread").asFloat(), 0.0001);
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
 fn fingered(finger: u32, phase: @import("fluxion_platform").event.TouchPhase, x: f64, y: f64) @import("fluxion_platform").Event {
     return .{ .touch = .{ .window = .none, .finger = finger, .phase = phase, .x = x, .y = y } };
 }

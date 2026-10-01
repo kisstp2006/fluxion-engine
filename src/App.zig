@@ -1712,6 +1712,9 @@ pub fn step(self: *App) anyerror!bool {
     if (self.input.justResumed()) self.time.restart();
 
     self.time.tick();
+    // What the fingers made - taps, swipes, two fingers' pinch - for the
+    // scripts to hear with the rest of the frame's input.
+    self.input.trackFingers(self.time.unscaled_delta);
     self.inherited.forget();
     // A game that wrote `paused` itself is taken at its word from here on.
     self.schedule.paused = self.paused;
@@ -2080,6 +2083,10 @@ fn fitFrame(self: *App) void {
     self.frame = self.stretch.frameOf(self.width, self.height);
     self.input.frame_origin = .init(self.frame.shown.x, self.frame.shown.y);
     self.input.frame_ratio = self.frame.ratio();
+    // A density-independent pixel, in the frame's: the window's pixels in
+    // one, and the frame's in each of those.
+    const display: f32 = if (self.window) |*window| window.content_scale else 1;
+    self.input.dp = display * self.input.frame_ratio;
 }
 
 /// The interface's scale for this frame: the game's `zoom` times the
@@ -5334,6 +5341,7 @@ pub const reflect_methods = .{
     .touchAt = .{attr.Params{ .names = &.{"index"} }},
     .touchOf = .{attr.Params{ .names = &.{"finger"} }},
     .fingersDown = .{},
+    .twoFingers = .{},
     .hasTouchscreen = .{},
     .setMouseFromTouch = .{attr.Params{ .names = &.{"on"} }},
     .mouseFromTouch = .{},
@@ -6061,6 +6069,21 @@ pub fn touchOf(self: *const App, finger: u32) ?Input.Touch {
 /// How many fingers are down now.
 pub fn fingersDown(self: *const App) usize {
     return self.input.fingersDown();
+}
+
+/// What two fingers did this frame: how much they spread, how far they
+/// moved together and how much they turned - a camera zoomed, dragged and
+/// turned by two fingers. `active` is false with fewer down.
+///
+/// ```
+/// const two = app.twoFingers();
+/// if (two.active) {
+///     camera.zoom *= two.factor;
+///     place.x -= two.relative.x / camera.zoom;
+/// }
+/// ```
+pub fn twoFingers(self: *const App) Input.TwoFingers {
+    return self.input.two_fingers;
 }
 
 /// Whether this is a touch screen: Android, or a screen a finger has

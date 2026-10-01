@@ -260,10 +260,18 @@ pub const MouseMotionEvent = input_event.MouseMotionEvent;
 pub const WheelEvent = input_event.WheelEvent;
 pub const TouchEvent = input_event.TouchEvent;
 pub const TouchMotionEvent = input_event.TouchMotionEvent;
+pub const TapEvent = input_event.TapEvent;
+pub const LongPressEvent = input_event.LongPressEvent;
+pub const SwipeEvent = input_event.SwipeEvent;
+pub const PinchEvent = input_event.PinchEvent;
+pub const PanEvent = input_event.PanEvent;
+pub const RotateEvent = input_event.RotateEvent;
 pub const PadButtonEvent = input_event.PadButtonEvent;
 
 /// One finger on a touch screen, as a frame has it: `app.input.touches()`.
 pub const Touch = @import("input.zig").Touch;
+/// What two fingers did this frame: `app.twoFingers()`.
+pub const TwoFingers = @import("input.zig").TwoFingers;
 /// A control fingers press, as many at once as there are fingers. See
 /// `touch.zig`.
 pub const TouchButton = @import("touch.zig").TouchButton;

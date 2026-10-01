@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! One thing the player did, as one value of its own kind: a key, a mouse
-//! button, the pointer moving, the wheel turning, a finger on a touch screen,
-//! a controller's button.
+//! button, the pointer moving, the wheel turning, a finger on a touch screen
+//! and the gestures fingers make, a controller's button.
 //! What a script's `input(self, event)` and `unhandled_input` are handed -
 //! asked which with `is`:
 //!
@@ -148,6 +148,77 @@ pub const TouchMotionEvent = struct {
     pub const reflect_name = "TouchMotionEvent";
 };
 
+/// A finger touched and was lifted soon, near where it touched; or did it
+/// again soon after, near the last: `count` says how many in a row.
+pub const TapEvent = struct {
+    finger: u32 = 0,
+    /// Where it was lifted, in the frame's pixels.
+    position: Vec2 = .zero,
+    /// 1 for a tap, 2 for a double tap, and on.
+    count: u32 = 1,
+
+    pub const reflect_name = "TapEvent";
+};
+
+/// A finger held still long enough: said once, while it is still down.
+pub const LongPressEvent = struct {
+    finger: u32 = 0,
+    position: Vec2 = .zero,
+
+    pub const reflect_name = "LongPressEvent";
+};
+
+/// A finger flicked across the screen: lifted far from where it touched,
+/// while it was going fast.
+pub const SwipeEvent = struct {
+    finger: u32 = 0,
+    /// Where it touched.
+    start: Vec2 = .zero,
+    /// Where it was lifted.
+    position: Vec2 = .zero,
+    /// How fast it was going, in the frame's pixels a second.
+    velocity: Vec2 = .zero,
+    /// Which way: the larger part of `velocity`.
+    direction: Direction = .right,
+
+    pub const Direction = enum { left, right, up, down };
+
+    pub const reflect_name = "SwipeEvent";
+};
+
+/// Two fingers spread apart or drew together.
+pub const PinchEvent = struct {
+    /// Halfway between them, in the frame's pixels.
+    center: Vec2 = .zero,
+    /// How much farther apart they are than at the last one: what a zoom
+    /// is multiplied by.
+    factor: f32 = 1,
+    /// How much farther apart they are than when the second touched.
+    scale: f32 = 1,
+
+    pub const reflect_name = "PinchEvent";
+};
+
+/// Two fingers moved across the screen together.
+pub const PanEvent = struct {
+    center: Vec2 = .zero,
+    /// How far their middle moved.
+    relative: Vec2 = .zero,
+
+    pub const reflect_name = "PanEvent";
+};
+
+/// Two fingers turned about each other.
+pub const RotateEvent = struct {
+    center: Vec2 = .zero,
+    /// Radians since the last one, clockwise on the screen positive.
+    angle: f32 = 0,
+    /// Radians since the second touched.
+    total: f32 = 0,
+
+    pub const reflect_name = "RotateEvent";
+};
+
 /// A controller's button pressed or let go.
 pub const PadButtonEvent = struct {
     button: platform.GamepadButton = .a,
@@ -166,6 +237,12 @@ pub const InputEvent = union(enum) {
     wheel: WheelEvent,
     touch: TouchEvent,
     touch_motion: TouchMotionEvent,
+    tap: TapEvent,
+    long_press: LongPressEvent,
+    swipe: SwipeEvent,
+    pinch: PinchEvent,
+    pan: PanEvent,
+    rotate: RotateEvent,
     pad_button: PadButtonEvent,
 
     pub const reflect_name = "InputEvent";
@@ -229,6 +306,12 @@ pub const InputEvent = union(enum) {
             .wheel => |w| w.position,
             .touch => |t| t.position,
             .touch_motion => |t| t.position,
+            .tap => |t| t.position,
+            .long_press => |p| p.position,
+            .swipe => |s| s.position,
+            .pinch => |p| p.center,
+            .pan => |p| p.center,
+            .rotate => |r| r.center,
             .key, .pad_button => null,
         };
     }
@@ -242,17 +325,36 @@ pub const InputEvent = union(enum) {
             .wheel => |*w| w.position = place,
             .touch => |*t| t.position = place,
             .touch_motion => |*t| t.position = place,
+            .tap => |*t| t.position = place,
+            .long_press => |*p| p.position = place,
+            .swipe => |*s| s.position = place,
+            .pinch => |*p| p.center = place,
+            .pan => |*p| p.center = place,
+            .rotate => |*r| r.center = place,
             .key, .pad_button => {},
         }
         return moved;
     }
 
-    /// The finger a touch screen's event is about; null for any other.
+    /// The finger a touch screen's event or one finger's gesture is about;
+    /// null for any other.
     pub fn finger(self: InputEvent) ?u32 {
         return switch (self) {
             .touch => |t| t.finger,
             .touch_motion => |t| t.finger,
+            .tap => |t| t.finger,
+            .long_press => |p| p.finger,
+            .swipe => |s| s.finger,
             else => null,
+        };
+    }
+
+    /// Whether it is the pointer's own: a mouse button, its motion, the
+    /// wheel - what picking hears.
+    pub fn fromPointer(self: InputEvent) bool {
+        return switch (self) {
+            .mouse_button, .mouse_motion, .wheel => true,
+            else => false,
         };
     }
 
@@ -261,7 +363,7 @@ pub const InputEvent = union(enum) {
             .mouse_button => |b| b.buttons,
             .mouse_motion => |m| m.buttons,
             .wheel => |w| w.buttons,
-            .key, .touch, .touch_motion, .pad_button => .none,
+            .key, .touch, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate, .pad_button => .none,
         };
     }
 
@@ -271,7 +373,7 @@ pub const InputEvent = union(enum) {
             .mouse_button => |b| b.mods,
             .mouse_motion => |m| m.mods,
             .wheel => |w| w.mods,
-            .touch, .touch_motion, .pad_button => .{},
+            .touch, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate, .pad_button => .{},
         };
     }
 
@@ -283,7 +385,7 @@ pub const InputEvent = union(enum) {
             .key => |k| .keyOf(k.key),
             .mouse_button => |b| .mouseButtonOf(b.button),
             .pad_button => |p| .padButtonOf(p.button),
-            .mouse_motion, .wheel, .touch, .touch_motion => null,
+            .mouse_motion, .wheel, .touch, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate => null,
         };
     }
 
@@ -293,7 +395,7 @@ pub const InputEvent = union(enum) {
             .mouse_button => |b| b.pressed,
             .pad_button => |p| p.pressed,
             .touch => |t| t.pressed,
-            .mouse_motion, .wheel, .touch_motion => false,
+            .mouse_motion, .wheel, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate => false,
         };
     }
 

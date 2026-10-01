@@ -2688,8 +2688,10 @@ pub const Scripts = struct {
             .key => app.ui.wantsKeyboard(),
             .mouse_button, .mouse_motion, .wheel => app.input.isHandled() or app.ui.wantsPointer(),
             // A finger a touch button holds, or the first finger over what
-            // took the mouse it is as well.
-            .touch, .touch_motion => {
+            // took the mouse it is as well; and one finger's gesture as its
+            // finger. Two fingers' are nobody's.
+            .pinch, .pan, .rotate => false,
+            .touch, .touch_motion, .tap, .long_press, .swipe => {
                 const finger = app.input.touchOf(event.finger().?) orelse return false;
                 return finger.on_button or (finger.mouse and app.input.mouse_from_touch and (app.input.isHandled() or app.ui.wantsPointer()));
             },

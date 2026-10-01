@@ -37,7 +37,9 @@
 //!
 //! Every finger on a touch screen is a `Touch` of its own, for the frame it
 //! touches to the frame it is lifted: see `touches`. The first finger is the
-//! mouse as well, unless `mouse_from_touch` says not.
+//! mouse as well, unless `mouse_from_touch` says not. What the fingers make -
+//! a tap, a long press, a swipe; two fingers' pinch, pan and turn - is worked
+//! out once a frame: see `trackFingers`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -183,6 +185,21 @@ mouse_from_touch: bool = true,
 touch_from_mouse: bool = false,
 /// Whether this is a touch screen: Android, or a screen a finger touched.
 touchscreen: bool = builtin.abi.isAndroid(),
+/// How many of the frame's pixels a density-independent pixel is - a 160th
+/// of an inch - so that a gesture is the same size under a finger on any
+/// screen. Set by `App`.
+dp: f32 = 1,
+/// Seconds on the fingers' own clock: what `trackFingers` has counted.
+finger_time: f64 = 0,
+/// Each finger down, for the gestures it may make.
+tracks: [max_fingers]Track = undefined,
+track_count: usize = 0,
+/// The two fingers whose pinch, pan and turn the last frame worked out.
+pair: ?Pair = null,
+/// The last tap, for the next to make a double tap.
+last_tap: ?LastTap = null,
+/// What two fingers did this frame.
+two_fingers: TwoFingers = .{},
 
 /// Whether the window has the keyboard. For a game that pauses when nobody
 /// is looking at it.
@@ -555,6 +572,95 @@ pub const Touch = struct {
     }
 };
 
+/// What two fingers did this frame - the first two down that no touch
+/// button holds: how much they spread, how far they moved together, how
+/// much they turned. The same as this frame's `PinchEvent`, `PanEvent` and
+/// `RotateEvent`, to ask for rather than to hear.
+pub const TwoFingers = struct {
+    /// Whether two fingers are down.
+    active: bool = false,
+    /// Halfway between them, in the frame's pixels.
+    center: Vec2 = .zero,
+    /// How much farther apart they are than last frame.
+    factor: f32 = 1,
+    /// How far their middle moved this frame.
+    relative: Vec2 = .zero,
+    /// Radians they turned this frame, clockwise on the screen positive.
+    rotation: f32 = 0,
+    /// How much farther apart they are than when the second touched.
+    scale: f32 = 1,
+    /// Radians they turned since the second touched.
+    angle: f32 = 0,
+
+    pub const reflect_name = "TwoFingers";
+};
+
+/// How far, in density-independent pixels, a finger may drift and still
+/// tap or press long.
+pub const tap_slop_dp = 10;
+/// Seconds a finger is held still before it is a long press.
+pub const long_press_seconds = 0.5;
+/// How soon after a tap was lifted a touch makes it a double tap, in
+/// seconds, and how near, in density-independent pixels.
+pub const double_tap_seconds = 0.3;
+pub const double_tap_slop_dp = 100;
+/// How far a swipe goes, and how fast the finger is going when it is
+/// lifted, in density-independent pixels and those a second.
+pub const swipe_distance_dp = 30;
+pub const swipe_speed_dp = 300;
+
+/// One finger down, as the gestures follow it.
+const Track = struct {
+    finger: u32,
+    start: Vec2,
+    down_at: f64,
+    /// It went past `tap_slop_dp`.
+    wandered: bool = false,
+    /// No other finger touched while it was down, and no touch button held
+    /// it: only such a finger taps, presses long and swipes.
+    alone: bool = true,
+    long_pressed: bool = false,
+    /// Where it was, frame by frame, the last few: for its speed.
+    samples: [8]Sample = undefined,
+    sample_count: usize = 0,
+    next: usize = 0,
+
+    const Sample = struct { at: Vec2, time: f64 };
+
+    fn sample(self: *Track, at: Vec2, time: f64) void {
+        self.samples[self.next] = .{ .at = at, .time = time };
+        self.next = (self.next + 1) % self.samples.len;
+        self.sample_count = @min(self.sample_count + 1, self.samples.len);
+    }
+
+    /// How fast it went over at least the last tenth of a second it has,
+    /// in the frame's pixels a second.
+    fn velocity(self: *const Track) Vec2 {
+        if (self.sample_count < 2) return .zero;
+        const newest = self.samples[(self.next + self.samples.len - 1) % self.samples.len];
+        var oldest = newest;
+        for (1..self.sample_count) |back| {
+            oldest = self.samples[(self.next + self.samples.len - 1 - back) % self.samples.len];
+            if (newest.time - oldest.time >= velocity_window) break;
+        }
+        const took = newest.time - oldest.time;
+        if (took <= 0) return .zero;
+        return newest.at.sub(oldest.at).scale(@floatCast(1 / took));
+    }
+};
+
+const Pair = struct {
+    first: u32,
+    second: u32,
+    center: Vec2,
+    distance: f32,
+    angle: f32,
+    start_distance: f32,
+    turned: f32 = 0,
+};
+
+const LastTap = struct { position: Vec2, time: f64, count: u32 };
+
 pub const Typed = union(enum) {
     character: u21,
     key: platform.event.KeyEvent,
@@ -861,6 +967,134 @@ pub fn trackPointer(self: *Input, delta: f32) void {
         self.pointer_elapsed = 0;
     }
     if (self.pointer_still >= velocity_forgets) self.pointer.velocity = .zero;
+}
+
+/// Work out what the fingers made this frame - a tap, a long press, a swipe,
+/// two fingers' pinch, pan and turn - and put it with the pointer's events
+/// for the scripts to hear. Called by `App` once a frame, after the touch
+/// buttons, with the frame's time unscaled: a gesture is the player's hand,
+/// not the game's clock.
+pub fn trackFingers(self: *Input, delta: f32) void {
+    self.finger_time += delta;
+    const now = self.finger_time;
+    for (self.fingers[0..self.finger_count]) |finger| {
+        if (finger.pressed) self.startTrack(finger, now);
+        const track = self.trackOf(finger.finger) orelse continue;
+        track.sample(finger.position, now);
+        if (finger.position.dist(track.start) > tap_slop_dp * self.dp) track.wandered = true;
+        if (finger.on_button) track.alone = false;
+        if (finger.released) {
+            if (!finger.canceled and track.alone) self.lifted(track.*, finger, now);
+            self.dropTrack(finger.finger);
+            continue;
+        }
+        if (track.alone and !track.wandered and !track.long_pressed and now - track.down_at >= long_press_seconds) {
+            track.long_pressed = true;
+            self.pushPointer(.{ .long_press = .{ .finger = finger.finger, .position = finger.position } });
+        }
+    }
+    self.trackPair();
+}
+
+fn startTrack(self: *Input, finger: Touch, now: f64) void {
+    if (self.trackOf(finger.finger) != null or self.track_count == self.tracks.len) return;
+    // A finger touching while others are down makes them all two fingers'.
+    const alone = self.track_count == 0;
+    for (self.tracks[0..self.track_count]) |*other| other.alone = false;
+    self.tracks[self.track_count] = .{ .finger = finger.finger, .start = finger.position, .down_at = now, .alone = alone };
+    self.track_count += 1;
+}
+
+fn trackOf(self: *Input, finger: u32) ?*Track {
+    for (self.tracks[0..self.track_count]) |*track| {
+        if (track.finger == finger) return track;
+    }
+    return null;
+}
+
+fn dropTrack(self: *Input, finger: u32) void {
+    for (self.tracks[0..self.track_count], 0..) |track, i| {
+        if (track.finger != finger) continue;
+        self.tracks[i] = self.tracks[self.track_count - 1];
+        self.track_count -= 1;
+        return;
+    }
+}
+
+/// A finger alone lifted: a tap where it touched, or a swipe far from it.
+fn lifted(self: *Input, track: Track, finger: Touch, now: f64) void {
+    if (track.long_pressed) return;
+    if (!track.wandered) {
+        var count: u32 = 1;
+        if (self.last_tap) |last| {
+            if (track.down_at - last.time <= double_tap_seconds and track.start.dist(last.position) <= double_tap_slop_dp * self.dp) count = last.count + 1;
+        }
+        self.last_tap = .{ .position = finger.position, .time = now, .count = count };
+        self.pushPointer(.{ .tap = .{ .finger = finger.finger, .position = finger.position, .count = count } });
+        return;
+    }
+    const velocity = track.velocity();
+    if (finger.position.dist(track.start) < swipe_distance_dp * self.dp or velocity.len() < swipe_speed_dp * self.dp) return;
+    const direction: events.SwipeEvent.Direction = if (@abs(velocity.x) >= @abs(velocity.y))
+        (if (velocity.x < 0) .left else .right)
+    else
+        (if (velocity.y < 0) .up else .down);
+    self.pushPointer(.{ .swipe = .{ .finger = finger.finger, .start = track.start, .position = finger.position, .velocity = velocity, .direction = direction } });
+}
+
+/// The first two fingers down that no touch button holds: how much they
+/// spread, moved and turned since last frame. A new pair starts from where
+/// it is, and says nothing on its first frame.
+fn trackPair(self: *Input) void {
+    self.two_fingers = .{};
+    var found: [2]Touch = undefined;
+    var count: usize = 0;
+    for (self.fingers[0..self.finger_count]) |finger| {
+        if (!finger.down() or finger.on_button) continue;
+        found[count] = finger;
+        count += 1;
+        if (count == 2) break;
+    }
+    if (count < 2) {
+        self.pair = null;
+        return;
+    }
+    const center = found[0].position.add(found[1].position).scale(0.5);
+    const span = found[1].position.sub(found[0].position);
+    const distance = @max(span.len(), 0.001);
+    const angle = std.math.atan2(span.y, span.x);
+    self.two_fingers.active = true;
+    self.two_fingers.center = center;
+
+    const held = if (self.pair) |*kept| (if (kept.first == found[0].finger and kept.second == found[1].finger) kept else null) else null;
+    const pair = held orelse {
+        self.pair = .{ .first = found[0].finger, .second = found[1].finger, .center = center, .distance = distance, .angle = angle, .start_distance = distance };
+        return;
+    };
+    const factor = distance / pair.distance;
+    const rotation = wrapAngle(angle - pair.angle);
+    const relative = center.sub(pair.center);
+    pair.turned += rotation;
+    pair.center = center;
+    pair.distance = distance;
+    pair.angle = angle;
+    self.two_fingers.factor = factor;
+    self.two_fingers.relative = relative;
+    self.two_fingers.rotation = rotation;
+    self.two_fingers.scale = distance / pair.start_distance;
+    self.two_fingers.angle = pair.turned;
+
+    if (factor != 1) self.pushPointer(.{ .pinch = .{ .center = center, .factor = factor, .scale = self.two_fingers.scale } });
+    if (relative.x != 0 or relative.y != 0) self.pushPointer(.{ .pan = .{ .center = center, .relative = relative } });
+    if (rotation != 0) self.pushPointer(.{ .rotate = .{ .center = center, .angle = rotation, .total = pair.turned } });
+}
+
+/// An angle between minus and plus half a turn.
+fn wrapAngle(angle: f32) f32 {
+    var wrapped = angle;
+    while (wrapped > std.math.pi) wrapped -= 2 * std.math.pi;
+    while (wrapped < -std.math.pi) wrapped += 2 * std.math.pi;
+    return wrapped;
 }
 
 /// What the pointer did this frame, oldest first: presses, releases, the
@@ -1769,6 +2003,99 @@ test "the first finger's mouse is not heard when a project says so, and the mous
     try testing.expect(input.touchOf(mouse_as_finger).?.released);
     // A mouse is no touch screen.
     try testing.expect(input.touchscreen == builtin.abi.isAndroid());
+}
+
+/// A frame of the fingers: their events, then the gestures, a sixtieth of a
+/// second on.
+fn frameOf(input: *Input, happened: []const platform.Event) void {
+    input.endFrame();
+    input.beginFrame();
+    for (happened) |event| input.apply(event);
+    input.trackFingers(1.0 / 60.0);
+}
+
+fn gesturesOf(input: *const Input) []const events.InputEvent {
+    var start: usize = 0;
+    for (input.pointerEvents(), 0..) |event, i| {
+        if (event == .touch or event == .touch_motion) start = i + 1;
+    }
+    return input.pointerEvents()[start..];
+}
+
+test "a finger lifted soon and near is a tap, and another soon after is a double tap" {
+    var input: Input = .{};
+    frameOf(&input, &.{touchEvent(1, .down, 100, 100)});
+    frameOf(&input, &.{touchEvent(1, .move, 104, 102)});
+    frameOf(&input, &.{touchEvent(1, .up, 104, 102)});
+    try testing.expectEqual(@as(u32, 1), gesturesOf(&input)[0].tap.count);
+
+    frameOf(&input, &.{});
+    frameOf(&input, &.{touchEvent(2, .down, 110, 100)});
+    frameOf(&input, &.{touchEvent(2, .up, 110, 100)});
+    try testing.expectEqual(@as(u32, 2), gesturesOf(&input)[0].tap.count);
+
+    // Too late for a third: a tap of its own.
+    for (0..30) |_| frameOf(&input, &.{});
+    frameOf(&input, &.{touchEvent(3, .down, 110, 100)});
+    frameOf(&input, &.{touchEvent(3, .up, 110, 100)});
+    try testing.expectEqual(@as(u32, 1), gesturesOf(&input)[0].tap.count);
+}
+
+test "a finger held still is a long press, once, and then no tap" {
+    var input: Input = .{};
+    frameOf(&input, &.{touchEvent(1, .down, 100, 100)});
+    var pressed: usize = 0;
+    for (0..40) |_| {
+        frameOf(&input, &.{});
+        for (gesturesOf(&input)) |event| {
+            if (event == .long_press) pressed += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), pressed);
+    frameOf(&input, &.{touchEvent(1, .up, 100, 100)});
+    try testing.expectEqual(@as(usize, 0), gesturesOf(&input).len);
+}
+
+test "a finger flicked and lifted while going fast is a swipe, and a slow drag is none" {
+    var input: Input = .{};
+    frameOf(&input, &.{touchEvent(1, .down, 100, 300)});
+    for (1..6) |i| frameOf(&input, &.{touchEvent(1, .move, 100, 300 - @as(f64, @floatFromInt(i)) * 20)});
+    frameOf(&input, &.{touchEvent(1, .up, 100, 180)});
+    const swiped = gesturesOf(&input)[0].swipe;
+    try testing.expectEqual(events.SwipeEvent.Direction.up, swiped.direction);
+    try testing.expectEqual(@as(f32, 300), swiped.start.y);
+    try testing.expect(swiped.velocity.y < -1000);
+
+    frameOf(&input, &.{touchEvent(2, .down, 100, 300)});
+    for (1..60) |i| frameOf(&input, &.{touchEvent(2, .move, 100 + @as(f64, @floatFromInt(i)), 300)});
+    frameOf(&input, &.{touchEvent(2, .up, 160, 300)});
+    try testing.expectEqual(@as(usize, 0), gesturesOf(&input).len);
+}
+
+test "two fingers pinch, pan and turn, and make no tap" {
+    var input: Input = .{};
+    frameOf(&input, &.{ touchEvent(1, .down, 100, 100), touchEvent(2, .down, 200, 100) });
+    try testing.expect(input.two_fingers.active);
+    try testing.expectEqual(@as(f32, 1), input.two_fingers.factor);
+
+    // Twice as far apart, about the same middle.
+    frameOf(&input, &.{ touchEvent(1, .move, 50, 100), touchEvent(2, .move, 250, 100) });
+    try testing.expectApproxEqAbs(@as(f32, 2), input.two_fingers.factor, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 2), gesturesOf(&input)[0].pinch.factor, 0.0001);
+
+    // Moved together, then a quarter turn about the middle.
+    frameOf(&input, &.{ touchEvent(1, .move, 60, 120), touchEvent(2, .move, 260, 120) });
+    try testing.expectEqual(@as(f32, 20), input.two_fingers.relative.y);
+    try testing.expectEqual(@as(f32, 20), gesturesOf(&input)[0].pan.relative.y);
+    frameOf(&input, &.{ touchEvent(1, .move, 160, 20), touchEvent(2, .move, 160, 220) });
+    try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), input.two_fingers.rotation, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), input.two_fingers.angle, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 2), input.two_fingers.scale, 0.0001);
+
+    // Lifted: no tap, no swipe, and no two fingers.
+    frameOf(&input, &.{ touchEvent(1, .up, 160, 20), touchEvent(2, .up, 160, 220) });
+    try testing.expectEqual(@as(usize, 0), gesturesOf(&input).len);
+    try testing.expect(!input.two_fingers.active);
 }
 
 test "the window losing the keyboard lifts every finger" {

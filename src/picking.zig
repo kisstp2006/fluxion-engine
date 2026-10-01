@@ -106,7 +106,7 @@ pub fn update(self: *Picking, app: *App) !void {
     // events are not the pointer's.
     var pointed = false;
     for (events) |event| {
-        if (event.finger() != null) continue;
+        if (!event.fromPointer()) continue;
         pointed = true;
         if (stopped) {
             if (releaseOf(event)) |button| try self.letGo(app, button, false);

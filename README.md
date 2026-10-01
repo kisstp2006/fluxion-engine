@@ -567,6 +567,35 @@ for (app.input.touches()) |finger| {
   `touch.touch_from_mouse`; `app.setMouseFromTouch` and
   `app.setTouchFromMouse` as it runs.
 - **`app.hasTouchscreen()`**: Android, or a screen a finger has touched.
+- **Gestures, worked out once a frame from the fingers**, and heard with
+  the rest of the input:
+  - a `TapEvent` - a finger lifted soon and within 10 dp of where it
+    touched - with `count` 2 for a double tap (the next touch within 0.3 s
+    and 100 dp), 3 for a third, and on;
+  - a `LongPressEvent`, once, for a finger held still half a second, which
+    then makes no tap;
+  - a `SwipeEvent` for a finger lifted at least 30 dp from where it touched
+    while going at least 300 dp a second: `start`, `position`, `velocity`
+    and `direction` (`.left`, `.right`, `.up`, `.down`);
+  - for two fingers - the first two down that no touch button holds - a
+    `PinchEvent` (`factor` since the last, `scale` since the second
+    touched), a `PanEvent` (`relative`, how far their middle moved) and a
+    `RotateEvent` (`angle` since the last, `total`), each about their
+    `center`; and the same, asked rather than heard, as `app.twoFingers()`.
+
+  A dp is a 160th of an inch, so a gesture is the same size under a finger
+  on any screen. Only a finger alone - no other down while it was, and no
+  touch button holding it - taps, presses long and swipes; two fingers'
+  never do. With `touch.touch_from_mouse` the left button taps, presses
+  long and swipes as a finger.
+
+  ```
+  fn input(self, event: InputEvent) {
+      if (event is TapEvent and event.count == 2) self.zoomIn(event.position);
+      if (event is SwipeEvent and event.direction == .left) self.nextPage();
+      if (event is PinchEvent) self.camera.zoom *= event.factor;
+  }
+  ```
 - **A `TouchButton` is a control fingers press**, as many at once as there
   are fingers - the interface answers one pointer, the first finger's.
   Beside a `Control` and what draws it, it is pressed by a finger that
@@ -3107,7 +3136,7 @@ struct Guard {
   event: InputEvent)` hears what nothing took - not a script's
   `app.setInputAsHandled()`, and not the interface, which takes a key while
   a field has the keys and the pointer over what it draws.
-  - Each kind is a type of its own, asked for with `is`: a `KeyEvent` has `key`, `virtual_key`, `pressed`, `echo` and `mods`; a `MouseButtonEvent` `button`, `pressed`, `double_click`, `position`, `buttons` and `mods`; a `MouseMotionEvent` `position`, `relative`, `buttons` and `mods`; a `WheelEvent` `delta`, `position`, `buttons` and `mods`; a `TouchEvent` `finger`, `pressed`, `canceled`, `position` and `pressure`; a `TouchMotionEvent` `finger`, `position`, `relative` and `pressure`; a `PadButtonEvent` `button`, `pad` and `pressed`. `mods` has `shift`, `control`, `alt` and `super`.
+  - Each kind is a type of its own, asked for with `is`: a `KeyEvent` has `key`, `virtual_key`, `pressed`, `echo` and `mods`; a `MouseButtonEvent` `button`, `pressed`, `double_click`, `position`, `buttons` and `mods`; a `MouseMotionEvent` `position`, `relative`, `buttons` and `mods`; a `WheelEvent` `delta`, `position`, `buttons` and `mods`; a `TouchEvent` `finger`, `pressed`, `canceled`, `position` and `pressure`; a `TouchMotionEvent` `finger`, `position`, `relative` and `pressure`; the gestures - `TapEvent`, `LongPressEvent`, `SwipeEvent`, `PinchEvent`, `PanEvent`, `RotateEvent` - as under "Fingers on a touch screen"; a `PadButtonEvent` `button`, `pad` and `pressed`. `mods` has `shift`, `control`, `alt` and `super`.
   - Inside `if (event is KeyEvent)`, after an `and`, and past an `if (!(event is KeyEvent)) return;`, the event is a `KeyEvent`. A field only some kinds have is a mistake elsewhere, and the compiler names the kinds that have it.
   - Every kind has `isAction("jump")`, `isActionPressed`, `isActionReleased` and `describe()`, by the project's actions.
   - `app.bindAction("jump", event)` binds what was pressed to an action, and `app.clearAction("jump")` unbinds it: a key-remapping screen, saved with `app.saveInputMap()`.
