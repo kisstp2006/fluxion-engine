@@ -44,7 +44,7 @@ const rhi = @import("fluxion_rhi");
 const math = @import("fluxion_math");
 const shader = @import("fluxion_shader");
 
-const Sprite = @import("../components.zig").Sprite;
+const Sprite = @import("../scene/components.zig").Sprite;
 
 /// What every frame tells a material's shader, as its `Frame` block says:
 /// `std140`, eighty bytes. `compile` holds the two to each other.

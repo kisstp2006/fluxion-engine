@@ -40,14 +40,14 @@ const json = @import("fluxion_json");
 const math = @import("fluxion_math");
 
 const App = @import("../App.zig");
-const actions = @import("../actions.zig");
-const audio = @import("../audio.zig");
-const attr = @import("../attr.zig");
+const actions = @import("../input/actions.zig");
+const audio = @import("../audio/audio.zig");
+const attr = @import("../reflect/attr.zig");
 const flux = @import("fluxion_script");
-const Color = @import("../color.zig").Color;
-const settings_file = @import("../settings_file.zig");
-const stretch = @import("../stretch.zig");
-const geometry = @import("../geometry.zig");
+const Color = @import("../math/color.zig").Color;
+const settings_file = @import("settings_file.zig");
+const stretch = @import("../render/stretch.zig");
+const geometry = @import("../math/geometry.zig");
 
 /// What the file is called, at the root of a project's folder.
 pub const file_name = "project.fluxion";

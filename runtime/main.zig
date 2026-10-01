@@ -2,7 +2,7 @@
 
 //! The program a game is shipped as. The editor's export takes a copy of it
 //! for each platform, named after the game, and puts the game's pack beside
-//! it: see the engine's `shipped.zig`.
+//! it: see the engine's `pack_locator.zig`.
 //!
 //! It opens the pack it finds, and in it the project, as the game opened in
 //! the editor: its boot splash, its autoloads, its main scene, its scripts

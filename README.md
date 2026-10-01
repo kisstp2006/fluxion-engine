@@ -1719,7 +1719,7 @@ app.grabFocus(play);                                                            
   `app.textOf` and `app.printText` from Zig; `label.text = "Paused"` from a
   script; a field of the component's in a scene and in an editor's
   inspector. Any component can keep some - an `attr.Text` on its type says
-  which - and they go with the entity. See `texts.zig`.
+  which - and they go with the entity. See `component_texts.zig`.
 - **The focus is the keyboard's and a pad's**: a button, a box and a slider
   take it from a press, Tab and the arrows, and a field always does. A
   `Focus` beside a control says otherwise - `none`, `click` for a press and

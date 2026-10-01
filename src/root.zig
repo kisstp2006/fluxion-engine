@@ -31,31 +31,31 @@
 const std = @import("std");
 
 pub const App = @import("App.zig");
-pub const Window = @import("window.zig");
-pub const Input = @import("input.zig");
-pub const Time = @import("time.zig");
-pub const Assets = @import("assets.zig");
-pub const Interface = @import("interface.zig");
-pub const ToolWindow = @import("tool_window.zig");
-pub const WorldUi = @import("world_ui.zig");
-pub const Clipboard = @import("clipboard.zig");
+pub const Window = @import("platform/window.zig");
+pub const Input = @import("input/input.zig");
+pub const Time = @import("time/frame_time.zig");
+pub const Assets = @import("assets/assets.zig");
+pub const Interface = @import("ui/interface.zig");
+pub const ToolWindow = @import("ui/tool_window.zig");
+pub const WorldUi = @import("ui/world_ui.zig");
+pub const Clipboard = @import("platform/clipboard.zig");
 
 /// Spawns, despawns, adds and removes that wait for the system asking for
 /// them to return: `app.commands`.
-pub const Commands = @import("commands.zig");
+pub const Commands = @import("core/commands.zig");
 
 /// What the engine draws into `app.debug` by itself - colliders, bodies,
 /// transforms, sprites, cameras, stats - each off until asked for:
 /// `app.debug_views`.
-pub const DebugViews = @import("debug_views.zig");
+pub const DebugViews = @import("render/debug_views.zig");
 
 /// A game's own states, each an enum with one value at a time: `app.state`,
 /// `app.setState`, `app.addSystemIn`, `app.onEnter`.
-pub const States = @import("states.zig");
+pub const States = @import("core/states.zig");
 
 /// Signals, on components: `pub const signals` on one, and `app.signal`,
 /// `connect`, `emit`. The table is `app.signals`.
-pub const signals = @import("signals.zig");
+pub const signals = @import("core/signals.zig");
 
 /// A signal of one entity. See `App.signal`.
 pub const Signal = signals.Signal;
@@ -83,7 +83,7 @@ pub const MethodInfo = signals.MethodInfo;
 
 /// Typed events: what one system tells any others that care, by type rather
 /// than by who. `app.send` and `app.events`.
-pub const events = @import("events.zig");
+pub const events = @import("core/event_channels.zig");
 
 /// The events of one type, last frame's and this frame's.
 pub const Events = events.Events;
@@ -93,7 +93,7 @@ pub const EventReader = events.Reader;
 
 /// Flux scripts on entities: `app.useScripts`, `app.loadScript`, and a
 /// `Script` on the entity.
-pub const script = @import("script.zig");
+pub const script = @import("script/script.zig");
 
 /// A script on an entity: a `.flux` file, and which struct in it.
 pub const Script = script.Script;
@@ -110,42 +110,42 @@ pub const flux = script.flux;
 /// known by the UUID in the `.uid` file beside them, and the player's own
 /// under `user://`: `app.project`. `app.readText`, `app.writeText` and the
 /// rest take any of them.
-pub const Project = @import("Project.zig");
+pub const Project = @import("project/Project.zig");
 /// Settings a game keeps for itself, in sections of keys that need no
 /// declaring: the player's volume, in `user://settings.cfg`.
-pub const ConfigFile = @import("config.zig").ConfigFile;
+pub const ConfigFile = @import("files/config_file.zig").ConfigFile;
 /// A picture in memory, a pixel at a time: see `images`.
-pub const Image = @import("images.zig").Image;
+pub const Image = @import("assets/images.zig").Image;
 /// A file of settings in sections, read and written from the struct that
 /// describes it: what `project.fluxion` is, and what an editor keeps its own
 /// settings with.
-pub const settings_file = @import("settings_file.zig");
+pub const settings_file = @import("project/settings_file.zig");
 
 /// File and folder dialogs, the system's own: `app.openFileDialog`,
 /// `app.openFolderDialog`, and the answer in `app.input.dialogAnswer`.
-pub const dialog = @import("dialog.zig");
+pub const dialog = @import("platform/dialog.zig");
 
 /// A 128-bit name for a thing, unique everywhere: what an entity is known by
 /// in a scene - `app.uuidOf`, `app.findUuid` - and a project's file by in its
 /// `.uid` file.
 pub const Uuid = @import("fluxion_id").Uuid;
 
-pub const assets = @import("assets.zig");
-pub const components = @import("components.zig");
-pub const control = @import("control.zig");
-pub const color = @import("color.zig");
-pub const schedule = @import("schedule.zig");
+pub const assets = @import("assets/assets.zig");
+pub const components = @import("scene/components.zig");
+pub const control = @import("ui/control.zig");
+pub const color = @import("math/color.zig");
+pub const schedule = @import("core/schedule.zig");
 
 /// Where a thing really is, once its parent has had its say.
-pub const hierarchy = @import("hierarchy.zig");
+pub const hierarchy = @import("scene/hierarchy.zig");
 
 /// A world written down and read back, as JSON or as CBOR: `App.saveScene`
 /// and `App.loadScene`.
-pub const scene = @import("scene.zig");
+pub const scene = @import("scene/scene.zig");
 
 /// Which body is which entity's: `RigidBody2D` and `Collider2D` kept in step
 /// with `App.physics`.
-pub const Bodies = @import("bodies.zig");
+pub const Bodies = @import("physics/bodies.zig");
 
 pub const render = struct {
     pub const sprite = @import("render/sprite.zig");
@@ -161,7 +161,7 @@ pub const render = struct {
 
 /// Every glyph the game has drawn, in one texture.
 pub const text = struct {
-    pub const Atlas = @import("text/Atlas.zig");
+    pub const Atlas = @import("render/GlyphAtlas.zig");
 };
 
 /// Where a thing is, how big, and which way round.
@@ -193,15 +193,15 @@ pub const Collider2D = components.Collider2D;
 /// pickup, a hurtbox.
 pub const Area2D = components.Area2D;
 pub const RayCast2D = components.RayCast2D;
-pub const Drawing2D = @import("drawing.zig").Drawing2D;
-pub const drawing = @import("drawing.zig");
+pub const Drawing2D = @import("render/drawing.zig").Drawing2D;
+pub const drawing = @import("render/drawing.zig");
 
 /// Sparks, smoke, rain: many small pictures an entity lets go of.
 pub const Particles2D = particles.Particles2D;
-pub const particles = @import("particles.zig");
+pub const particles = @import("render/particles.zig");
 
 /// Light in the 2D world, and the shadows it casts: see `lights.zig`.
-pub const lights = @import("lights.zig");
+pub const lights = @import("render/lights.zig");
 pub const PointLight2D = lights.PointLight2D;
 pub const DirectionalLight2D = lights.DirectionalLight2D;
 pub const AmbientLight2D = lights.AmbientLight2D;
@@ -209,18 +209,18 @@ pub const LightOccluder2D = lights.LightOccluder2D;
 
 /// A grid of tiles from a `TileSet`. Its cells live in `TileChunk`s the
 /// map owns; `App.setTile` paints one.
-pub const TileMap = @import("tilemap.zig").TileMap;
-pub const TileChunk = @import("tilemap.zig").TileChunk;
+pub const TileMap = @import("tiles/tilemap.zig").TileMap;
+pub const TileChunk = @import("tiles/tilemap.zig").TileChunk;
 /// One tile of a map: which tile of which source, and how it is turned.
-pub const Cell = @import("tilemap.zig").Cell;
-pub const tile_chunk_side = @import("tilemap.zig").chunk_side;
+pub const Cell = @import("tiles/tilemap.zig").Cell;
+pub const tile_chunk_side = @import("tiles/tilemap.zig").chunk_side;
 
-pub const tileset = @import("tileset.zig");
+pub const tileset = @import("tiles/tileset.zig");
 /// What a map's cells name their tiles in: a `.tileset` file.
 pub const TileSet = tileset.TileSet;
 pub const TileSetHandle = tileset.TileSetHandle;
 
-pub const theme = @import("theme.zig");
+pub const theme = @import("ui/theme.zig");
 /// What a `Control` is drawn from: a `.theme` file.
 pub const Theme = theme.Theme;
 pub const ThemeHandle = theme.ThemeHandle;
@@ -252,7 +252,7 @@ pub const NinePatchRect = control.NinePatchRect;
 
 /// One thing the player did, of its own kind: what a script's `input` is
 /// handed, and a pointer's `input_event` signal. See `input_event.zig`.
-pub const input_event = @import("input_event.zig");
+pub const input_event = @import("input/input_event.zig");
 pub const InputEvent = input_event.InputEvent;
 pub const KeyEvent = input_event.KeyEvent;
 pub const MouseButtonEvent = input_event.MouseButtonEvent;
@@ -269,12 +269,12 @@ pub const RotateEvent = input_event.RotateEvent;
 pub const PadButtonEvent = input_event.PadButtonEvent;
 
 /// One finger on a touch screen, as a frame has it: `app.input.touches()`.
-pub const Touch = @import("input.zig").Touch;
+pub const Touch = @import("input/input.zig").Touch;
 /// What two fingers did this frame: `app.twoFingers()`.
-pub const TwoFingers = @import("input.zig").TwoFingers;
+pub const TwoFingers = @import("input/input.zig").TwoFingers;
 /// A control fingers press, as many at once as there are fingers. See
-/// `touch.zig`.
-pub const TouchButton = @import("touch.zig").TouchButton;
+/// `touch_button.zig`.
+pub const TouchButton = @import("ui/touch_button.zig").TouchButton;
 
 /// Which mouse buttons are held: `app.input.buttonMask()`.
 pub const ButtonMask = input_event.ButtonMask;
@@ -295,7 +295,7 @@ pub const Contact = Bodies.Contact;
 /// What `App.castRay` hit.
 pub const RayHit = Bodies.RayHit;
 /// Bodies the game moves: see `App.moveAndSlide`.
-pub const character = @import("character.zig");
+pub const character = @import("physics/character.zig");
 pub const CharacterBody2D = components.CharacterBody2D;
 pub const Collision = character.Collision;
 
@@ -333,28 +333,28 @@ pub const AxisBinding = Input.AxisBinding;
 /// A game's actions - `jump`, `ui_accept` - and the keys, buttons and
 /// sticks that set them off: named in the project, asked for with
 /// `app.input.actionDown`, and rebound as the game runs. See `actions.zig`.
-pub const actions = @import("actions.zig");
+pub const actions = @import("input/actions.zig");
 pub const Action = actions.Action;
 pub const Binding = actions.Binding;
 
 /// A component that counts down and says `timeout`. See `timer.zig`.
-pub const Timer = @import("timer.zig").Timer;
+pub const Timer = @import("time/timer.zig").Timer;
 /// Sound: clips, the players that play them, and the project's buses. See
 /// `audio.zig`.
-pub const audio = @import("audio.zig");
+pub const audio = @import("audio/audio.zig");
 /// A property of an entity named by text - `Appearance.modulate.a` - which
 /// tweens and animations move. See `property.zig`.
-pub const property = @import("property.zig");
+pub const property = @import("reflect/property.zig");
 pub const Property = property.Property;
-pub const Tween = @import("tween.zig").Tween;
+pub const Tween = @import("animation/tween.zig").Tween;
 /// Animation libraries - `.anim` - and the players that play them. See
 /// `animation.zig`.
-pub const animation = @import("animation.zig");
+pub const animation = @import("animation/animation.zig");
 pub const AnimationPlayer = animation.AnimationPlayer;
 pub const AnimationLibraryHandle = animation.AnimationLibraryHandle;
 /// Animations of pictures - `.frames` - and the sprites that play them. See
 /// `sprite_frames.zig`.
-pub const sprite_frames = @import("sprite_frames.zig");
+pub const sprite_frames = @import("animation/sprite_frames.zig");
 pub const AnimatedSprite2D = sprite_frames.AnimatedSprite2D;
 pub const SpriteFrames = sprite_frames.SpriteFrames;
 pub const SpriteFramesHandle = sprite_frames.SpriteFramesHandle;
@@ -362,23 +362,23 @@ pub const AudioPlayer = audio.AudioPlayer;
 pub const AudioSpatial2D = audio.AudioSpatial2D;
 pub const AudioListener2D = audio.AudioListener2D;
 pub const AudioClipHandle = audio.AudioClipHandle;
-pub const scenes = @import("scenes.zig");
+pub const scenes = @import("assets/scene_table.zig");
 pub const SceneHandle = scenes.SceneHandle;
-pub const data = @import("data.zig");
+pub const data = @import("assets/data_files.zig");
 /// Dates and times: a moment, a span, and a calendar's fields in a time zone,
 /// written as the person's culture writes them. See `datetime.zig`.
-pub const datetime = @import("datetime.zig");
+pub const datetime = @import("time/datetime.zig");
 pub const Instant = datetime.Instant;
 pub const Duration = datetime.Duration;
 pub const DateTime = datetime.DateTime;
 pub const Zone = datetime.Zone;
 /// A game's own clocks: a date and time at a rate of its own. See
-/// `clocks.zig` and `App.newClock`.
-pub const clocks = @import("clocks.zig");
+/// `game_clocks.zig` and `App.newClock`.
+pub const clocks = @import("time/game_clocks.zig");
 pub const ClockHandle = clocks.ClockHandle;
 pub const DataHandle = data.DataHandle;
-pub const background = @import("background.zig");
-pub const inherited = @import("inherited.zig");
+pub const background = @import("assets/background_load.zig");
+pub const inherited = @import("scene/inherited.zig");
 pub const Processing = inherited.Processing;
 pub const Appearance = inherited.Appearance;
 
@@ -389,13 +389,13 @@ pub const Vec2 = math.Vec2;
 pub const Color = color.Color;
 
 /// Whole-number points, and boxes of either kind.
-pub const geometry = @import("geometry.zig");
+pub const geometry = @import("math/geometry.zig");
 pub const Vec2i = geometry.Vec2i;
 pub const Rect2 = geometry.Rect2;
 pub const Rect2i = geometry.Rect2i;
 
 /// The kinds of file a game is made of, and the handle each is held by.
-pub const AssetKind = @import("asset_kind.zig").AssetKind;
+pub const AssetKind = @import("assets/asset_kind.zig").AssetKind;
 
 /// What a `Sprite` points at.
 pub const TextureHandle = assets.TextureHandle;
@@ -438,7 +438,7 @@ pub const vfs = @import("fluxion_vfs");
 
 /// Where a shipped game's program finds its pack, and keeps the pack's key:
 /// what the runtime reads and the export writes.
-pub const shipped = @import("shipped.zig");
+pub const shipped = @import("files/pack_locator.zig");
 
 /// Rigid bodies in the plane: what `App.physics` is, for joints, gravity and
 /// anything else a body can do.
@@ -451,19 +451,19 @@ pub const reflect = @import("fluxion_reflect");
 /// What a component's field means, for an inspector to show it by: a range,
 /// an angle, a unit, layers, several lines, a value behind a getter and a
 /// setter. `reflect.attr`'s five and five more, in one namespace.
-pub const attr = @import("attr.zig");
+pub const attr = @import("reflect/attr.zig");
 /// The words components keep beside them: see `App.textOf`.
-pub const texts = @import("texts.zig");
+pub const texts = @import("scene/component_texts.zig");
 /// Shaders from `.shader` files, and what a `Material` gives one: see
 /// `App.loadShader`.
-pub const shaders = @import("shaders.zig");
+pub const shaders = @import("render/shaders.zig");
 pub const Material = shaders.Material;
 /// The picture each `RenderView` draws: see `App.viewTexture`.
-pub const views = @import("views.zig");
+pub const views = @import("render/view_textures.zig");
 pub const RenderView = components.RenderView;
 pub const ViewTexture = components.ViewTexture;
 /// A game made at one size, shown in a window of any: see `App.frame`.
-pub const stretch = @import("stretch.zig");
+pub const stretch = @import("render/stretch.zig");
 pub const ShaderHandle = shaders.ShaderHandle;
 
 /// A physical key, by its position on a US layout.
@@ -478,80 +478,110 @@ pub const Entity = ecs.Entity;
 /// Everything with a set of components, in slices.
 pub const Query = ecs.Query;
 
+// Every test the engine has: its test files, which run whole apps headless,
+// and every source file, for the tests of its own each keeps beside its code.
 test {
-    _ = geometry;
-    _ = @import("asset_kind.zig");
-    _ = control;
-    _ = tileset;
-    _ = @import("tilemap.zig");
-    _ = App;
-    _ = Window;
-    _ = Input;
-    _ = actions;
-    _ = Time;
-    _ = Interface;
-    _ = Clipboard;
-    _ = Commands;
-    _ = DebugViews;
-    _ = States;
-    _ = signals;
-    _ = @import("areas.zig");
-    _ = @import("picking.zig");
-    _ = @import("input_event.zig");
-    _ = events;
-    _ = @import("signals_test.zig");
-    _ = @import("areas_test.zig");
-    _ = @import("picking_test.zig");
-    _ = @import("timer.zig");
-    _ = @import("inherited.zig");
-    _ = @import("scenes.zig");
-    _ = @import("exports.zig");
-    _ = @import("file_table.zig");
-    _ = @import("data.zig");
-    _ = @import("audio.zig");
-    _ = @import("property.zig");
-    _ = @import("tween.zig");
-    _ = @import("texts.zig");
-    _ = @import("shaders.zig");
-    _ = @import("shader_edit.zig");
+    _ = @import("animation/animation_test.zig");
+    _ = @import("animation/sprite_frames_test.zig");
+    _ = @import("animation/tween_test.zig");
+    _ = @import("app_test.zig");
+    _ = @import("assets/images_test.zig");
+    _ = @import("audio/audio_test.zig");
+    _ = @import("core/signals_test.zig");
+    _ = @import("core/states_test.zig");
+    _ = @import("files/files_test.zig");
+    _ = @import("files/pack_test.zig");
+    _ = @import("input/input_test.zig");
+    _ = @import("physics/areas_test.zig");
+    _ = @import("physics/bodies_test.zig");
+    _ = @import("physics/character_test.zig");
+    _ = @import("physics/picking_test.zig");
+    _ = @import("platform/window_test.zig");
+    _ = @import("reflect/reflect_test.zig");
+    _ = @import("render/camera_test.zig");
+    _ = @import("render/particles_test.zig");
+    _ = @import("render/render_test.zig");
+    _ = @import("scene/hierarchy_test.zig");
+    _ = @import("scene/inherited_test.zig");
+    _ = @import("scene/instance_test.zig");
+    _ = @import("scene/names_test.zig");
+    _ = @import("scene/scene_test.zig");
+    _ = @import("script/script_test.zig");
+    _ = @import("tiles/tilemap_test.zig");
+    _ = @import("time/frame_time_test.zig");
+    _ = @import("time/timer_test.zig");
+    _ = @import("ui/ui_test.zig");
+
+    _ = @import("App.zig");
+    _ = @import("animation/animation.zig");
+    _ = @import("animation/sprite_frames.zig");
+    _ = @import("animation/tween.zig");
+    _ = @import("assets/asset_kind.zig");
+    _ = @import("assets/assets.zig");
+    _ = @import("assets/background_load.zig");
+    _ = @import("assets/data_files.zig");
+    _ = @import("assets/file_table.zig");
+    _ = @import("assets/images.zig");
+    _ = @import("assets/scene_table.zig");
+    _ = @import("audio/audio.zig");
+    _ = @import("core/commands.zig");
+    _ = @import("core/event_channels.zig");
+    _ = @import("core/schedule.zig");
+    _ = @import("core/signals.zig");
+    _ = @import("core/states.zig");
+    _ = @import("files/config_file.zig");
+    _ = @import("files/pack_locator.zig");
+    _ = @import("files/sealed.zig");
+    _ = @import("input/actions.zig");
+    _ = @import("input/input.zig");
+    _ = @import("input/input_event.zig");
+    _ = @import("math/color.zig");
+    _ = @import("math/geometry.zig");
+    _ = @import("physics/areas.zig");
+    _ = @import("physics/bodies.zig");
+    _ = @import("physics/character.zig");
+    _ = @import("physics/picking.zig");
+    _ = @import("platform/clipboard.zig");
+    _ = @import("platform/dialog.zig");
+    _ = @import("platform/window.zig");
+    _ = @import("project/Project.zig");
+    _ = @import("project/settings.zig");
+    _ = @import("project/settings_file.zig");
+    _ = @import("reflect/attr.zig");
+    _ = @import("reflect/property.zig");
+    _ = @import("render/GlyphAtlas.zig");
+    _ = @import("render/debug_views.zig");
+    _ = @import("render/drawing.zig");
+    _ = @import("render/lighting.zig");
+    _ = @import("render/lights.zig");
     _ = @import("render/material.zig");
+    _ = @import("render/particles.zig");
     _ = @import("render/screen.zig");
-    _ = render.lighting;
-    _ = particles;
-    _ = @import("particles_test.zig");
-    _ = lights;
-    _ = @import("render_test.zig");
-    _ = @import("stretch.zig");
-    _ = @import("character_test.zig");
-    _ = @import("ui_test.zig");
-    _ = @import("animation.zig");
-    _ = @import("sprite_frames.zig");
-    _ = @import("sprite_frames_test.zig");
-    _ = @import("animation_test.zig");
-    _ = @import("datetime.zig");
-    _ = @import("clocks.zig");
-    _ = @import("audio_test.zig");
-    _ = @import("background.zig");
-    _ = @import("scenes_test.zig");
-    _ = @import("script.zig");
-    _ = @import("script_test.zig");
-    _ = @import("pack_test.zig");
-    _ = shipped;
-    _ = Project;
-    _ = settings_file;
-    _ = @import("config.zig");
-    _ = dialog;
-    _ = attr;
-    _ = assets;
-    _ = components;
-    _ = color;
-    _ = schedule;
-    _ = hierarchy;
-    _ = scene;
-    _ = Bodies;
-    _ = render.sprite;
-    _ = render.view;
-    _ = text.Atlas;
+    _ = @import("render/shader_edit.zig");
+    _ = @import("render/shaders.zig");
+    _ = @import("render/sprite.zig");
+    _ = @import("render/stretch.zig");
+    _ = @import("render/view.zig");
+    _ = @import("render/view_textures.zig");
+    _ = @import("scene/component_texts.zig");
+    _ = @import("scene/components.zig");
+    _ = @import("scene/hierarchy.zig");
+    _ = @import("scene/inherited.zig");
+    _ = @import("scene/scene.zig");
+    _ = @import("script/script.zig");
+    _ = @import("script/script_exports.zig");
+    _ = @import("tiles/tilemap.zig");
+    _ = @import("tiles/tileset.zig");
+    _ = @import("time/datetime.zig");
+    _ = @import("time/frame_time.zig");
+    _ = @import("time/game_clocks.zig");
+    _ = @import("time/timer.zig");
+    _ = @import("ui/control.zig");
+    _ = @import("ui/interface.zig");
+    _ = @import("ui/theme.zig");
+    _ = @import("ui/tool_window.zig");
+    _ = @import("ui/touch_button.zig");
+    _ = @import("ui/world_ui.zig");
 }
 
 test "every name this file exports is one that exists" {

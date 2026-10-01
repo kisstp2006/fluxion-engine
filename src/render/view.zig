@@ -20,8 +20,8 @@ const testing = std.testing;
 const ecs = @import("fluxion_ecs");
 const math = @import("fluxion_math");
 
-const components = @import("../components.zig");
-const hierarchy = @import("../hierarchy.zig");
+const components = @import("../scene/components.zig");
+const hierarchy = @import("../scene/hierarchy.zig");
 
 const Transform2D = components.Transform2D;
 const Camera2D = components.Camera2D;

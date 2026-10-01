@@ -26,32 +26,32 @@ const rhi = @import("fluxion_rhi");
 const math = @import("fluxion_math");
 const typeface = @import("fluxion_font");
 
-const Assets = @import("../assets.zig");
-const components = @import("../components.zig");
-const hierarchy = @import("../hierarchy.zig");
-const inherited_mod = @import("../inherited.zig");
+const Assets = @import("../assets/assets.zig");
+const components = @import("../scene/components.zig");
+const hierarchy = @import("../scene/hierarchy.zig");
+const inherited_mod = @import("../scene/inherited.zig");
 const Inherited = inherited_mod.Inherited;
-const tilemap = @import("../tilemap.zig");
-const tileset = @import("../tileset.zig");
+const tilemap = @import("../tiles/tilemap.zig");
+const tileset = @import("../tiles/tileset.zig");
 const view_mod = @import("view.zig");
 
 const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
 const Color = components.Color;
 const Text2D = components.Text2D;
-const texts_mod = @import("../texts.zig");
+const texts_mod = @import("../scene/component_texts.zig");
 /// What a label says, among the app's texts.
 const text_key = texts_mod.keyFor(Text2D, "text");
 const View = view_mod.View;
 const Bounds = view_mod.Bounds;
 
-const shaders_mod = @import("../shaders.zig");
+const shaders_mod = @import("shaders.zig");
 const material = shaders_mod.material;
 const ShaderHandle = shaders_mod.ShaderHandle;
 const Screen = @import("screen.zig").Screen;
-const views_mod = @import("../views.zig");
-const drawing_mod = @import("../drawing.zig");
-const particles_mod = @import("../particles.zig");
+const views_mod = @import("view_textures.zig");
+const drawing_mod = @import("drawing.zig");
+const particles_mod = @import("particles.zig");
 const lighting_mod = @import("lighting.zig");
 
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
@@ -1386,7 +1386,7 @@ pub const Renderer = struct {
         renderer: *Renderer,
         gpa: Allocator,
         placed: Transform2D,
-        looks: @import("../inherited.zig").Resolved,
+        looks: @import("../scene/inherited.zig").Resolved,
         key: u64,
         order: f32,
         white: rhi.Texture,

@@ -20,7 +20,7 @@ const rhi = @import("fluxion_rhi");
 const shader = @import("fluxion_shader");
 
 const material = @import("material.zig");
-const Color = @import("../color.zig").Color;
+const Color = @import("../math/color.zig").Color;
 
 /// The quad over the whole of a target, and where in the picture each of its
 /// pixels is - counted as `SCREEN_UV` counts, so a copy is the right way up
