@@ -289,7 +289,7 @@ test "a scene comes back as it went, from JSON and from CBOR" {
         try testing.expectEqualStrings(expected, again);
 
         const leader = copy.find("hero").?;
-        const wander = copy.single(Wander).?;
+        const wander = copy.singleton(Wander).?;
         try testing.expect(wander.leader.eql(leader));
         try testing.expectEqual(@as(u64, std.math.maxInt(u64)), wander.seed);
         const sheet = copy.world.get(leader, Sprite).?.texture;
@@ -355,7 +355,7 @@ test "a project's file is written by its res:// path and its UUID, and found by 
     defer copy.destroy();
     const loaded = try copy.readScene("res://levels/meadow.json", .{});
     try testing.expectEqual(@as(usize, 1), loaded.moved);
-    const sheet = copy.single(Sprite).?.texture;
+    const sheet = copy.singleton(Sprite).?.texture;
     try testing.expectEqualStrings("res://art/people/ada.png", copy.assets.textureSource(sheet).?);
 }
 
@@ -509,7 +509,7 @@ test "a component nothing here knows is kept, a field or a member nothing knows 
     try testing.expectEqualStrings("{\"a\":[1,2]}", kept[0].value);
     try testing.expectEqual(@as(usize, 0), app.unknownComponentsOf(app.find("empty").?).len);
 
-    const place = app.single(Transform2D).?;
+    const place = app.singleton(Transform2D).?;
     try testing.expectEqual(@as(f32, 5), place.x);
     try testing.expectEqual(@as(f32, 1), place.scale_x);
     try testing.expect(app.parentOf(app.find("odd").?).isNone());

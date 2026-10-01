@@ -88,30 +88,30 @@ pub fn keyFor(comptime T: type, comptime property: []const u8) u64 {
 }
 
 pub const Texts = struct {
-    map: std.AutoHashMapUnmanaged(Key, []u8) = .empty,
+    by_key: std.AutoHashMapUnmanaged(Key, []u8) = .empty,
 
     pub fn deinit(self: *Texts, gpa: Allocator) void {
-        var it = self.map.valueIterator();
+        var it = self.by_key.valueIterator();
         while (it.next()) |text| gpa.free(text.*);
-        self.map.deinit(gpa);
+        self.by_key.deinit(gpa);
     }
 
     /// What it says: empty for nothing.
     pub fn get(self: *const Texts, entity: Entity, name: u64) []const u8 {
-        return self.map.get(.{ .entity = entity, .name = name }) orelse "";
+        return self.by_key.get(.{ .entity = entity, .name = name }) orelse "";
     }
 
     /// Say `text`, in memory of its own. Empty is nothing kept.
     pub fn set(self: *Texts, gpa: Allocator, entity: Entity, name: u64, text: []const u8) Allocator.Error!void {
         const key: Key = .{ .entity = entity, .name = name };
         if (text.len == 0) {
-            if (self.map.fetchRemove(key)) |gone| gpa.free(gone.value);
+            if (self.by_key.fetchRemove(key)) |gone| gpa.free(gone.value);
             return;
         }
-        if (self.map.getPtr(key)) |held| if (std.mem.eql(u8, held.*, text)) return;
+        if (self.by_key.getPtr(key)) |held| if (std.mem.eql(u8, held.*, text)) return;
         const copy = try gpa.dupe(u8, text);
         errdefer gpa.free(copy);
-        const slot = try self.map.getOrPut(gpa, key);
+        const slot = try self.by_key.getOrPut(gpa, key);
         if (slot.found_existing) gpa.free(slot.value_ptr.*);
         slot.value_ptr.* = copy;
     }
@@ -120,20 +120,20 @@ pub const Texts = struct {
     pub fn forgetDead(self: *Texts, app: *App) void {
         var dead: std.ArrayList(Key) = .empty;
         defer dead.deinit(app.gpa);
-        var it = self.map.keyIterator();
+        var it = self.by_key.keyIterator();
         while (it.next()) |key| {
             if (app.world.isAlive(key.entity)) continue;
             dead.append(app.gpa, key.*) catch break;
         }
         for (dead.items) |key| {
-            if (self.map.fetchRemove(key)) |gone| app.gpa.free(gone.value);
+            if (self.by_key.fetchRemove(key)) |gone| app.gpa.free(gone.value);
         }
     }
 
     pub fn clear(self: *Texts, app: *App) void {
-        var it = self.map.valueIterator();
+        var it = self.by_key.valueIterator();
         while (it.next()) |text| app.gpa.free(text.*);
-        self.map.clearRetainingCapacity();
+        self.by_key.clearRetainingCapacity();
     }
 };
 
@@ -150,5 +150,5 @@ test "a text is kept under its entity and name, in memory of its own, and nothin
     // The same slot, another life: nothing said.
     try testing.expectEqualStrings("", texts.get(.{ .index = 3, .generation = 2 }, name));
     try texts.set(testing.allocator, e, name, "");
-    try testing.expectEqual(@as(usize, 0), texts.map.count());
+    try testing.expectEqual(@as(usize, 0), texts.by_key.count());
 }

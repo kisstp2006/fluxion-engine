@@ -83,7 +83,7 @@ pub const MouseButtonEvent = struct {
     pressed: bool = false,
     /// The second press of a double click, by the system's own rule.
     double_click: bool = false,
-    /// Where the pointer is, in the frame's pixels, as `app.pointerOnScreen()`
+    /// Where the pointer is, in the game area's pixels, as `app.pointerOnScreen()`
     /// says; `app.screenToWorld` takes it into the world.
     position: Vec2 = .zero,
     /// What is held after it.
@@ -95,7 +95,7 @@ pub const MouseButtonEvent = struct {
 
 /// The pointer moved: one a frame, with the frame's moving added up.
 pub const MouseMotionEvent = struct {
-    /// In the frame's pixels.
+    /// In the game area's pixels.
     position: Vec2 = .zero,
     /// How far it moved to get there.
     relative: Vec2 = .zero,
@@ -109,7 +109,7 @@ pub const MouseMotionEvent = struct {
 pub const WheelEvent = struct {
     /// How many notches, up and right positive.
     delta: Vec2 = .zero,
-    /// Where the pointer is, in the frame's pixels.
+    /// Where the pointer is, in the game area's pixels.
     position: Vec2 = .zero,
     buttons: ButtonMask = .none,
     mods: platform.Mods = .{},
@@ -127,7 +127,7 @@ pub const TouchEvent = struct {
     /// Lifted by the system rather than the player - a gesture of its own,
     /// the app sent away: whatever the finger was doing should not happen.
     canceled: bool = false,
-    /// In the frame's pixels, as a mouse button's.
+    /// In the game area's pixels, as a mouse button's.
     position: Vec2 = .zero,
     /// How hard it presses, from nought to one.
     pressure: f32 = 1,
@@ -139,7 +139,7 @@ pub const TouchEvent = struct {
 /// moving added up.
 pub const TouchMotionEvent = struct {
     finger: u32 = 0,
-    /// In the frame's pixels.
+    /// In the game area's pixels.
     position: Vec2 = .zero,
     /// How far it moved to get there.
     relative: Vec2 = .zero,
@@ -152,7 +152,7 @@ pub const TouchMotionEvent = struct {
 /// again soon after, near the last: `count` says how many in a row.
 pub const TapEvent = struct {
     finger: u32 = 0,
-    /// Where it was lifted, in the frame's pixels.
+    /// Where it was lifted, in the game area's pixels.
     position: Vec2 = .zero,
     /// 1 for a tap, 2 for a double tap, and on.
     count: u32 = 1,
@@ -176,7 +176,7 @@ pub const SwipeEvent = struct {
     start: Vec2 = .zero,
     /// Where it was lifted.
     position: Vec2 = .zero,
-    /// How fast it was going, in the frame's pixels a second.
+    /// How fast it was going, in the game area's pixels a second.
     velocity: Vec2 = .zero,
     /// Which way: the larger part of `velocity`.
     direction: Direction = .right,
@@ -188,7 +188,7 @@ pub const SwipeEvent = struct {
 
 /// Two fingers spread apart or drew together.
 pub const PinchEvent = struct {
-    /// Halfway between them, in the frame's pixels.
+    /// Halfway between them, in the game area's pixels.
     center: Vec2 = .zero,
     /// How much farther apart they are than at the last one: what a zoom
     /// is multiplied by.

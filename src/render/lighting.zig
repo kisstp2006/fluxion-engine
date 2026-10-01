@@ -37,20 +37,19 @@ const Assets = @import("../assets/assets.zig");
 const Color = @import("../math/color.zig").Color;
 const components = @import("../scene/components.zig");
 const hierarchy = @import("../scene/hierarchy.zig");
-const inherited_mod = @import("../scene/inherited.zig");
+const Inherited = @import("../scene/inherited.zig").Inherited;
+const Resolved = @import("../scene/inherited.zig").Resolved;
 const lights = @import("lights.zig");
 const tilemap = @import("../tiles/tilemap.zig");
 const tileset = @import("../tiles/tileset.zig");
 const material = @import("material.zig");
 const sprite = @import("sprite.zig");
-const view_mod = @import("view.zig");
+const Bounds = @import("view.zig").Bounds;
+const View = @import("view.zig").View;
 
 const Vec2 = math.Vec2;
 const Transform2D = components.Transform2D;
-const Inherited = inherited_mod.Inherited;
 const Instance = sprite.Instance;
-const View = view_mod.View;
-const Bounds = view_mod.Bounds;
 
 /// What a light is drawn through: its picture as light - its colour times
 /// its alpha, times the light's - with the alpha the draw is given, which is
@@ -564,7 +563,7 @@ pub fn overView(view: View, tint: [4]f32, uv: [4]f32) Instance {
 }
 
 /// Whether what `looks` resolved to is shown in `view`.
-fn shows(looks: inherited_mod.Resolved, view: View) bool {
+fn shows(looks: Resolved, view: View) bool {
     return looks.visible and looks.render_layers & view.cull_mask != 0;
 }
 

@@ -147,13 +147,13 @@ test "a shortcut nobody asked for is not one" {
 test "a stretch, the physics' steps and the game's version change as a game says, and a close is asked of it" {
     const app = try App.create(testing.allocator, .{ .headless = true, .width = 1280, .height = 720, .stretch = .{ .mode = .canvas, .width = 640, .height = 360 } });
     defer app.destroy();
-    try testing.expectEqual(@as(u32, 1280), app.frame.width);
+    try testing.expectEqual(@as(u32, 1280), app.game_area.width);
 
     // Twice as big: half the game shows.
     app.setStretchScale(2);
     try testing.expectEqual(@as(f32, 2), app.stretchScale());
     app.setStretchMode(.picture);
-    try testing.expectEqual(@as(u32, 320), app.frame.width);
+    try testing.expectEqual(@as(u32, 320), app.game_area.width);
     app.setStretchScaleMode(.integer);
     app.setStretchAspect(.keep_width);
     try testing.expect(app.stretchMode() == .picture and app.stretchAspect() == .keep_width and app.stretchScaleMode() == .integer);
@@ -502,7 +502,7 @@ test "the window, the frame and the clock are the game's, then the project's, th
     try testing.expectEqual(stretching.ScaleMode.integer, project.stretch.scale_mode);
     try testing.expectEqual(@as(u32, 3), project.max_fixed_steps);
     try testing.expectEqual(@as(f32, 1.5), project.interface_zoom);
-    try testing.expectEqual(Color.hex(0x102030), project.background);
+    try testing.expectEqual(Color.hex(0x102030), project.clear_color);
     try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), project.fixed_delta, 1e-6);
     try testing.expectEqual(@as(?f32, 30), project.max_fps);
 
@@ -533,6 +533,6 @@ test "the window, the frame and the clock are the game's, then the project's, th
     const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
     defer app.destroy();
     try testing.expectEqual(@as(u32, 1600), app.width);
-    try testing.expectEqual(Color.hex(0x102030), app.background);
+    try testing.expectEqual(Color.hex(0x102030), app.clear_color);
     try testing.expectApproxEqAbs(@as(f32, 1.0 / 120.0), app.time.fixed_delta, 1e-6);
 }

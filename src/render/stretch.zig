@@ -6,14 +6,14 @@
 //!
 //! | Mode | What it does |
 //! | --- | --- |
-//! | `disabled` | The frame is the window: a bigger window shows more. |
+//! | `disabled` | The game area is the window: a bigger window shows more. |
 //! | `canvas` | The world and the interface are laid out at the project's size and drawn at the window's, scaled: sharp text at any size. |
 //! | `picture` | Everything is drawn at the project's size, into a picture of its own, and the picture is scaled to the window: pixel art stays pixels. |
 //!
 //! | Aspect | What it does |
 //! | --- | --- |
 //! | `keep` | Always the project's shape: bars fill what the window has to spare. |
-//! | `expand` | The spare room shows more: the frame grows the long way, and the project's size is the least of it. |
+//! | `expand` | The spare room shows more: the area grows the long way, and the project's size is the least of it. |
 //! | `keep_width` | As wide as the project: a taller window shows more below, a wider one has bars. |
 //! | `keep_height` | As tall as the project: a wider window shows more at the sides, a taller one has bars. |
 //!
@@ -21,10 +21,10 @@
 //! the size - and an `integer` scale mode takes only whole scales, so every
 //! pixel of pixel art comes out the same size, with bars round what is left.
 //!
-//! What the game sees is the frame: what the interface is laid out in, what
+//! What the game sees is its area: what the interface is laid out in, what
 //! the camera's view is sized by, and where the pointer is - the window's
-//! pixels, turned into the frame's by `Input` as they come. The window's size
-//! is `App.width` and `App.height` still; the frame's is `App.frame`.
+//! pixels, turned into the area's by `Input` as they come. The window's size
+//! is `App.width` and `App.height` still; the area's is `App.game_area`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -66,8 +66,8 @@ pub const Stretch = struct {
     scale: f32 = 1,
     scale_mode: ScaleMode = .fractional,
 
-    /// The frame for a window `width` by `height` pixels.
-    pub fn frameOf(self: Stretch, width: u32, height: u32) Frame {
+    /// The game area for a window `width` by `height` pixels.
+    pub fn areaOf(self: Stretch, width: u32, height: u32) GameArea {
         if (self.mode == .disabled or self.width == 0 or self.height == 0 or width == 0 or height == 0) return .window(width, height);
         const window_width: f32 = @floatFromInt(width);
         const window_height: f32 = @floatFromInt(height);
@@ -94,7 +94,7 @@ pub const Stretch = struct {
             .width = shown_width,
             .height = shown_height,
         };
-        var out: Frame = switch (self.mode) {
+        var out: GameArea = switch (self.mode) {
             .disabled => unreachable,
             .canvas => .{ .width = whole(shown_width), .height = whole(shown_height), .scale = scale, .shown = shown },
             .picture => .{ .width = whole(room_width), .height = whole(room_height), .shown = shown },
@@ -116,8 +116,8 @@ pub const Rect = struct {
     height: f32,
 };
 
-/// What a frame is laid out and drawn at, and where on the window it goes.
-pub const Frame = struct {
+/// What the game is laid out and drawn at, and where on the window it goes.
+pub const GameArea = struct {
     /// Its pixels: what the interface is laid out in and the camera's view
     /// is sized by.
     width: u32,
@@ -134,7 +134,7 @@ pub const Frame = struct {
     apart: bool = false,
 
     /// The window itself.
-    pub fn window(width: u32, height: u32) Frame {
+    pub fn window(width: u32, height: u32) GameArea {
         return .{
             .width = @max(width, 1),
             .height = @max(height, 1),
@@ -143,68 +143,68 @@ pub const Frame = struct {
     }
 
     /// How many of its pixels one of the window's is.
-    pub fn ratio(self: Frame) f32 {
+    pub fn ratio(self: GameArea) f32 {
         return @as(f32, @floatFromInt(self.width)) / self.shown.width;
     }
 
-    /// A point on the window, in the frame's pixels.
-    pub fn toFrame(self: Frame, point: math.Vec2) math.Vec2 {
+    /// A point on the window, in the area's pixels.
+    pub fn toArea(self: GameArea, point: math.Vec2) math.Vec2 {
         const r = self.ratio();
         return .init((point.x - self.shown.x) * r, (point.y - self.shown.y) * r);
     }
 };
 
 test "keeping the width, a taller window shows more below and a wider one has bars" {
-    const tall = (Stretch{ .mode = .canvas, .aspect = .keep_width, .width = 640, .height = 360 }).frameOf(1280, 1000);
+    const tall = (Stretch{ .mode = .canvas, .aspect = .keep_width, .width = 640, .height = 360 }).areaOf(1280, 1000);
     try testing.expectEqual(@as(f32, 2), tall.scale);
     try testing.expectEqual(@as(u32, 1280), tall.width);
     try testing.expectEqual(@as(u32, 1000), tall.height);
-    const wide = (Stretch{ .mode = .canvas, .aspect = .keep_width, .width = 640, .height = 360 }).frameOf(1600, 720);
+    const wide = (Stretch{ .mode = .canvas, .aspect = .keep_width, .width = 640, .height = 360 }).areaOf(1600, 720);
     try testing.expectEqual(@as(u32, 1280), wide.width);
     try testing.expectEqual(@as(f32, 160), wide.shown.x);
 }
 
 test "keeping the height, a wider window shows more at the sides and a taller one has bars" {
-    const wide = (Stretch{ .mode = .canvas, .aspect = .keep_height, .width = 640, .height = 360 }).frameOf(1600, 720);
+    const wide = (Stretch{ .mode = .canvas, .aspect = .keep_height, .width = 640, .height = 360 }).areaOf(1600, 720);
     try testing.expectEqual(@as(u32, 1600), wide.width);
     try testing.expectEqual(@as(u32, 720), wide.height);
-    const tall = (Stretch{ .mode = .canvas, .aspect = .keep_height, .width = 640, .height = 360 }).frameOf(1280, 1000);
+    const tall = (Stretch{ .mode = .canvas, .aspect = .keep_height, .width = 640, .height = 360 }).areaOf(1280, 1000);
     try testing.expectEqual(@as(u32, 720), tall.height);
     try testing.expect(tall.shown.y > 0);
 }
 
 test "an integer scale is whole, with bars round what is left; a scale draws bigger" {
     // Two and a half times would fit; twice does.
-    const whole_scale = (Stretch{ .mode = .picture, .width = 320, .height = 180, .scale_mode = .integer }).frameOf(800, 450);
+    const whole_scale = (Stretch{ .mode = .picture, .width = 320, .height = 180, .scale_mode = .integer }).areaOf(800, 450);
     try testing.expectEqual(@as(f32, 640), whole_scale.shown.width);
     try testing.expectEqual(@as(f32, 80), whole_scale.shown.x);
     // Twice as big: half as much of the game shows, at the same place.
-    const bigger = (Stretch{ .mode = .picture, .width = 640, .height = 360, .scale = 2 }).frameOf(1280, 720);
+    const bigger = (Stretch{ .mode = .picture, .width = 640, .height = 360, .scale = 2 }).areaOf(1280, 720);
     try testing.expectEqual(@as(u32, 320), bigger.width);
     try testing.expectEqual(@as(f32, 1280), bigger.shown.width);
 }
 
-test "disabled, the frame is the window" {
-    const frame = (Stretch{ .width = 640, .height = 360 }).frameOf(1280, 800);
+test "disabled, the game area is the window" {
+    const frame = (Stretch{ .width = 640, .height = 360 }).areaOf(1280, 800);
     try testing.expectEqual(@as(u32, 1280), frame.width);
     try testing.expect(!frame.apart);
     try testing.expectEqual(@as(f32, 1), frame.scale);
 }
 
 test "a canvas keeping its shape is scaled into the window with bars at the sides" {
-    const frame = (Stretch{ .mode = .canvas, .width = 640, .height = 360 }).frameOf(1600, 720);
+    const frame = (Stretch{ .mode = .canvas, .width = 640, .height = 360 }).areaOf(1600, 720);
     // Twice as tall: twice the size, and the spare width in two bars.
     try testing.expectEqual(@as(f32, 2), frame.scale);
     try testing.expectEqual(@as(u32, 1280), frame.width);
     try testing.expectEqual(@as(u32, 720), frame.height);
     try testing.expectEqual(@as(f32, 160), frame.shown.x);
     try testing.expect(frame.apart);
-    // The pointer at the bar's edge is at the frame's.
-    try testing.expectEqual(@as(f32, 0), frame.toFrame(.init(160, 0)).x);
+    // The pointer at the bar's edge is at the area's.
+    try testing.expectEqual(@as(f32, 0), frame.toArea(.init(160, 0)).x);
 }
 
 test "an expanded canvas fills the window and shows more the long way" {
-    const frame = (Stretch{ .mode = .canvas, .aspect = .expand, .width = 640, .height = 360 }).frameOf(1600, 720);
+    const frame = (Stretch{ .mode = .canvas, .aspect = .expand, .width = 640, .height = 360 }).areaOf(1600, 720);
     try testing.expectEqual(@as(u32, 1600), frame.width);
     try testing.expectEqual(@as(f32, 2), frame.scale);
     // One pixel to one, all of the window: drawn straight on it.
@@ -212,7 +212,7 @@ test "an expanded canvas fills the window and shows more the long way" {
 }
 
 test "a picture is drawn at the project's size and scaled whole" {
-    const frame = (Stretch{ .mode = .picture, .width = 320, .height = 180 }).frameOf(1280, 800);
+    const frame = (Stretch{ .mode = .picture, .width = 320, .height = 180 }).areaOf(1280, 800);
     try testing.expectEqual(@as(u32, 320), frame.width);
     try testing.expectEqual(@as(u32, 180), frame.height);
     try testing.expectEqual(@as(f32, 1), frame.scale);
@@ -221,11 +221,11 @@ test "a picture is drawn at the project's size and scaled whole" {
     try testing.expectEqual(@as(f32, 40), frame.shown.y);
     // Four of the window's pixels are one of the picture's.
     try testing.expectEqual(@as(f32, 0.25), frame.ratio());
-    const point = frame.toFrame(.init(640, 400));
+    const point = frame.toArea(.init(640, 400));
     try testing.expectEqual(@as(f32, 160), point.x);
     try testing.expectEqual(@as(f32, 90), point.y);
 
-    const wide = (Stretch{ .mode = .picture, .aspect = .expand, .width = 320, .height = 180 }).frameOf(1280, 800);
+    const wide = (Stretch{ .mode = .picture, .aspect = .expand, .width = 320, .height = 180 }).areaOf(1280, 800);
     try testing.expectEqual(@as(u32, 320), wide.width);
     try testing.expectEqual(@as(u32, 200), wide.height);
 }

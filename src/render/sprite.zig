@@ -29,36 +29,49 @@ const typeface = @import("fluxion_font");
 const Assets = @import("../assets/assets.zig");
 const components = @import("../scene/components.zig");
 const hierarchy = @import("../scene/hierarchy.zig");
-const inherited_mod = @import("../scene/inherited.zig");
-const Inherited = inherited_mod.Inherited;
+const Appearance = @import("../scene/inherited.zig").Appearance;
+const Inherited = @import("../scene/inherited.zig").Inherited;
+const Processing = @import("../scene/inherited.zig").Processing;
+const Resolved = @import("../scene/inherited.zig").Resolved;
 const tilemap = @import("../tiles/tilemap.zig");
 const tileset = @import("../tiles/tileset.zig");
-const view_mod = @import("view.zig");
+const Bounds = @import("view.zig").Bounds;
+const View = @import("view.zig").View;
 
 const Transform2D = components.Transform2D;
 const Sprite = components.Sprite;
 const Color = components.Color;
 const Text2D = components.Text2D;
-const texts_mod = @import("../scene/component_texts.zig");
+const Texts = @import("../scene/component_texts.zig").Texts;
+const keyFor = @import("../scene/component_texts.zig").keyFor;
 /// What a label says, among the app's texts.
-const text_key = texts_mod.keyFor(Text2D, "text");
-const View = view_mod.View;
-const Bounds = view_mod.Bounds;
+const text_key = keyFor(Text2D, "text");
 
-const shaders_mod = @import("shaders.zig");
-const material = shaders_mod.material;
-const ShaderHandle = shaders_mod.ShaderHandle;
+const Material = @import("shaders.zig").Material;
+const Params = @import("shaders.zig").Params;
+const ShaderHandle = @import("shaders.zig").ShaderHandle;
+const Shaders = @import("shaders.zig").Shaders;
+const material = @import("shaders.zig").material;
+const pack = @import("shaders.zig").pack;
 const Screen = @import("screen.zig").Screen;
-const views_mod = @import("view_textures.zig");
-const drawing_mod = @import("drawing.zig");
-const particles_mod = @import("particles.zig");
-const lighting_mod = @import("lighting.zig");
+const Views = @import("view_textures.zig").Views;
+const Drawing2D = @import("drawing.zig").Drawing2D;
+const Drawings = @import("drawing.zig").Drawings;
+const Picture = @import("drawing.zig").Picture;
+const Shape = @import("drawing.zig").Shape;
+const segmentsOf = @import("drawing.zig").segmentsOf;
+const Particle = @import("particles.zig").Particle;
+const Particles = @import("particles.zig").Particles;
+const Particles2D = @import("particles.zig").Particles2D;
+const dot_size = @import("particles.zig").dot_size;
+const Lighting = @import("lighting.zig").Lighting;
+const overView = @import("lighting.zig").overView;
 
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
 const Labels = ecs.Query(.{ Transform2D, Text2D });
 const TileChunks = ecs.Query(.{tilemap.TileChunk});
-const Drawings2D = ecs.Query(.{drawing_mod.Drawing2D});
-const Emitters = ecs.Query(.{particles_mod.Particles2D});
+const Drawings2D = ecs.Query(.{Drawing2D});
+const Emitters = ecs.Query(.{Particles2D});
 
 pub const Error = rhi.Error || Allocator.Error || error{ShaderFailed};
 
@@ -240,8 +253,8 @@ const Has = struct {
     fn of(chunk: anytype) Has {
         return .{
             .parents = chunk.optional(components.Parent),
-            .own_looks = chunk.optional(inherited_mod.Appearance) != null or chunk.optional(inherited_mod.Processing) != null,
-            .material = chunk.optional(shaders_mod.Material) != null,
+            .own_looks = chunk.optional(Appearance) != null or chunk.optional(Processing) != null,
+            .material = chunk.optional(Material) != null,
             .view_texture = chunk.optional(components.ViewTexture) != null,
         };
     }
@@ -253,7 +266,7 @@ const Has = struct {
 
     /// What it is under everything above it: the defaults for a root with
     /// nothing of its own.
-    fn looks(self: Has, gpa: Allocator, world: *ecs.World, inherited: *Inherited, entity: ecs.Entity, row: usize) inherited_mod.Resolved {
+    fn looks(self: Has, gpa: Allocator, world: *ecs.World, inherited: *Inherited, entity: ecs.Entity, row: usize) Resolved {
         if (!self.own_looks and self.parentOf(row).isNone()) return .{};
         return inherited.of(gpa, world, entity);
     }
@@ -284,22 +297,22 @@ const ParamBuffer = struct {
 pub const Renderer = struct {
     device: *rhi.Device,
     /// What each `Text2D` says: the app's. Nothing is drawn of one without.
-    texts: ?*const texts_mod.Texts = null,
+    texts: ?*const Texts = null,
     /// The shaders a `Material` names, and the numbers each gives. Without
     /// them every sprite is a plain picture.
-    shaders: ?*const shaders_mod.Shaders = null,
-    params: ?*const shaders_mod.Params = null,
+    shaders: ?*const Shaders = null,
+    params: ?*const Params = null,
     /// Where what is drawn so far is copied for a shader that reads it. With
     /// none, such a shader reads a white picture.
     screen: ?*Screen = null,
     /// Seconds, as `TIME`.
     time: f32 = 0,
     /// The picture each `RenderView` draws, for what a `ViewTexture` shows.
-    views: ?*const views_mod.Views = null,
+    views: ?*const Views = null,
     /// What each `Drawing2D` has drawn. Nothing of one is drawn without.
-    drawings: ?*const drawing_mod.Drawings = null,
+    drawings: ?*const Drawings = null,
     /// Each emitter's particles. None are drawn without.
-    particles: ?*const particles_mod.Particles = null,
+    particles: ?*const Particles = null,
     /// The font whose atlas the last label found full.
     full: ?*Assets.Font = null,
     /// The fonts whose atlases this frame's words emptied: one that fills
@@ -325,7 +338,7 @@ pub const Renderer = struct {
     plain: material.Compiled,
     /// The same, for one that multiplies what is under it.
     multiplied: material.Compiled,
-    lighting: lighting_mod.Lighting,
+    lighting: Lighting,
 
     quad: rhi.Buffer,
     instances: rhi.Buffer,
@@ -381,7 +394,7 @@ pub const Renderer = struct {
             return err;
         };
         errdefer multiplied.deinit(device);
-        var lighting: lighting_mod.Lighting = try .init(gpa, device);
+        var lighting: Lighting = try .init(gpa, device);
         errdefer lighting.deinit(gpa);
 
         const initial_capacity = 256;
@@ -500,7 +513,7 @@ pub const Renderer = struct {
             // The buffer is drawn upside down where the device counts rows
             // from the bottom, as a render view's picture is.
             const uv: [4]f32 = if (self.device.caps().features.render_target_origin_bottom_left) .{ 0, 1, 1, 0 } else .{ 0, 0, 1, 1 };
-            if (lit) self.staging.appendAssumeCapacity(lighting_mod.overView(view, @splat(1), uv));
+            if (lit) self.staging.appendAssumeCapacity(overView(view, @splat(1), uv));
             try self.device.updateBuffer(self.instances, 0, std.mem.sliceAsBytes(self.staging.items));
         }
 
@@ -622,7 +635,7 @@ pub const Renderer = struct {
         const start: u32 = @intCast(self.param_bytes.items.len);
         try self.param_bytes.resize(gpa, start + block.size);
         const bytes = self.param_bytes.items[start..];
-        shaders_mod.pack(block, given, bytes);
+        pack(block, given, bytes);
         const hash = std.hash.Wyhash.hash(block.size, bytes);
         const found = try self.param_found.getOrPut(gpa, hash);
         if (found.found_existing) {
@@ -869,7 +882,7 @@ pub const Renderer = struct {
         const bounds = view.bounds();
         var it = try Emitters.over(world);
         while (it.next()) |chunk| {
-            for (chunk.slice(particles_mod.Particles2D), chunk.entities) |*settings, entity| {
+            for (chunk.slice(Particles2D), chunk.entities) |*settings, entity| {
                 const emitter = table.get(entity) orelse continue;
                 const looks = inherited.of(gpa, world, entity);
                 if (!looks.visible or looks.modulate.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
@@ -885,7 +898,7 @@ pub const Renderer = struct {
                 const across: u32 = @max(settings.frames_across, 1);
                 const down: u32 = @max(settings.frames_down, 1);
                 const size: [2]f32 = if (own.eql(assets.glow))
-                    .{ particles_mod.dot_size, particles_mod.dot_size }
+                    .{ dot_size, dot_size }
                 else
                     .{ @as(f32, @floatFromInt(picture.width)) / @as(f32, @floatFromInt(across)), @as(f32, @floatFromInt(picture.height)) / @as(f32, @floatFromInt(down)) };
                 const drawn_with = try self.materialOf(gpa, world, entity);
@@ -897,7 +910,7 @@ pub const Renderer = struct {
                     if (particle.alive) try self.ranks.append(gpa, @intCast(index));
                 }
                 const Age = struct {
-                    particles: []const particles_mod.Particle,
+                    particles: []const Particle,
                     newest_first: bool,
 
                     fn before(by: @This(), a: u32, b: u32) bool {
@@ -1032,7 +1045,7 @@ pub const Renderer = struct {
     /// The shader an entity's `Material` names - when it compiled - and the
     /// set of numbers it gives it; none for a plain picture.
     fn materialOf(self: *Renderer, gpa: Allocator, world: *ecs.World, entity: ecs.Entity) !DrawnWith {
-        const held = world.get(entity, shaders_mod.Material) orelse return .{};
+        const held = world.get(entity, Material) orelse return .{};
         const table = self.shaders orelse return .{};
         const compiled = table.compiledOf(held.shader) orelse return .{};
         return .{ .shader = held.shader, .params = try self.paramSetOf(gpa, compiled, entity) };
@@ -1092,7 +1105,7 @@ pub const Renderer = struct {
 
                     // A map with no tile set draws white squares its tint
                     // colours: a level blocked out before its art exists.
-                    const picture: tileset.Picture = if (set) |held|
+                    const picture: tileset.TilePicture = if (set) |held|
                         held.pictureOf(assets, cell)
                     else
                         .{ .texture = assets.white, .region = .full };
@@ -1337,7 +1350,7 @@ pub const Renderer = struct {
         const white = assets.get(assets.white) orelse return;
         var it = try Drawings2D.over(world);
         while (it.next()) |chunk| {
-            for (chunk.slice(drawing_mod.Drawing2D), chunk.entities) |held, entity| {
+            for (chunk.slice(Drawing2D), chunk.entities) |held, entity| {
                 if (!held.visible) continue;
                 const picture = table.get(entity) orelse continue;
                 if (picture.isEmpty()) continue;
@@ -1445,7 +1458,7 @@ pub const Renderer = struct {
         /// Points round a circle of the entity's space, in the world.
         fn round(self: *Pen, center: math.Vec2, radius: f32, start: f32, turn: f32, out: []math.Vec2) []math.Vec2 {
             const scale = (@abs(self.placed.scale_x) + @abs(self.placed.scale_y)) / 2;
-            const pieces = @min(drawing_mod.segmentsOf(radius * scale, turn), @as(u32, @intCast(out.len - 1)));
+            const pieces = @min(segmentsOf(radius * scale, turn), @as(u32, @intCast(out.len - 1)));
             for (0..pieces + 1) |i| {
                 const angle = start + turn * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(pieces));
                 out[i] = self.at(center.add(math.Vec2.init(@cos(angle), @sin(angle)).scale(radius)));
@@ -1453,7 +1466,7 @@ pub const Renderer = struct {
             return out[0 .. pieces + 1];
         }
 
-        fn draw(self: *Pen, assets: *Assets, picture: *const drawing_mod.Picture, shape: drawing_mod.Shape, bounds: Bounds) !void {
+        fn draw(self: *Pen, assets: *Assets, picture: *const Picture, shape: Shape, bounds: Bounds) !void {
             switch (shape) {
                 .line => |held| try self.line(self.at(held.from), self.at(held.to), self.widthOf(held.width), self.colorOf(held.color)),
                 .rect => |held| {

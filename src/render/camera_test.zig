@@ -50,7 +50,7 @@ test "the pointer is found in the world through the camera" {
     try testing.expectApproxEqAbs(@as(f32, 0), again.y, 0.001);
 }
 
-test "the pointer's place on the screen is measured against the screen's size, the frame's" {
+test "the pointer's place on the screen is measured against the screen's size, the game area's" {
     const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240 });
     defer app.destroy();
     _ = try app.step();

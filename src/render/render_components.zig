@@ -375,6 +375,6 @@ test "a label's words are the app's, as long as they are, and gone with it" {
 
     app.world.despawn(label);
     _ = try app.step();
-    try testing.expectEqual(@as(usize, 0), app.texts.map.count());
+    try testing.expectEqual(@as(usize, 0), app.texts.by_key.count());
     try testing.expectError(error.NoSuchEntity, app.setText(label, Text2D, "text", "late"));
 }

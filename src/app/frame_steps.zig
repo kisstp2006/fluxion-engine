@@ -54,7 +54,7 @@ pub const Step = union(enum) {
 pub const news = [_]Step{
     .{ .pass = touch_button.update },
     .{ .pass = actions },
-    .{ .pass = fitFrame },
+    .{ .pass = fitGameArea },
 };
 
 /// The rest of a frame, unless the program is in the background.
@@ -173,10 +173,10 @@ fn actions(app: *App) anyerror!void {
     for (app.tool_windows.items) |tool| tool.input.updateActions();
 }
 
-/// The frame the game is drawn in, and the interface's scale, fitted to the
+/// The area the game is drawn in, and the interface's scale, fitted to the
 /// window as it is now.
-fn fitFrame(app: *App) anyerror!void {
-    display.fitFrame(app);
+fn fitGameArea(app: *App) anyerror!void {
+    display.fitGameArea(app);
     display.fitInterface(app);
 }
 
@@ -363,7 +363,7 @@ fn debugViews(app: *App) anyerror!void {
 fn layOut(app: *App) anyerror!void {
     if (app.hasInterface()) {
         app.interface.commands = &.{};
-        app.ui.begin(app.interface.surface(@floatFromInt(app.frame.width), @floatFromInt(app.frame.height)));
+        app.ui.begin(app.interface.surface(@floatFromInt(app.game_area.width), @floatFromInt(app.game_area.height)));
         {
             // One root for every `.ui` system: fluxion-ui makes the first
             // element the root, so a second system's would land beside it.

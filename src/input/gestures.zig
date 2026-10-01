@@ -29,7 +29,7 @@ const velocity_window = Input.velocity_window;
 pub const TwoFingers = struct {
     /// Whether two fingers are down.
     active: bool = false,
-    /// Halfway between them, in the frame's pixels.
+    /// Halfway between them, in the game area's pixels.
     center: Vec2 = .zero,
     /// How much farther apart they are than last frame.
     factor: f32 = 1,
@@ -95,7 +95,7 @@ const Track = struct {
     }
 
     /// How fast it went over at least the last tenth of a second it has,
-    /// in the frame's pixels a second.
+    /// in the game area's pixels a second.
     fn velocity(self: *const Track) Vec2 {
         if (self.sample_count < 2) return .zero;
         const newest = self.samples[(self.next + self.samples.len - 1) % self.samples.len];

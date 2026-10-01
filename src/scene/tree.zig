@@ -248,7 +248,7 @@ pub fn setParent(app: *App, entity: Entity, parent: Entity, keep_global: bool) P
     if (!world.isAlive(entity)) return error.NoSuchEntity;
     if (!parent.isNone()) {
         if (!world.isAlive(parent)) return error.NoSuchEntity;
-        if (parent.eql(entity) or hierarchy.hangsFrom(world, parent, entity)) return error.Loop;
+        if (parent.eql(entity) or hierarchy.isDescendantOf(world, parent, entity)) return error.Loop;
     }
     if (hierarchy.parentOf(world, entity).eql(parent)) return;
     const was = if (keep_global and world.has(entity, components.Transform2D))

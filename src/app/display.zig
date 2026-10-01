@@ -104,7 +104,7 @@ pub fn open(app: *App, gpa: Allocator, options: Options, resolved: Resolved, bac
             .width = width,
             .height = height,
             .usage = .{ .sampled = true, .render_target = true },
-            .clear_color = resolved.background.array(),
+            .clear_color = resolved.clear_color.array(),
             .label = "headless target",
         });
     }
@@ -149,16 +149,16 @@ pub fn titleOf(options: Options, settings: ?Project.Settings) []const u8 {
     return "fluxion";
 }
 
-/// This frame's size and place on the window, as the stretch says, and the
+/// The game area's size and place on the window, as the stretch says, and the
 /// pointer's pixels turned into its. See `stretch.zig`.
-pub fn fitFrame(app: *App) void {
-    app.frame = app.stretch.frameOf(app.width, app.height);
-    app.input.frame_origin = .init(app.frame.shown.x, app.frame.shown.y);
-    app.input.frame_ratio = app.frame.ratio();
-    // A density-independent pixel, in the frame's: the window's pixels in
-    // one, and the frame's in each of those.
+pub fn fitGameArea(app: *App) void {
+    app.game_area = app.stretch.areaOf(app.width, app.height);
+    app.input.area_origin = .init(app.game_area.shown.x, app.game_area.shown.y);
+    app.input.area_ratio = app.game_area.ratio();
+    // A density-independent pixel, in the game area's: the window's pixels
+    // in one, and the area's in each of those.
     const display_scale: f32 = if (app.window) |*window| window.content_scale else 1;
-    app.input.dp = display_scale * app.input.frame_ratio;
+    app.input.dp = display_scale * app.input.area_ratio;
 }
 
 /// The interface's scale for this frame: the game's `zoom` times the
@@ -171,7 +171,7 @@ pub fn fitInterface(app: *App) void {
     else
         1;
     app.interface.display_scale = display_scale;
-    const outer: f32 = if (app.stretch.mode == .disabled) display_scale else app.frame.scale;
+    const outer: f32 = if (app.stretch.mode == .disabled) display_scale else app.game_area.scale;
     app.interface.scale = app.interface.zoom * outer;
     if (app.interface.follow_safe_area) {
         const edges = app.safeArea();
@@ -194,7 +194,7 @@ fn cut(edge: u32) u16 {
 pub fn adoptSize(app: *App, width: u32, height: u32) !void {
     app.width = width;
     app.height = height;
-    fitFrame(app);
+    fitGameArea(app);
     app.resized = true;
     if (app.surface) |surface| try app.device.resizeSurface(surface, width, height);
 }

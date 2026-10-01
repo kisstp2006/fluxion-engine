@@ -40,12 +40,11 @@ const math = @import("fluxion_math");
 
 const App = @import("../App.zig");
 const attr = @import("../reflect/attr.zig");
-const property_mod = @import("../reflect/property.zig");
+const Property = @import("../reflect/property.zig").Property;
+const Value = @import("../reflect/property.zig").Value;
 const flux = @import("../script/script.zig").flux;
 
 const Entity = ecs.Entity;
-const Property = property_mod.Property;
-const Value = property_mod.Value;
 
 pub const Tween = extern struct {
     /// Faster above 1, slower below.
@@ -117,37 +116,37 @@ pub const Plan = struct {
 
 /// Every tween's plan: `app.tweens`.
 pub const Tweens = struct {
-    by: std.AutoArrayHashMapUnmanaged(Entity, Plan) = .empty,
+    of_entity: std.AutoArrayHashMapUnmanaged(Entity, Plan) = .empty,
     /// The tweens done this pass, to say so after it.
     ended: std.ArrayList(Entity) = .empty,
 
     pub fn deinit(self: *Tweens, gpa: Allocator) void {
-        for (self.by.values()) |*plan| plan.steps.deinit(gpa);
-        self.by.deinit(gpa);
+        for (self.of_entity.values()) |*plan| plan.steps.deinit(gpa);
+        self.of_entity.deinit(gpa);
         self.ended.deinit(gpa);
     }
 
     /// Every tween is gone: the world was cleared.
     pub fn clear(self: *Tweens, app: *App) void {
-        for (self.by.values()) |*plan| forget(app, plan);
-        self.by.clearRetainingCapacity();
+        for (self.of_entity.values()) |*plan| forget(app, plan);
+        self.of_entity.clearRetainingCapacity();
     }
 
     /// The plan of a tween, made the first time it is asked for.
     pub fn planOf(self: *Tweens, gpa: Allocator, tween: Entity) Allocator.Error!*Plan {
-        const entry = try self.by.getOrPut(gpa, tween);
+        const entry = try self.of_entity.getOrPut(gpa, tween);
         if (!entry.found_existing) entry.value_ptr.* = .{};
         return entry.value_ptr;
     }
 
     /// Let go of the plans of the tweens that died.
     pub fn forgetDead(self: *Tweens, app: *App) void {
-        var at = self.by.count();
+        var at = self.of_entity.count();
         while (at > 0) {
             at -= 1;
-            if (app.world.isAlive(self.by.keys()[at])) continue;
-            forget(app, &self.by.values()[at]);
-            self.by.swapRemoveAt(at);
+            if (app.world.isAlive(self.of_entity.keys()[at])) continue;
+            forget(app, &self.of_entity.values()[at]);
+            self.of_entity.swapRemoveAt(at);
         }
     }
 
@@ -164,7 +163,7 @@ pub const Tweens = struct {
 /// top of the tree - whose steps move properties over time, and which goes
 /// once it is done. See `tween.zig`.
 pub fn make(app: *App, owner: Entity) !Entity {
-    const made = try app.spawn(owner);
+    const made = try app.newEntity(owner);
     errdefer app.world.despawn(made);
     try app.world.add(made, Tween{});
     return made;
@@ -254,7 +253,7 @@ pub fn setDelay(app: *App, tween_entity: Entity, seconds: f32) !void {
 
 fn lastStep(app: *App, tween_entity: Entity) error{ NotATween, NoStep }!*Step {
     if (!app.world.has(tween_entity, Tween)) return error.NotATween;
-    const plan = app.tweens.by.getPtr(tween_entity) orelse return error.NoStep;
+    const plan = app.tweens.of_entity.getPtr(tween_entity) orelse return error.NoStep;
     if (plan.steps.items.len == 0) return error.NoStep;
     return &plan.steps.items[plan.steps.items.len - 1];
 }
@@ -279,7 +278,7 @@ pub fn update(app: *App) !void {
             }
             if (tween.paused or !app.timeMovesFor(e)) continue;
             // One with nothing in it has nothing to wait for.
-            const plan = tweens.by.getPtr(e) orelse {
+            const plan = tweens.of_entity.getPtr(e) orelse {
                 tween.done = true;
                 try tweens.ended.append(app.gpa, e);
                 continue;

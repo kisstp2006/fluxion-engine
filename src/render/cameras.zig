@@ -8,21 +8,21 @@ const math = @import("fluxion_math");
 
 const App = @import("../App.zig");
 const components = @import("../scene/components.zig");
-const Frame = @import("stretch.zig").Frame;
+const GameArea = @import("stretch.zig").GameArea;
 const View = @import("view.zig").View;
 
-/// What the camera sees, at the frame's size and scale: the view the world
+/// What the camera sees, at the game area's size and scale: the view the world
 /// is drawn through and the pointer is found in.
 pub fn currentView(app: *App) View {
-    return viewAt(app, app.frame, @floatFromInt(app.frame.width), @floatFromInt(app.frame.height));
+    return viewAt(app, app.game_area, @floatFromInt(app.game_area.width), @floatFromInt(app.game_area.height));
 }
 
 /// What the camera sees in a frame this size, as the stretch scales it:
 /// worked out at the size the game is made at - where a world with no
 /// camera has its origin at the top left, and a camera's fit is measured -
-/// and drawn at the frame's pixels.
-pub fn viewAt(app: *App, frame: Frame, width: f32, height: f32) View {
-    const scale = if (frame.scale > 0) frame.scale else 1;
+/// and drawn at the game area's pixels.
+pub fn viewAt(app: *App, area: GameArea, width: f32, height: f32) View {
+    const scale = if (area.scale > 0) area.scale else 1;
     var view: View = .of(&app.world, &app.snapshots, width / scale, height / scale);
     view.width = width;
     view.height = height;

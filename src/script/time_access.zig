@@ -8,7 +8,7 @@ const flux = @import("fluxion_script");
 const App = @import("../App.zig");
 const attr = @import("../reflect/attr.zig");
 const datetime = @import("../time/datetime.zig");
-const clocks_mod = @import("../time/game_clocks.zig");
+const ClockHandle = @import("../time/game_clocks.zig").ClockHandle;
 
 const Scripts = @import("script.zig").Scripts;
 
@@ -145,7 +145,7 @@ pub const TimeAccess = struct {
 /// It stands while the game is paused. A call on one taken away says so.
 pub const ClockRef = struct {
     scripts: *Scripts,
-    handle: clocks_mod.ClockHandle,
+    handle: ClockHandle,
 
     pub const signal_names = [3][]const u8{ "minute_passed", "hour_passed", "day_passed" };
 
@@ -200,12 +200,12 @@ pub const ClockRef = struct {
     }
 };
 
-pub fn clockKey(handle: clocks_mod.ClockHandle) u64 {
+pub fn clockKey(handle: ClockHandle) u64 {
     return @bitCast(handle);
 }
 
 /// The value a clock is to the scripts: one clock, one value.
-fn clockValue(scripts: *Scripts, handle: clocks_mod.ClockHandle) flux.Vm.Error!flux.Value {
+fn clockValue(scripts: *Scripts, handle: ClockHandle) flux.Vm.Error!flux.Value {
     const key = clockKey(handle);
     if (scripts.clock_values.get(key)) |known| return known;
     const vm = scripts.vm;

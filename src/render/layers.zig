@@ -19,7 +19,7 @@ const App = @import("../App.zig");
 const cameras = @import("cameras.zig");
 const view_textures = @import("view_textures.zig");
 const Material = @import("shaders.zig").Material;
-const Frame = @import("stretch.zig").Frame;
+const GameArea = @import("stretch.zig").GameArea;
 const View = @import("view.zig").View;
 const Color = @import("../math/color.zig").Color;
 
@@ -43,29 +43,29 @@ pub fn render(app: *App) !void {
 /// after. See `render/screen.zig`.
 fn drawLayers(app: *App, into: rhi.RenderTarget, width: f32, height: f32) !void {
     app.sprites.time = @floatCast(app.interface.seconds);
-    app.screen.copies = 0;
+    app.screen_texture.copies = 0;
     try view_textures.drawAll(app);
-    // The frame for a target this size: the window's, or a capture's.
-    const frame = app.stretch.frameOf(@intFromFloat(width), @intFromFloat(height));
-    const frame_width: f32 = @floatFromInt(frame.width);
-    const frame_height: f32 = @floatFromInt(frame.height);
-    if (!frame.apart and !readsScreen(app)) return drawLayersInto(app, into, frame, frame_width, frame_height);
-    const picture = try app.screen.frameOf(frame.width, frame.height, app.background);
-    try drawLayersInto(app, .{ .texture = picture }, frame, frame_width, frame_height);
+    // The game area for a target this size: the window's, or a capture's.
+    const area = app.stretch.areaOf(@intFromFloat(width), @intFromFloat(height));
+    const area_width: f32 = @floatFromInt(area.width);
+    const area_height: f32 = @floatFromInt(area.height);
+    if (!area.apart and !readsScreen(app)) return drawLayersInto(app, into, area, area_width, area_height);
+    const picture = try app.screen_texture.frameOf(area.width, area.height, app.clear_color);
+    try drawLayersInto(app, .{ .texture = picture }, area, area_width, area_height);
     // A picture scaled to the window is sampled as the project's textures
     // are; a canvas is one pixel to one.
     const filter: rhi.Filter = if (app.stretch.mode == .picture) app.assets.default_filter else .nearest;
-    const shown = frame.shown;
-    try app.screen.present(picture, into, .{ .x = shown.x, .y = shown.y, .width = shown.width, .height = shown.height }, app.assets.samplerFor(filter, .clamp_to_edge), .black);
+    const shown = area.shown;
+    try app.screen_texture.present(picture, into, .{ .x = shown.x, .y = shown.y, .width = shown.width, .height = shown.height }, app.assets.samplerFor(filter, .clamp_to_edge), .black);
 }
 
-fn drawLayersInto(app: *App, into: rhi.RenderTarget, frame: Frame, width: f32, height: f32) !void {
+fn drawLayersInto(app: *App, into: rhi.RenderTarget, area: GameArea, width: f32, height: f32) !void {
     // 1. The 3D layer, with a depth test, clearing the frame. Not written
     //    yet; when it is, the 2D pass below stops clearing.
 
     // 2. The 2D layer: sprites and text, sorted back to front, blended, no
     //    depth - or, with the world off the screen, only the clearing.
-    const view = cameras.viewAt(app, frame, width, height);
+    const view = cameras.viewAt(app, area, width, height);
     if (app.world_on_screen) {
         const clear = try drawDebugUnder(app, into, view);
         try app.sprites.draw(app.gpa, &app.world, &app.assets, &app.tile_sets, &app.snapshots, &app.inherited, into, view, clear, app.time.alpha());
@@ -148,11 +148,11 @@ pub fn drawnUpsideDown(app: *const App) bool {
 /// case - no pass is made, and the sprites clear as they always did.
 fn drawDebugUnder(app: *App, into: rhi.RenderTarget, view: View) !?Color {
     app.debug_under_stats = .{};
-    if (!app.debug_visible) return app.background;
-    if (app.debug_under_frame.isEmpty() and app.debug_under_steps.isEmpty()) return app.background;
+    if (!app.debug_visible) return app.clear_color;
+    if (app.debug_under_frame.isEmpty() and app.debug_under_steps.isEmpty()) return app.clear_color;
     try app.debug_renderer.draw(&.{ &app.debug_under_steps, &app.debug_under_frame }, .{
         .color = into,
-        .clear = app.background.array(),
+        .clear = app.clear_color.array(),
     }, .{
         .view_projection = view.matrix(app.device.clip()),
         .width = view.width,
@@ -173,7 +173,7 @@ fn drawDebug(app: *App, into: rhi.RenderTarget, view: View) !void {
 /// Start a frame from the background, for a frame that draws no world.
 fn clearTarget(app: *App, into: rhi.RenderTarget) !void {
     const list = app.device.begin();
-    try list.beginPass(.{ .color = .{ .target = into, .clear_color = app.background.array() } });
+    try list.beginPass(.{ .color = .{ .target = into, .clear_color = app.clear_color.array() } });
     try list.endPass();
     try app.device.submit();
 }
@@ -186,7 +186,7 @@ pub fn capture(app: *App, gpa: Allocator, width: u32, height: u32) ![]u8 {
         .width = width,
         .height = height,
         .usage = .{ .sampled = true, .render_target = true },
-        .clear_color = app.background.array(),
+        .clear_color = app.clear_color.array(),
         .label = "capture",
     });
     defer app.device.destroyTexture(texture);

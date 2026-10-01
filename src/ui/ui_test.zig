@@ -16,7 +16,8 @@ const Assets = @import("../assets/assets.zig");
 const Color = @import("../math/color.zig").Color;
 const ToolWindow = @import("tool_window.zig");
 const Interface = @import("interface.zig");
-const inherited_mod = @import("../scene/inherited.zig");
+const Appearance = @import("../scene/inherited.zig").Appearance;
+const Processing = @import("../scene/inherited.zig").Processing;
 const platform = @import("fluxion_platform");
 const typeface = @import("fluxion_font");
 const helpers = @import("../test_helpers.zig");
@@ -480,7 +481,6 @@ test "a control's modulate colours it and everything in it, and its alpha fades 
     const it = try withCanvas();
     const app = it.app;
     defer app.destroy();
-    const Appearance = @import("../scene/inherited.zig").Appearance;
     const panel = try app.world.spawnWith(.{ fixed(100, 50), Parent.of(it.root), control.ColorRect{}, Appearance{ .modulate = .rgba(1, 0.5, 0.5, 0.5) } });
     _ = try app.world.spawnWith(.{ fixed(20, 20), Parent.of(panel), control.ColorRect{ .color = .rgba(0.5, 1, 1, 1) } });
     _ = try app.step();
@@ -931,7 +931,7 @@ test "a button answers while it runs: not while the game is paused, unless it as
     try testing.expectEqual(@as(u32, 1), Paused.pressed);
 
     // A pause menu's button: it answers while the game is paused.
-    try app.world.add(button, inherited_mod.Processing{ .mode = .when_paused });
+    try app.world.add(button, Processing{ .mode = .when_paused });
     try Click.at(app);
     try testing.expectEqual(@as(u32, 2), Paused.pressed);
 }
@@ -940,19 +940,19 @@ test "a control fades as its Appearance and everything above it says, and grows 
     const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100 });
     defer app.destroy();
     try app.useControlNodes();
-    const holder = try app.world.spawnWith(.{inherited_mod.Appearance{ .modulate = Color.white.withAlpha(0.5) }});
+    const holder = try app.world.spawnWith(.{Appearance{ .modulate = Color.white.withAlpha(0.5) }});
     const root = try app.world.spawnWith(.{ control.Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, control.CanvasLayer{}, components.Parent.of(holder) });
     const panel = try app.world.spawnWith(.{
         control.Control{ .width = .{ .mode = .fixed, .value = 40 }, .height = .{ .mode = .fixed, .value = 40 }, .scale = 2 },
         components.Parent.of(root),
         control.PanelContainer{},
-        inherited_mod.Appearance{ .modulate = Color.white.withAlpha(0.5) },
+        Appearance{ .modulate = Color.white.withAlpha(0.5) },
     });
     _ = try app.world.spawnWith(.{
         control.Control{ .width = .{ .mode = .fixed, .value = 10 }, .height = .{ .mode = .fixed, .value = 10 } },
         components.Parent.of(root),
         control.PanelContainer{},
-        inherited_mod.Appearance{ .visible = false },
+        Appearance{ .visible = false },
     });
     _ = try app.step();
 

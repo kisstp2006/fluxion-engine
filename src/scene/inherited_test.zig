@@ -8,8 +8,9 @@ const testing = std.testing;
 const App = @import("../App.zig");
 const Color = @import("../math/color.zig").Color;
 const components = @import("components.zig");
-const inherited_mod = @import("inherited.zig");
-const sprite_frames_mod = @import("../animation/sprite_frames.zig");
+const Appearance = @import("inherited.zig").Appearance;
+const Processing = @import("inherited.zig").Processing;
+const AnimatedSprite2D = @import("../animation/sprite_frames.zig").AnimatedSprite2D;
 const helpers = @import("../test_helpers.zig");
 const Paused = helpers.Paused;
 
@@ -50,15 +51,15 @@ test "an animation waits while its entity does not run" {
     defer app.destroy();
     app.time.source = .{ .fixed = 0.25 };
     const frames = try app.addGridFrames("strip", .none, 4, 1, &.{.{ .name = "walk", .cells = &.{ 0, 1, 2, 3 }, .speed = 4 }});
-    const strip: sprite_frames_mod.AnimatedSprite2D = .autoplaying(frames, "walk");
+    const strip: AnimatedSprite2D = .autoplaying(frames, "walk");
     const walker = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip });
-    const menu = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip, inherited_mod.Processing{ .mode = .always } });
+    const menu = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4), strip, Processing{ .mode = .always } });
 
     app.setPaused(true);
     for (0..2) |_| _ = try app.step();
-    try testing.expectEqual(@as(f32, 0), app.world.get(walker, sprite_frames_mod.AnimatedSprite2D).?.frame_progress);
-    try testing.expectEqual(@as(i32, 0), app.world.get(walker, sprite_frames_mod.AnimatedSprite2D).?.frame);
-    try testing.expectEqual(@as(i32, 1), app.world.get(menu, sprite_frames_mod.AnimatedSprite2D).?.frame);
+    try testing.expectEqual(@as(f32, 0), app.world.get(walker, AnimatedSprite2D).?.frame_progress);
+    try testing.expectEqual(@as(i32, 0), app.world.get(walker, AnimatedSprite2D).?.frame);
+    try testing.expectEqual(@as(i32, 1), app.world.get(menu, AnimatedSprite2D).?.frame);
 }
 
 test "an Appearance hides, fades and raises what hangs from it" {
@@ -67,10 +68,10 @@ test "an Appearance hides, fades and raises what hangs from it" {
     const faded = try app.world.spawnWith(.{
         components.Transform2D.at(0, 0),
         components.Sprite.solid(.white, 10, 10),
-        inherited_mod.Appearance{ .modulate = Color.white.withAlpha(0.5), .z = 3 },
+        Appearance{ .modulate = Color.white.withAlpha(0.5), .z = 3 },
     });
     _ = try app.world.spawnWith(.{ components.Transform2D.at(2, 0), components.Parent.of(faded), components.Sprite.solid(.white, 4, 4) });
-    const hidden = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), inherited_mod.Appearance{ .visible = false } });
+    const hidden = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), Appearance{ .visible = false } });
     _ = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Parent.of(hidden), components.Sprite.solid(.white, 4, 4) });
     const plain = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite.solid(.white, 4, 4) });
     _ = try app.step();

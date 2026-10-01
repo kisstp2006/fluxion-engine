@@ -44,7 +44,7 @@ const source =
 const quad_corners = [8]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
 
 /// A picture of the frame's, and the size it was made at.
-const Picture = struct {
+const FrameTexture = struct {
     texture: rhi.Texture,
     width: u32,
     height: u32,
@@ -57,9 +57,9 @@ pub const Screen = struct {
     quad: rhi.Buffer,
     uniforms: rhi.Buffer,
     /// What the frame is drawn into when it has to be read.
-    frame: ?Picture = null,
+    frame: ?FrameTexture = null,
     /// What is drawn so far, copied for a shader to read.
-    copy: ?Picture = null,
+    copy: ?FrameTexture = null,
     /// How many copies the last frame took.
     copies: u32 = 0,
 
@@ -154,7 +154,7 @@ pub const Screen = struct {
         try self.device.submit();
     }
 
-    fn pictureOf(self: *Screen, slot: *?Picture, width: u32, height: u32, clear: [4]f32, label: []const u8) !Picture {
+    fn pictureOf(self: *Screen, slot: *?FrameTexture, width: u32, height: u32, clear: [4]f32, label: []const u8) !FrameTexture {
         if (slot.*) |held| {
             if (held.width == width and held.height == height) return held;
             self.device.destroyTexture(held.texture);

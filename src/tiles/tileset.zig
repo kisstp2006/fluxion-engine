@@ -261,7 +261,7 @@ pub const Source = struct {
 };
 
 /// What to draw a cell with: a texture and the part of it.
-pub const Picture = struct {
+pub const TilePicture = struct {
     texture: Assets.TextureHandle,
     region: Region,
 };
@@ -428,8 +428,8 @@ pub const TileSet = struct {
     /// The part of which texture a cell shows, before it flips or turns. A
     /// source the set has not got, or one with no texture, shows the white
     /// texel.
-    pub fn pictureOf(self: *const TileSet, assets: *Assets, cell: Cell) Picture {
-        const white: Picture = .{ .texture = assets.white, .region = .full };
+    pub fn pictureOf(self: *const TileSet, assets: *Assets, cell: Cell) TilePicture {
+        const white: TilePicture = .{ .texture = assets.white, .region = .full };
         const held = self.sourceById(cell.source) orelse return white;
         const size = assets.sizeOf(held.texture) orelse return white;
         const tile_width: f32 = @floatFromInt(self.tile_width);

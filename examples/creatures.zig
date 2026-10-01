@@ -726,7 +726,7 @@ pub fn main(init: std.process.Init) !void {
         .title = "Creatures - Fluxion Engine",
         .width = 960,
         .height = 540,
-        .background = theme.background,
+        .clear_color = theme.background,
         .io = init.io,
         .quit_key = .escape,
         .fullscreen_key = .f11,

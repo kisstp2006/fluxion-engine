@@ -26,11 +26,11 @@ const App = @import("../App.zig");
 const Entity = ecs.Entity;
 
 pub const Exports = struct {
-    by: std.AutoArrayHashMapUnmanaged(Entity, json.Document) = .empty,
+    of_entity: std.AutoArrayHashMapUnmanaged(Entity, json.Document) = .empty,
 
     pub fn deinit(self: *Exports, gpa: Allocator) void {
         self.freeAll();
-        self.by.deinit(gpa);
+        self.of_entity.deinit(gpa);
     }
 
     /// Every entity's gone: the world was cleared.
@@ -39,14 +39,14 @@ pub const Exports = struct {
     }
 
     fn freeAll(self: *Exports) void {
-        for (self.by.values()) |doc| doc.deinit();
-        self.by.clearRetainingCapacity();
+        for (self.of_entity.values()) |doc| doc.deinit();
+        self.of_entity.clearRetainingCapacity();
     }
 
     /// The values an entity's fields are given, an object by field; null
     /// for one with none.
     pub fn of(self: *const Exports, entity: Entity) ?json.Value {
-        const doc = self.by.get(entity) orelse return null;
+        const doc = self.of_entity.get(entity) orelse return null;
         return doc.root;
     }
 
@@ -65,7 +65,7 @@ pub const Exports = struct {
 
     /// `name` back to its default. Says whether it had a value of its own.
     pub fn remove(self: *Exports, entity: Entity, name: []const u8) bool {
-        const doc = self.by.getPtr(entity) orelse return false;
+        const doc = self.of_entity.getPtr(entity) orelse return false;
         const had = doc.root.remove(name);
         if (doc.root.len() == 0) self.forget(entity);
         return had;
@@ -89,31 +89,31 @@ pub const Exports = struct {
     }
 
     pub fn forget(self: *Exports, entity: Entity) void {
-        const removed = self.by.fetchSwapRemove(entity) orelse return;
+        const removed = self.of_entity.fetchSwapRemove(entity) orelse return;
         removed.value.deinit();
     }
 
     /// Let go of what the dead had. Once a frame, with the names.
     pub fn forgetDead(self: *Exports, app: *App) void {
-        var at = self.by.count();
+        var at = self.of_entity.count();
         while (at > 0) {
             at -= 1;
-            if (app.world.isAlive(self.by.keys()[at])) continue;
-            self.by.values()[at].deinit();
-            self.by.swapRemoveAt(at);
+            if (app.world.isAlive(self.of_entity.keys()[at])) continue;
+            self.of_entity.values()[at].deinit();
+            self.of_entity.swapRemoveAt(at);
         }
     }
 
     fn documentOf(self: *Exports, gpa: Allocator, entity: Entity) Allocator.Error!*json.Document {
-        const entry = try self.by.getOrPut(gpa, entity);
+        const entry = try self.of_entity.getOrPut(gpa, entity);
         if (!entry.found_existing) {
             entry.value_ptr.* = json.Document.init(gpa) catch |err| {
-                self.by.swapRemoveAt(entry.index);
+                self.of_entity.swapRemoveAt(entry.index);
                 return err;
             };
             entry.value_ptr.root = entry.value_ptr.object() catch |err| {
                 entry.value_ptr.deinit();
-                self.by.swapRemoveAt(entry.index);
+                self.of_entity.swapRemoveAt(entry.index);
                 return err;
             };
         }

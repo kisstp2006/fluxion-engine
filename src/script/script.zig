@@ -160,7 +160,7 @@ const signals = @import("../core/signals.zig");
 const Color = @import("../math/color.zig").Color;
 const input_event = @import("../input/input_event.zig");
 const InputEvent = input_event.InputEvent;
-const clocks_mod = @import("../time/game_clocks.zig");
+const ClockHandle = @import("../time/game_clocks.zig").ClockHandle;
 const dialog = @import("../platform/dialog.zig");
 
 const Entity = ecs.Entity;
@@ -482,7 +482,7 @@ pub const Scripts = struct {
     /// The components handles found last, by entity and type: a script
     /// reads a component's fields one after another, and each read finds
     /// it again. Good while the world's make-up has not changed.
-    found: [found_slots]Found = @splat(.{}),
+    found: [found_slots]Lookup = @splat(.{}),
     /// What scripts reach as `files`.
     file_access: FileAccess,
     /// What scripts reach as `time`.
@@ -785,7 +785,7 @@ pub const Scripts = struct {
     fn watchFiles(self: *Scripts) Allocator.Error!void {
         const app = self.app;
         const io = app.io orelse return;
-        // Found first and read after: reading runs code, which can load a
+        // Lookup first and read after: reading runs code, which can load a
         // script into the table being walked.
         self.changed.clearRetainingCapacity();
         var it = self.files.iterator();
@@ -984,7 +984,7 @@ pub const Scripts = struct {
         const app = self.app;
         try self.letGoOfTheUnwanted();
 
-        // Found first and made after: making one runs its struct's defaults,
+        // Lookup first and made after: making one runs its struct's defaults,
         // which may change the world the query is walking.
         self.scratch.clearRetainingCapacity();
         var query = ecs.Query(.{Script}).over(&app.world) catch |err| switch (err) {
@@ -1620,7 +1620,7 @@ pub const Scripts = struct {
     /// first time a script reaches it and connected to the engine's.
     /// A clock's `minute_passed`, `hour_passed` or `day_passed`, made the
     /// first time a script reaches for it.
-    pub fn clockSignal(self: *Scripts, handle: clocks_mod.ClockHandle, which: usize) flux.Vm.Error!flux.Value {
+    pub fn clockSignal(self: *Scripts, handle: ClockHandle, which: usize) flux.Vm.Error!flux.Value {
         const got = try self.clock_signals.getOrPut(self.app.gpa, clockKey(handle));
         if (!got.found_existing) got.value_ptr.* = @splat(.null);
         if (got.value_ptr[which].tag != .signal) {
@@ -1642,7 +1642,7 @@ pub const Scripts = struct {
         defer due.deinit(self.app.gpa);
         var it = self.clock_signals.iterator();
         while (it.next()) |entry| {
-            const handle: clocks_mod.ClockHandle = @bitCast(entry.key_ptr.*);
+            const handle: ClockHandle = @bitCast(entry.key_ptr.*);
             const clock = self.app.clocks.get(handle) orelse continue;
             const counts = [3]u64{ clock.passed.minutes, clock.passed.hours, clock.passed.days };
             for (entry.value_ptr.*, counts) |signal, count| {
@@ -1912,7 +1912,7 @@ const found_slots = 64;
 /// A component a handle found, and the world's `structure` then: the cell
 /// stays where it is until something is spawned, despawned, added or taken
 /// off.
-const Found = struct {
+const Lookup = struct {
     key: u64 = 0,
     type: ?*const reflect.Type = null,
     structure: u64 = 0,

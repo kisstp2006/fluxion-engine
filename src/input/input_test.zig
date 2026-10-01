@@ -617,8 +617,8 @@ fn cursorEvent(x: f64, y: f64, dx: f64, dy: f64) platform.Event {
 
 test "every finger is a touch of its own, from the frame it touches to the frame it is lifted" {
     var input: Input = .{};
-    input.frame_origin = .init(100, 0);
-    input.frame_ratio = 0.5;
+    input.area_origin = .init(100, 0);
+    input.area_ratio = 0.5;
 
     input.apply(touchOf(4, .down, 300, 200));
     input.apply(touchOf(9, .down, 500, 100));

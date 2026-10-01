@@ -162,12 +162,12 @@ test "where an entity is in the space of something above it" {
     const middle = try app.world.spawnWith(.{ components.Transform2D{ .x = 10, .rotation = std.math.pi / 2.0 }, components.Parent.of(root) });
     const leaf = try app.world.spawnWith(.{ components.Transform2D.at(5, 0), components.Parent.of(middle) });
 
-    const within = app.getRelativeTransformToParent(leaf, root).?;
+    const within = app.getTransformRelativeTo(leaf, root).?;
     try testing.expectApproxEqAbs(@as(f32, 10), within.x, 1e-4);
     try testing.expectApproxEqAbs(@as(f32, 5), within.y, 1e-4);
     try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), within.rotation, 1e-5);
-    try testing.expectEqual(@as(f32, 0), app.getRelativeTransformToParent(leaf, leaf).?.x);
-    try testing.expect(app.getRelativeTransformToParent(root, leaf) == null);
+    try testing.expectEqual(@as(f32, 0), app.getTransformRelativeTo(leaf, leaf).?.x);
+    try testing.expect(app.getTransformRelativeTo(root, leaf) == null);
 }
 
 test "writing where an entity is says why it cannot: no transform, or a parent that is gone" {
@@ -261,15 +261,15 @@ test "single finds the one entity with a component, or none" {
     defer app.destroy();
 
     // Never seen, so nothing - and asking registered nothing.
-    try testing.expect(app.single(Tally) == null);
+    try testing.expect(app.singleton(Tally) == null);
     const before = app.world.componentCount();
-    try testing.expect(app.single(Tally) == null);
+    try testing.expect(app.singleton(Tally) == null);
     try testing.expectEqual(before, app.world.componentCount());
 
     // Beside other components, in an archetype of its own.
     _ = try app.world.spawnWith(.{ components.Transform2D{}, Tally{ .points = 4 } });
-    app.single(Tally).?.points += 1;
-    try testing.expectEqual(@as(u32, 5), app.single(Tally).?.points);
+    app.singleton(Tally).?.points += 1;
+    try testing.expectEqual(@as(u32, 5), app.singleton(Tally).?.points);
 }
 
 test "anything hangs in the one tree, and goes with what it hangs from" {
@@ -280,8 +280,8 @@ test "anything hangs in the one tree, and goes with what it hangs from" {
     const button = try app.world.spawnWith(.{ control.Control{}, components.Parent.of(panel), control.Button{} });
     try app.setText(button, control.Button, "text", "OK");
     const clock = try app.world.spawnWith(.{ timer.Timer{}, components.Parent.of(button) });
-    try testing.expect(app.hangsFrom(clock, panel));
-    try testing.expect(!app.hangsFrom(panel, clock));
+    try testing.expect(app.isDescendantOf(clock, panel));
+    try testing.expect(!app.isDescendantOf(panel, clock));
 
     // A loop is refused, and changes nothing.
     try testing.expectError(error.Loop, app.setParent(panel, clock, false));

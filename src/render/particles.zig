@@ -295,38 +295,38 @@ pub const Emitter = struct {
 
 /// Every emitter's particles, by its entity.
 pub const Particles = struct {
-    by: std.AutoArrayHashMapUnmanaged(Entity, Emitter) = .empty,
+    of_entity: std.AutoArrayHashMapUnmanaged(Entity, Emitter) = .empty,
 
     pub fn deinit(self: *Particles, gpa: Allocator) void {
-        for (self.by.values()) |*e| e.deinit(gpa);
-        self.by.deinit(gpa);
+        for (self.of_entity.values()) |*e| e.deinit(gpa);
+        self.of_entity.deinit(gpa);
     }
 
     pub fn get(self: *const Particles, entity: Entity) ?*Emitter {
-        return self.by.getPtr(entity);
+        return self.of_entity.getPtr(entity);
     }
 
     /// Those of the dead, and of what lost its `Particles2D`, let go.
     pub fn forgetDead(self: *Particles, app: *App) void {
         var at: usize = 0;
-        while (at < self.by.count()) {
-            const entity = self.by.keys()[at];
+        while (at < self.of_entity.count()) {
+            const entity = self.of_entity.keys()[at];
             if (app.world.isAlive(entity) and app.world.has(entity, Particles2D)) {
                 at += 1;
                 continue;
             }
-            self.by.values()[at].deinit(app.gpa);
-            self.by.swapRemoveAt(at);
+            self.of_entity.values()[at].deinit(app.gpa);
+            self.of_entity.swapRemoveAt(at);
         }
     }
 
     pub fn clear(self: *Particles, app: *App) void {
-        for (self.by.values()) |*e| e.deinit(app.gpa);
-        self.by.clearRetainingCapacity();
+        for (self.of_entity.values()) |*e| e.deinit(app.gpa);
+        self.of_entity.clearRetainingCapacity();
     }
 
     fn emitterOf(self: *Particles, gpa: Allocator, entity: Entity) Allocator.Error!*Emitter {
-        const got = try self.by.getOrPut(gpa, entity);
+        const got = try self.of_entity.getOrPut(gpa, entity);
         if (!got.found_existing) got.value_ptr.* = .{};
         return got.value_ptr;
     }

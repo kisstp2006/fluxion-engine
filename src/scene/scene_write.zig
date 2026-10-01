@@ -96,18 +96,18 @@ const Document = struct {
 
     pub fn toJson(self: Document, w: *json.Writer) json.Writer.Error!void {
         const gpa = self.app.gpa;
-        var s: Saving = .{ .app = self.app, .root = self.root };
-        defer s.deinit(gpa);
-        try s.placeAll();
+        var saving: Saving = .{ .app = self.app, .root = self.root };
+        defer saving.deinit(gpa);
+        try saving.placeAll();
 
         try w.beginObject();
         try w.field("fluxion_scene", @as(u32, version));
         try w.key("entities");
         try w.beginArray();
-        for (s.order.items) |e| try s.writeEntity(w, e);
+        for (saving.order.items) |e| try saving.writeEntity(w, e);
         try w.endArray();
-        try s.writeConnections(w);
-        try s.writeFiles(w);
+        try saving.writeConnections(w);
+        try saving.writeFiles(w);
         try w.endObject();
     }
 };
@@ -125,9 +125,9 @@ const Template = struct {
     entity: Entity,
 
     pub fn toJson(self: Template, w: *json.Writer) json.Writer.Error!void {
-        var s: Saving = .{ .app = self.app, .every_field = true };
-        defer s.deinit(self.app.gpa);
-        try s.writeEntity(w, self.entity);
+        var saving: Saving = .{ .app = self.app, .every_field = true };
+        defer saving.deinit(self.app.gpa);
+        try saving.writeEntity(w, self.entity);
     }
 };
 
@@ -142,10 +142,10 @@ pub const EntityJson = struct {
     every_field: bool = false,
 
     pub fn toJson(self: EntityJson, w: *json.Writer) json.Writer.Error!void {
-        var s: Saving = .{ .app = self.app, .every_field = self.every_field };
-        defer s.deinit(self.app.gpa);
-        try s.placeAll();
-        try s.writeEntity(w, self.entity);
+        var saving: Saving = .{ .app = self.app, .every_field = self.every_field };
+        defer saving.deinit(self.app.gpa);
+        try saving.placeAll();
+        try saving.writeEntity(w, self.entity);
     }
 };
 
@@ -164,10 +164,10 @@ pub const Saving = struct {
     /// Every file written, under the name it was written by, for `assets`.
     files: std.StringArrayHashMapUnmanaged(TextureOptions) = .empty,
 
-    fn deinit(s: *Saving, gpa: Allocator) void {
-        s.order.deinit(gpa);
-        s.files.deinit(gpa);
-        s.written.deinit(gpa);
+    fn deinit(saving: *Saving, gpa: Allocator) void {
+        saving.order.deinit(gpa);
+        saving.files.deinit(gpa);
+        saving.written.deinit(gpa);
     }
 
     /// Every entity in the world, in the order a parent's children are in -
@@ -176,58 +176,58 @@ pub const Saving = struct {
     /// and never thinned is the order it was built in - and each given a
     /// UUID, if it had none, for what names it to be written by. So the list
     /// is the order, and a scene needs nothing more to keep it.
-    fn placeAll(s: *Saving) Allocator.Error!void {
-        const gpa = s.app.gpa;
-        for (s.app.world.archetypeSlice()) |*archetype| {
+    fn placeAll(saving: *Saving) Allocator.Error!void {
+        const gpa = saving.app.gpa;
+        for (saving.app.world.archetypeSlice()) |*archetype| {
             for (archetype.entities.items) |e| {
-                // Not a thing in the scene: a map's chunk, which its map
+                // Not a thing in the scene: a map'saving chunk, which its map
                 // writes, and reading that makes again.
-                if (s.app.scene_components.keepsOut(&s.app.world, e)) continue;
-                if (s.root) |root| if (!e.eql(root) and !s.app.hangsFrom(e, root)) continue;
-                try s.order.append(gpa, e);
+                if (saving.app.scene_components.keepsOut(&saving.app.world, e)) continue;
+                if (saving.root) |root| if (!e.eql(root) and !saving.app.isDescendantOf(e, root)) continue;
+                try saving.order.append(gpa, e);
             }
         }
-        std.mem.sort(Entity, s.order.items, @as(*const App, s.app), App.siblingBefore);
-        for (s.order.items) |e| try s.written.put(gpa, e, {});
+        std.mem.sort(Entity, saving.order.items, @as(*const App, saving.app), App.siblingBefore);
+        for (saving.order.items) |e| try saving.written.put(gpa, e, {});
         // What an instance holds is its scene's: the instance is written, and
         // its insides are made again from the scene when it is read.
         var hidden: std.AutoHashMapUnmanaged(Entity, void) = .empty;
         defer hidden.deinit(gpa);
-        for (s.app.instances.by_root.keys(), s.app.instances.by_root.values()) |root, held| {
-            if (!s.written.contains(root)) continue;
+        for (saving.app.instances.by_root.keys(), saving.app.instances.by_root.values()) |root, held| {
+            if (!saving.written.contains(root)) continue;
             for (held.members) |member| try hidden.put(gpa, member, {});
         }
         if (hidden.count() > 0) {
             var kept: usize = 0;
-            for (s.order.items) |e| {
+            for (saving.order.items) |e| {
                 if (hidden.contains(e)) {
-                    _ = s.written.remove(e);
+                    _ = saving.written.remove(e);
                     continue;
                 }
-                s.order.items[kept] = e;
+                saving.order.items[kept] = e;
                 kept += 1;
             }
-            s.order.shrinkRetainingCapacity(kept);
+            saving.order.shrinkRetainingCapacity(kept);
         }
-        for (s.order.items) |e| _ = s.app.ensureUuid(e) catch |err| switch (err) {
+        for (saving.order.items) |e| _ = saving.app.ensureUuid(e) catch |err| switch (err) {
             error.NoSuchEntity => unreachable,
             error.OutOfMemory => return error.OutOfMemory,
         };
     }
 
-    fn writeEntity(s: *Saving, w: *json.Writer, e: Entity) json.Writer.Error!void {
-        const app = s.app;
-        s.entity = e;
+    fn writeEntity(saving: *Saving, w: *json.Writer, e: Entity) json.Writer.Error!void {
+        const app = saving.app;
+        saving.entity = e;
         try w.beginObject();
         if (app.uuidOf(e)) |uuid| {
             const text = uuid.toString();
             try w.field("uuid", @as([]const u8, &text));
         }
         // What it hangs from, by the UUID it was written with: before the
-        // name, which is its own among its parent's children. A branch's
+        // name, which is its own among its parent'saving children. A branch'saving
         // root hangs from nothing written.
         const parent = app.parentOf(e);
-        const named_parent = if (s.root) |root| !e.eql(root) else true;
+        const named_parent = if (saving.root) |root| !e.eql(root) else true;
         if (!parent.isNone() and named_parent) if (app.uuidOf(parent)) |uuid| {
             const text = uuid.toString();
             try w.field("parent", @as([]const u8, &text));
@@ -241,29 +241,29 @@ pub const Saving = struct {
             for (groups) |group| try w.writeString(group);
             try w.endArray();
         }
-        // What its script's `@export`s are given.
+        // What its script'saving `@export`saving are given.
         if (app.exports.of(e)) |values| try w.field("exports", values);
         // An instance: the scene it is one of, and what differs from it.
-        if (!s.every_field) if (app.instances.by_root.getPtr(e)) |instance| {
+        if (!saving.every_field) if (app.instances.by_root.getPtr(e)) |instance| {
             try w.field("instance", app.sceneSource(instance.scene) orelse "");
-            try s.writeOverrides(w, e, instance.template);
+            try saving.writeOverrides(w, e, instance.template);
             return w.endObject();
         };
         for (app.scene_components.entries.items) |entry| {
             const id = entry.findIdIn(&app.world) orelse continue;
             const cell = app.world.cellOf(e, id) orelse continue;
             try w.key(entry.name);
-            try entry.write(s, w, cell);
+            try entry.write(saving, w, cell);
         }
-        try s.writeUnknown(w, e);
+        try saving.writeUnknown(w, e);
         try w.endObject();
     }
 
     /// What an instance's root has that its scene did not give it: the
     /// fields that differ, the components it was given, and in `removed`
     /// those it lost - `template` being the root as the scene made it.
-    fn writeOverrides(s: *Saving, w: *json.Writer, e: Entity, template: []const u8) json.Writer.Error!void {
-        const app = s.app;
+    fn writeOverrides(saving: *Saving, w: *json.Writer, e: Entity, template: []const u8) json.Writer.Error!void {
+        const app = saving.app;
         var arena_state: std.heap.ArenaAllocator = .init(app.gpa);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -286,20 +286,20 @@ pub const Saving = struct {
             const had = before orelse {
                 // Given one its scene does not: written whole.
                 try w.key(entry.name);
-                try entry.write(s, w, cell);
+                try entry.write(saving, w, cell);
                 continue;
             };
             // Every field of it as it is now, beside every field it was
             // made with: what differs is written.
             var now_text: std.Io.Writer.Allocating = .init(arena);
             var now_writer: json.Writer = .init(&now_text.writer, .{ .non_finite = .literal });
-            const every = s.every_field;
-            s.every_field = true;
-            entry.write(s, &now_writer, cell) catch |err| {
-                s.every_field = every;
+            const every = saving.every_field;
+            saving.every_field = true;
+            entry.write(saving, &now_writer, cell) catch |err| {
+                saving.every_field = every;
                 return err;
             };
-            s.every_field = every;
+            saving.every_field = every;
             const now = membersOf(arena, now_text.written()) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.WriteFailed,
@@ -310,7 +310,7 @@ pub const Saving = struct {
             };
             var any = false;
             for (now) |field| {
-                // A map's tiles are its scene's.
+                // A map'saving tiles are its scene'saving.
                 if (std.mem.eql(u8, field.name, "cells")) continue;
                 if (memberNamed(then, field.name)) |old| if (std.mem.eql(u8, old, field.value)) continue;
                 if (!any) {
@@ -334,8 +334,8 @@ pub const Saving = struct {
     /// The components the entity was read with that nothing here knows, as
     /// they were read. One of a name the entity has a registered component
     /// of now is left out: that component is what it holds.
-    fn writeUnknown(s: *Saving, w: *json.Writer, e: Entity) json.Writer.Error!void {
-        const app = s.app;
+    fn writeUnknown(saving: *Saving, w: *json.Writer, e: Entity) json.Writer.Error!void {
+        const app = saving.app;
         for (app.unknown_components.of(e)) |kept| {
             if (app.componentOf(e, kept.name) != null) continue;
             try w.key(kept.name);
@@ -352,14 +352,14 @@ pub const Saving = struct {
     /// `connections`: every one made with `persist` from an entity written,
     /// to one written, in the order each entity's are heard - known to this
     /// build or not - and nothing at all when there are none.
-    fn writeConnections(s: *Saving, w: *json.Writer) json.Writer.Error!void {
+    fn writeConnections(saving: *Saving, w: *json.Writer) json.Writer.Error!void {
         var any = false;
-        for (s.order.items) |source| {
-            const list = s.app.signals.from.getPtr(source) orelse continue;
+        for (saving.order.items) |source| {
+            const list = saving.app.signals.from.getPtr(source) orelse continue;
             for (list.items) |c| {
                 if (!c.options.flags.persist or c.callable != .named) continue;
-                const from = s.app.uuidOf(source) orelse continue;
-                const to = s.app.uuidOf(c.callable.named.target) orelse continue;
+                const from = saving.app.uuidOf(source) orelse continue;
+                const to = saving.app.uuidOf(c.callable.named.target) orelse continue;
                 if (!any) {
                     try w.key("connections");
                     try w.beginArray();
@@ -368,7 +368,7 @@ pub const Saving = struct {
                 try w.beginObject();
                 const from_text = from.toString();
                 try w.field("from", @as([]const u8, &from_text));
-                try w.field("signal", s.app.signalWritten(c));
+                try w.field("signal", saving.app.signalWritten(c));
                 const to_text = to.toString();
                 try w.field("to", @as([]const u8, &to_text));
                 try w.field("method", c.callable.named.name);
@@ -387,7 +387,7 @@ pub const Saving = struct {
                 if (c.options.binds.len != 0) {
                     try w.key("binds");
                     try w.beginArray();
-                    for (c.options.binds) |b| try s.writeBind(w, b);
+                    for (c.options.binds) |b| try saving.writeBind(w, b);
                     try w.endArray();
                 }
                 try w.endObject();
@@ -398,7 +398,7 @@ pub const Saving = struct {
 
     /// A bind: the plain JSON value it is, or an object saying which of the
     /// others it is.
-    fn writeBind(s: *Saving, w: *json.Writer, b: signals.Bind) json.Writer.Error!void {
+    fn writeBind(saving: *Saving, w: *json.Writer, b: signals.Bind) json.Writer.Error!void {
         switch (b) {
             .bool => |v| try w.writeBool(v),
             .int => |v| try w.writeInt(v),
@@ -424,7 +424,7 @@ pub const Saving = struct {
             .entity => |e| {
                 try w.beginObject();
                 try w.key("entity");
-                try writeValue(s, w, Entity, &e);
+                try writeValue(saving, w, Entity, &e);
                 try w.endObject();
             },
         }
@@ -433,10 +433,10 @@ pub const Saving = struct {
     /// `assets`: each file the scene named that there is something to say
     /// of - its UUID, how a texture is sampled when that is not the default
     /// - and nothing at all when there is nothing to say of any.
-    fn writeFiles(s: *Saving, w: *json.Writer) json.Writer.Error!void {
+    fn writeFiles(saving: *Saving, w: *json.Writer) json.Writer.Error!void {
         var any = false;
-        for (s.files.keys(), s.files.values()) |name, sampled| {
-            const uid = s.app.project.knownUid(name);
+        for (saving.files.keys(), saving.files.values()) |name, sampled| {
+            const uid = saving.app.project.knownUid(name);
             if (uid == null and std.meta.eql(sampled, TextureOptions{})) continue;
             if (!any) {
                 try w.key("assets");
@@ -451,11 +451,11 @@ pub const Saving = struct {
             }
             if (sampled.filter != .nearest) {
                 try w.key("filter");
-                try writeValue(s, w, rhi.Filter, &sampled.filter);
+                try writeValue(saving, w, rhi.Filter, &sampled.filter);
             }
             if (sampled.wrap != .clamp_to_edge) {
                 try w.key("wrap");
-                try writeValue(s, w, rhi.Wrap, &sampled.wrap);
+                try writeValue(saving, w, rhi.Wrap, &sampled.wrap);
             }
             try w.endObject();
         }
@@ -511,25 +511,25 @@ fn writeRaw(gpa: Allocator, w: *json.Writer, text: []const u8) json.Writer.Error
 }
 
 /// A component: an object of the fields that do not hold their defaults.
-pub fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
-    if (@typeInfo(T) != .@"struct") return writeValue(s, w, T, value);
+pub fn writeComponent(saving: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
+    if (@typeInfo(T) != .@"struct") return writeValue(saving, w, T, value);
     try w.beginObject();
     // Its words, which it keeps beside it: see `component_texts.zig`.
     inline for (comptime component_texts.declared(T)) |text| {
-        const said = s.app.textOf(s.entity, T, text.name);
-        if (said.len > 0 or s.every_field) try w.field(text.name, said);
+        const said = saving.app.textOf(saving.entity, T, text.name);
+        if (said.len > 0 or saving.every_field) try w.field(text.name, said);
     }
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const held = &@field(value.*, field.name);
         const skip = (comptime isUnsaved(T, field.name)) or
-            (if (field.defaultValue()) |default| !s.every_field and std.meta.eql(held.*, default) else false);
+            (if (field.defaultValue()) |default| !saving.every_field and std.meta.eql(held.*, default) else false);
         if (!skip) {
             try w.key(field.name);
-            try writeValue(s, w, field.type, held);
+            try writeValue(saving, w, field.type, held);
         }
     }
     // What it keeps beside it.
-    inline for (comptime scene.besideOf(T)) |beside| try beside.write(s, w);
+    inline for (comptime scene.besideOf(T)) |beside| try beside.write(saving, w);
     try w.endObject();
 }
 
@@ -544,29 +544,29 @@ fn isUnsaved(comptime T: type, comptime name: []const u8) bool {
 
 /// A value inside a component, whole: a nested struct with all its fields,
 /// so a colour reads as the four numbers it is.
-fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
+fn writeValue(saving: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
     if (T == Entity) {
-        const uuid = if (value.isNone()) null else s.app.uuidOf(value.*);
+        const uuid = if (value.isNone()) null else saving.app.uuidOf(value.*);
         const held = uuid orelse return w.writeNull();
         const text = held.toString();
         return w.writeString(&text);
     }
     // A file is written as its path, and the path kept for `assets`.
     if (comptime AssetKind.of(T)) |kind| {
-        const source = s.app.assetSource(value.*) orelse return w.writeNull();
-        const kept = try s.files.getOrPut(s.app.gpa, source);
+        const source = saving.app.assetSource(value.*) orelse return w.writeNull();
+        const kept = try saving.files.getOrPut(saving.app.gpa, source);
         if (!kept.found_existing) kept.value_ptr.* = .{};
         switch (kind) {
-            // How a texture is sampled is the file's, and goes in `assets`.
+            // How a texture is sampled is the file'saving, and goes in `assets`.
             .texture => {
-                const texture = s.app.assets.get(value.*).?;
+                const texture = saving.app.assets.get(value.*).?;
                 kept.value_ptr.* = .{ .filter = texture.filter, .wrap = texture.wrap };
             },
             // The first font of a file is the file. Another font of a
             // collection is an object that says which, so one scene can
             // hold two of a file.
             .font => {
-                const member = s.app.assets.fontMember(value.*);
+                const member = saving.app.assets.fontMember(value.*);
                 if (member != 0) {
                     try w.beginObject();
                     try w.field("file", source);
@@ -590,29 +590,29 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
             try w.beginObject();
             inline for (info.fields) |field| {
                 try w.key(field.name);
-                try writeValue(s, w, field.type, &@field(value.*, field.name));
+                try writeValue(saving, w, field.type, &@field(value.*, field.name));
             }
             try w.endObject();
         },
         .array => |info| {
-            // A name kept in the component - a `Script`'s struct, a player's
+            // A name kept in the component - a `Script`'saving struct, a player'saving
             // bus - is the text before its first zero.
             if (info.child == u8) {
                 const end = std.mem.indexOfScalar(u8, value, 0) orelse value.len;
                 return w.writeString(value[0..end]);
             }
             try w.beginArray();
-            for (value) |*item| try writeValue(s, w, info.child, item);
+            for (value) |*item| try writeValue(saving, w, info.child, item);
             try w.endArray();
         },
         .vector => |info| {
             try w.beginArray();
             const items: [info.len]info.child = value.*;
-            for (&items) |*item| try writeValue(s, w, info.child, item);
+            for (&items) |*item| try writeValue(saving, w, info.child, item);
             try w.endArray();
         },
         .optional => |info| if (value.*) |*inner| {
-            try writeValue(s, w, info.child, inner);
+            try writeValue(saving, w, info.child, inner);
         } else try w.writeNull(),
         .@"union" => |info| {
             if (info.tag_type == null) @compileError("fluxion-engine: a scene cannot tell which field of the untagged union " ++ @typeName(T) ++ " is set");
@@ -621,7 +621,7 @@ fn writeValue(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) js
                     if (@TypeOf(payload.*) == void) return w.writeString(@tagName(tag));
                     try w.beginObject();
                     try w.key(@tagName(tag));
-                    try writeValue(s, w, @TypeOf(payload.*), payload);
+                    try writeValue(saving, w, @TypeOf(payload.*), payload);
                     try w.endObject();
                 },
             }

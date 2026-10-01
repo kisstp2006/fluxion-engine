@@ -36,10 +36,11 @@
 const std = @import("std");
 const testing = std.testing;
 
-const culture_mod = @import("fluxion_platform").culture;
+/// What the system says of cultures: names, patterns, the time zone.
+const system_culture = @import("fluxion_platform").culture;
 const flux = @import("fluxion_script");
 const attr = @import("../reflect/attr.zig");
-const script_mod = @import("../script/script.zig");
+const Scripts = @import("../script/script.zig").Scripts;
 
 const file = @This();
 
@@ -74,10 +75,10 @@ pub const CultureChoice = struct {
     }
 };
 
-pub const Culture = culture_mod.Culture;
-pub const Width = culture_mod.Width;
-pub const Style = culture_mod.Style;
-pub const Unit = culture_mod.Unit;
+pub const Culture = system_culture.Culture;
+pub const Width = system_culture.Width;
+pub const Style = system_culture.Style;
+pub const Unit = system_culture.Unit;
 
 const us_per_second: i64 = 1_000_000;
 const us_per_minute: i64 = 60 * us_per_second;
@@ -303,7 +304,7 @@ pub const Zone = extern struct {
         return switch (self.kind) {
             .utc => 0,
             .fixed => self.minutes,
-            .local => @intCast(@divTrunc(culture_mod.utcOffset(at.unixMilliseconds()), 60)),
+            .local => @intCast(@divTrunc(system_culture.utcOffset(at.unixMilliseconds()), 60)),
         };
     }
 
@@ -790,7 +791,7 @@ pub const DateTime = extern struct {
                 if (n <= 2) out.number(quarter + 1, n) else out.put(culture.quarters[if (n == 4) 0 else 1][quarter]);
             },
             'M', 'L' => {
-                const context: culture_mod.Context = if (letter == 'M') .format else .standalone;
+                const context: system_culture.Context = if (letter == 'M') .format else .standalone;
                 if (n <= 2) out.number(self.month, n) else out.put(culture.monthName(@intCast(self.month), width, context));
             },
             'w' => out.number(weekOf(self.days(), culture.first_weekday, culture.minimal_days).week, n),
@@ -841,7 +842,7 @@ pub const DateTime = extern struct {
                 .utc => out.put("UTC"),
                 .local => {
                     var name: [64]u8 = undefined;
-                    const found = culture_mod.timeZoneName(&name);
+                    const found = system_culture.timeZoneName(&name);
                     if (found.len > 0) out.put(found) else out.gmt(self.offset, true);
                 },
                 .fixed => out.gmt(self.offset, true),
@@ -989,7 +990,7 @@ pub fn relative(culture: *Culture, then: Instant, now: Instant, zone: Zone, widt
     return culture.relative(buf, @floatFromInt(@divTrunc(month_apart, 12)), .year, width, false);
 }
 
-fn scriptsOf(vm: *flux.Vm) *script_mod.Scripts {
+fn scriptsOf(vm: *flux.Vm) *Scripts {
     return @ptrCast(@alignCast(vm.host.?));
 }
 
@@ -1206,7 +1207,7 @@ test "a span as a clock and in words" {
 }
 
 test "the system's culture writes in its own words" {
-    if (!culture_mod.available) return error.SkipZigTest;
+    if (!system_culture.available) return error.SkipZigTest;
     const hu = try Culture.open(testing.allocator, "hu-HU");
     defer hu.close();
     if (hu.source != .system) return error.SkipZigTest;

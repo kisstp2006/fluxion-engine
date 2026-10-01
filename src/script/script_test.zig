@@ -1686,7 +1686,7 @@ test "a file is a value of its kind to a script, made from its path where one is
         \\struct Swap {
         \\    fn ready(self) {
         \\        before = self.entity.get(Script).source.?.resource_path;
-        \\        const other = app.spawn(null);
+        \\        const other = app.newEntity(null);
         \\        other.add(Script).source = "res://door.flux";
         \\        const door: ScriptFile = "res://door.flux";
         \\        same = other.get(Script).source == door;

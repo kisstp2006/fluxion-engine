@@ -126,7 +126,7 @@ const Change = struct { entity: Entity, down: bool };
 /// An action's name as a button keeps it.
 pub const ActionName = [32]u8;
 
-/// The box a button answers in, in the frame's pixels as the fingers are;
+/// The box a button answers in, in the game area's pixels as the fingers are;
 /// null for one that does not answer now.
 fn boxOf(app: *App, entity: Entity, button: TouchButton) ?Box {
     if (!button.shown(app.input.touchscreen)) return null;

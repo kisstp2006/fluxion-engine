@@ -74,15 +74,15 @@ const chunk_text_len = std.base64.standard.Encoder.calcSize(chunk_bytes);
 /// of a level is a change to one line of the file, and base64 rather than
 /// numbers because a chunk is a kilobyte of them and nobody reads a
 /// thousand numbers.
-fn writeCells(s: *Saving, w: *json.Writer) json.Writer.Error!void {
-    const app = s.app;
+fn writeCells(saving: *Saving, w: *json.Writer) json.Writer.Error!void {
+    const app = saving.app;
     var any = false;
     // In the order the chunks were made, which for a level painted left to
     // right is the order it was painted: a scene saved again keeps its
     // lines where they were.
     var it = app.tile_chunks.by_key.iterator();
     while (it.next()) |entry| {
-        if (!entry.key_ptr.map.eql(s.entity)) continue;
+        if (!entry.key_ptr.map.eql(saving.entity)) continue;
         const chunk = app.world.getConst(entry.value_ptr.*, TileChunk) orelse continue;
         if (chunk.isEmpty()) continue;
         if (!any) {
@@ -109,32 +109,32 @@ const Pending = struct {
 /// A map's `cells`: a line of base64 under each chunk's place, as
 /// `writeCells` put them. The chunks themselves are made once every value in
 /// the scene has been written: see `Loading.whenRead`.
-fn readCells(l: *Loading) anyerror!void {
-    try l.open(.object_begin, "the map's tiles, which is an object of its chunks");
-    while (try l.key()) |name| {
-        const mark = l.path.push("{s}", .{name});
+fn readCells(loading: *Loading) anyerror!void {
+    try loading.open(.object_begin, "the map's tiles, which is an object of its chunks");
+    while (try loading.key()) |name| {
+        const mark = loading.path.push("{s}", .{name});
         const comma = std.mem.indexOfScalar(u8, name, ',') orelse
-            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+            return loading.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
         const x = std.fmt.parseInt(i32, name[0..comma], 10) catch
-            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+            return loading.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
         const y = std.fmt.parseInt(i32, name[comma + 1 ..], 10) catch
-            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+            return loading.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
 
-        const token = try l.next();
+        const token = try loading.next();
         const text = switch (token) {
             .string => |held| held,
-            else => return l.wrong("a chunk's tiles, which is a line of base64", token),
+            else => return loading.wrong("a chunk's tiles, which is a line of base64", token),
         };
-        var pending: Pending = .{ .map = l.entity, .x = x, .y = y, .cells = undefined };
+        var pending: Pending = .{ .map = loading.entity, .x = x, .y = y, .cells = undefined };
         const room = std.mem.asBytes(&pending.cells);
         const size = std.base64.standard.Decoder.calcSizeForSlice(text) catch
-            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
-        if (size != room.len) return l.fail(error.OutOfRange, "a chunk is {d} bytes of tiles, and this is {d}", .{ room.len, size });
+            return loading.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
+        if (size != room.len) return loading.fail(error.OutOfRange, "a chunk is {d} bytes of tiles, and this is {d}", .{ room.len, size });
         std.base64.standard.Decoder.decode(room, text) catch
-            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
+            return loading.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
 
-        try l.whenRead(pending, makeRead);
-        l.path.pop(mark);
+        try loading.whenRead(pending, makeRead);
+        loading.path.pop(mark);
     }
 }
 

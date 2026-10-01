@@ -142,7 +142,7 @@ fn crate(app: *App, x: f32, y: f32) !fx.Entity {
 }
 
 fn ball(app: *App, x: f32, y: f32) !fx.Entity {
-    const art = app.single(Art) orelse return error.NoArt;
+    const art = app.singleton(Art) orelse return error.NoArt;
     return app.world.spawnWith(.{
         Transform2D.at(x, y).interpolated(),
         Sprite{ .texture = art.disc, .tint = theme.ball, .width = ball_size, .height = ball_size },
@@ -240,7 +240,7 @@ pub fn main(init: std.process.Init) !void {
         .title = "Crates - Fluxion Engine",
         .width = 960,
         .height = 540,
-        .background = theme.background,
+        .clear_color = theme.background,
         .io = init.io,
         .quit_key = .escape,
         .fullscreen_key = .f11,

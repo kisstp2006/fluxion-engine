@@ -95,51 +95,51 @@ const Glance = struct {
     versioned: bool = false,
     files: std.ArrayList(Info.File) = .empty,
 
-    fn deinit(g: *Glance) void {
-        for (g.files.items) |named| g.gpa.free(named.path);
-        g.files.deinit(g.gpa);
+    fn deinit(glance: *Glance) void {
+        for (glance.files.items) |named| glance.gpa.free(named.path);
+        glance.files.deinit(glance.gpa);
     }
 
-    fn scene(g: *Glance) json.Reader.Error!void {
-        if (try g.next() != .object_begin) return;
-        while (try g.key()) |name| {
+    fn scene(glance: *Glance) json.Reader.Error!void {
+        if (try glance.next() != .object_begin) return;
+        while (try glance.key()) |name| {
             // Told apart before the next token, which the name does not
             // outlive.
             const member = std.meta.stringToEnum(enum { fluxion_scene, entities, assets }, name) orelse {
-                try g.reader.skipValue();
+                try glance.reader.skipValue();
                 continue;
             };
             switch (member) {
                 .fluxion_scene => {
-                    const number = switch (try g.next()) {
+                    const number = switch (try glance.next()) {
                         .number => |n| n.asInt(u32),
                         else => null,
                     } orelse return;
-                    g.said.version = number;
-                    g.versioned = true;
+                    glance.said.version = number;
+                    glance.versioned = true;
                 },
                 .entities => {
-                    if (try g.peek() != .array_begin) {
-                        try g.reader.skipValue();
+                    if (try glance.peek() != .array_begin) {
+                        try glance.reader.skipValue();
                         continue;
                     }
-                    _ = try g.next();
-                    while (try g.peek() != .array_end) {
-                        g.said.entities += 1;
-                        if (!try g.parented()) g.said.roots += 1;
+                    _ = try glance.next();
+                    while (try glance.peek() != .array_end) {
+                        glance.said.entities += 1;
+                        if (!try glance.parented()) glance.said.roots += 1;
                     }
-                    _ = try g.next();
+                    _ = try glance.next();
                 },
                 .assets => {
-                    if (try g.peek() != .object_begin) {
-                        try g.reader.skipValue();
+                    if (try glance.peek() != .object_begin) {
+                        try glance.reader.skipValue();
                         continue;
                     }
-                    _ = try g.next();
-                    while (try g.key()) |path| {
-                        try g.files.ensureUnusedCapacity(g.gpa, 1);
-                        g.files.appendAssumeCapacity(.{ .path = try g.gpa.dupe(u8, path) });
-                        g.files.items[g.files.items.len - 1].uid = try g.uid();
+                    _ = try glance.next();
+                    while (try glance.key()) |path| {
+                        try glance.files.ensureUnusedCapacity(glance.gpa, 1);
+                        glance.files.appendAssumeCapacity(.{ .path = try glance.gpa.dupe(u8, path) });
+                        glance.files.items[glance.files.items.len - 1].uid = try glance.uid();
                     }
                 },
             }
@@ -147,35 +147,35 @@ const Glance = struct {
     }
 
     /// Whether the entity next names a parent. The entity is passed over.
-    fn parented(g: *Glance) json.Reader.Error!bool {
-        if (try g.peek() != .object_begin) {
-            try g.reader.skipValue();
+    fn parented(glance: *Glance) json.Reader.Error!bool {
+        if (try glance.peek() != .object_begin) {
+            try glance.reader.skipValue();
             return false;
         }
-        _ = try g.next();
+        _ = try glance.next();
         var found_parent = false;
-        while (try g.key()) |name| {
+        while (try glance.key()) |name| {
             if (std.mem.eql(u8, name, "parent")) found_parent = true;
-            try g.reader.skipValue();
+            try glance.reader.skipValue();
         }
         return found_parent;
     }
 
     /// The UUID in what `assets` says of one file, when it says one that
     /// reads.
-    fn uid(g: *Glance) json.Reader.Error!?Uuid {
-        if (try g.peek() != .object_begin) {
-            try g.reader.skipValue();
+    fn uid(glance: *Glance) json.Reader.Error!?Uuid {
+        if (try glance.peek() != .object_begin) {
+            try glance.reader.skipValue();
             return null;
         }
-        _ = try g.next();
+        _ = try glance.next();
         var found_uid: ?Uuid = null;
-        while (try g.key()) |field| {
-            if (!std.mem.eql(u8, field, "uid") or try g.peek() != .string) {
-                try g.reader.skipValue();
+        while (try glance.key()) |field| {
+            if (!std.mem.eql(u8, field, "uid") or try glance.peek() != .string) {
+                try glance.reader.skipValue();
                 continue;
             }
-            const text = (try g.next()).string;
+            const text = (try glance.next()).string;
             const body = if (std.mem.startsWith(u8, text, Project.uid_scheme)) text[Project.uid_scheme.len..] else text;
             found_uid = Uuid.parse(body) catch null;
         }
@@ -184,22 +184,22 @@ const Glance = struct {
 
     /// The next token. The input ending where a value should be is a
     /// mistake, never the end of a loop.
-    fn next(g: *Glance) json.Reader.Error!Token {
-        return (try g.reader.next()) orelse g.endsTooSoon();
+    fn next(glance: *Glance) json.Reader.Error!Token {
+        return (try glance.reader.next()) orelse glance.endsTooSoon();
     }
 
-    fn peek(g: *Glance) json.Reader.Error!json.Reader.Kind {
-        return (try g.reader.peek()) orelse g.endsTooSoon();
+    fn peek(glance: *Glance) json.Reader.Error!json.Reader.Kind {
+        return (try glance.reader.peek()) orelse glance.endsTooSoon();
     }
 
-    fn endsTooSoon(g: *Glance) json.Reader.Error {
-        g.reader.report("the scene ends too soon", .{});
+    fn endsTooSoon(glance: *Glance) json.Reader.Error {
+        glance.reader.report("the scene ends too soon", .{});
         return error.SyntaxError;
     }
 
     /// The next member's name, or null at the end of the object.
-    fn key(g: *Glance) json.Reader.Error!?[]const u8 {
-        return switch (try g.next()) {
+    fn key(glance: *Glance) json.Reader.Error!?[]const u8 {
+        return switch (try glance.next()) {
             .key => |name| name,
             else => null,
         };

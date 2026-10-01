@@ -56,13 +56,13 @@ fn autoload(app: *App, path: []const u8) !void {
 /// middle of the window. Nothing without a window.
 fn showBootSplash(app: *App, splash: Project.Application.BootSplash) void {
     if (app.window == null) return;
-    const kept = app.background;
-    defer app.background = kept;
-    app.background = splash.color;
+    const kept = app.clear_color;
+    defer app.clear_color = kept;
+    app.clear_color = splash.color;
     var shown: ?ecs.Entity = null;
     if (splash.image.len > 0) {
         if (app.assets.loadTexture(splash.image, .{ .filter = .linear })) |picture| {
-            const middle = app.screenToWorld(@as(f32, @floatFromInt(app.frame.width)) / 2, @as(f32, @floatFromInt(app.frame.height)) / 2);
+            const middle = app.screenToWorld(@as(f32, @floatFromInt(app.game_area.width)) / 2, @as(f32, @floatFromInt(app.game_area.height)) / 2);
             shown = app.world.spawnWith(.{ components.Transform2D.at(middle.x, middle.y), components.Sprite.of(picture) }) catch null;
         } else |err| log.warn("the boot splash's picture {s} did not read: {t}", .{ splash.image, err });
     }

@@ -115,8 +115,8 @@ fn forgetParams(app: *App, entity: Entity) void {
 
 /// A material's numbers, as an object by field: one number, or a list of
 /// them for a vector or a matrix. What it gives nothing is left out.
-fn writeParams(s: *Saving, w: *json.Writer) json.Writer.Error!void {
-    const given = s.app.shader_params.of(s.entity);
+fn writeParams(saving: *Saving, w: *json.Writer) json.Writer.Error!void {
+    const given = saving.app.shader_params.of(saving.entity);
     if (given.len == 0) return;
     try w.key("params");
     try w.beginObject();
@@ -136,36 +136,36 @@ fn writeParams(s: *Saving, w: *json.Writer) json.Writer.Error!void {
 
 /// A material's numbers, by field: a number, a list of up to sixteen, or a
 /// colour written `"#rrggbb"`.
-fn readParams(l: *Loading) anyerror!void {
-    try l.open(.object_begin, "a material's numbers, which is an object of its shader's fields");
-    while (try l.key()) |name| {
+fn readParams(loading: *Loading) anyerror!void {
+    try loading.open(.object_begin, "a material's numbers, which is an object of its shader's fields");
+    while (try loading.key()) |name| {
         var numbers: [16]f32 = undefined;
         var len: usize = 0;
-        switch (try l.next()) {
+        switch (try loading.next()) {
             .number => |n| {
                 numbers[0] = n.asFloat(f32);
                 len = 1;
             },
             .string => |text| {
                 const colour = Color.parse(text) orelse
-                    return l.fail(error.WrongType, "{s} is not a colour, which is written #rrggbb or #rrggbbaa", .{text});
+                    return loading.fail(error.WrongType, "{s} is not a colour, which is written #rrggbb or #rrggbbaa", .{text});
                 numbers[0..4].* = .{ colour.r, colour.g, colour.b, colour.a };
                 len = 4;
             },
             .array_begin => while (true) {
-                switch (try l.next()) {
+                switch (try loading.next()) {
                     .array_end => break,
                     .number => |n| {
-                        if (len == numbers.len) return l.fail(error.OutOfRange, "{s} is more than sixteen numbers", .{name});
+                        if (len == numbers.len) return loading.fail(error.OutOfRange, "{s} is more than sixteen numbers", .{name});
                         numbers[len] = n.asFloat(f32);
                         len += 1;
                     },
-                    else => |other| return l.wrong("a number", other),
+                    else => |other| return loading.wrong("a number", other),
                 }
             },
-            else => |other| return l.wrong("a number, a list of them or a colour", other),
+            else => |other| return loading.wrong("a number, a list of them or a colour", other),
         }
-        if (!l.entity.isNone()) try l.app.setShaderParam(l.entity, name, numbers[0..len]);
+        if (!loading.entity.isNone()) try loading.app.setShaderParam(loading.entity, name, numbers[0..len]);
     }
 }
 
@@ -370,16 +370,16 @@ pub const Param = struct {
 /// The numbers each entity's material gives its shader, kept beside the
 /// world as its words are, and gone with it.
 pub const Params = struct {
-    map: std.AutoHashMapUnmanaged(Entity, std.ArrayListUnmanaged(Param)) = .empty,
+    of_entity: std.AutoHashMapUnmanaged(Entity, std.ArrayListUnmanaged(Param)) = .empty,
 
     pub fn deinit(self: *Params, gpa: Allocator) void {
         self.freeAll(gpa);
-        self.map.deinit(gpa);
+        self.of_entity.deinit(gpa);
     }
 
     /// Every number an entity gives, in the order it was first given.
     pub fn of(self: *const Params, entity: Entity) []const Param {
-        const held = self.map.getPtr(entity) orelse return &.{};
+        const held = self.of_entity.getPtr(entity) orelse return &.{};
         return held.items;
     }
 
@@ -393,7 +393,7 @@ pub const Params = struct {
     /// Give a field `numbers` - at most sixteen - or, for none, what the
     /// file says again.
     pub fn set(self: *Params, gpa: Allocator, entity: Entity, name: []const u8, numbers: []const f32) Allocator.Error!void {
-        const slot = try self.map.getOrPut(gpa, entity);
+        const slot = try self.of_entity.getOrPut(gpa, entity);
         if (!slot.found_existing) slot.value_ptr.* = .empty;
         const list = slot.value_ptr;
         for (list.items, 0..) |*param, index| {
@@ -419,7 +419,7 @@ pub const Params = struct {
 
     /// Forget every number an entity gives.
     pub fn clearOf(self: *Params, gpa: Allocator, entity: Entity) void {
-        var gone = self.map.fetchRemove(entity) orelse return;
+        var gone = self.of_entity.fetchRemove(entity) orelse return;
         freeList(gpa, &gone.value);
     }
 
@@ -427,7 +427,7 @@ pub const Params = struct {
     pub fn forgetDead(self: *Params, app: *App) void {
         var dead: std.ArrayList(Entity) = .empty;
         defer dead.deinit(app.gpa);
-        var it = self.map.keyIterator();
+        var it = self.of_entity.keyIterator();
         while (it.next()) |entity| {
             if (!app.world.isAlive(entity.*)) dead.append(app.gpa, entity.*) catch break;
         }
@@ -439,9 +439,9 @@ pub const Params = struct {
     }
 
     fn freeAll(self: *Params, gpa: Allocator) void {
-        var it = self.map.valueIterator();
+        var it = self.of_entity.valueIterator();
         while (it.next()) |list| freeList(gpa, list);
-        self.map.clearRetainingCapacity();
+        self.of_entity.clearRetainingCapacity();
     }
 
     fn freeList(gpa: Allocator, list: *std.ArrayListUnmanaged(Param)) void {

@@ -49,13 +49,12 @@ const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
 const attr = @import("../reflect/attr.zig");
 const file_table = @import("../assets/file_table.zig");
-const property_mod = @import("../reflect/property.zig");
+const Property = @import("../reflect/property.zig").Property;
+const Value = @import("../reflect/property.zig").Value;
 const Color = @import("../math/color.zig").Color;
 const fixed_text = @import("../reflect/fixed_text.zig");
 
 const Entity = ecs.Entity;
-const Property = property_mod.Property;
-const Value = property_mod.Value;
 const log = std.log.scoped(.fluxion_engine);
 
 /// An animation library read: see `Libraries`.
@@ -688,7 +687,7 @@ const Bound = struct {
 /// What each player's tracks are bound to, for the library's revision and
 /// the animation it plays: `app.animation_players`.
 pub const Players = struct {
-    by: std.AutoArrayHashMapUnmanaged(Entity, Binding) = .empty,
+    of_entity: std.AutoArrayHashMapUnmanaged(Entity, Binding) = .empty,
     /// Signals to say after the pass.
     said: std.ArrayList(Said) = .empty,
 
@@ -702,23 +701,23 @@ pub const Players = struct {
     };
 
     pub fn deinit(self: *Players, gpa: Allocator) void {
-        for (self.by.values()) |*binding| binding.tracks.deinit(gpa);
-        self.by.deinit(gpa);
+        for (self.of_entity.values()) |*binding| binding.tracks.deinit(gpa);
+        self.of_entity.deinit(gpa);
         self.said.deinit(gpa);
     }
 
     pub fn clear(self: *Players, app: *App) void {
-        for (self.by.values()) |*binding| binding.tracks.deinit(app.gpa);
-        self.by.clearRetainingCapacity();
+        for (self.of_entity.values()) |*binding| binding.tracks.deinit(app.gpa);
+        self.of_entity.clearRetainingCapacity();
     }
 
     pub fn forgetDead(self: *Players, app: *App) void {
-        var at = self.by.count();
+        var at = self.of_entity.count();
         while (at > 0) {
             at -= 1;
-            if (app.world.isAlive(self.by.keys()[at])) continue;
-            self.by.values()[at].tracks.deinit(app.gpa);
-            self.by.swapRemoveAt(at);
+            if (app.world.isAlive(self.of_entity.keys()[at])) continue;
+            self.of_entity.values()[at].tracks.deinit(app.gpa);
+            self.of_entity.swapRemoveAt(at);
         }
     }
 };
@@ -843,7 +842,7 @@ fn timeIn(animation: *const Animation, position: f32) f32 {
 /// The player's tracks bound to what they move, again after a change to the
 /// library or to what it plays, or when an entity bound is gone.
 fn bindingOf(app: *App, e: Entity, player: *const AnimationPlayer, library: *const Library, animation: *const Animation) !*Players.Binding {
-    const entry = try app.animation_players.by.getOrPut(app.gpa, e);
+    const entry = try app.animation_players.of_entity.getOrPut(app.gpa, e);
     if (!entry.found_existing) entry.value_ptr.* = .{};
     const binding = entry.value_ptr;
     var fresh = !binding.library.eql(player.library) or binding.revision != library.revision or !std.mem.eql(u8, &binding.name, &player.current);

@@ -18,7 +18,7 @@ const property = @import("../reflect/property.zig");
 const attr = @import("../reflect/attr.zig");
 const Project = @import("../project/Project.zig");
 const tileset = @import("../tiles/tileset.zig");
-const shaders_mod = @import("../render/shaders.zig");
+const Material = @import("../render/shaders.zig").Material;
 const Color = @import("../math/color.zig").Color;
 const input_event = @import("../input/input_event.zig");
 const InputEvent = input_event.InputEvent;
@@ -127,7 +127,7 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
             // A transform's place and scale as vectors: `t.position`.
             if (entry.type.same(reflect.typeOf(Transform2D))) return transformVector(self, source, name);
             // A material's numbers: `material.strength`.
-            if (entry.type.same(reflect.typeOf(shaders_mod.Material))) if (try shaderParamOf(self, source, name)) |value| return value;
+            if (entry.type.same(reflect.typeOf(Material))) if (try shaderParamOf(self, source, name)) |value| return value;
             for (entry.signals) |decl| {
                 if (std.mem.eql(u8, decl.name, name)) return try self.bridgeOf(source, entry.name, decl.name, decl.args.fields().len);
             }
@@ -158,7 +158,7 @@ fn hostSetMember(vm: *flux.Vm, handle: flux.Value, name: []const u8, value: flux
     const source = Entity.fromInt(h.key);
     for (self.app.scene_components.entries.items) |*entry| {
         if (!entry.type.same(h.value.type)) continue;
-        if (entry.type.same(reflect.typeOf(shaders_mod.Material))) return setShaderParamOf(self, source, name, value);
+        if (entry.type.same(reflect.typeOf(Material))) return setShaderParamOf(self, source, name, value);
         if (entry.type.same(reflect.typeOf(Transform2D))) return setTransformVector(self, source, name, value);
         if (component_texts.attributeOf(entry.type, name) == null) return false;
         if (value.tag != .string) return vm.fail("{s}.{s} is text, not {s}", .{ entry.name, name, typeName(value) });
@@ -217,7 +217,7 @@ fn shaderParamOf(self: *Scripts, entity: Entity, name: []const u8) flux.Vm.Error
 /// `material.glow = Color(1, 0.8, 0.3)`.
 fn setShaderParamOf(self: *Scripts, entity: Entity, name: []const u8, value: flux.Value) flux.Vm.Error!bool {
     const vm = self.vm;
-    const held = self.app.world.get(entity, shaders_mod.Material) orelse return false;
+    const held = self.app.world.get(entity, Material) orelse return false;
     // A shader that compiled says what it has; one that did not is given
     // what it is given.
     if (self.app.shaders.compiledOf(held.shader) != null and self.app.shaderParamField(entity, name) == null) return false;
@@ -425,7 +425,7 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
         };
     }
     // A material's numbers are its shader's to name.
-    try vm.declareOpen(reflect.typeOf(shaders_mod.Material));
+    try vm.declareOpen(reflect.typeOf(Material));
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "position", .type = .vec2, .writable = true, .doc = "`x` and `y` as one vector: `t.position += velocity * delta`." });
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "scale", .type = .vec2, .writable = true, .doc = "`scale_x` and `scale_y` as one vector." });
     for (ClockRef.signal_names) |name| try vm.declareMember(.{ .of = reflect.typeOf(ClockRef), .name = name, .type = .signal });

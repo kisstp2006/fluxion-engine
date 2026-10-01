@@ -222,7 +222,7 @@ pub const Options = struct {
 
     /// What the frame is cleared to. Null is the project file's
     /// `rendering.clear_color`.
-    background: ?Color = null,
+    clear_color: ?Color = null,
 
     /// One fixed step, in seconds. Null is a step of the project file's
     /// `physics_2d.ticks_per_second` - sixty a second, with none.
@@ -273,7 +273,7 @@ pub const Resolved = struct {
     screen: u16,
     position: geometry.Vec2i,
     keep_screen_on: bool,
-    background: Color,
+    clear_color: Color,
     fixed_delta: f32,
     max_fixed_steps: u32,
     max_fps: ?f32,
@@ -310,7 +310,7 @@ pub const Resolved = struct {
             .screen = options.screen orelse display.screen,
             .position = options.position orelse display.position,
             .keep_screen_on = options.keep_screen_on orelse display.keep_screen_on,
-            .background = options.background orelse rendering.clear_color,
+            .clear_color = options.clear_color orelse rendering.clear_color,
             .fixed_delta = options.fixed_delta orelse 1.0 / @as(f32, @floatFromInt(@max(physics_2d.ticks_per_second, 1))),
             .max_fixed_steps = @max(physics_2d.max_steps_per_frame, 1),
             .max_fps = options.max_fps orelse if (application.max_fps > 0) @floatFromInt(application.max_fps) else null,

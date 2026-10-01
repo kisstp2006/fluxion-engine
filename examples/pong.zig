@@ -40,7 +40,7 @@
 //! game takes and never how the game plays.
 //!
 //! **The score is a component on an entity**, the only one of its kind, and
-//! `app.single(Score)` is how every system finds it. A singleton entity is the
+//! `app.singleton(Score)` is how every system finds it. A singleton entity is the
 //! ECS answer to state that is not about a thing, and it is saved and loaded
 //! with the world for free.
 
@@ -219,7 +219,7 @@ fn readKeys(app: *App) !void {
     const pads = app.input.anyPad();
 
     if (app.input.justPressed(.r) or pads.justPressed(.start)) {
-        if (app.single(Score)) |score| score.* = .{};
+        if (app.singleton(Score)) |score| score.* = .{};
         try resetBall(app, 1);
     }
 
@@ -365,7 +365,7 @@ fn overlaps(place: Transform2D, bat: Bat) bool {
 }
 
 fn award(app: *App, side: u8) void {
-    const score = app.single(Score) orelse return;
+    const score = app.singleton(Score) orelse return;
     if (score.winner != 0) return;
 
     if (side == 1) score.left += 1 else score.right += 1;
@@ -387,7 +387,7 @@ fn resetBall(app: *App, towards: f32) !void {
 
 /// Show one pip per point. The scoreboard is sprites, like everything else.
 fn showScore(app: *App) !void {
-    const score = app.single(Score) orelse return;
+    const score = app.singleton(Score) orelse return;
 
     var it = try Pips.over(&app.world);
     while (it.next()) |pips| {
@@ -401,12 +401,12 @@ fn showScore(app: *App) !void {
 /// A won game pulses the winner's colour, which is the whole of the
 /// celebration a game with no text can manage.
 fn celebrate(app: *App) !void {
-    const score = app.single(Score) orelse return;
+    const score = app.singleton(Score) orelse return;
     if (score.winner == 0) return;
 
     const pulse = 0.5 + 0.5 * @sin(@as(f32, @floatCast(app.time.elapsed)) * 6);
     const base = if (score.winner == 1) theme.left else theme.right;
-    app.background = Color.mix(theme.background, base.withAlpha(1), pulse * 0.25);
+    app.clear_color = Color.mix(theme.background, base.withAlpha(1), pulse * 0.25);
 }
 
 // -------------------------------------------------------------------------
@@ -428,7 +428,7 @@ pub fn main(init: std.process.Init) !void {
         .title = "Pong - Fluxion Engine",
         .width = 960,
         .height = 540,
-        .background = theme.background,
+        .clear_color = theme.background,
         .io = init.io,
         .quit_key = .escape,
         .fullscreen_key = .f11,

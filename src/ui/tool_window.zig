@@ -65,7 +65,7 @@ ui: ui_lib.Ui,
 interface: Interface = .{},
 draw: ?Draw = null,
 /// Filled behind the interface.
-background: [4]f32 = .{ 0.11, 0.12, 0.14, 1 },
+clear_color: [4]f32 = .{ 0.11, 0.12, 0.14, 1 },
 
 /// The drawable size in pixels, and whether it changed since the device's
 /// surface was told.
@@ -205,7 +205,7 @@ pub fn open(app: *App, desc: Desc) !*ToolWindow {
             .width = tool.width,
             .height = tool.height,
             .usage = .{ .sampled = true, .render_target = true },
-            .clear_color = tool.background,
+            .clear_color = tool.clear_color,
             .label = "tool window",
         });
     }
@@ -272,7 +272,7 @@ pub fn render(self: *ToolWindow, app: *App) !void {
     if (self.handle) |handle| if (handle.isIconified()) return;
     const into = self.target();
     const cmd = app.device.begin();
-    try cmd.beginPass(.{ .color = .{ .target = into, .clear_color = self.background } });
+    try cmd.beginPass(.{ .color = .{ .target = into, .clear_color = self.clear_color } });
     try cmd.endPass();
     try app.device.submit();
     try self.interface.draw(app.gpa, &app.device, app.interface.fillFaces(&app.assets), into, @floatFromInt(self.width), @floatFromInt(self.height));

@@ -526,7 +526,7 @@ const turn = app.input.pointer.dx;
   so a cursor a page will see should be small.
 - **Where the pointer is, and how fast**: `input.pointer.x/y` in the
   framebuffer's pixels - `app.pointerOnScreen()` from a script - against
-  `app.screenSize()`, the frame's size in those pixels, so a place on the
+  `app.screenSize()`, the game area's size in those pixels, so a place on the
   screen reads the same at every resolution:
   `app.pointerOnScreen().x / app.screenSize().x` is 0 at the left and 1 at
   the right. `app.pointerInWorld()` is through the camera,
@@ -560,7 +560,7 @@ for (app.input.touches()) |finger| {
 
 - **Every finger is a `Touch` of its own**, on Android and in a browser:
   `finger`, its number from the frame it touches to the frame it is lifted,
-  `position` in the frame's pixels as the pointer's, `start`, `relative`
+  `position` in the game area's pixels as the pointer's, `start`, `relative`
   (this frame's moving), `pressure`, and the edges `pressed` and `released`
   - a finger lifted is there one last frame with `released`, and `canceled`
   when the system took it. `input.touches()` is this frame's fingers in the
@@ -744,9 +744,9 @@ if (tool.close_pressed) app.closeToolWindow(tool);
 - **A game changes all four as it runs**: `setStretchMode`,
   `setStretchAspect`, `setStretchScale`, `setStretchScaleMode`, each with
   its question, a settings menu's "pixel perfect" included.
-- **What the game sees is the frame**: `app.frame` - its `width` and
+- **What the game sees is its area**: `app.game_area` - its `width` and
   `height`, what the interface is laid out in and the camera's view is
-  sized by, and its `scale` - and the pointer in the frame's pixels, turned
+  sized by, and its `scale` - and the pointer in the area's pixels, turned
   from the window's as it comes, so `pointerInWorld` and a click on a
   control need nothing. `app.width` and `app.height` are still the window's.
 - **An editor's window is its own**: `Options.stretch = .{}` is the window
@@ -1170,7 +1170,7 @@ try app.callGroup("enemies", "alert");
   `keep_global` it stays where it is in the world, its own transform written
   to land there; without, its numbers stay and it moves with the new parent.
   A loop - the entity itself, or something under it - is `error.Loop`.
-  `app.parentOf` and `app.hangsFrom` read it. A `Parent` written straight
+  `app.parentOf` and `app.isDescendantOf` read it. A `Parent` written straight
   into the component is seen after the next spawn, despawn or change of
   components, and renames nothing, so an inspector shows it read-only and
   leaves the move to `setParent`.
@@ -1283,7 +1283,7 @@ _ = try world.spawnWith(.{
   - `globalTranslate` moves it by an amount in the world, and `toLocal`/`toGlobal` take a point in and out of its space.
   - `lookAt` turns its `+x` to a point, and `getAngleTo` says how far that is.
   - `moveLocalX`/`moveLocalY`, `rotate` and `applyScale` change its own numbers along its own axes.
-  - `getRelativeTransformToParent` says where it is in an ancestor's space.
+  - `getTransformRelativeTo` says where it is in an ancestor's space.
   - These are where the entity is. What an entity that `interpolate`s is drawn at between two steps is `drawnTransform`.
 - **Particles and lights are drawn in this pass too**: see
   [Particles](#-particles) and [Lights and shadows](#-lights-and-shadows).
@@ -3038,7 +3038,7 @@ struct Door {
   `CursorShape`, and a component's own where no other has its name.
   - An enum is a Flux enum: `event.key == .space`, `app.setCursor(.hidden)`, `Key.escape`; never a string.
   - A union is the arm it holds: its payload, asked for with `is` - `if (event is KeyEvent)` - or, for an arm that holds nothing, its name.
-  - What may be none is optional: a field that holds an entity or a file - `sprite.texture` - and what a call gives that may be none - `app.parentOf(e)`, `app.currentScene()` - are read with `.?`, `orelse` or `if (x) |v|`. What a call that can fail gives is never none: `app.spawn(null)` is an entity.
+  - What may be none is optional: a field that holds an entity or a file - `sprite.texture` - and what a call gives that may be none - `app.parentOf(e)`, `app.currentScene()` - are read with `.?`, `orelse` or `if (x) |v|`. What a call that can fail gives is never none: `app.newEntity(null)` is an entity.
   - So a call is checked as the script compiles - how many arguments, of what types, and what it gives back - and an editor offers their fields and methods after the dot, with their signatures and what their doc comments say. `tools/member_docs.zig` gathers those from the engine's source as it builds.
 - **An error of the engine's stops the script** with its name, as a
   mistake in the script would: a name taken, a component that is not
@@ -3091,7 +3091,7 @@ struct Guard {
   saved; it goes with its entity, and with `clearWorld`.
 - **`app.nextFrame()`** is a signal emitted once a frame: `await
   app.nextFrame()` goes on in the next one, even from `ready`.
-- **Making and unmaking.** `app.spawn(parent)` makes an empty entity -
+- **Making and unmaking.** `app.newEntity(parent)` makes an empty entity -
   `null` for the top of the tree, `entity.spawnChild()` one under an
   entity - and `entity.despawn()` takes one away
   with everything under it, at once. `app.instantiate("res://…", parent)`
@@ -3529,7 +3529,7 @@ before this package existed - the seam was cut for it deliberately.
 ## 💭 Not on the list yet
 
 - **Resources** - a typed store for state that is not a component. A singleton
-  entity is the answer today - `app.single(Score)` finds it - it saves and
+  entity is the answer today - `app.singleton(Score)` finds it - it saves and
   loads with the world for free, and the case for a second mechanism has not
   been made.
 - **Parallel systems.** Work inside a system already goes on every core

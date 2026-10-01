@@ -111,7 +111,7 @@ test "a material that reads the screen has the frame drawn where it can be read,
         \\}
     );
     _ = try app.step();
-    try testing.expect(app.screen.frame == null);
+    try testing.expect(app.screen_texture.frame == null);
 
     var first = Sprite.solid(.white, 8, 8);
     first.order = 0;
@@ -123,9 +123,9 @@ test "a material that reads the screen has the frame drawn where it can be read,
     _ = try app.world.spawnWith(.{ Transform2D.at(20, 10), between });
     _ = try app.world.spawnWith(.{ Transform2D.at(30, 10), last, Material{ .shader = shade } });
     _ = try app.step();
-    try testing.expect(app.screen.frame != null);
+    try testing.expect(app.screen_texture.frame != null);
     // Once before the first, and again after the plain one went down.
-    try testing.expectEqual(@as(u32, 2), app.screen.copies);
+    try testing.expectEqual(@as(u32, 2), app.screen_texture.copies);
 }
 
 test "a colour rect with a material is drawn by its shader, in the box the interface leaves" {
@@ -280,9 +280,9 @@ test "a stretched game is laid out at its own size, drawn apart and put on the w
     _ = try app.world.spawnWith(.{ Transform2D.at(16, 8), Sprite.solid(.white, 4, 4) });
     _ = try app.step();
     // Four window pixels a picture pixel, and a bar of eight above and below.
-    try testing.expectEqual(@as(u32, 32), app.frame.width);
-    try testing.expectEqual(@as(f32, 8), app.frame.shown.y);
-    try testing.expect(app.screen.frame != null);
+    try testing.expectEqual(@as(u32, 32), app.game_area.width);
+    try testing.expectEqual(@as(f32, 8), app.game_area.shown.y);
+    try testing.expect(app.screen_texture.frame != null);
     try testing.expectEqual(@as(u32, 1), app.sprites.drawn);
 
     app.input.apply(.{ .cursor = .{ .window = .none, .x = 64, .y = 40, .dx = 4, .dy = 0 } });
@@ -295,11 +295,11 @@ test "a stretched game is laid out at its own size, drawn apart and put on the w
     // A canvas: the window's pixels, with everything four times the size.
     app.stretch.mode = .canvas;
     _ = try app.step();
-    try testing.expectEqual(@as(u32, 128), app.frame.width);
-    try testing.expectEqual(@as(f32, 4), app.frame.scale);
+    try testing.expectEqual(@as(u32, 128), app.game_area.width);
+    try testing.expectEqual(@as(f32, 4), app.game_area.scale);
     try testing.expectEqual(@as(f32, 4), app.currentView().zoom_x);
     try testing.expectEqual(@as(f32, 4), app.interface.scale);
-    // With no camera, the made-at size's top left is the frame's.
+    // With no camera, the made-at size's top left is the game area's.
     try testing.expectApproxEqAbs(@as(f32, 0), app.currentView().toScreen(.init(0, 0)).x, 0.001);
     try testing.expectApproxEqAbs(@as(f32, 128), app.currentView().toScreen(.init(32, 16)).x, 0.001);
 }
@@ -308,7 +308,7 @@ const lights = @import("lights.zig");
 const Appearance = @import("../scene/inherited.zig").Appearance;
 const Assets = @import("../assets/assets.zig");
 const View = @import("view.zig").View;
-const drawing_mod = @import("drawing.zig");
+const Drawing2D = @import("drawing.zig").Drawing2D;
 const image = @import("fluxion_image");
 const helpers = @import("../test_helpers.zig");
 const pressOf = helpers.pressOf;
@@ -701,7 +701,7 @@ test "a drawing is drawn at its entity: boxes, lines, circles and polygons among
     try app.drawLine(canvas, .init(0, 0), .init(20, 0), .white, 2);
     try app.drawCircle(canvas, .init(0, 0), 20, .white, true, 1);
     try app.drawPolygon(canvas, &.{ .init(0, 0), .init(8, 0), .init(8, 8), .init(0, 8) }, .white);
-    try testing.expect(app.world.has(canvas, drawing_mod.Drawing2D));
+    try testing.expect(app.world.has(canvas, Drawing2D));
     // A sprite on a layer over it.
     _ = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Sprite{ .width = 4, .height = 4, .layer = 1 } });
     _ = try app.step();

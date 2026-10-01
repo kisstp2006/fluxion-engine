@@ -154,38 +154,38 @@ pub const Picture = struct {
 
 /// Every entity's picture: `app.drawings`.
 pub const Drawings = struct {
-    by: std.AutoArrayHashMapUnmanaged(Entity, Picture) = .empty,
+    of_entity: std.AutoArrayHashMapUnmanaged(Entity, Picture) = .empty,
 
     pub fn deinit(self: *Drawings, gpa: Allocator) void {
-        for (self.by.values()) |*picture| picture.deinit(gpa);
-        self.by.deinit(gpa);
+        for (self.of_entity.values()) |*picture| picture.deinit(gpa);
+        self.of_entity.deinit(gpa);
     }
 
     /// Every picture gone: the world was cleared.
     pub fn clear(self: *Drawings, app: *App) void {
-        for (self.by.values()) |*picture| picture.deinit(app.gpa);
-        self.by.clearRetainingCapacity();
+        for (self.of_entity.values()) |*picture| picture.deinit(app.gpa);
+        self.of_entity.clearRetainingCapacity();
     }
 
     pub fn get(self: *const Drawings, entity: Entity) ?*Picture {
-        return self.by.getPtr(entity);
+        return self.of_entity.getPtr(entity);
     }
 
     /// An entity's picture, made the first time it is asked for.
     pub fn pictureOf(self: *Drawings, gpa: Allocator, entity: Entity) Allocator.Error!*Picture {
-        const entry = try self.by.getOrPut(gpa, entity);
+        const entry = try self.of_entity.getOrPut(gpa, entity);
         if (!entry.found_existing) entry.value_ptr.* = .{};
         return entry.value_ptr;
     }
 
     /// Let go of the pictures of the dead.
     pub fn forgetDead(self: *Drawings, app: *App) void {
-        var at = self.by.count();
+        var at = self.of_entity.count();
         while (at > 0) {
             at -= 1;
-            if (app.world.isAlive(self.by.keys()[at])) continue;
-            self.by.values()[at].deinit(app.gpa);
-            self.by.swapRemoveAt(at);
+            if (app.world.isAlive(self.of_entity.keys()[at])) continue;
+            self.of_entity.values()[at].deinit(app.gpa);
+            self.of_entity.swapRemoveAt(at);
         }
     }
 };

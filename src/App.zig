@@ -344,7 +344,7 @@ offscreen: ?rhi.Texture = null,
 sprites: sprite.Renderer,
 /// Where a frame something reads is drawn, and copied for what reads it.
 /// See `render/screen.zig`.
-screen: Screen,
+screen_texture: Screen,
 /// Every `.shader` file read, compiled for the 2D layer: see `render/shaders.zig`
 /// and `loadShader`.
 shaders: shading.Shaders = .{},
@@ -357,7 +357,7 @@ drawings: drawing.Drawings = .{},
 /// Each `Particles2D`'s particles: see `render/particles.zig`.
 particles: particle_emitters.Particles = .{},
 /// What the frame is cleared to.
-background: Color,
+clear_color: Color,
 /// Whether the frame draws the world under the interface. An editor turns it
 /// off and shows the world in a panel of its own, through `drawWorld`; the
 /// frame is then the background and the interface.
@@ -374,7 +374,7 @@ resized: bool = false,
 stretch: stretching.Stretch = .{},
 /// What this frame is laid out and drawn at, and where on the window it is
 /// shown: the window itself unless the project stretches its game.
-frame: stretching.Frame = .window(1, 1),
+game_area: stretching.GameArea = .window(1, 1),
 /// How frames are shown against the refresh, as last asked: kept for a
 /// headless app too, which has no display to wait for.
 vsync_mode_now: VsyncMode = .enabled,
@@ -617,7 +617,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .project = undefined,
         .assets = undefined,
         .sprites = undefined,
-        .screen = undefined,
+        .screen_texture = undefined,
         .debug = undefined,
         .debug_frame = .init(gpa),
         .debug_steps = .init(gpa),
@@ -655,7 +655,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .schedule = .{ .io = options.io, .commands = &self.commands, .signals = &self.signals },
         .states = .{},
         .gate = null,
-        .background = options.background orelse Project.Rendering.default_clear_color,
+        .clear_color = options.clear_color orelse Project.Rendering.default_clear_color,
         .world_on_screen = true,
         .width = options.width orelse 0,
         .height = options.height orelse 0,
@@ -720,11 +720,11 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     // The window, the frame and the clock: what the game says, over what
     // the project says, over the engine's own.
     const resolved: Resolved = .of(options, if (self.project.settings) |*held| held else null, self.physics_2d);
-    self.background = resolved.background;
+    self.clear_color = resolved.clear_color;
     self.width = resolved.width;
     self.height = resolved.height;
     self.stretch = resolved.stretch;
-    display.fitFrame(self);
+    display.fitGameArea(self);
     self.vsync_mode_now = resolved.vsync_mode;
     self.time.fixed_delta = resolved.fixed_delta;
     self.time.max_fixed_steps = resolved.max_fixed_steps;
@@ -792,12 +792,12 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 
     self.sprites = try .init(gpa, &self.device);
     errdefer self.sprites.deinit(gpa);
-    self.screen = try .init(gpa, &self.device);
-    errdefer self.screen.deinit();
+    self.screen_texture = try .init(gpa, &self.device);
+    errdefer self.screen_texture.deinit();
     self.sprites.texts = &self.texts;
     self.sprites.shaders = &self.shaders;
     self.sprites.params = &self.shader_params;
-    self.sprites.screen = &self.screen;
+    self.sprites.screen = &self.screen_texture;
     self.sprites.views = &self.views;
     self.sprites.drawings = &self.drawings;
     self.sprites.particles = &self.particles;
@@ -866,7 +866,7 @@ pub fn destroy(self: *App) void {
     self.control_tree.deinit(gpa);
     self.ui.deinit();
     self.sprites.deinit(gpa);
-    self.screen.deinit();
+    self.screen_texture.deinit();
     self.shaders.deinit(gpa, &self.device);
     self.views.deinit(gpa);
     self.assets.deinit();
@@ -1477,8 +1477,8 @@ pub fn registerComponents(self: *App, comptime list: anytype) scene.Registry.Err
 
 /// A new entity, with nothing on it, hanging from `parent` - or a root, for
 /// none. What a script makes things with: `self.entity.spawnChild()`, or
-/// `app.spawn(null)` for a root, then `add(Sprite)`.
-pub fn spawn(self: *App, parent: ecs.Entity) !ecs.Entity {
+/// `app.newEntity(null)` for a root, then `add(Sprite)`.
+pub fn newEntity(self: *App, parent: ecs.Entity) !ecs.Entity {
     const made = try self.world.spawn();
     errdefer self.world.despawn(made);
     if (!parent.isNone()) try self.setParent(made, parent, false);
@@ -1500,14 +1500,14 @@ pub fn createTimer(self: *App, seconds: f32) ecs.World.Error!ecs.Entity {
 /// exactly one of. Null when there is none.
 ///
 /// ```zig
-/// const score = app.single(Score) orelse return;
+/// const score = app.singleton(Score) orelse return;
 /// score.left += 1;
 /// ```
 ///
 /// A second entity with a `T` stops a debug build here rather than quietly
 /// picking one. The pointer lasts until rows next move, as with `World.get`.
 /// Asking about a component the world has never seen registers nothing.
-pub fn single(self: *App, comptime T: type) ?*T {
+pub fn singleton(self: *App, comptime T: type) ?*T {
     const id = self.world.findId(T) orelse return null;
     var found: ?ecs.Entity = null;
     for (self.world.archetypeSlice()) |*archetype| {
@@ -1565,8 +1565,8 @@ pub fn setParent(self: *App, entity: ecs.Entity, parent: ecs.Entity, keep_global
 }
 
 /// Whether `entity` hangs from `ancestor`, however far down.
-pub fn hangsFrom(self: *const App, entity: ecs.Entity, ancestor: ecs.Entity) bool {
-    return hierarchy.hangsFrom(&self.world, entity, ancestor);
+pub fn isDescendantOf(self: *const App, entity: ecs.Entity, ancestor: ecs.Entity) bool {
+    return hierarchy.isDescendantOf(&self.world, entity, ancestor);
 }
 
 /// Whether `a` comes before `b` among their parent's children: what to sort
@@ -1761,8 +1761,8 @@ pub fn lookAt(self: *App, entity: ecs.Entity, point: math.Vec2) PlaceError!void 
 /// Where an entity is in the space of `ancestor`, something it hangs from.
 /// Nothing moved for the entity itself, and null for an entity `ancestor`
 /// is not above.
-pub fn getRelativeTransformToParent(self: *App, entity: ecs.Entity, ancestor: ecs.Entity) ?components.Transform2D {
-    return hierarchy.getRelativeTransformToParent(&self.world, entity, ancestor);
+pub fn getTransformRelativeTo(self: *App, entity: ecs.Entity, ancestor: ecs.Entity) ?components.Transform2D {
+    return hierarchy.getTransformRelativeTo(&self.world, entity, ancestor);
 }
 
 /// Move an entity along its own `+x`, in its parent's space. By `delta`
@@ -2395,7 +2395,7 @@ pub fn pointerInWorld(self: *App) math.Vec2 {
     return self.screenToWorld(self.input.pointer.x, self.input.pointer.y);
 }
 
-/// Where the pointer is on the screen: in the frame's pixels from its top
+/// Where the pointer is on the screen: in the game area's pixels from its top
 /// left, `y` down - what an input event's `position` says, and what
 /// `screenToWorld` takes. Where it was last, once it has left the window.
 pub fn pointerOnScreen(self: *const App) math.Vec2 {
@@ -2429,8 +2429,8 @@ pub fn localEvent(self: *App, entity: ecs.Entity, event: InputEvent) InputEvent 
 /// as well. Nothing without a window, save moving what a test reads.
 pub fn warpPointer(self: *App, x: f32, y: f32) void {
     if (self.window) |*window| {
-        const ratio = if (self.input.frame_ratio > 0) self.input.frame_ratio else 1;
-        window.setCursorPos(x / ratio + self.input.frame_origin.x, y / ratio + self.input.frame_origin.y) catch |err| {
+        const ratio = if (self.input.area_ratio > 0) self.input.area_ratio else 1;
+        window.setCursorPos(x / ratio + self.input.area_origin.x, y / ratio + self.input.area_origin.y) catch |err| {
             log.warn("could not put the pointer at {d},{d}: {t}", .{ x, y, err });
             return;
         };
@@ -3141,7 +3141,7 @@ pub fn shaderParamOrDefault(self: *App, entity: ecs.Entity, name: []const u8, ou
 //
 // See `render/cameras.zig`.
 
-/// What the camera sees, at the frame's size and scale: the view the world
+/// What the camera sees, at the game area's size and scale: the view the world
 /// is drawn through and the pointer is found in.
 pub fn currentView(self: *App) View {
     return cameras.currentView(self);
@@ -3205,7 +3205,7 @@ pub fn worldToScreen(self: *App, x: f32, y: f32) math.Vec2 {
 /// const across = app.pointerOnScreen().x / app.screenSize().x; // 0 at the left, 1 at the right
 /// ```
 pub fn screenSize(self: *const App) math.Vec2 {
-    return .init(@floatFromInt(self.frame.width), @floatFromInt(self.frame.height));
+    return .init(@floatFromInt(self.game_area.width), @floatFromInt(self.game_area.height));
 }
 
 /// The size the game is made at: the project's `display.width` and
@@ -3398,7 +3398,7 @@ pub fn stretchScaleMode(self: *const App) stretching.ScaleMode {
 
 /// A stretch changed: the frame again, and the picture it is drawn into.
 fn refitStretch(self: *App) void {
-    display.fitFrame(self);
+    display.fitGameArea(self);
     self.resized = true;
 }
 
@@ -4018,7 +4018,7 @@ pub fn addSpriteFrames(self: *App, name: []const u8, text: []const u8) !sprite_a
 
 /// Sprite frames made in code: `clips` over a `columns` by `rows` grid of
 /// `texture`, found by `name`.
-pub fn addGridFrames(self: *App, name: []const u8, texture: Assets.TextureHandle, columns: u16, rows: u16, clips: []const sprite_animation.GridClip) !sprite_animation.SpriteFramesHandle {
+pub fn addGridFrames(self: *App, name: []const u8, texture: Assets.TextureHandle, columns: u16, rows: u16, clips: []const sprite_animation.GridAnimation) !sprite_animation.SpriteFramesHandle {
     return self.sprite_frames.addGrid(self, name, texture, columns, rows, clips);
 }
 
@@ -4863,13 +4863,13 @@ pub const reflect_methods = .{
     .stateNamed = .{attr.Params{ .names = &.{"state"} }},
     .setStateNamed = .{attr.Params{ .names = &.{ "state", "value" } }},
     // Entities
-    .spawn = .{ attr.Params{ .names = &.{"parent"} }, flux.Alias{ .name = "spawnChild" } },
+    .newEntity = .{ attr.Params{ .names = &.{"parent"} }, flux.Alias{ .name = "spawnChild" } },
     .createTimer = .{attr.Params{ .names = &.{"seconds"} }},
     .clearWorld = .{},
     // The tree
     .parentOf = .{ attr.Params{ .names = &.{"entity"} }, flux.Alias{ .name = "parent" } },
     .setParent = .{attr.Params{ .names = &.{ "entity", "parent", "keep_global" } }},
-    .hangsFrom = .{attr.Params{ .names = &.{ "entity", "ancestor" } }},
+    .isDescendantOf = .{attr.Params{ .names = &.{ "entity", "ancestor" } }},
     .children = .{attr.Params{ .names = &.{"parent"} }},
     .childCount = .{attr.Params{ .names = &.{"parent"} }},
     .childAt = .{attr.Params{ .names = &.{ "parent", "index" } }},
@@ -4892,7 +4892,7 @@ pub const reflect_methods = .{
     .toGlobal = .{attr.Params{ .names = &.{ "entity", "point" } }},
     .getAngleTo = .{attr.Params{ .names = &.{ "entity", "point" } }},
     .lookAt = .{attr.Params{ .names = &.{ "entity", "point" } }},
-    .getRelativeTransformToParent = .{attr.Params{ .names = &.{ "entity", "ancestor" } }},
+    .getTransformRelativeTo = .{attr.Params{ .names = &.{ "entity", "ancestor" } }},
     .moveLocalX = .{attr.Params{ .names = &.{ "entity", "delta", "scaled" } }},
     .moveLocalY = .{attr.Params{ .names = &.{ "entity", "delta", "scaled" } }},
     .rotate = .{attr.Params{ .names = &.{ "entity", "radians" } }},

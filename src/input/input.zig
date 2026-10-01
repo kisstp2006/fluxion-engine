@@ -117,12 +117,12 @@ fixed_button_released: Buttons = .initEmpty(),
 /// simply right. `App` sets it around the fixed stage; nothing else should.
 clock: Clock = .frame,
 
-/// Where on the window the frame is shown, and how many of its pixels one of
+/// Where on the window the game area is shown, and how many of its pixels one of
 /// the window's is: what turns every pointer position and movement this
-/// reads from the window's pixels into the frame's. The identity until a
+/// reads from the window's pixels into the game area's. The identity until a
 /// project stretches its game to the window; see `stretch.zig`.
-frame_origin: math.Vec2 = .zero,
-frame_ratio: f32 = 1,
+area_origin: math.Vec2 = .zero,
+area_ratio: f32 = 1,
 
 /// Where the pointer is, in pixels from the top left of the content area,
 /// and how far it moved this frame.
@@ -193,7 +193,7 @@ mouse_from_touch: bool = true,
 touch_from_mouse: bool = false,
 /// Whether this is a touch screen: Android, or a screen a finger touched.
 touchscreen: bool = builtin.abi.isAndroid(),
-/// How many of the frame's pixels a density-independent pixel is - a 160th
+/// How many of the game area's pixels a density-independent pixel is - a 160th
 /// of an inch - so that a gesture is the same size under a finger on any
 /// screen. Set by `App`.
 dp: f32 = 1,
@@ -322,7 +322,7 @@ pub const Touch = struct {
     /// Which finger: the same number from the frame it touches to the frame
     /// it is lifted. Another may have the number afterwards.
     finger: u32 = 0,
-    /// Where it is, in the frame's pixels, as the pointer's.
+    /// Where it is, in the game area's pixels, as the pointer's.
     position: Vec2 = .zero,
     /// Where it touched.
     start: Vec2 = .zero,
@@ -958,13 +958,13 @@ pub fn readPads(self: *Input, devices: []const platform.Gamepad) void {
 /// Fold one platform event in. Events that are not input are ignored, so a
 /// caller may hand over everything the queue produced. A dialog's answer is
 /// input too: see `dialogAnswers`.
-/// A point across the window, in the frame's pixels.
+/// A point across the window, in the game area's pixels.
 fn frameX(self: *const Input, x: f64) f32 {
-    return (@as(f32, @floatCast(x)) - self.frame_origin.x) * self.frame_ratio;
+    return (@as(f32, @floatCast(x)) - self.area_origin.x) * self.area_ratio;
 }
 
 fn frameY(self: *const Input, y: f64) f32 {
-    return (@as(f32, @floatCast(y)) - self.frame_origin.y) * self.frame_ratio;
+    return (@as(f32, @floatCast(y)) - self.area_origin.y) * self.area_ratio;
 }
 
 pub fn apply(self: *Input, ev: platform.Event) void {
@@ -1060,14 +1060,14 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 // in the background, the hand on the mouse is using another
                 // program.
                 if (self.focused) {
-                    self.pointer.dx += @as(f32, @floatCast(m.dx)) * self.frame_ratio;
-                    self.pointer.dy += @as(f32, @floatCast(m.dy)) * self.frame_ratio;
+                    self.pointer.dx += @as(f32, @floatCast(m.dx)) * self.area_ratio;
+                    self.pointer.dy += @as(f32, @floatCast(m.dy)) * self.area_ratio;
                 }
                 return;
             }
             self.pointer.x = self.frameX(m.x);
             self.pointer.y = self.frameY(m.y);
-            const moved: math.Vec2 = .init(@as(f32, @floatCast(m.dx)) * self.frame_ratio, @as(f32, @floatCast(m.dy)) * self.frame_ratio);
+            const moved: math.Vec2 = .init(@as(f32, @floatCast(m.dx)) * self.area_ratio, @as(f32, @floatCast(m.dy)) * self.area_ratio);
             self.pointer.dx += moved.x;
             self.pointer.dy += moved.y;
             self.pushMotion(moved);
@@ -1123,7 +1123,7 @@ pub fn apply(self: *Input, ev: platform.Event) void {
     }
 }
 
-/// A finger touched, moved or was lifted, at `at` in the frame's pixels.
+/// A finger touched, moved or was lifted, at `at` in the game area's pixels.
 fn touched(self: *Input, finger: u32, at: Vec2, phase: platform.event.TouchPhase, pressure: f32) void {
     switch (phase) {
         .down => {

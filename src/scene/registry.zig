@@ -92,11 +92,11 @@ pub const Registry = struct {
                 fn removeFrom(world: *World, entity: Entity) World.Error!void {
                     return world.remove(entity, T);
                 }
-                fn write(s: *Saving, w: *json.Writer, cell: *const anyopaque) json.Writer.Error!void {
-                    return writeComponent(s, w, T, @ptrCast(@alignCast(cell)));
+                fn write(saving: *Saving, w: *json.Writer, cell: *const anyopaque) json.Writer.Error!void {
+                    return writeComponent(saving, w, T, @ptrCast(@alignCast(cell)));
                 }
-                fn read(l: *Loading, cell: *anyopaque) anyerror!void {
-                    return readComponent(l, T, @ptrCast(@alignCast(cell)));
+                fn read(loading: *Loading, cell: *anyopaque) anyerror!void {
+                    return readComponent(loading, T, @ptrCast(@alignCast(cell)));
                 }
             };
             return .{

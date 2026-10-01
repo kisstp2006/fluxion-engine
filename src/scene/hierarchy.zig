@@ -266,7 +266,7 @@ pub fn lookAt(world: *ecs.World, entity: Entity, point: Vec2) PlaceError!void {
 /// Where an entity is in the space of `ancestor`, something it hangs from.
 /// Nothing moved for the entity itself, and null for an entity `ancestor`
 /// is not above.
-pub fn getRelativeTransformToParent(world: *ecs.World, entity: Entity, ancestor: Entity) ?Transform2D {
+pub fn getTransformRelativeTo(world: *ecs.World, entity: Entity, ancestor: Entity) ?Transform2D {
     var chain: [Transform2D.max_depth]Transform2D = undefined;
     var depth: usize = 0;
     var at = entity;
@@ -320,7 +320,7 @@ pub fn applyScale(world: *ecs.World, entity: Entity, ratio: Vec2) PlaceError!voi
 }
 
 /// Whether `entity` hangs from `ancestor`, however far down.
-pub fn hangsFrom(world: *const ecs.World, entity: Entity, ancestor: Entity) bool {
+pub fn isDescendantOf(world: *const ecs.World, entity: Entity, ancestor: Entity) bool {
     var at = parentOf(world, entity);
     var depth: usize = 0;
     while (!at.isNone() and depth < 256) : (depth += 1) {

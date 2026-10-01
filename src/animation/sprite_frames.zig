@@ -114,14 +114,14 @@ pub const Frame = struct {
 };
 
 /// One animation of a set: see the top of this file.
-pub const Clip = struct {
+pub const FramesAnimation = struct {
     name: []u8,
     /// Frames a second.
     speed: f32 = default_speed,
     loop: LoopMode = .linear,
     frames: std.ArrayList(Frame) = .empty,
 
-    fn deinit(self: *Clip, gpa: Allocator) void {
+    fn deinit(self: *FramesAnimation, gpa: Allocator) void {
         gpa.free(self.name);
         self.frames.deinit(gpa);
     }
@@ -142,12 +142,12 @@ pub const SpriteFrames = struct {
     on_disc: bool,
     /// In the order they were added: what an animated sprite given these
     /// frames falls back to is the first.
-    animations: std.ArrayList(Clip) = .empty,
+    animations: std.ArrayList(FramesAnimation) = .empty,
     /// Moved on by every change, for what keeps something worked out of it.
     revision: u32 = 0,
 
     /// The animation called `name`.
-    pub fn find(self: *const SpriteFrames, name: []const u8) ?*const Clip {
+    pub fn find(self: *const SpriteFrames, name: []const u8) ?*const FramesAnimation {
         const at = self.indexOf(name) orelse return null;
         return &self.animations.items[at];
     }
@@ -163,7 +163,7 @@ pub const SpriteFrames = struct {
         self.revision +%= 1;
     }
 
-    fn clipOf(self: *SpriteFrames, name: []const u8) Error!*Clip {
+    fn clipOf(self: *SpriteFrames, name: []const u8) Error!*FramesAnimation {
         const at = self.indexOf(name) orelse return error.NoSuchAnimation;
         return &self.animations.items[at];
     }
@@ -177,7 +177,7 @@ pub const SpriteFrames = struct {
     /// A new animation, with no frames, at 5 frames a second and looping.
     pub fn addAnimation(self: *SpriteFrames, gpa: Allocator, name: []const u8) Error!void {
         if (self.indexOf(name) != null) return error.AnimationExists;
-        const made: Clip = .{ .name = try gpa.dupe(u8, name) };
+        const made: FramesAnimation = .{ .name = try gpa.dupe(u8, name) };
         self.animations.append(gpa, made) catch |err| {
             gpa.free(made.name);
             return err;
@@ -219,7 +219,7 @@ pub const SpriteFrames = struct {
     pub fn duplicateAnimation(self: *SpriteFrames, gpa: Allocator, from: []const u8, to: []const u8) Error!void {
         const at = self.indexOf(from) orelse return error.NoSuchAnimation;
         if (self.indexOf(to) != null) return error.AnimationExists;
-        var made: Clip = .{ .name = try gpa.dupe(u8, to) };
+        var made: FramesAnimation = .{ .name = try gpa.dupe(u8, to) };
         errdefer made.deinit(gpa);
         const original = &self.animations.items[at];
         made.speed = original.speed;
@@ -368,7 +368,7 @@ pub fn read(app: *App, into: *SpriteFrames, text: []const u8) ReadError!void {
             log.warn("{s}: a second animation called {s} is left out", .{ into.source, name });
             continue;
         }
-        var clip: Clip = .{ .name = try gpa.dupe(u8, name) };
+        var clip: FramesAnimation = .{ .name = try gpa.dupe(u8, name) };
         errdefer clip.deinit(gpa);
         clip.speed = @floatCast(given.get("speed").asFloat(f64) orelse default_speed);
         if (given.get("loop").asString()) |loop| {
@@ -442,7 +442,7 @@ const Document = struct {
 
 /// An animation of the cells of a grid over a sheet, for `AllFrames.addGrid`:
 /// the cells counted across and then down.
-pub const GridClip = struct {
+pub const GridAnimation = struct {
     name: []const u8,
     cells: []const u32,
     speed: f32 = default_speed,
@@ -501,7 +501,7 @@ pub const AllFrames = struct {
 
     /// Sprite frames made in code: `clips` of the cells of a `columns` by
     /// `rows` grid over `texture`, found by `name`.
-    pub fn addGrid(self: *AllFrames, app: *App, name: []const u8, texture: TextureHandle, columns: u16, rows: u16, clips: []const GridClip) !SpriteFramesHandle {
+    pub fn addGrid(self: *AllFrames, app: *App, name: []const u8, texture: TextureHandle, columns: u16, rows: u16, clips: []const GridAnimation) !SpriteFramesHandle {
         const gpa = app.gpa;
         const source = try gpa.dupe(u8, name);
         errdefer gpa.free(source);

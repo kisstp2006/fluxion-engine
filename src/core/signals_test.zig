@@ -11,7 +11,8 @@ const ecs = @import("fluxion_ecs");
 const reflect = @import("fluxion_reflect");
 const signals = @import("signals.zig");
 const events = @import("event_channels.zig");
-const scene_mod = @import("../scene/scene.zig");
+const read = @import("../scene/scene.zig").read;
+const write = @import("../scene/scene.zig").write;
 const json = @import("fluxion_json");
 const Transform2D = @import("../scene/components.zig").Transform2D;
 
@@ -418,13 +419,13 @@ test "a component added later does not make one connection two signals" {
     try testing.expectEqual(@as(usize, 0), app.signals.failures);
 
     // And a scene says which, and is read back as the same one.
-    const bytes = try scene_mod.write(app, testing.allocator, .{});
+    const bytes = try write(app, testing.allocator, .{});
     defer testing.allocator.free(bytes);
     try testing.expect(std.mem.indexOf(u8, bytes, "\"signal\": \"Health.hit\"") != null);
     const copy = try App.create(testing.allocator, .{ .headless = true });
     defer copy.destroy();
     try copy.registerComponents(.{ Health, Armour });
-    const loaded = try scene_mod.read(copy, bytes, .{});
+    const loaded = try read(copy, bytes, .{});
     try testing.expectEqual(@as(usize, 0), loaded.connections_skipped);
     const player = copy.findUuid(app.uuidOf(scene.player).?).?;
     const listed = copy.connectionsFrom(player, &found);
@@ -454,7 +455,7 @@ test "a bare name two components declare is kept as written, and never heard" {
         \\  ]
         \\}
     ;
-    const loaded = try scene_mod.read(app, text, .{});
+    const loaded = try read(app, text, .{});
     try testing.expectEqual(@as(usize, 1), loaded.connections_unknown);
     const knight = app.findUuid(try .parse("00000000-0000-4000-8000-000000000001")).?;
     var found: [4]signals.Connection = undefined;
@@ -466,7 +467,7 @@ test "a bare name two components declare is kept as written, and never heard" {
     try app.signals.drain(app);
     try testing.expectEqual(@as(usize, 0), Heard.len);
 
-    const saved = try scene_mod.write(app, testing.allocator, .{});
+    const saved = try write(app, testing.allocator, .{});
     defer testing.allocator.free(saved);
     try testing.expect(std.mem.indexOf(u8, saved, "\"signal\": \"hit\"") != null);
 
@@ -615,7 +616,7 @@ test "a connection goes through a scene and back, flags, unbinds and binds and a
         // Made in play, not to persist: not the scene's.
         try app.signal(first.player, Health, .died).connect(.method(first.hud, "_on_died"), .{});
 
-        const bytes = try scene_mod.write(app, testing.allocator, .{ .format = format });
+        const bytes = try write(app, testing.allocator, .{ .format = format });
         defer testing.allocator.free(bytes);
         // The bare name, which only Health declares on the player.
         if (format == .json) try testing.expect(std.mem.indexOf(u8, bytes, "\"signal\": \"hit\"") != null);
@@ -623,7 +624,7 @@ test "a connection goes through a scene and back, flags, unbinds and binds and a
         const copy = try App.create(testing.allocator, .{ .headless = true });
         defer copy.destroy();
         try copy.registerComponents(.{ Health, Armour });
-        const loaded = try scene_mod.read(copy, bytes, .{});
+        const loaded = try read(copy, bytes, .{});
         try testing.expectEqual(@as(usize, 0), loaded.connections_skipped);
         // `_on_hit` is not a method here: kept, and counted.
         try testing.expectEqual(@as(usize, 1), loaded.connections_unknown);
@@ -645,7 +646,7 @@ test "a connection goes through a scene and back, flags, unbinds and binds and a
         try testing.expect(kept.options.binds[binds.len - 1].entity.eql(hud));
 
         // Written again, it is what was read.
-        const again = try scene_mod.write(copy, testing.allocator, .{ .format = format });
+        const again = try write(copy, testing.allocator, .{ .format = format });
         defer testing.allocator.free(again);
         try testing.expectEqualSlices(u8, bytes, again);
     }
@@ -667,12 +668,12 @@ test "a connection this build knows nothing of is kept through a load and a save
         \\  ]
         \\}
     ;
-    const loaded = try scene_mod.read(app, text, .{});
+    const loaded = try read(app, text, .{});
     try testing.expectEqual(@as(usize, 1), loaded.connections_unknown);
     // Its `to` is in neither the scene nor the world.
     try testing.expectEqual(@as(usize, 1), loaded.connections_skipped);
 
-    const saved = try scene_mod.write(app, testing.allocator, .{});
+    const saved = try write(app, testing.allocator, .{});
     defer testing.allocator.free(saved);
     try testing.expect(std.mem.indexOf(u8, saved, "\"signal\": \"Inventory.dropped\"") != null);
     try testing.expect(std.mem.indexOf(u8, saved, "\"method\": \"_on_dropped\"") != null);

@@ -84,8 +84,8 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     {
         var reader: json.Reader = .init(gpa, bytes, readerOptions(options));
         defer reader.deinit();
-        var l: Loading = .{ .app = app, .reader = &reader, .arena = arena.allocator(), .diagnostics = options.diagnostics, .parent = options.parent };
-        try l.shape(&entities, made, &told);
+        var loading: Loading = .{ .app = app, .reader = &reader, .arena = arena.allocator(), .diagnostics = options.diagnostics, .parent = options.parent };
+        try loading.shape(&entities, made, &told);
     }
     if (options.instance != null and told.roots != 1) {
         return failWhole(options, error.NotOneRoot, "a scene made as an instance has one root, which the rest of it hangs from, and this has {d}", .{told.roots});
@@ -153,7 +153,7 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
     {
         var reader: json.Reader = .init(gpa, bytes, readerOptions(options));
         defer reader.deinit();
-        var l: Loading = .{
+        var loading: Loading = .{
             .app = app,
             .reader = &reader,
             .arena = arena.allocator(),
@@ -164,13 +164,13 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
             .parent = options.parent,
             .instance = options.instance,
         };
-        try l.fill();
+        try loading.fill();
         // The list is the order of every parent's children.
         try app.placeInOrder(entities.items);
-        loaded.moved = @intCast(l.moved);
-        loaded.components_unknown = @intCast(l.components_unknown);
-        loaded.connections_unknown = @intCast(l.connections_unknown);
-        loaded.connections_skipped = @intCast(l.connections_skipped);
+        loaded.moved = @intCast(loading.moved);
+        loaded.components_unknown = @intCast(loading.components_unknown);
+        loaded.connections_unknown = @intCast(loading.connections_unknown);
+        loaded.connections_skipped = @intCast(loading.connections_skipped);
     }
 
     // Last of all, what had to wait for the values to be written: see
@@ -270,69 +270,69 @@ pub const Loading = struct {
     /// makes an entity - a map's chunk - since making one now would move the
     /// rows the values are being written into. What it makes goes in
     /// `made`, with the rest of what the scene made.
-    pub fn whenRead(l: *Loading, value: anytype, comptime job: fn (app: *App, value: *const @TypeOf(value), made: *std.ArrayList(Entity)) anyerror!void) !void {
-        const list = l.later orelse return;
+    pub fn whenRead(loading: *Loading, value: anytype, comptime job: fn (app: *App, value: *const @TypeOf(value), made: *std.ArrayList(Entity)) anyerror!void) !void {
+        const list = loading.later orelse return;
         const T = @TypeOf(value);
-        const kept = try l.arena.create(T);
+        const kept = try loading.arena.create(T);
         kept.* = value;
         const Run = struct {
             fn run(app: *App, held: *const anyopaque, made: *std.ArrayList(Entity)) anyerror!void {
                 return job(app, @ptrCast(@alignCast(held)), made);
             }
         };
-        try list.append(l.app.gpa, .{ .run = Run.run, .value = kept });
+        try list.append(loading.app.gpa, .{ .run = Run.run, .value = kept });
     }
 
     /// The first pass: an entity for every object in `entities`, with every
     /// registered component it has, each entity's UUID, and the tables of
     /// files.
-    fn shape(l: *Loading, entities: *std.ArrayList(Entity), made: *std.ArrayList(Entity), told: *Told) anyerror!void {
-        const app = l.app;
+    fn shape(loading: *Loading, entities: *std.ArrayList(Entity), made: *std.ArrayList(Entity), told: *Told) anyerror!void {
+        const app = loading.app;
         var versioned = false;
         var listed = false;
 
-        try l.open(.object_begin, "a scene, which is an object");
-        while (try l.key()) |name| {
+        try loading.open(.object_begin, "a scene, which is an object");
+        while (try loading.key()) |name| {
             if (std.mem.eql(u8, name, "fluxion_scene")) {
-                const token = try l.next();
+                const token = try loading.next();
                 const number = switch (token) {
                     .number => |n| n.asInt(u32),
                     else => null,
-                } orelse return l.fail(error.NotAScene, "\"fluxion_scene\" is the version of the scene, and this is {f}", .{found(token)});
-                if (number < version) return l.fail(error.UnsupportedVersion, "this scene is version {d}, an older one this engine no longer reads: it reads version {d}", .{ number, version });
-                if (number > version) return l.fail(error.UnsupportedVersion, "this scene is version {d}, newer than this engine, which reads version {d}", .{ number, version });
+                } orelse return loading.fail(error.NotAScene, "\"fluxion_scene\" is the version of the scene, and this is {f}", .{found(token)});
+                if (number < version) return loading.fail(error.UnsupportedVersion, "this scene is version {d}, an older one this engine no longer reads: it reads version {d}", .{ number, version });
+                if (number > version) return loading.fail(error.UnsupportedVersion, "this scene is version {d}, newer than this engine, which reads version {d}", .{ number, version });
                 versioned = true;
             } else if (std.mem.eql(u8, name, "entities")) {
-                if (listed) return l.fail(error.NotAScene, "a scene has one list of entities, and this is a second", .{});
+                if (listed) return loading.fail(error.NotAScene, "a scene has one list of entities, and this is a second", .{});
                 listed = true;
-                try l.open(.array_begin, "the list of entities");
-                while (try l.reader.peek() != .array_end) {
+                try loading.open(.array_begin, "the list of entities");
+                while (try loading.reader.peek() != .array_end) {
                     const place = entities.items.len;
-                    const mark = l.path.push("entities/{d}", .{place});
-                    try l.open(.object_begin, "an entity, which is an object of its components");
+                    const mark = loading.path.push("entities/{d}", .{place});
+                    try loading.open(.object_begin, "an entity, which is an object of its components");
                     var ids: [ecs.component.max_components]ComponentId = undefined;
                     var count: usize = 0;
                     var own: ?Uuid = null;
                     var parented = false;
                     var instance: ?[]const u8 = null;
-                    while (try l.key()) |member| {
+                    while (try loading.key()) |member| {
                         if (std.mem.eql(u8, member, "uuid")) {
-                            const inner = l.path.push("uuid", .{});
-                            const uuid = try l.readUuid();
-                            if (told.places.contains(uuid)) return l.fail(error.DuplicateUuid, "another entity in this scene has this UUID already", .{});
-                            try told.places.put(l.arena, uuid, place);
+                            const inner = loading.path.push("uuid", .{});
+                            const uuid = try loading.readUuid();
+                            if (told.places.contains(uuid)) return loading.fail(error.DuplicateUuid, "another entity in this scene has this UUID already", .{});
+                            try told.places.put(loading.arena, uuid, place);
                             own = uuid;
-                            l.path.pop(inner);
+                            loading.path.pop(inner);
                             continue;
                         }
                         if (std.mem.eql(u8, member, "instance")) {
-                            const inner = l.path.push("instance", .{});
-                            const token = try l.next();
+                            const inner = loading.path.push("instance", .{});
+                            const token = try loading.next();
                             instance = switch (token) {
-                                .string => |text| try l.arena.dupe(u8, text),
-                                else => return l.wrong("the scene it is an instance of, which is a path", token),
+                                .string => |text| try loading.arena.dupe(u8, text),
+                                else => return loading.wrong("the scene it is an instance of, which is a path", token),
                             };
-                            l.path.pop(inner);
+                            loading.path.pop(inner);
                             continue;
                         }
                         if (std.mem.eql(u8, member, "parent")) {
@@ -344,21 +344,21 @@ pub const Loading = struct {
                                 count += 1;
                             }
                         }
-                        try l.reader.skipValue();
+                        try loading.reader.skipValue();
                     }
                     if (!parented) {
                         if (told.root_place == null) told.root_place = place;
                         told.roots += 1;
                     }
-                    try told.uuids.append(l.arena, own);
-                    try told.parented.append(l.arena, parented);
+                    try told.uuids.append(loading.arena, own);
+                    try told.parented.append(loading.arena, parented);
                     try entities.ensureUnusedCapacity(app.gpa, 1);
                     if (instance) |path| {
                         // Made from its own scene once the list is read.
-                        try told.nested.put(l.arena, place, path);
+                        try told.nested.put(loading.arena, place, path);
                         entities.appendAssumeCapacity(.none);
                     } else {
-                        if (parented or !l.parent.isNone()) {
+                        if (parented or !loading.parent.isNone()) {
                             if (count == ids.len) return error.TooManyComponents;
                             ids[count] = try app.world.idOf(components.Parent);
                             count += 1;
@@ -368,163 +368,163 @@ pub const Loading = struct {
                         made.appendAssumeCapacity(e);
                         entities.appendAssumeCapacity(e);
                     }
-                    l.path.pop(mark);
+                    loading.path.pop(mark);
                 }
-                _ = try l.next();
+                _ = try loading.next();
             } else if (std.mem.eql(u8, name, "assets")) {
-                try l.open(.object_begin, "the table of the files the scene names, which is an object");
-                while (try l.key()) |path| {
-                    const owned = try l.arena.dupe(u8, path);
-                    const mark = l.path.push("assets/{s}", .{owned});
-                    try told.files.put(l.arena, owned, try l.fileInfo());
-                    l.path.pop(mark);
+                try loading.open(.object_begin, "the table of the files the scene names, which is an object");
+                while (try loading.key()) |path| {
+                    const owned = try loading.arena.dupe(u8, path);
+                    const mark = loading.path.push("assets/{s}", .{owned});
+                    try told.files.put(loading.arena, owned, try loading.fileInfo());
+                    loading.path.pop(mark);
                 }
-            } else try l.reader.skipValue();
+            } else try loading.reader.skipValue();
         }
-        if (!versioned) return l.fail(error.NotAScene, "this is not a scene: it has no \"fluxion_scene\" version", .{});
+        if (!versioned) return loading.fail(error.NotAScene, "this is not a scene: it has no \"fluxion_scene\" version", .{});
     }
 
     /// A UUID, written as a string: an entity's own, or one naming another.
-    fn readUuid(l: *Loading) anyerror!Uuid {
-        const token = try l.next();
+    fn readUuid(loading: *Loading) anyerror!Uuid {
+        const token = try loading.next();
         const text = switch (token) {
             .string => |text| text,
-            else => return l.wrong("a UUID, which is a string", token),
+            else => return loading.wrong("a UUID, which is a string", token),
         };
-        const uuid = Uuid.parse(text) catch return l.fail(error.WrongType, "\"{s}\" is not a UUID", .{text});
-        if (uuid.isNil()) return l.fail(error.WrongType, "the nil UUID names nothing", .{});
+        const uuid = Uuid.parse(text) catch return loading.fail(error.WrongType, "\"{s}\" is not a UUID", .{text});
+        if (uuid.isNil()) return loading.fail(error.WrongType, "the nil UUID names nothing", .{});
         return uuid;
     }
 
     /// One file in `assets`: its UUID, and how a texture is sampled.
-    fn fileInfo(l: *Loading) anyerror!FileInfo {
+    fn fileInfo(loading: *Loading) anyerror!FileInfo {
         var info: FileInfo = .{};
-        try l.open(.object_begin, "what the scene knows of a file, which is an object");
-        while (try l.key()) |field| {
+        try loading.open(.object_begin, "what the scene knows of a file, which is an object");
+        while (try loading.key()) |field| {
             if (std.mem.eql(u8, field, "uid")) {
-                const mark = l.path.push("uid", .{});
-                const token = try l.next();
+                const mark = loading.path.push("uid", .{});
+                const token = try loading.next();
                 const text = switch (token) {
                     .string => |text| text,
-                    else => return l.wrong("a uid:// path", token),
+                    else => return loading.wrong("a uid:// path", token),
                 };
                 const body = if (std.mem.startsWith(u8, text, Project.uid_scheme)) text[Project.uid_scheme.len..] else text;
-                info.uid = Uuid.parse(body) catch return l.fail(error.WrongType, "\"{s}\" is not a uid:// path", .{text});
-                l.path.pop(mark);
+                info.uid = Uuid.parse(body) catch return loading.fail(error.WrongType, "\"{s}\" is not a uid:// path", .{text});
+                loading.path.pop(mark);
             } else if (std.mem.eql(u8, field, "filter")) {
-                const mark = l.path.push("filter", .{});
-                try readValue(l, rhi.Filter, &info.filter);
-                l.path.pop(mark);
+                const mark = loading.path.push("filter", .{});
+                try readValue(loading, rhi.Filter, &info.filter);
+                loading.path.pop(mark);
             } else if (std.mem.eql(u8, field, "wrap")) {
-                const mark = l.path.push("wrap", .{});
-                try readValue(l, rhi.Wrap, &info.wrap);
-                l.path.pop(mark);
-            } else try l.reader.skipValue();
+                const mark = loading.path.push("wrap", .{});
+                try readValue(loading, rhi.Wrap, &info.wrap);
+                loading.path.pop(mark);
+            } else try loading.reader.skipValue();
         }
         return info;
     }
 
     /// The second pass: every name and every component value.
-    fn fill(l: *Loading) anyerror!void {
-        const app = l.app;
-        _ = try l.next();
-        while (try l.key()) |name| {
+    fn fill(loading: *Loading) anyerror!void {
+        const app = loading.app;
+        _ = try loading.next();
+        while (try loading.key()) |name| {
             if (std.mem.eql(u8, name, "connections")) {
-                const mark = l.path.push("connections", .{});
-                try l.connections();
-                l.path.pop(mark);
+                const mark = loading.path.push("connections", .{});
+                try loading.connections();
+                loading.path.pop(mark);
                 continue;
             }
             if (!std.mem.eql(u8, name, "entities")) {
-                try l.reader.skipValue();
+                try loading.reader.skipValue();
                 continue;
             }
-            _ = try l.next();
-            for (l.entities, 0..) |e, place| {
-                const entity_mark = l.path.push("entities/{d}", .{place});
-                l.entity = e;
-                l.overriding = l.told.?.nested.contains(place);
-                defer l.overriding = false;
+            _ = try loading.next();
+            for (loading.entities, 0..) |e, place| {
+                const entity_mark = loading.path.push("entities/{d}", .{place});
+                loading.entity = e;
+                loading.overriding = loading.told.?.nested.contains(place);
+                defer loading.overriding = false;
                 // Given once the whole entity is read, when its parent is,
                 // since a name is its own among its parent's children.
                 var given: ?[]const u8 = null;
-                _ = try l.next();
-                while (try l.key()) |member| {
+                _ = try loading.next();
+                while (try loading.key()) |member| {
                     if (std.mem.eql(u8, member, "uuid") or std.mem.eql(u8, member, "instance")) {
-                        try l.reader.skipValue();
+                        try loading.reader.skipValue();
                         continue;
                     }
                     if (std.mem.eql(u8, member, "removed")) {
-                        const mark = l.path.push("removed", .{});
-                        try l.open(.array_begin, "the components its scene gives it that it has not, which is a list of names");
+                        const mark = loading.path.push("removed", .{});
+                        try loading.open(.array_begin, "the components its scene gives it that it has not, which is a list of names");
                         while (true) {
-                            const token = try l.next();
+                            const token = try loading.next();
                             switch (token) {
                                 .array_end => break,
                                 .string => |component| app.removeComponentNamed(e, component) catch {},
-                                else => return l.wrong("the name of a component", token),
+                                else => return loading.wrong("the name of a component", token),
                             }
                         }
-                        l.path.pop(mark);
+                        loading.path.pop(mark);
                         continue;
                     }
                     if (std.mem.eql(u8, member, "name")) {
-                        const token = try l.next();
+                        const token = try loading.next();
                         given = switch (token) {
-                            .string => |text| try l.arena.dupe(u8, text),
-                            else => return l.wrong("an entity's name", token),
+                            .string => |text| try loading.arena.dupe(u8, text),
+                            else => return loading.wrong("an entity's name", token),
                         };
                         continue;
                     }
                     if (std.mem.eql(u8, member, "parent")) {
-                        const mark = l.path.push("parent", .{});
+                        const mark = loading.path.push("parent", .{});
                         var parent: Entity = .none;
-                        try readValue(l, Entity, &parent);
+                        try readValue(loading, Entity, &parent);
                         try hang(app, e, parent);
-                        l.path.pop(mark);
+                        loading.path.pop(mark);
                         continue;
                     }
                     if (std.mem.eql(u8, member, "exports")) {
-                        const mark = l.path.push("exports", .{});
-                        try l.readExports(e);
-                        l.path.pop(mark);
+                        const mark = loading.path.push("exports", .{});
+                        try loading.readExports(e);
+                        loading.path.pop(mark);
                         continue;
                     }
                     if (std.mem.eql(u8, member, "groups")) {
-                        const mark = l.path.push("groups", .{});
-                        try l.open(.array_begin, "the groups an entity is in, which is a list of names");
+                        const mark = loading.path.push("groups", .{});
+                        try loading.open(.array_begin, "the groups an entity is in, which is a list of names");
                         while (true) {
-                            const token = try l.next();
+                            const token = try loading.next();
                             switch (token) {
                                 .array_end => break,
                                 .string => |group| try app.addToGroup(e, group),
-                                else => return l.wrong("the name of a group", token),
+                                else => return loading.wrong("the name of a group", token),
                             }
                         }
-                        l.path.pop(mark);
+                        loading.path.pop(mark);
                         continue;
                     }
                     const entry = app.scene_components.find(member) orelse {
-                        try l.keepUnknown(e, member);
+                        try loading.keepUnknown(e, member);
                         continue;
                     };
-                    const mark = l.path.push("{s}", .{entry.name});
+                    const mark = loading.path.push("{s}", .{entry.name});
                     // An instance given a component its scene does not.
-                    if (l.overriding and app.componentOf(e, entry.name) == null) _ = try app.addComponentNamed(e, entry.name);
+                    if (loading.overriding and app.componentOf(e, entry.name) == null) _ = try app.addComponentNamed(e, entry.name);
                     const cell = app.world.cellOf(e, entry.findIdIn(&app.world).?).?;
-                    try entry.read(l, cell);
-                    l.path.pop(mark);
+                    try entry.read(loading, cell);
+                    loading.path.pop(mark);
                 }
                 // A root of the scene hangs from what it was read under.
-                if (!l.told.?.parented.items[place] and !l.parent.isNone()) try hang(app, e, l.parent);
+                if (!loading.told.?.parented.items[place] and !loading.parent.isNone()) try hang(app, e, loading.parent);
                 // Another of its family with the name already - the same
                 // scene read twice beside itself - gives this one the first
                 // free one after it.
                 if (given) |text| try app.setFreeName(e, text);
-                l.path.pop(entity_mark);
+                loading.path.pop(entity_mark);
             }
             // Past the list's end, for what comes after it: the connections.
-            try l.open(.array_end, "the end of the entities");
+            try loading.open(.array_end, "the end of the entities");
         }
     }
 
@@ -532,46 +532,46 @@ pub const Loading = struct {
     /// the scene has it. See `Unknown`.
     /// `exports`: what the entity's script's fields are given, an object of
     /// them. See `script_exports.zig`.
-    fn readExports(l: *Loading, e: Entity) anyerror!void {
-        const gpa = l.app.gpa;
+    fn readExports(loading: *Loading, e: Entity) anyerror!void {
+        const gpa = loading.app.gpa;
         var text: std.Io.Writer.Allocating = .init(gpa);
         defer text.deinit();
         var w: json.Writer = .init(&text.writer, .{ .non_finite = .literal });
-        try copyValue(l.reader, &w);
+        try copyValue(loading.reader, &w);
         var doc = try json.parse(gpa, text.written(), .{ .syntax = .json5 });
         defer doc.deinit();
-        if (doc.root.asObject() == null) return l.fail(error.WrongType, "what a script's fields are given is an object, by field", .{});
-        try l.app.exports.setAll(gpa, e, doc.root);
+        if (doc.root.asObject() == null) return loading.fail(error.WrongType, "what a script's fields are given is an object, by field", .{});
+        try loading.app.exports.setAll(gpa, e, doc.root);
     }
 
-    fn keepUnknown(l: *Loading, e: Entity, name: []const u8) anyerror!void {
-        const gpa = l.app.gpa;
+    fn keepUnknown(loading: *Loading, e: Entity, name: []const u8) anyerror!void {
+        const gpa = loading.app.gpa;
         // The reader's, until its next token.
         const owned = try gpa.dupe(u8, name);
         errdefer gpa.free(owned);
         var text: std.Io.Writer.Allocating = .init(gpa);
         defer text.deinit();
         var w: json.Writer = .init(&text.writer, .{ .non_finite = .literal });
-        try copyValue(l.reader, &w);
+        try copyValue(loading.reader, &w);
         const value = try text.toOwnedSlice();
         errdefer gpa.free(value);
-        try l.app.unknown_components.keep(gpa, e, owned, value);
-        l.components_unknown += 1;
+        try loading.app.unknown_components.keep(gpa, e, owned, value);
+        loading.components_unknown += 1;
     }
 
     /// `connections`: each made again, with `persist`, whether this build
     /// knows its signal and its method or not - an editor that has not got
     /// the game's components saves them back as they were. One whose `from`
     /// or `to` is in neither the scene nor the world is passed over.
-    fn connections(l: *Loading) anyerror!void {
-        try l.open(.array_begin, "the connections, which are a list");
+    fn connections(loading: *Loading) anyerror!void {
+        try loading.open(.array_begin, "the connections, which are a list");
         var place: usize = 0;
         while (true) : (place += 1) {
-            const token = try l.next();
+            const token = try loading.next();
             if (token == .array_end) return;
-            if (token != .object_begin) return l.wrong("a connection, which is an object", token);
-            const mark = l.path.push("{d}", .{place});
-            defer l.path.pop(mark);
+            if (token != .object_begin) return loading.wrong("a connection, which is an object", token);
+            const mark = loading.path.push("{d}", .{place});
+            defer loading.path.pop(mark);
 
             var from: ?Entity = null;
             var to: ?Entity = null;
@@ -579,23 +579,23 @@ pub const Loading = struct {
             var method: ?[]const u8 = null;
             var options: signals.Options = .{ .flags = .{ .persist = true } };
             var binds: std.ArrayList(signals.Bind) = .empty;
-            while (try l.key()) |field| {
+            while (try loading.key()) |field| {
                 if (std.mem.eql(u8, field, "from") or std.mem.eql(u8, field, "to")) {
-                    const end = try l.connectionEnd();
+                    const end = try loading.connectionEnd();
                     if (field[0] == 'f') from = end else to = end;
                 } else if (std.mem.eql(u8, field, "signal") or std.mem.eql(u8, field, "method")) {
-                    const text = switch (try l.next()) {
-                        .string => |text| try l.arena.dupe(u8, text),
-                        else => |other| return l.wrong("a name", other),
+                    const text = switch (try loading.next()) {
+                        .string => |text| try loading.arena.dupe(u8, text),
+                        else => |other| return loading.wrong("a name", other),
                     };
                     if (field[0] == 's') signal = text else method = text;
                 } else if (std.mem.eql(u8, field, "flags")) {
-                    try l.open(.array_begin, "the flags, which are a list");
+                    try loading.open(.array_begin, "the flags, which are a list");
                     while (true) {
-                        const flag = switch (try l.next()) {
+                        const flag = switch (try loading.next()) {
                             .array_end => break,
                             .string => |text| text,
-                            else => |other| return l.wrong("a flag's name", other),
+                            else => |other| return loading.wrong("a flag's name", other),
                         };
                         // A flag, not a `break`: control flow that leaves an
                         // `inline for` under a run-time test is refused.
@@ -606,108 +606,108 @@ pub const Loading = struct {
                                 matched = true;
                             }
                         }
-                        if (!matched) return l.fail(error.WrongType, "\"{s}\" is not a flag: the flags are deferred, persist, one_shot, reference_counted and append_source", .{flag});
+                        if (!matched) return loading.fail(error.WrongType, "\"{s}\" is not a flag: the flags are deferred, persist, one_shot, reference_counted and append_source", .{flag});
                     }
                 } else if (std.mem.eql(u8, field, "unbinds")) {
-                    try readValue(l, u8, &options.unbinds);
+                    try readValue(loading, u8, &options.unbinds);
                 } else if (std.mem.eql(u8, field, "binds")) {
-                    try l.open(.array_begin, "the binds, which are a list");
-                    while (try l.bind()) |b| try binds.append(l.arena, b);
-                } else try l.reader.skipValue();
+                    try loading.open(.array_begin, "the binds, which are a list");
+                    while (try loading.bind()) |b| try binds.append(loading.arena, b);
+                } else try loading.reader.skipValue();
             }
-            const named = signal orelse return l.fail(error.WrongType, "a connection names its \"signal\"", .{});
-            const called = method orelse return l.fail(error.WrongType, "a connection names its \"method\"", .{});
+            const named = signal orelse return loading.fail(error.WrongType, "a connection names its \"signal\"", .{});
+            const called = method orelse return loading.fail(error.WrongType, "a connection names its \"method\"", .{});
             if (from == null or to == null) {
-                l.connections_skipped += 1;
+                loading.connections_skipped += 1;
                 continue;
             }
             options.binds = binds.items;
             const callable: signals.Callable = .method(to.?, called);
             // A signal nothing declares, or a bare name two components
             // declare now, is kept as written and never heard.
-            const heard: ?signals.Signal = l.app.signalNamed(from.?, named) catch null;
-            const made = if (heard) |s| s.connect(callable, options) else l.app.signals.connect(from.?, .{ .name = named }, callable, options);
+            const heard: ?signals.Signal = loading.app.signalNamed(from.?, named) catch null;
+            const made = if (heard) |declared| declared.connect(callable, options) else loading.app.signals.connect(from.?, .{ .name = named }, callable, options);
             made catch |err| switch (err) {
                 // The same scene's connection read twice keeps the one.
                 error.AlreadyConnected => {},
                 else => return err,
             };
-            if (heard == null or !l.app.hasMethod(to.?, called)) l.connections_unknown += 1;
+            if (heard == null or !loading.app.hasMethod(to.?, called)) loading.connections_unknown += 1;
         }
     }
 
     /// A connection's `from` or `to`: the entity with that UUID, in the
     /// scene first and then the world, or null when neither has it.
-    fn connectionEnd(l: *Loading) anyerror!?Entity {
-        const text = switch (try l.next()) {
+    fn connectionEnd(loading: *Loading) anyerror!?Entity {
+        const text = switch (try loading.next()) {
             .string => |text| text,
-            else => |other| return l.wrong("an entity's UUID", other),
+            else => |other| return loading.wrong("an entity's UUID", other),
         };
-        const uuid = Uuid.parse(text) catch return l.fail(error.WrongType, "an entity is named by its UUID, and \"{s}\" is not one", .{text});
-        return l.entityNamed(uuid);
+        const uuid = Uuid.parse(text) catch return loading.fail(error.WrongType, "an entity is named by its UUID, and \"{s}\" is not one", .{text});
+        return loading.entityNamed(uuid);
     }
 
     /// The entity a UUID in the file names: one of the scene's own by the
     /// file's name for it, else one inside an instance the scene holds -
     /// named, as the file names it, after the instance - else one the world
     /// had already.
-    fn entityNamed(l: *Loading, uuid: Uuid) ?Entity {
-        if (l.told.?.places.get(uuid)) |place| return l.entities[place];
-        if (l.instance) |instance| {
-            if (l.app.findUuid(Uuid.fromName(instance, &uuid.bytes))) |inside| return inside;
+    fn entityNamed(loading: *Loading, uuid: Uuid) ?Entity {
+        if (loading.told.?.places.get(uuid)) |place| return loading.entities[place];
+        if (loading.instance) |instance| {
+            if (loading.app.findUuid(Uuid.fromName(instance, &uuid.bytes))) |inside| return inside;
         }
-        return l.app.findUuid(uuid);
+        return loading.app.findUuid(uuid);
     }
 
     /// One of a connection's binds, or null at the list's end: a bool, a
     /// number, text, or `{ "vec2": [x, y] }`, `{ "color": [r, g, b, a] }`,
     /// `{ "entity": uuid }`.
-    fn bind(l: *Loading) anyerror!?signals.Bind {
-        return switch (try l.next()) {
+    fn bind(loading: *Loading) anyerror!?signals.Bind {
+        return switch (try loading.next()) {
             .array_end => null,
             .bool => |b| .{ .bool = b },
             .number => |n| if (n.isInteger())
-                .{ .int = n.asInt(i64) orelse return l.fail(error.WrongType, "{s} is too big for a bind", .{n.text}) }
+                .{ .int = n.asInt(i64) orelse return loading.fail(error.WrongType, "{s} is too big for a bind", .{n.text}) }
             else
                 .{ .float = n.asFloat(f64) },
-            .string => |text| .{ .string = try l.arena.dupe(u8, text) },
+            .string => |text| .{ .string = try loading.arena.dupe(u8, text) },
             .object_begin => blk: {
-                const kind = (try l.key()) orelse return l.fail(error.WrongType, "a bind's object names what it is", .{});
+                const kind = (try loading.key()) orelse return loading.fail(error.WrongType, "a bind's object names what it is", .{});
                 const made: signals.Bind = if (std.mem.eql(u8, kind, "vec2")) vec: {
                     var v: math.Vec2 = undefined;
-                    try l.numbers(&.{ &v.x, &v.y });
+                    try loading.numbers(&.{ &v.x, &v.y });
                     break :vec .{ .vec2 = v };
                 } else if (std.mem.eql(u8, kind, "color")) colour: {
                     var c: Color = undefined;
-                    try l.numbers(&.{ &c.r, &c.g, &c.b, &c.a });
+                    try loading.numbers(&.{ &c.r, &c.g, &c.b, &c.a });
                     break :colour .{ .color = c };
                 } else if (std.mem.eql(u8, kind, "entity")) entity: {
                     var e: Entity = .none;
-                    try readValue(l, Entity, &e);
+                    try readValue(loading, Entity, &e);
                     break :entity .{ .entity = e };
-                } else return l.fail(error.WrongType, "\"{s}\" is not a bind: they are vec2, color and entity, besides bools, numbers and text", .{kind});
-                try l.open(.object_end, "the end of the bind");
+                } else return loading.fail(error.WrongType, "\"{s}\" is not a bind: they are vec2, color and entity, besides bools, numbers and text", .{kind});
+                try loading.open(.object_end, "the end of the bind");
                 break :blk made;
             },
-            else => |other| l.wrong("a bind", other),
+            else => |other| loading.wrong("a bind", other),
         };
     }
 
     /// A list of exactly these numbers.
-    fn numbers(l: *Loading, into: []const *f32) anyerror!void {
-        try l.open(.array_begin, "a list of numbers");
-        for (into) |out| try readValue(l, f32, out);
-        try l.open(.array_end, "the end of the list");
+    fn numbers(loading: *Loading, into: []const *f32) anyerror!void {
+        try loading.open(.array_begin, "a list of numbers");
+        for (into) |out| try readValue(loading, f32, out);
+        try loading.open(.array_end, "the end of the list");
     }
 
     /// The next token, which the scene has to have.
-    pub fn next(l: *Loading) anyerror!Token {
-        return (try l.reader.next()) orelse l.fail(error.SyntaxError, "the scene ends too soon", .{});
+    pub fn next(loading: *Loading) anyerror!Token {
+        return (try loading.reader.next()) orelse loading.fail(error.SyntaxError, "the scene ends too soon", .{});
     }
 
     /// The next member's name, or null at the end of the object.
-    pub fn key(l: *Loading) anyerror!?[]const u8 {
-        return switch (try l.next()) {
+    pub fn key(loading: *Loading) anyerror!?[]const u8 {
+        return switch (try loading.next()) {
             .key => |name| name,
             else => null,
         };
@@ -715,34 +715,34 @@ pub const Loading = struct {
 
     /// The next token, which has to be a `kind`: `what` it is, said when it
     /// is not.
-    pub fn open(l: *Loading, comptime kind: std.meta.Tag(Token), comptime what: []const u8) anyerror!void {
-        const token = try l.next();
-        if (token != kind) return l.wrong(what, token);
+    pub fn open(loading: *Loading, comptime kind: std.meta.Tag(Token), comptime what: []const u8) anyerror!void {
+        const token = try loading.next();
+        if (token != kind) return loading.wrong(what, token);
     }
 
     /// Say the last token is not what was `expected`.
-    pub fn wrong(l: *Loading, comptime expected: []const u8, token: Token) anyerror {
-        return l.fail(error.WrongType, "expected " ++ expected ++ ", found {f}", .{found(token)});
+    pub fn wrong(loading: *Loading, comptime expected: []const u8, token: Token) anyerror {
+        return loading.fail(error.WrongType, "expected " ++ expected ++ ", found {f}", .{found(token)});
     }
 
     /// Say what is wrong with the last token, and where in the scene it is.
-    pub fn fail(l: *Loading, err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
-        l.reader.report(fmt, args);
-        if (l.diagnostics) |d| d.setPath(l.path.slice());
+    pub fn fail(loading: *Loading, err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
+        loading.reader.report(fmt, args);
+        if (loading.diagnostics) |d| d.setPath(loading.path.slice());
         return err;
     }
 
     /// Where a file the scene names is now, and what `assets` says of it:
     /// by its UUID first - counted in `moved` when that is somewhere else -
     /// and by its path when no `.uid` file holds the UUID.
-    fn file(l: *Loading, path: []const u8) anyerror!struct { []const u8, FileInfo } {
-        const told = l.told.?;
+    fn file(loading: *Loading, path: []const u8) anyerror!struct { []const u8, FileInfo } {
+        const told = loading.told.?;
         const info = told.files.get(path) orelse return .{ path, .{} };
         const uid = info.uid orelse return .{ path, info };
-        const now = (try l.app.project.pathOf(uid)) orelse return .{ path, info };
+        const now = (try loading.app.project.pathOf(uid)) orelse return .{ path, info };
         if (std.mem.eql(u8, now, path)) return .{ path, info };
-        l.moved += 1;
-        return .{ try l.arena.dupe(u8, now), info };
+        loading.moved += 1;
+        return .{ try loading.arena.dupe(u8, now), info };
     }
 
     /// A file the scene names, read once however many things name it. A
@@ -750,61 +750,61 @@ pub const Loading = struct {
     /// a tile set or a theme that does not read, is still loaded, and the
     /// scene opens with it: what uses it makes nothing, draws white squares
     /// or draws with no theme, until a reload reads it.
-    fn asset(l: *Loading, comptime H: type, path: []const u8) anyerror!H {
+    fn asset(loading: *Loading, comptime H: type, path: []const u8) anyerror!H {
         const kind = comptime AssetKind.of(H).?;
-        const seen = try std.fmt.allocPrint(l.arena, "{t}\x00{s}", .{ kind, path });
-        if (l.handles.get(seen)) |known| return @bitCast(known);
-        const where, const info = try l.file(path);
+        const seen = try std.fmt.allocPrint(loading.arena, "{t}\x00{s}", .{ kind, path });
+        if (loading.handles.get(seen)) |known| return @bitCast(known);
+        const where, const info = try loading.file(path);
         // A picture read in the background is taken; what went wrong there
         // is found again below.
-        if (kind == .texture) l.app.finishLoad(where) catch {};
+        if (kind == .texture) loading.app.finishLoad(where) catch {};
         const handle: H = switch (kind) {
-            .texture => l.app.assets.findTexture(where) orelse l.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap }) catch |err|
-                return l.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err }),
-            else => l.app.loadAsset(H, where) catch |err|
-                return l.fail(err, "cannot read the {s} \"{s}\": {t}", .{ kind.label(), where, err }),
+            .texture => loading.app.assets.findTexture(where) orelse loading.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap }) catch |err|
+                return loading.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err }),
+            else => loading.app.loadAsset(H, where) catch |err|
+                return loading.fail(err, "cannot read the {s} \"{s}\": {t}", .{ kind.label(), where, err }),
         };
-        try l.handles.put(l.arena, seen, @bitCast(handle));
+        try loading.handles.put(loading.arena, seen, @bitCast(handle));
         return handle;
     }
 
-    fn font(l: *Loading, path: []const u8, member: u32) anyerror!FontHandle {
+    fn font(loading: *Loading, path: []const u8, member: u32) anyerror!FontHandle {
         // Kept by the file and the member: two fonts of one collection are
         // two fonts.
-        const name = if (member == 0) path else try std.fmt.allocPrint(l.arena, "{s}\x00{d}", .{ path, member });
-        if (l.fonts.get(name)) |known| return known;
-        const where, _ = try l.file(path);
-        const assets = &l.app.assets;
+        const name = if (member == 0) path else try std.fmt.allocPrint(loading.arena, "{s}\x00{d}", .{ path, member });
+        if (loading.fonts.get(name)) |known| return known;
+        const where, _ = try loading.file(path);
+        const assets = &loading.app.assets;
         const handle = assets.findFontMember(where, member) orelse assets.loadFont(where, .{ .member = member }) catch |err| {
-            if (member == 0) return l.fail(err, "cannot read the font \"{s}\": {t}", .{ where, err });
-            return l.fail(err, "cannot read font {d} of the collection \"{s}\": {t}", .{ member, where, err });
+            if (member == 0) return loading.fail(err, "cannot read the font \"{s}\": {t}", .{ where, err });
+            return loading.fail(err, "cannot read font {d} of the collection \"{s}\": {t}", .{ member, where, err });
         };
-        try l.fonts.put(l.arena, try l.arena.dupe(u8, name), handle);
+        try loading.fonts.put(loading.arena, try loading.arena.dupe(u8, name), handle);
         return handle;
     }
 
     /// A font written as an object: its file, and which font of the file it
     /// is. The object itself has begun.
-    fn fontObject(l: *Loading) anyerror!FontHandle {
+    fn fontObject(loading: *Loading) anyerror!FontHandle {
         var path: ?[]const u8 = null;
         var member: u32 = 0;
-        while (try l.key()) |field| {
+        while (try loading.key()) |field| {
             if (std.mem.eql(u8, field, "file")) {
-                const mark = l.path.push("file", .{});
-                const token = try l.next();
+                const mark = loading.path.push("file", .{});
+                const token = try loading.next();
                 path = switch (token) {
-                    .string => |text| try l.arena.dupe(u8, text),
-                    else => return l.wrong("the file it was read from", token),
+                    .string => |text| try loading.arena.dupe(u8, text),
+                    else => return loading.wrong("the file it was read from", token),
                 };
-                l.path.pop(mark);
+                loading.path.pop(mark);
             } else if (std.mem.eql(u8, field, "member")) {
-                const mark = l.path.push("member", .{});
-                try readValue(l, u32, &member);
-                l.path.pop(mark);
-            } else try l.reader.skipValue();
+                const mark = loading.path.push("member", .{});
+                try readValue(loading, u32, &member);
+                loading.path.pop(mark);
+            } else try loading.reader.skipValue();
         }
-        const named = path orelse return l.fail(error.WrongType, "a font written as an object names its \"file\"", .{});
-        return l.font(named, member);
+        const named = path orelse return loading.fail(error.WrongType, "a font written as an object names its \"file\"", .{});
+        return loading.font(named, member);
     }
 };
 
@@ -829,36 +829,36 @@ fn hang(app: *App, e: Entity, parent: Entity) !void {
     } else try app.world.add(e, components.Parent.of(parent));
 }
 
-pub fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
-    if (@typeInfo(T) != .@"struct") return readValue(l, T, out);
-    try l.open(.object_begin, "an object of the component's fields");
+pub fn readComponent(loading: *Loading, comptime T: type, out: *T) anyerror!void {
+    if (@typeInfo(T) != .@"struct") return readValue(loading, T, out);
+    try loading.open(.object_begin, "an object of the component's fields");
     const fields = @typeInfo(T).@"struct".fields;
     var seen: std.StaticBitSet(fields.len) = .initEmpty();
     // An instance's field left out keeps what its scene gave it.
-    if (!l.overriding) {
+    if (!loading.overriding) {
         // Words left out are none.
         inline for (comptime component_texts.declared(T)) |text| {
-            if (!l.entity.isNone()) try l.app.setText(l.entity, T, text.name, "");
+            if (!loading.entity.isNone()) try loading.app.setText(loading.entity, T, text.name, "");
         }
         // What it keeps beside it, left out, is none.
         inline for (comptime scene.besideOf(T)) |beside| {
-            if (beside.forget) |forget| if (!l.entity.isNone()) forget(l.app, l.entity);
+            if (beside.forget) |forget| if (!loading.entity.isNone()) forget(loading.app, loading.entity);
         }
     }
-    while (try l.key()) |name| {
+    while (try loading.key()) |name| {
         var said = false;
         inline for (comptime component_texts.declared(T)) |text| {
             if (!said and std.mem.eql(u8, name, text.name)) {
                 said = true;
-                try readText(l, T, text.name);
+                try readText(loading, T, text.name);
             }
         }
         inline for (comptime scene.besideOf(T)) |beside| {
             if (!said and std.mem.eql(u8, name, beside.key)) {
                 said = true;
-                const mark = l.path.push("{s}", .{beside.key});
-                try beside.read(l);
-                l.path.pop(mark);
+                const mark = loading.path.push("{s}", .{beside.key});
+                try beside.read(loading);
+                loading.path.pop(mark);
             }
         }
         if (said) continue;
@@ -867,93 +867,93 @@ pub fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
             if (!matched and std.mem.eql(u8, name, field.name)) {
                 matched = true;
                 seen.set(i);
-                const mark = l.path.push("{s}", .{field.name});
-                try readValue(l, field.type, &@field(out.*, field.name));
-                l.path.pop(mark);
+                const mark = loading.path.push("{s}", .{field.name});
+                try readValue(loading, field.type, &@field(out.*, field.name));
+                loading.path.pop(mark);
             }
         }
         // A field the component no longer has: the scene is older than it.
-        if (!matched) try l.reader.skipValue();
+        if (!matched) try loading.reader.skipValue();
     }
-    if (!l.overriding) try defaultTheRest(l, T, out, seen);
+    if (!loading.overriding) try defaultTheRest(loading, T, out, seen);
 }
 
-fn defaultTheRest(l: *Loading, comptime T: type, out: *T, seen: anytype) anyerror!void {
+fn defaultTheRest(loading: *Loading, comptime T: type, out: *T, seen: anytype) anyerror!void {
     inline for (@typeInfo(T).@"struct".fields, 0..) |field, i| {
         if (!seen.isSet(i)) {
             @field(out.*, field.name) = field.defaultValue() orelse
-                return l.fail(error.MissingField, "{s} has no {s}, and it has no default to take", .{ nameOf(T), field.name });
+                return loading.fail(error.MissingField, "{s} has no {s}, and it has no default to take", .{ nameOf(T), field.name });
         }
     }
 }
 
 /// A name kept in a component, written as the text it is.
-fn readName(l: *Loading, out: []u8) anyerror!void {
-    const token = try l.next();
+fn readName(loading: *Loading, out: []u8) anyerror!void {
+    const token = try loading.next();
     const text = switch (token) {
         .string => |text| text,
-        else => return l.wrong("a name, as text", token),
+        else => return loading.wrong("a name, as text", token),
     };
-    if (text.len > out.len) return l.fail(error.OutOfRange, "the name is {d} bytes, and {d} are kept", .{ text.len, out.len });
+    if (text.len > out.len) return loading.fail(error.OutOfRange, "the name is {d} bytes, and {d} are kept", .{ text.len, out.len });
     @memset(out, 0);
     @memcpy(out[0..text.len], text);
 }
 
 /// One of a component's words, kept beside it for the entity being read.
-fn readText(l: *Loading, comptime T: type, comptime property: []const u8) anyerror!void {
-    const token = try l.next();
+fn readText(loading: *Loading, comptime T: type, comptime property: []const u8) anyerror!void {
+    const token = try loading.next();
     const text = switch (token) {
         .string => |text| text,
-        else => return l.wrong("words, as text", token),
+        else => return loading.wrong("words, as text", token),
     };
-    if (!l.entity.isNone()) try l.app.setText(l.entity, T, property, text);
+    if (!loading.entity.isNone()) try loading.app.setText(loading.entity, T, property, text);
 }
 
 /// A value inside a component. A nested struct may leave fields out too.
-fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
+fn readValue(loading: *Loading, comptime T: type, out: *T) anyerror!void {
     if (T == Entity) {
-        const token = try l.next();
+        const token = try loading.next();
         out.* = switch (token) {
             .null => .none,
             .string => |text| blk: {
-                const uuid = Uuid.parse(text) catch return l.fail(error.WrongType, "an entity is named by its UUID, and \"{s}\" is not one", .{text});
-                break :blk l.entityNamed(uuid) orelse
-                    return l.fail(error.NoSuchEntity, "no entity in this scene or in the world has the UUID {s}", .{text});
+                const uuid = Uuid.parse(text) catch return loading.fail(error.WrongType, "an entity is named by its UUID, and \"{s}\" is not one", .{text});
+                break :blk loading.entityNamed(uuid) orelse
+                    return loading.fail(error.NoSuchEntity, "no entity in this scene or in the world has the UUID {s}", .{text});
             },
-            else => return l.wrong("an entity's UUID, or null", token),
+            else => return loading.wrong("an entity's UUID, or null", token),
         };
         return;
     }
     if (comptime AssetKind.of(T)) |kind| {
-        const token = try l.next();
+        const token = try loading.next();
         out.* = switch (token) {
             .null => .none,
-            .string => |path| if (kind == .font) try l.font(path, 0) else try l.asset(T, path),
-            .object_begin => if (kind == .font) try l.fontObject() else return l.wrong("the file it was read from, or null", token),
-            else => return l.wrong(if (kind == .font) "the file it was read from, its file and member, or null" else "the file it was read from, or null", token),
+            .string => |path| if (kind == .font) try loading.font(path, 0) else try loading.asset(T, path),
+            .object_begin => if (kind == .font) try loading.fontObject() else return loading.wrong("the file it was read from, or null", token),
+            else => return loading.wrong(if (kind == .font) "the file it was read from, its file and member, or null" else "the file it was read from, or null", token),
         };
         return;
     }
     switch (@typeInfo(T)) {
-        .@"struct" => return readComponent(l, T, out),
+        .@"struct" => return readComponent(loading, T, out),
         .optional => |info| {
-            if (try l.reader.peek() == .null) {
-                _ = try l.next();
+            if (try loading.reader.peek() == .null) {
+                _ = try loading.next();
                 out.* = null;
                 return;
             }
             var inner: info.child = undefined;
-            try readValue(l, info.child, &inner);
+            try readValue(loading, info.child, &inner);
             out.* = inner;
         },
-        .array => |info| if (info.child == u8) try readName(l, out) else try readItems(l, info.child, info.len, out),
+        .array => |info| if (info.child == u8) try readName(loading, out) else try readItems(loading, info.child, info.len, out),
         .vector => |info| {
             var items: [info.len]info.child = undefined;
-            try readItems(l, info.child, info.len, &items);
+            try readItems(loading, info.child, info.len, &items);
             out.* = items;
         },
         .@"union" => |info| {
-            const token = try l.next();
+            const token = try loading.next();
             switch (token) {
                 .string => |arm| inline for (info.fields) |field| {
                     if (field.type == void and std.mem.eql(u8, arm, field.name)) {
@@ -961,43 +961,43 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
                         return;
                     }
                 },
-                .object_begin => if (try l.key()) |arm| inline for (info.fields) |field| {
+                .object_begin => if (try loading.key()) |arm| inline for (info.fields) |field| {
                     if (std.mem.eql(u8, arm, field.name)) {
                         var payload: field.type = undefined;
-                        if (field.type == void) try l.reader.skipValue() else try readValue(l, field.type, &payload);
+                        if (field.type == void) try loading.reader.skipValue() else try readValue(loading, field.type, &payload);
                         out.* = @unionInit(T, field.name, payload);
-                        if (try l.key() != null) return l.fail(error.WrongType, "a union is one member, naming the field that is set, and this has more", .{});
+                        if (try loading.key() != null) return loading.fail(error.WrongType, "a union is one member, naming the field that is set, and this has more", .{});
                         return;
                     }
                 },
                 else => {},
             }
-            return l.wrong("the name of one of " ++ @typeName(T) ++ "'s fields", token);
+            return loading.wrong("the name of one of " ++ @typeName(T) ++ "'s fields", token);
         },
         else => {
-            const token = try l.next();
+            const token = try loading.next();
             out.* = switch (@typeInfo(T)) {
                 .bool => switch (token) {
                     .bool => |b| b,
-                    else => return l.wrong("true or false", token),
+                    else => return loading.wrong("true or false", token),
                 },
                 .int => switch (token) {
                     .number => |n| n.asInt(T) orelse return if (n.isInteger())
-                        l.fail(error.OutOfRange, "{s} does not fit in a {s}, which holds {d} to {d}", .{ n.text, @typeName(T), std.math.minInt(T), std.math.maxInt(T) })
+                        loading.fail(error.OutOfRange, "{s} does not fit in a {s}, which holds {d} to {d}", .{ n.text, @typeName(T), std.math.minInt(T), std.math.maxInt(T) })
                     else
-                        l.fail(error.WrongType, "expected a whole number, found {s}", .{n.text}),
-                    else => return l.wrong("a whole number", token),
+                        loading.fail(error.WrongType, "expected a whole number, found {s}", .{n.text}),
+                    else => return loading.wrong("a whole number", token),
                 },
                 .float => switch (token) {
                     .number => |n| n.asFloat(T),
-                    else => return l.wrong("a number", token),
+                    else => return loading.wrong("a number", token),
                 },
                 .@"enum" => |info| switch (token) {
                     .string => |name| std.meta.stringToEnum(T, name) orelse
-                        return l.fail(error.WrongType, "\"{s}\" is not one of the names of {s}", .{ name, @typeName(T) }),
+                        return loading.fail(error.WrongType, "\"{s}\" is not one of the names of {s}", .{ name, @typeName(T) }),
                     .number => |n| if (n.asInt(info.tag_type)) |raw| std.enums.fromInt(T, raw) orelse
-                        return l.fail(error.WrongType, "{s} is not one of the values of {s}", .{ n.text, @typeName(T) }) else return l.wrong("one of the names of " ++ @typeName(T), token),
-                    else => return l.wrong("one of the names of " ++ @typeName(T), token),
+                        return loading.fail(error.WrongType, "{s} is not one of the values of {s}", .{ n.text, @typeName(T) }) else return loading.wrong("one of the names of " ++ @typeName(T), token),
+                    else => return loading.wrong("one of the names of " ++ @typeName(T), token),
                 },
                 else => @compileError("fluxion-engine: a scene cannot hold a " ++ @typeName(T)),
             };
@@ -1005,15 +1005,15 @@ fn readValue(l: *Loading, comptime T: type, out: *T) anyerror!void {
     }
 }
 
-fn readItems(l: *Loading, comptime Item: type, comptime len: usize, out: *[len]Item) anyerror!void {
-    try l.open(.array_begin, std.fmt.comptimePrint("a list of {d}", .{len}));
+fn readItems(loading: *Loading, comptime Item: type, comptime len: usize, out: *[len]Item) anyerror!void {
+    try loading.open(.array_begin, std.fmt.comptimePrint("a list of {d}", .{len}));
     for (out, 0..) |*item, i| {
-        if (try l.reader.peek() == .array_end) return l.fail(error.LengthMismatch, "expected {d} items, found {d}", .{ len, i });
-        const mark = l.path.push("{d}", .{i});
-        try readValue(l, Item, item);
-        l.path.pop(mark);
+        if (try loading.reader.peek() == .array_end) return loading.fail(error.LengthMismatch, "expected {d} items, found {d}", .{ len, i });
+        const mark = loading.path.push("{d}", .{i});
+        try readValue(loading, Item, item);
+        loading.path.pop(mark);
     }
-    if (try l.next() != .array_end) return l.fail(error.LengthMismatch, "expected {d} items, found more", .{len});
+    if (try loading.next() != .array_end) return loading.fail(error.LengthMismatch, "expected {d} items, found more", .{len});
 }
 
 /// What a token is, for a message: `the string "wide"`, `an object`. The
