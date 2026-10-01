@@ -3200,6 +3200,39 @@ const app = try App.create(gpa, flags.apply(.{ .title = "game", .io = io }));
 and makes a capture reproducible: every frame one fixed step, whatever the
 clock says, so the same flags draw the same picture on every machine.
 
+## 🗂️ Where the code is
+
+`src/App.zig` is the app: the tables it keeps and every call a game makes,
+each a line that hands the work to the module it belongs to and carries its
+documentation - what a script's hover shows too. The rest is in folders by
+what it is about:
+
+| Folder | What is in it |
+| --- | --- |
+| `app/` | The options an app is made with, its command line, the window's display settings, and the frame: the ordered list of passes `App.step` runs (`frame_steps.zig`) |
+| `core/` | The schedule of systems, commands, states, signals and event channels |
+| `reflect/` | Attributes, property paths, calls by name, fixed-size text |
+| `scene/` | The tree, names, UUIDs, groups, instances, the texts a component keeps beside it, what is inherited down the tree, and the scene file read and written |
+| `time/` | The frame's time, timers, game clocks, dates and cultures |
+| `input/` | Keys, the pointer, controllers, actions, fingers and gestures, and the events scripts hear |
+| `physics/` | Bodies, areas, characters, forces, rays and picking |
+| `audio/` | Sound and its buses |
+| `animation/` | Tweens, animation libraries and sprite frames |
+| `render/` | Sprites, cameras, layers, materials and shaders, lights, particles, drawings, render views and the stretch of a game to its window |
+| `tiles/` | Tile sets, tile maps and their chunks |
+| `ui/` | Controls, themes, the interface, touch buttons and tool windows |
+| `script/` | What a script sees of the engine and how it gets there |
+| `assets/` | The tables of files of each kind, background loading, data files |
+| `project/` | The project file and its settings |
+| `files/` | A game's own files, config files, sealed files and the pack a shipped game reads |
+| `platform/` | The window, its cursor and icon, the clipboard and the system's dialogs |
+| `math/` | Colours, points and boxes |
+
+A table kept by entity is listed once, in `App.entity_tables`: the world
+cleared and the dead forgotten go through that list. Tests sit beside what
+they test, as `*_test.zig`; `root.zig` lists them. `runtime/` is the
+program a shipped game runs (BSD-1-Clause), and `tools/` what the build runs.
+
 ## 📦 Install
 
 ```bash
@@ -3345,7 +3378,7 @@ Here, and checked by the tests:
   dead zone, held from code, rebound and kept in the player's own file, and
   the interface moved by six built-in ones.
 - A timer as a component, with `timeout` and `app.createTimer`;
-  `app.single` for the component there is
+  `app.singleton` for the component there is
   one of, and engine shortcuts for quitting and fullscreen, off unless asked
   for.
 - Names that belong to the entity rather than to a component:

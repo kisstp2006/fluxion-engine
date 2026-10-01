@@ -2,7 +2,7 @@
 
 .{
     .name = .fluxion_engine,
-    .version = "0.3.0",
+    .version = "0.3.1",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x2e5b6a99e50b4a48,
     // Every one pinned to a pushed commit, so `zig fetch` builds this
