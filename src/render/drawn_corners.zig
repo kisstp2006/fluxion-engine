@@ -34,8 +34,7 @@ pub fn ofSprite(app: *App, entity: Entity) ?[4]Vec2 {
 pub fn ofText(app: *App, entity: Entity) ?[4]Vec2 {
     const label = (app.world.get(entity, components.Text2D) orelse return null).*;
     const placed = app.drawnTransform(entity) orelse return null;
-    const face = app.assets.fontOf(label.font) orelse return null;
-    return sprite.labelCornersOf(label, app.textOf(entity, components.Text2D, "text"), placed, face);
+    return sprite.labelCornersOf(app.gpa, &app.assets, label, app.textOf(entity, components.Text2D, "text"), placed);
 }
 
 /// Where a map's painted tiles are drawn, as the four corners of the box

@@ -160,6 +160,14 @@ pub const Sprite = extern struct {
 /// The words are the app's, kept beside the component as long as they are:
 /// see `component_texts.zig`. The transform is the top left of the first line, not the
 /// baseline.
+///
+/// **Lines** break where the words say, and with a `wrap_width` between
+/// words to stay within it - inside a word longer than a line, at a letter.
+/// Each line is aligned on the transform by itself. **An outline** is the
+/// letters grown by `outline_size` all round, drawn under them. **Tags**,
+/// with `markup` on, are a `RichText`'s but for pictures - `{color=red|...}`,
+/// `{size=32|...}`, `{b|...}` in the `bold_font`, and the rest - so one label
+/// can be in two fonts and many sizes: see `label_layout.zig`.
 pub const Text2D = extern struct {
     /// `.none` is the default font, the first one loaded.
     font: assets.FontHandle = .none,
@@ -176,6 +184,21 @@ pub const Text2D = extern struct {
     /// Multiplies the font's own line height.
     line_spacing: f32 = 1,
 
+    /// How wide a line may be before the words go on to the next; nought for
+    /// lines only where the words break them.
+    wrap_width: f32 = 0,
+
+    /// How far the outline reaches out from the letters, in the same units
+    /// as `size`; nought for none.
+    outline_size: f32 = 0,
+    outline_color: Color = .black,
+
+    /// Whether tags in the words are read rather than shown.
+    markup: bool = false,
+    /// The font a `{b|...}` stretch is set in; `.none` strikes the label's
+    /// own font twice.
+    bold_font: assets.FontHandle = .none,
+
     /// The same sort keys as a `Sprite`'s: text and sprites are one list.
     layer: i16 = 0,
     order: f32 = 0,
@@ -188,6 +211,11 @@ pub const Text2D = extern struct {
     pub const reflect_attributes = .{attr.Text{ .name = "text", .multiline = true }};
     pub const reflect_fields = .{
         .size = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "Per em, before the transform's scale" } },
+        .wrap_width = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "Zero breaks lines only where the words do" } },
+        .outline_size = .{ attr.Unit{ .text = "px" }, attr.Group{ .name = "Outline" }, attr.Doc{ .text = "How far it reaches out from the letters; zero for none" } },
+        .markup = .{ attr.Group{ .name = "Tags" }, attr.Doc{ .text = "Read {color=red|...}, {size=32|...}, {b|...} and the rest, as a RichText does" } },
+        .bold_font = .{attr.Doc{ .text = "What {b|...} is set in; none strikes the label's own font twice" }},
+        .layer = .{attr.Group{ .name = "Drawing" }},
     };
 };
 

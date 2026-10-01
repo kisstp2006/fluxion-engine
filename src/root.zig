@@ -499,6 +499,7 @@ test {
     _ = @import("platform/window_test.zig");
     _ = @import("reflect/reflect_test.zig");
     _ = @import("render/camera_test.zig");
+    _ = @import("render/label_layout_test.zig");
     _ = @import("render/particles_test.zig");
     _ = @import("render/render_test.zig");
     _ = @import("scene/hierarchy_test.zig");

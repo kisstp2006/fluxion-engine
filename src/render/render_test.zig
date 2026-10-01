@@ -912,6 +912,89 @@ test "an entity is outlined by whichever of the two it is drawn as" {
     try testing.expect(app.drawnCorners(neither) == null);
 }
 
+test "a label's outline is drawn under all of its letters, in its own colour, and reaches past them" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 320, .height = 240, .io = threaded.io() });
+    defer app.destroy();
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch
+        return error.SkipZigTest;
+
+    const label = try app.world.spawnWith(.{
+        components.Transform2D.at(20, 20),
+        components.Text2D{ .outline_size = 3, .outline_color = .rgba(1, 0, 0, 1) },
+    });
+    try app.setText(label, components.Text2D, "text", "Hi!");
+    try app.run();
+
+    // Three outlines, then three letters: none of a letter's neighbours'
+    // outlines over it.
+    const items = app.sprites.items.items;
+    try testing.expectEqual(@as(u32, 6), app.sprites.drawn);
+    for (items[0..3], items[3..6]) |outline, letter| {
+        try testing.expectEqual(@as(f32, 0), outline.instance.tint[1]);
+        try testing.expectEqual(@as(f32, 1), letter.instance.tint[1]);
+        // Grown by three all round.
+        try testing.expectApproxEqAbs(letter.instance.place[2] + 6, outline.instance.place[2], 0.001);
+        try testing.expectApproxEqAbs(letter.instance.place[0] - 3, outline.instance.place[0], 0.001);
+    }
+    // Each outline is a glyph of its own in the atlas.
+    try testing.expectEqual(@as(usize, 6), app.assets.fontOf(.none).?.atlas.count());
+}
+
+test "a label in two fonts draws each stretch from its font's atlas, and a heavy one with no font of its own twice" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 320, .height = 240, .io = threaded.io() });
+    defer app.destroy();
+    _ = app.assets.loadSystemFont(.{ .atlas = 256 }) catch return error.SkipZigTest;
+    const mono = app.assets.loadSystemFont(.{ .atlas = 256, .mono = true }) catch return error.SkipZigTest;
+
+    const label = try app.world.spawnWith(.{
+        components.Transform2D.at(20, 20),
+        components.Text2D{ .markup = true, .bold_font = mono, .outline_size = 1 },
+    });
+    try app.setText(label, components.Text2D, "text", "a{b|b}c");
+    try app.run();
+
+    // The outlines under the letters whichever atlas each is from.
+    const items = app.sprites.items.items;
+    try testing.expectEqual(@as(u32, 6), app.sprites.drawn);
+    const own = app.assets.fontOf(.none).?.texture;
+    const bold = app.assets.fontOf(mono).?.texture;
+    for ([_]usize{ 0, 2, 3, 5 }) |i| try testing.expectEqual(own, items[i].texture);
+    for ([_]usize{ 1, 4 }) |i| try testing.expectEqual(bold, items[i].texture);
+    for (items[0..3]) |outline| try testing.expectEqual(@as(f32, 0), outline.instance.tint[0]);
+    for (items[3..6]) |letter| try testing.expectEqual(@as(f32, 1), letter.instance.tint[0]);
+
+    // With no bold font, the heavy letter is the label's own, struck twice.
+    app.world.get(label, components.Text2D).?.bold_font = .none;
+    app.world.get(label, components.Text2D).?.outline_size = 0;
+    app.running = true;
+    app.frames_left = 1;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 4), app.sprites.drawn);
+    for (app.sprites.items.items) |letter| try testing.expectEqual(own, letter.texture);
+}
+
+test "a wrapped label's corners are the box of its lines as they wrap" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    _ = app.assets.loadSystemFont(.{ .atlas = 256 }) catch return error.SkipZigTest;
+
+    const one = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Text2D{} });
+    try app.setText(one, components.Text2D, "text", "Hello");
+    const word = app.textCorners(one).?;
+    const width = word[2].x - word[0].x;
+    const height = word[2].y - word[0].y;
+
+    const wrapped = try app.world.spawnWith(.{ components.Transform2D.at(0, 0), components.Text2D{ .wrap_width = width * 1.5 } });
+    try app.setText(wrapped, components.Text2D, "text", "Hello Hello");
+    const two = app.textCorners(wrapped).?;
+    try testing.expectApproxEqAbs(width, two[2].x - two[0].x, 0.001);
+    try testing.expectApproxEqAbs(height * 2, two[2].y - two[0].y, 0.01);
+}
+
 const Beneath = struct {
     fn grid(app: *App) anyerror!void {
         app.debug_under.line2d(.init(-50, 0), .init(50, 0), .white);

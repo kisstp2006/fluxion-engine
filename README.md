@@ -837,7 +837,9 @@ for (app.input.dropped()) |drop| {
 - **`x` and `y` are where it was let go**, in the pixels `input.pointer` is
   in - into the folder under it, onto the thing under it. A fluxion-platform
   from before drops said where gives the pointer's last place instead.
-- **Windows and the web drop files**; X11 and Wayland do not yet.
+- **Every desktop drops files**: Windows through `WM_DROPFILES`, X11 by
+  XDND with the program they come from, Wayland through the seat's data
+  device, and the web from the page. A phone has nothing to drag.
 - **A test drops them itself**: `app.input.dropFiles(.{ .paths = &.{"C:/Art/hero.png"}, .x = 40, .y = 60 })`.
 
 ## ⌛ Frame pacing
@@ -882,9 +884,10 @@ if (!app.input.focused) app.setPaused(true);
   uneven frame to frame.
 - **A minimised window is not drawn**, and the loop wakes ten times a second
   instead of spinning. The fixed steps keep the simulation in real time.
-- **On `d3d11`, vsync off does not yet go past the refresh rate**: the
-  flip-model swapchain in fluxion-rhi has two buffers and no tearing support.
-  It is the backend Windows opens by default now.
+- **With vsync off nothing waits for the refresh**: on `d3d11` and `d3d12`
+  a frame tears onto the screen where the system allows tearing, rather than
+  the compositor showing only the newest at each refresh, and Vulkan
+  presents `immediate`, or `mailbox` where that is all there is.
 
 ## ⏲️ Timers
 
@@ -1299,6 +1302,19 @@ _ = try world.spawnWith(.{
   long as they are - `app.setText(label, fx.Text2D, "text", "Score")` - and
   `app.printText(label, fx.Text2D, "text", "{d} points", .{score})` is what a
   game actually does with them. See [Controls and themes](#-controls-and-themes).
+- **A label wraps, has an outline, and reads tags.** With a `wrap_width`
+  its lines break between words to stay within it, and inside a word longer
+  than a line; each line is aligned on the transform by itself.
+  `outline_size` grows every letter by that much all round into an
+  `outline_color` shape drawn under all of them - worked out from the
+  glyph's own coverage and kept in the atlas beside it, so a thick outline
+  is as smooth as a thin one. With `markup` on, the words' tags are a
+  `RichText`'s but for pictures: `{color=red|...}`, `{size=32|...}`,
+  `{shadow_color=black_offset=0.1,0.1|...}`, and `{b|...}` set in the
+  `bold_font` - one label in two fonts and as many sizes - or, with none,
+  the label's own font struck twice. A line is as tall as its tallest
+  letter. The box an editor outlines and the camera tests is laid out by
+  the same code the letters are, `label_layout.zig`.
 - **A font is a file, or one font of a collection.** `app.assets.loadFont`
   opens a `.ttf` or an `.otf`, and `.member = n` the nth font of a `.ttc`,
   which is what Windows ships its Chinese, Japanese and Korean fonts in.
@@ -2212,8 +2228,8 @@ struct Lever {
 - **`event.position` is in the window's pixels**. `app.screenToWorld(x, y)`
   takes it into the world.
 
-Not here yet: polygons, joints as components, and a view of the colliders in
-`debug`.
+Not here yet: polygon colliders, and joints as components. What the physics
+sees is drawn by `app.debug_views.colliders`: see [Debug drawing](#-debug-drawing).
 
 ## 📁 The project's files
 
@@ -3218,7 +3234,7 @@ what it is about:
 | `physics/` | Bodies, areas, characters, forces, rays and picking |
 | `audio/` | Sound and its buses |
 | `animation/` | Tweens, animation libraries and sprite frames |
-| `render/` | Sprites, cameras, layers, materials and shaders, lights, particles, drawings, render views and the stretch of a game to its window |
+| `render/` | Sprites, labels and their glyph atlas, cameras, layers, materials and shaders, lights, particles, drawings, render views and the stretch of a game to its window |
 | `tiles/` | Tile sets, tile maps and their chunks |
 | `ui/` | Controls, themes, the interface, touch buttons and tool windows |
 | `script/` | What a script sees of the engine and how it gets there |
@@ -3437,9 +3453,8 @@ Here, and checked by the tests:
   fields by a path, from Zig and from Flux.
 - Text: a shelf-packed glyph atlas per font, kerning, several lines, three
   alignments, and words of any length kept beside the component, formatted
-  into from Zig and written from Flux. Not here yet, for a `Text2D`: wrapping,
-  an outline, and more than one font in one label - a `RichText` control has
-  those.
+  into from Zig and written from Flux; a label wrapped to a width, with an
+  outline, and in two fonts and many sizes through its tags.
 - Fonts from a `.ttf`, an `.otf`, or one font of a `.ttc` collection, and
   the system's own interface font and its monospaced one, as the system
   names them.
@@ -3545,14 +3560,7 @@ In order, and the order is an argument rather than a wish list: each of these
 either unblocks the one after it or is the thing most missed by somebody
 trying to finish a game with what is here.
 
-### 1. Interface anchored to the world
-
-The layer is here. What a game's interface still wants from fluxion-ui is
-interface floating over a point in the world - health bars, name plates -
-which needs an id scope so forty of them can share one declaration, state per
-element so a menu can animate, and nine-slice pictures.
-
-### 2. The 3D pass
+### 1. The 3D pass
 
 Meshes, a depth attachment, a `Camera3D`, and the pass drawn before the 2D one
 into the same target. The place it goes is marked in `App.drawLayers`, and
@@ -3569,10 +3577,10 @@ before this package existed - the seam was cut for it deliberately.
   through `Query.each`; running two whole systems at once needs each to
   declare what it touches, which is a change to what a system *is* and should
   wait until there is a game slow enough to want it.
-- **Hot reload**, which is what [Fluxion VFS](https://github.com/kisstp2006/fluxion-vfs)
-  is for and is not wired up.
-- **An editor.** A separate program one licence tier up, `fluxion-editor`,
-  begun on the interface layer; what it needs from here is its own list.
+- **Hot reload of everything a running game holds.** Its scripts are read
+  again when saved, with `Options.watch`, and every kind of file has its
+  `reloadX`, which is what an editor calls when a file changes; a game does
+  not yet watch its pictures, sounds and scenes on disc itself.
 
 ## 🧩 What counts as a component
 

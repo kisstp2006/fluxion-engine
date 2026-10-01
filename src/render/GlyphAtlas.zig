@@ -11,7 +11,8 @@
 //!
 //! Each glyph is rasterised once and packed into a shared image, so all the
 //! text in a frame is instances of one quad against one texture. Keyed by
-//! glyph and whole-pixel size. White pixels with the coverage in the alpha,
+//! glyph, whole-pixel size, and how far an outline grown from it reaches.
+//! White pixels with the coverage in the alpha,
 //! so a glyph is a picture like any other and the sprite shader needs no
 //! special case. Packed on shelves, which suits glyphs of one size: they are
 //! nearly all the same height.
@@ -49,12 +50,16 @@ pub const Entry = struct {
     advance: f32,
 };
 
-/// One glyph at one size, as a number.
-const Key = u32;
+/// One glyph at one size, and how far its outline reaches, as a number.
+const Key = u64;
 
-inline fn keyOf(index: u16, size: u16) Key {
-    return (@as(Key, size) << 16) | index;
+inline fn keyOf(index: u16, size: u16, reach: u16) Key {
+    return (@as(Key, reach) << 32) | (@as(Key, size) << 16) | index;
 }
+
+/// The furthest an outline reaches from its glyph, in pixels: one asked to
+/// reach further reaches this far.
+pub const max_outline: u16 = 64;
 
 /// A blank pixel between glyphs, so a linear sampler at one glyph's edge does
 /// not read its neighbour. One is enough without mip-maps.
@@ -129,15 +134,118 @@ pub fn markClean(self: *Atlas) void {
 /// asked for. `size` is in whole pixels per em. The face is passed in rather
 /// than held, because the font table may move.
 pub fn glyph(self: *Atlas, face: *const font.Font, index: u16, size: u16) Error!Entry {
-    const key = keyOf(index, size);
+    return self.entryOf(face, index, size, 0);
+}
+
+/// The same glyph's outline: its shape grown by `reach` pixels all round,
+/// as smooth at its edge as the glyph is at its own, to be drawn under it in
+/// another colour. At most `max_outline`.
+pub fn outline(self: *Atlas, face: *const font.Font, index: u16, size: u16, reach: u16) Error!Entry {
+    return self.entryOf(face, index, size, @min(reach, max_outline));
+}
+
+fn entryOf(self: *Atlas, face: *const font.Font, index: u16, size: u16, reach: u16) Error!Entry {
+    const key = keyOf(index, size, reach);
     if (self.entries.get(key)) |entry| return entry;
 
     var rendered = try face.render(self.gpa, index, face.scaleFor(@floatFromInt(size)));
     defer rendered.deinit(self.gpa);
+    if (reach > 0) try grow(self.gpa, &rendered, reach);
 
     const entry = try self.place(rendered);
     try self.entries.put(self.gpa, key, entry);
     return entry;
+}
+
+/// A glyph grown into its outline: each pixel as covered as it is within
+/// `reach` of the glyph's edge, with half a pixel's blend at the outline's
+/// own edge. The distance is a Euclidean distance transform of the
+/// coverage - squared distances along each column, then along each row -
+/// so a wide outline costs no more a pixel than a thin one. A pixel the
+/// glyph's edge crosses starts half a pixel less its coverage from it.
+fn grow(gpa: Allocator, rendered: *font.Rendered, reach: u16) Allocator.Error!void {
+    const inner = rendered.bitmap;
+    if (inner.isEmpty()) return;
+    const r: u32 = reach;
+    const width = inner.width + 2 * r;
+    const height = inner.height + 2 * r;
+
+    const squared = try gpa.alloc(f32, @as(usize, width) * height);
+    defer gpa.free(squared);
+    for (0..height) |y| for (0..width) |x| {
+        const coverage: u8 = if (x < r or y < r) 0 else inner.at(@intCast(x - r), @intCast(y - r));
+        const within = 0.5 - @as(f32, @floatFromInt(coverage)) / 255;
+        squared[y * width + x] = switch (coverage) {
+            255 => 0,
+            0 => far,
+            else => if (within > 0) within * within else 0,
+        };
+    };
+
+    const longest = @max(width, height);
+    const line = try gpa.alloc(f32, longest);
+    defer gpa.free(line);
+    const parabolas = try gpa.alloc(u32, longest);
+    defer gpa.free(parabolas);
+    const bounds = try gpa.alloc(f32, longest + 1);
+    defer gpa.free(bounds);
+    for (0..width) |x| alongLine(squared, x, width, height, line, parabolas, bounds);
+    for (0..height) |y| alongLine(squared, y * width, 1, width, line, parabolas, bounds);
+
+    const pixels = try gpa.alloc(u8, squared.len);
+    const edge = @as(f32, @floatFromInt(r)) + 0.5;
+    for (squared, pixels) |distance, *pixel| {
+        pixel.* = @intFromFloat(@round(std.math.clamp(edge - @sqrt(distance), 0, 1) * 255));
+    }
+    rendered.bitmap.deinit(gpa);
+    rendered.bitmap = .{ .pixels = pixels, .width = width, .height = height };
+    rendered.left -= @intCast(r);
+    rendered.top += @intCast(r);
+}
+
+/// Further than any glyph is from anything, squared: no shape near yet.
+const far: f32 = 1e20;
+
+/// Along one line of `grid` - `length` cells `stride` apart from `offset` -
+/// each squared distance becomes the least, over the line, of any cell's
+/// plus the square of how far that cell is: the lower envelope of the
+/// parabolas the cells stand for, as Felzenszwalb and Huttenlocher find it.
+/// `line`, `parabolas` and `bounds` are room to work in.
+fn alongLine(grid: []f32, offset: usize, stride: usize, length: usize, line: []f32, parabolas: []u32, bounds: []f32) void {
+    line[0] = grid[offset];
+    parabolas[0] = 0;
+    bounds[0] = -far;
+    bounds[1] = far;
+    var k: usize = 0;
+    for (1..length) |q| {
+        line[q] = grid[offset + q * stride];
+        // The first parabola's bound is further back than any meeting, so
+        // this never steps back past it.
+        var meet = meeting(line, parabolas[k], q);
+        while (meet <= bounds[k]) {
+            k -= 1;
+            meet = meeting(line, parabolas[k], q);
+        }
+        k += 1;
+        parabolas[k] = @intCast(q);
+        bounds[k] = meet;
+        bounds[k + 1] = far;
+    }
+    k = 0;
+    for (0..length) |q| {
+        const at: f32 = @floatFromInt(q);
+        while (bounds[k + 1] < at) k += 1;
+        const r = parabolas[k];
+        const apart = at - @as(f32, @floatFromInt(r));
+        grid[offset + q * stride] = line[r] + apart * apart;
+    }
+}
+
+/// Where the parabolas of cells `r` and `q` cross.
+fn meeting(line: []const f32, r: usize, q: usize) f32 {
+    const at: f32 = @floatFromInt(q);
+    const from: f32 = @floatFromInt(r);
+    return (line[q] - line[r] + at * at - from * from) / (at - from) / 2;
 }
 
 /// Copy a rasterised glyph into the next free space, and say where that was.
@@ -217,7 +325,7 @@ pub fn clear(self: *Atlas) void {
     self.generation = nextGeneration();
 }
 
-/// How many glyphs are cached. One per letter per size.
+/// How many glyphs are cached. One per letter per size, and per outline.
 pub fn count(self: Atlas) usize {
     return self.entries.count();
 }
@@ -297,4 +405,25 @@ test "a space takes no room and still moves the pen" {
     try testing.expectEqual(@as(f32, 0), entry.width);
     try testing.expectEqual(@as(f32, 5), entry.advance);
     try testing.expect(!atlas.dirty);
+}
+
+test "an outline is the glyph grown all round, smooth at its edge" {
+    const gpa = testing.allocator;
+    // One covered pixel, grown by two.
+    const one = try gpa.alloc(u8, 1);
+    one[0] = 255;
+    var rendered: font.Rendered = .{ .bitmap = .{ .pixels = one, .width = 1, .height = 1 }, .left = 3, .top = 7, .advance = 9 };
+    defer rendered.deinit(gpa);
+    try grow(gpa, &rendered, 2);
+
+    try testing.expectEqual(@as(u32, 5), rendered.bitmap.width);
+    try testing.expectEqual(@as(u32, 5), rendered.bitmap.height);
+    try testing.expectEqual(@as(i32, 1), rendered.left);
+    try testing.expectEqual(@as(i32, 9), rendered.top);
+    // Solid within its reach, half at the edge of it, and nothing past.
+    try testing.expectEqual(@as(u8, 255), rendered.bitmap.at(2, 2));
+    try testing.expectEqual(@as(u8, 255), rendered.bitmap.at(1, 2));
+    try testing.expectEqual(@as(u8, 128), rendered.bitmap.at(0, 2));
+    try testing.expectEqual(@as(u8, 255), rendered.bitmap.at(1, 1));
+    try testing.expectEqual(@as(u8, 0), rendered.bitmap.at(0, 0));
 }

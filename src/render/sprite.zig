@@ -24,7 +24,6 @@ const Allocator = std.mem.Allocator;
 const ecs = @import("fluxion_ecs");
 const rhi = @import("fluxion_rhi");
 const math = @import("fluxion_math");
-const typeface = @import("fluxion_font");
 
 const Assets = @import("../assets/assets.zig");
 const components = @import("../scene/components.zig");
@@ -66,6 +65,9 @@ const Particles2D = @import("particles.zig").Particles2D;
 const dot_size = @import("particles.zig").dot_size;
 const Lighting = @import("lighting.zig").Lighting;
 const overView = @import("lighting.zig").overView;
+const label_layout = @import("label_layout.zig");
+const Faces = label_layout.Faces;
+const GlyphAtlas = @import("GlyphAtlas.zig");
 
 const Drawable = ecs.Query(.{ Transform2D, Sprite });
 const Labels = ecs.Query(.{ Transform2D, Text2D });
@@ -330,6 +332,9 @@ pub const Renderer = struct {
     laid: std.AutoArrayHashMapUnmanaged(u64, Laid) = .empty,
     /// A drawing's words, laid out each time they are drawn.
     loose: Laid = .{},
+    /// Where the letters of the label being laid out go: worked out in, kept
+    /// from one label to the next.
+    letters: label_layout.Layout = .{},
     /// Counts the times the words are gathered, for `Laid.used`.
     text_clock: u64 = 0,
 
@@ -447,6 +452,7 @@ pub const Renderer = struct {
         for (self.laid.values()) |*held| held.glyphs.deinit(gpa);
         self.laid.deinit(gpa);
         self.loose.glyphs.deinit(gpa);
+        self.letters.deinit(gpa);
         self.staging.deinit(gpa);
         self.param_sets.deinit(gpa);
         self.param_bytes.deinit(gpa);
@@ -1154,22 +1160,21 @@ pub const Renderer = struct {
 
             for (transforms, labels, chunk.entities, 0..) |local, label, entity, row| {
                 const run = (self.texts orelse return).get(entity, text_key);
-                if (!label.visible or run.len == 0 or label.color.a <= 0) continue;
+                if (!label.visible or run.len == 0) continue;
                 const looks = has.looks(gpa, world, inherited, entity, row);
                 if (!looks.visible or looks.modulate.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
                 // A scene's words are UTF-8 by the time they are read, but a
                 // label's bytes can be written by hand, and the walk through
-                // its characters below takes them on trust.
+                // its characters takes them on trust.
                 if (!std.unicode.utf8ValidateSlice(run)) continue;
 
                 // Not drawn when it cannot be placed, as with a sprite.
                 const transform = has.placed(world, snapshots, entity, row, local, alpha) orelse continue;
-                const face = assets.fontOf(label.font) orelse continue;
+                const faces = Faces.of(assets, label) orelse continue;
 
                 var shown = label;
-                shown.color = looks.tint(label.color);
                 shown.layer = looks.layer(label.layer);
-                try self.layOut(gpa, assets, face, shown, run, transform, bounds, null, entity, looks.unshaded);
+                try self.layOut(gpa, assets, faces, shown, looks, run, transform, bounds, null, entity);
             }
         }
     }
@@ -1180,8 +1185,11 @@ pub const Renderer = struct {
         self: *Renderer,
         gpa: Allocator,
         assets: *Assets,
-        face: *Assets.Font,
+        faces: Faces,
         label: Text2D,
+        /// What it looks like under its parents: its colours are tinted by
+        /// it, and it may be unshaded.
+        looks: Resolved,
         run: []const u8,
         transform: Transform2D,
         bounds: Bounds,
@@ -1191,39 +1199,42 @@ pub const Renderer = struct {
         /// The label's entity, whose layout is kept; none for a drawing's
         /// words.
         kept_for: ecs.Entity,
-        unshaded: bool,
     ) !void {
-        const size = GlyphSize.of(label.size);
-        const scaled = face.face.at(@floatFromInt(size.pixels));
-        const line_height = scaled.lineHeight() * label.line_spacing * size.stretch;
-
         const laid = if (kept_for.isNone()) &self.loose else laid: {
             const found = try self.laid.getOrPut(gpa, kept_for.toInt());
             if (!found.found_existing) found.value_ptr.* = .{};
             break :laid found.value_ptr;
         };
         laid.used = self.text_clock;
-        const hash = layoutHash(face, label, run);
+        const hash = layoutHash(faces, label, run);
+        var made = false;
         if (laid.hash != hash or kept_for.isNone()) {
-            var widths: [max_measured_lines]f32 = undefined;
-            const measured = measureLines(&face.face, scaled, run, &widths);
+            try self.letters.make(gpa, faces, label, run);
+            made = true;
             laid.hash = hash;
-            laid.width = measured.width * size.stretch;
-            laid.height = measured.lines * line_height;
+            laid.width = self.letters.width;
+            laid.height = self.letters.height;
+            laid.overhang = self.letters.overhang + outlineOf(label);
             laid.whole = false;
         }
 
         // The whole label against the camera, boxed generously: one test, not
         // one per letter. Letters off screen are not drawn into the atlas.
-        const reach = spriteRadius(laid.width * @abs(transform.scale_x), laid.height * @abs(transform.scale_y));
+        const scale = @max(@abs(transform.scale_x), @abs(transform.scale_y));
+        const reach = spriteRadius(laid.width * @abs(transform.scale_x), laid.height * @abs(transform.scale_y)) + laid.overhang * 2 * scale;
         if (!bounds.admits(transform.x, transform.y, reach)) {
             self.culled += 1;
             return;
         }
-        if (!laid.whole) try self.layLetters(gpa, face, label, run, scaled, line_height, size, laid);
+        if (!laid.whole) {
+            if (!made) try self.letters.make(gpa, faces, label, run);
+            try self.layLetters(gpa, faces, label, laid);
+        }
 
         const c = @cos(transform.rotation);
         const sn = @sin(transform.rotation);
+        // One key for all of it, in either font, so its shadows, outlines
+        // and letters are drawn in the order they were laid.
         const key = drawn_key orelse sortKeyOf(label.layer, if (label.font.isNone())
             assets.default_font.index
         else
@@ -1233,14 +1244,22 @@ pub const Renderer = struct {
         const sampler = assets.samplerFor(.linear, .clamp_to_edge);
         try self.items.ensureUnusedCapacity(gpa, laid.glyphs.items.len);
         for (laid.glyphs.items) |glyph| {
+            const own = switch (glyph.kind) {
+                .shadow => glyph.color.?,
+                .outline => label.outline_color,
+                .letter => glyph.color orelse label.color,
+            };
+            var shown = looks.tint(own);
+            shown.a *= glyph.opacity;
+            if (!(shown.a > 0)) continue;
             const placed = transform.apply(glyph.x, glyph.y);
             self.items.appendAssumeCapacity(.{
                 .key = key,
                 .order = label.order,
-                .texture = face.texture,
+                .texture = faces.get(glyph.face).texture,
                 .sampler = sampler,
                 .blend = .alpha,
-                .unshaded = unshaded,
+                .unshaded = looks.unshaded,
                 // The pivot is the corner the pen worked out.
                 .instance = .quad(
                     placed.x,
@@ -1251,86 +1270,86 @@ pub const Renderer = struct {
                     0,
                     c,
                     sn,
-                    .{ label.color.r, label.color.g, label.color.b, label.color.a },
+                    .{ shown.r, shown.g, shown.b, shown.a },
                     glyph.uv,
                 ),
             });
         }
     }
 
-    /// Walk one label's characters, and find where each goes in its own
-    /// space and in the atlas, drawing into the atlas what is not there yet.
-    fn layLetters(
+    /// Each letter of the layout just made as quads in its label's space,
+    /// with where each is in its font's atlas, drawing into the atlas what is
+    /// not there yet: the shadows first, then the outline, then the letters,
+    /// so each is under the next all along the words.
+    fn layLetters(self: *Renderer, gpa: Allocator, faces: Faces, label: Text2D, laid: *Laid) !void {
+        laid.glyphs.clearRetainingCapacity();
+        self.layAll(gpa, faces, label, laid) catch |err| switch (err) {
+            // Room is made and the frame's words laid out again - but for the
+            // last pass of a frame that has none to make, which leaves the
+            // rest of this label out.
+            error.AtlasFull => if (self.fit_only) return else return err,
+            else => return err,
+        };
+        laid.whole = true;
+    }
+
+    fn layAll(self: *Renderer, gpa: Allocator, faces: Faces, label: Text2D, laid: *Laid) !void {
+        const letters = self.letters.letters.items;
+        for (letters) |letter| if (letter.shadow) |shadow| {
+            try self.layGlyph(gpa, faces, letter, 0, .shadow, shadow.color, shadow.x, shadow.y, laid);
+        };
+        const reach = outlineOf(label);
+        if (reach > 0) for (letters) |letter| {
+            // In the atlas's pixels: past `Assets.max_glyph` a pixel is more.
+            const pixels: u16 = @intFromFloat(@min(@round(reach / letter.size.stretch), GlyphAtlas.max_outline));
+            if (pixels > 0) try self.layGlyph(gpa, faces, letter, pixels, .outline, null, 0, 0, laid);
+        };
+        for (letters) |letter| try self.layGlyph(gpa, faces, letter, 0, .letter, letter.color, 0, 0, laid);
+    }
+
+    /// One letter's glyph, or its outline `reach` pixels out, as a quad
+    /// `x`, `y` from where the letter goes - and again where its second
+    /// strike goes, if it has one.
+    fn layGlyph(
         self: *Renderer,
         gpa: Allocator,
-        face: *Assets.Font,
-        label: Text2D,
-        run: []const u8,
-        scaled: typeface.Scaled,
-        line_height: f32,
-        size: GlyphSize,
+        faces: Faces,
+        letter: label_layout.Letter,
+        reach: u16,
+        kind: LaidGlyph.Kind,
+        color: ?Color,
+        x: f32,
+        y: f32,
         laid: *Laid,
     ) !void {
-        const stretch = size.stretch;
-        laid.glyphs.clearRetainingCapacity();
-        var line_start: usize = 0;
-        var line_index: usize = 0;
+        const font = faces.get(letter.face);
+        const pixels = letter.size.pixels;
+        const entry = (if (reach == 0)
+            font.atlas.glyph(&font.face, letter.glyph, pixels)
+        else
+            font.atlas.outline(&font.face, letter.glyph, pixels, reach)) catch |err| {
+            if (err == error.AtlasFull) self.full = font;
+            return err;
+        };
+        if (entry.width == 0) return;
 
-        while (line_start <= run.len) {
-            const end = std.mem.indexOfScalarPos(u8, run, line_start, '\n') orelse run.len;
-            const line = run[line_start..end];
-
-            // The transform is the top left of the first line, so the first
-            // baseline is one ascent below it.
-            const baseline = scaled.ascent() * stretch + @as(f32, @floatFromInt(line_index)) * line_height;
-            const width = if (label.alignment == .left) 0 else lineWidth(&face.face, scaled, line);
-            var pen: f32 = switch (label.alignment) {
-                .left => 0,
-                .center => -width * stretch / 2,
-                .right => -width * stretch,
-            };
-
-            var previous_glyph: ?u16 = null;
-            var characters = std.unicode.Utf8View.initUnchecked(line).iterator();
-            while (characters.nextCodepoint()) |codepoint| {
-                const index = face.face.glyphFor(codepoint);
-
-                if (previous_glyph) |left| {
-                    const units = face.face.kern(left, index) catch 0;
-                    pen += @as(f32, @floatFromInt(units)) * scaled.scale * stretch;
-                }
-                previous_glyph = index;
-
-                const entry = face.atlas.glyph(&face.face, index, size.pixels) catch |err| switch (err) {
-                    // Room is made and the frame's words laid out again - but
-                    // for the last pass of a frame that has none to make,
-                    // which leaves the rest of this label out.
-                    error.AtlasFull => {
-                        if (self.fit_only) return;
-                        self.full = face;
-                        return error.AtlasFull;
-                    },
-                    else => return err,
-                };
-                defer pen += entry.advance * stretch;
-
-                if (entry.width == 0) continue;
-
-                // The glyph's top left, in the label's space.
-                try laid.glyphs.append(gpa, .{
-                    .x = pen + entry.left * stretch,
-                    .y = baseline - entry.top * stretch,
-                    .width = entry.width * stretch,
-                    .height = entry.height * stretch,
-                    .uv = .{ entry.u0, entry.v0, entry.u1, entry.v1 },
-                });
-            }
-
-            if (end == run.len) break;
-            line_start = end + 1;
-            line_index += 1;
+        const stretch = letter.size.stretch;
+        const strikes: usize = if (letter.strike > 0) 2 else 1;
+        for (0..strikes) |strike| {
+            const across: f32 = if (strike == 1) letter.strike else 0;
+            // The glyph's top left, in the label's space.
+            try laid.glyphs.append(gpa, .{
+                .x = letter.x + across + x + entry.left * stretch,
+                .y = letter.baseline + y - entry.top * stretch,
+                .width = entry.width * stretch,
+                .height = entry.height * stretch,
+                .uv = .{ entry.u0, entry.v0, entry.u1, entry.v1 },
+                .face = letter.face,
+                .kind = kind,
+                .color = color,
+                .opacity = letter.opacity,
+            });
         }
-        laid.whole = true;
     }
 
     /// What each `Drawing2D` holds, its shapes put in the world: at its layer
@@ -1533,9 +1552,8 @@ pub const Renderer = struct {
                     const start = self.at(held.at);
                     placed.x = start.x;
                     placed.y = start.y;
-                    const shown = self.looks.tint(held.color);
-                    const label: Text2D = .{ .font = held.font, .size = held.size, .color = shown, .order = self.order };
-                    try self.renderer.layOut(self.gpa, assets, face, label, run, placed, bounds, self.key, .none, self.looks.unshaded);
+                    const label: Text2D = .{ .font = held.font, .size = held.size, .color = held.color, .order = self.order };
+                    try self.renderer.layOut(self.gpa, assets, .{ .own = face }, label, self.looks, run, placed, bounds, self.key, .none);
                 },
             }
         }
@@ -1560,84 +1578,58 @@ pub const Renderer = struct {
     }
 };
 
-/// How wide one line is, in pixels, kerning included.
-fn lineWidth(face: *const typeface.Font, scaled: typeface.Scaled, line: []const u8) f32 {
-    var width: f32 = 0;
-    var previous: ?u16 = null;
-
-    var characters = std.unicode.Utf8View.initUnchecked(line).iterator();
-    while (characters.nextCodepoint()) |codepoint| {
-        const index = face.glyphFor(codepoint);
-        if (previous) |left| {
-            const units = face.kern(left, index) catch 0;
-            width += @as(f32, @floatFromInt(units)) * scaled.scale;
-        }
-        previous = index;
-        width += scaled.advance(index) catch 0;
-    }
-    return width;
-}
-
-/// The widest line, and how many there are.
-fn measure(face: *const typeface.Font, scaled: typeface.Scaled, run: []const u8) Measured {
-    return measureLines(face, scaled, run, &.{});
-}
-
-const Measured = struct { width: f32, lines: f32 };
-
-/// How many lines' widths a label's layout keeps from measuring it, for
-/// their alignment; one with more measures the rest again.
-const max_measured_lines = 32;
-
 /// One label laid out: see `Renderer.laid`.
 const Laid = struct {
     /// What it was laid out from. See `layoutHash`; nought for nothing.
     hash: u64 = 0,
     /// The last `Renderer.text_clock` it was drawn at.
     used: u64 = 0,
-    /// How far it reaches in its own space, for the camera's test.
+    /// How far it reaches in its own space, for the camera's test: its box,
+    /// and how far past it an outline, a shadow or a second strike goes.
     width: f32 = 0,
     height: f32 = 0,
+    overhang: f32 = 0,
     /// Whether `glyphs` holds every letter: not before the label was first
     /// on screen, nor when the atlas had no room for them all.
     whole: bool = false,
     glyphs: std.ArrayList(LaidGlyph) = .empty,
 };
 
-/// A letter of a label, in the label's space: its top left, its size, and
-/// where it is in the atlas.
+/// A quad of a label, in the label's space: its top left, its size, where
+/// it is in which of its fonts' atlases, and what colours it.
 const LaidGlyph = struct {
     x: f32,
     y: f32,
     width: f32,
     height: f32,
     uv: [4]f32,
+    face: label_layout.Face,
+    kind: Kind,
+    /// A shadow's colour, or a letter's own from a tag; null for the label's.
+    color: ?Color,
+    /// Multiplied into the alpha.
+    opacity: f32,
+
+    const Kind = enum { shadow, outline, letter };
 };
 
-/// What a label is laid out from: its words, its size and lines, and the
-/// atlas its letters are in, which is new each time it is emptied or grows
-/// and so tells its font too.
-fn layoutHash(face: *const Assets.Font, label: Text2D, run: []const u8) u64 {
-    var hasher: std.hash.Wyhash = .init(face.atlas.generation);
+/// What a label is laid out from: its words, everything that places or
+/// sizes a letter, and the atlases its letters are in, which are new each
+/// time one is emptied or grows and so tell its fonts too.
+fn layoutHash(faces: Faces, label: Text2D, run: []const u8) u64 {
+    var hasher: std.hash.Wyhash = .init(faces.own.atlas.generation);
+    if (faces.bold) |bold| hasher.update(std.mem.asBytes(&bold.atlas.generation));
     hasher.update(run);
-    hasher.update(std.mem.asBytes(&label.size));
-    hasher.update(std.mem.asBytes(&label.line_spacing));
-    hasher.update(std.mem.asBytes(&label.alignment));
+    inline for (.{ "size", "line_spacing", "alignment", "wrap_width", "outline_size", "markup" }) |field| {
+        hasher.update(std.mem.asBytes(&@field(label, field)));
+    }
     return hasher.final() | 1;
 }
 
-/// `measure`, with the width of each of the first lines put in `widths`.
-fn measureLines(face: *const typeface.Font, scaled: typeface.Scaled, run: []const u8, widths: []f32) Measured {
-    var widest: f32 = 0;
-    var lines: usize = 0;
-    var it = std.mem.splitScalar(u8, run, '\n');
-    while (it.next()) |line| {
-        const width = lineWidth(face, scaled, line);
-        if (lines < widths.len) widths[lines] = width;
-        widest = @max(widest, width);
-        lines += 1;
-    }
-    return .{ .width = widest, .lines = @floatFromInt(lines) };
+/// How far a label's outline reaches, in its units: nought for none, and
+/// for what is not a number.
+fn outlineOf(label: Text2D) f32 {
+    return if (label.outline_size > 0 and std.math.isFinite(label.outline_size)) label.outline_size else 0;
 }
 
 /// How far from its transform a sprite can reach, whatever its pivot and
@@ -1669,32 +1661,22 @@ pub fn cornersOf(sprite: Sprite, placed: Transform2D, texture: *const Assets.Tex
 /// of its first line: the box its lines are laid out in - the widest line
 /// across, shifted by the alignment, and the lines' heights down - turned
 /// and scaled as the transform says. The laid-out box, not the ink: a line
-/// of spaces is as tall as any other.
+/// of spaces is as tall as any other, and an outline reaches past it.
 ///
 /// Null for a label with nothing drawn: no words, a size that measures
-/// nothing, or bytes that are not UTF-8. What an editor outlines, frames and
-/// tests a click against, as `cornersOf` is for a sprite.
-pub fn labelCornersOf(label: Text2D, run: []const u8, placed: Transform2D, face: *Assets.Font) ?[4]math.Vec2 {
+/// nothing, bytes that are not UTF-8, or no font. What an editor outlines,
+/// frames and tests a click against, as `cornersOf` is for a sprite.
+pub fn labelCornersOf(gpa: Allocator, assets: *Assets, label: Text2D, run: []const u8, placed: Transform2D) ?[4]math.Vec2 {
     if (run.len == 0 or !std.unicode.utf8ValidateSlice(run)) return null;
+    const faces = Faces.of(assets, label) orelse return null;
+    var layout: label_layout.Layout = .{};
+    defer layout.deinit(gpa);
+    layout.make(gpa, faces, label, run) catch return null;
+    if (!(layout.width > 0) or !(layout.height > 0) or !std.math.isFinite(layout.width + layout.height)) return null;
 
-    // The size the renderer lays it out at, and the lines it lays out.
-    const size = GlyphSize.of(label.size);
-    const scaled = face.face.at(@floatFromInt(size.pixels));
-    const line_height = scaled.lineHeight() * label.line_spacing * size.stretch;
-    const measured = measure(&face.face, scaled, run);
-    const across = measured.width * size.stretch;
-    if (!(across > 0) or !(measured.lines > 0) or !std.math.isFinite(line_height)) return null;
-
-    // The transform is the top left of the first line; each line is moved
-    // by the alignment, and so is the box around them.
-    const left: f32 = switch (label.alignment) {
-        .left => 0,
-        .center => -across / 2,
-        .right => -across,
-    };
-    const width = across * placed.scale_x;
-    const height = measured.lines * line_height * placed.scale_y;
-    const x0 = left * placed.scale_x;
+    const width = layout.width * placed.scale_x;
+    const height = layout.height * placed.scale_y;
+    const x0 = layout.left * placed.scale_x;
     const c = @cos(placed.rotation);
     const s = @sin(placed.rotation);
     var out: [4]math.Vec2 = undefined;
@@ -1705,24 +1687,6 @@ pub fn labelCornersOf(label: Text2D, run: []const u8, placed: Transform2D, face:
     }
     return out;
 }
-
-/// The size a label's glyphs are drawn into its font's atlas at: its own in
-/// whole pixels, as the atlas is keyed - a size read from a file is not
-/// always one a hand would give, and NaN is the smallest - and at most
-/// `Assets.max_glyph`, scaled up past it by `stretch`, which is what one of
-/// the glyphs' pixels is in the label's units.
-const GlyphSize = struct {
-    pixels: u16,
-    stretch: f32,
-
-    fn of(size: f32) GlyphSize {
-        const biggest: f32 = @floatFromInt(Assets.max_glyph);
-        const rounded = @round(size);
-        if (rounded >= 1 and rounded <= biggest) return .{ .pixels = @intFromFloat(rounded), .stretch = 1 };
-        if (rounded > biggest) return .{ .pixels = Assets.max_glyph, .stretch = @min(size, 65536) / biggest };
-        return .{ .pixels = 1, .stretch = 1 };
-    }
-};
 
 /// The unit square's corners in order round it, rather than in the strip's
 /// order.
