@@ -430,7 +430,7 @@ pub const Libraries = struct {
     /// name given before gets the new text.
     pub fn add(self: *Libraries, gpa: Allocator, name: []const u8, text: []const u8) !AnimationLibraryHandle {
         if (self.find(name)) |known| {
-            try self.setText(gpa, known, text);
+            try self.readAgain(gpa, known, text);
             return known;
         }
         return self.keep(gpa, name, text, false);
@@ -450,7 +450,11 @@ pub const Libraries = struct {
 
     /// New text for a library: an editor's, as it undoes. Text that does not
     /// read leaves what it said before.
-    pub fn setText(self: *Libraries, gpa: Allocator, handle: AnimationLibraryHandle, text: []const u8) !void {
+    pub fn setText(self: *Libraries, app: *App, handle: AnimationLibraryHandle, text: []const u8) !void {
+        return self.readAgain(app.gpa, handle, text);
+    }
+
+    fn readAgain(self: *Libraries, gpa: Allocator, handle: AnimationLibraryHandle, text: []const u8) !void {
         const held = self.table.get(toId(handle)) orelse return error.NoSuchAnimations;
         var fresh: Library = .{ .source = held.source, .on_disc = held.on_disc, .revision = held.revision +% 1 };
         read(gpa, &fresh, text) catch |err| {
@@ -470,7 +474,7 @@ pub const Libraries = struct {
         if (!held.on_disc) return false;
         const text = try app.project.readFileAlloc(app.gpa, held.source, .limited(file_table.file_limit));
         defer app.gpa.free(text);
-        try self.setText(app.gpa, handle, text);
+        try self.setText(app, handle, text);
         return true;
     }
 
@@ -493,8 +497,10 @@ pub const Libraries = struct {
     }
 
     /// The library as its file would be, into fresh memory: what an editor
-    /// saves and keeps to undo by. The caller frees it.
-    pub fn textOf(self: *Libraries, gpa: Allocator, handle: AnimationLibraryHandle) ![]u8 {
+    /// saves and keeps to undo by. The caller frees it. The app is not
+    /// needed - nothing in a library names another file - but every table of
+    /// a kind of file an editor opens is asked the same way.
+    pub fn textOf(self: *Libraries, _: *App, gpa: Allocator, handle: AnimationLibraryHandle) ![]u8 {
         const held = self.table.get(toId(handle)) orelse return error.NoSuchAnimations;
         return json.stringify(gpa, Document{ .library = held }, write_options);
     }
