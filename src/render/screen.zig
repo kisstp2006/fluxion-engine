@@ -21,6 +21,8 @@ const shader = @import("fluxion_shader");
 
 const material = @import("material.zig");
 const Color = @import("../math/color.zig").Color;
+/// Where in a target the frame is shown: see `stretch.zig`.
+const Rect = @import("stretch.zig").Rect;
 
 /// The quad over the whole of a target, and where in the picture each of its
 /// pixels is - counted as `SCREEN_UV` counts, so a copy is the right way up
@@ -46,14 +48,6 @@ const Picture = struct {
     texture: rhi.Texture,
     width: u32,
     height: u32,
-};
-
-/// Where in a target the frame is shown, in its pixels from the top left.
-pub const Rect = struct {
-    x: f32 = 0,
-    y: f32 = 0,
-    width: f32,
-    height: f32,
 };
 
 pub const Screen = struct {

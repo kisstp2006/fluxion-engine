@@ -162,8 +162,8 @@ pub const Drawings = struct {
     }
 
     /// Every picture gone: the world was cleared.
-    pub fn clearAll(self: *Drawings, gpa: Allocator) void {
-        for (self.by.values()) |*picture| picture.deinit(gpa);
+    pub fn clear(self: *Drawings, app: *App) void {
+        for (self.by.values()) |*picture| picture.deinit(app.gpa);
         self.by.clearRetainingCapacity();
     }
 
@@ -179,12 +179,12 @@ pub const Drawings = struct {
     }
 
     /// Let go of the pictures of the dead.
-    pub fn forgetDead(self: *Drawings, gpa: Allocator, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Drawings, app: *App) void {
         var at = self.by.count();
         while (at > 0) {
             at -= 1;
-            if (world.isAlive(self.by.keys()[at])) continue;
-            self.by.values()[at].deinit(gpa);
+            if (app.world.isAlive(self.by.keys()[at])) continue;
+            self.by.values()[at].deinit(app.gpa);
             self.by.swapRemoveAt(at);
         }
     }

@@ -50,6 +50,7 @@ const attr = @import("../reflect/attr.zig");
 const components = @import("../scene/components.zig");
 const file_table = @import("../assets/file_table.zig");
 const geometry = @import("../math/geometry.zig");
+const fixed_text = @import("../reflect/fixed_text.zig");
 
 const Entity = ecs.Entity;
 const Rect2 = geometry.Rect2;
@@ -640,22 +641,6 @@ pub fn cellRegion(index: u32, columns: u16, rows: u16, width: f32, height: f32) 
 /// holds, so a name keyed on the timeline is the whole name.
 pub const name_len = @import("../reflect/property.zig").Value.name_len;
 
-fn nameIn(buffer: *const [name_len]u8) []const u8 {
-    return std.mem.sliceTo(buffer, 0);
-}
-
-fn setName(buffer: *[name_len]u8, name: []const u8) void {
-    buffer.* = @splat(0);
-    const kept = @min(name.len, name_len);
-    @memcpy(buffer[0..kept], name[0..kept]);
-}
-
-fn named(comptime name: []const u8) [name_len]u8 {
-    var out: [name_len]u8 = @splat(0);
-    @memcpy(out[0..name.len], name);
-    return out;
-}
-
 /// Plays an animation of its `sprite_frames` in the `Sprite` beside it,
 /// writing four of the Sprite's fields every frame: its texture, the region
 /// of it shown - mirrored by `flip_h` and `flip_v` -, its size, which is the
@@ -699,7 +684,7 @@ fn named(comptime name: []const u8) [name_len]u8 {
 /// before drawing.
 pub const AnimatedSprite2D = extern struct {
     sprite_frames: SpriteFramesHandle = .none,
-    animation: [name_len]u8 = named(default_name),
+    animation: [name_len]u8 = fixed_text.of(name_len, default_name),
     /// Started by itself when the game first runs its entity; empty for none.
     autoplay: [name_len]u8 = @splat(0),
     /// Its middle on the transform, rather than its top left corner.
@@ -793,21 +778,21 @@ pub const AnimatedSprite2D = extern struct {
     /// One that plays `name` of `frames` once the game runs it.
     pub fn autoplaying(frames: SpriteFramesHandle, name: []const u8) AnimatedSprite2D {
         var made: AnimatedSprite2D = .{ .sprite_frames = frames };
-        setName(&made.animation, name);
-        setName(&made.autoplay, name);
+        fixed_text.set(&made.animation, name);
+        fixed_text.set(&made.autoplay, name);
         return made;
     }
 
     pub fn animationName(self: *const AnimatedSprite2D) []const u8 {
-        return nameIn(&self.animation);
+        return fixed_text.get(&self.animation);
     }
 
     pub fn autoplayName(self: *const AnimatedSprite2D) []const u8 {
-        return nameIn(&self.autoplay);
+        return fixed_text.get(&self.autoplay);
     }
 
     pub fn setAutoplay(self: *AnimatedSprite2D, name: []const u8) void {
-        setName(&self.autoplay, name);
+        fixed_text.set(&self.autoplay, name);
     }
 
     pub fn play(self: *AnimatedSprite2D, name: []const u8, custom_speed: f32, from_end: bool) void {
@@ -891,7 +876,7 @@ pub const AnimatedSprite2D = extern struct {
     }
 
     fn changeAnimation(self: *AnimatedSprite2D, name: []const u8) void {
-        setName(&self.animation, name);
+        fixed_text.set(&self.animation, name);
         self.seen_animation = self.animation;
         self.frame_count = -1;
         self.check_name = true;
@@ -940,11 +925,12 @@ const Said = struct {
     }
 };
 
-/// Every animated sprite moved on by `delta` seconds, after what was written
-/// to it is made what its setters make it, and its autoplay started the
-/// first time time goes by. What `App.step` calls after the animation
-/// players.
-pub fn update(app: *App, delta: f32) !void {
+/// Every animated sprite moved on by the frame's time, after what was
+/// written to it is made what its setters make it, and its autoplay started
+/// the first time time goes by: a pass of `app/frame_steps.zig`, after the
+/// animation players.
+pub fn update(app: *App) !void {
+    const delta = app.time.delta;
     var said: Said = .{};
     defer said.deinit(app.gpa);
     const flowing = delta > 0;
@@ -962,11 +948,11 @@ pub fn update(app: *App, delta: f32) !void {
                 if (name.len > 0) if (frames) |held| if (held.hasAnimation(name)) {
                     // Its own copy: `play` writes the name it is given.
                     const autoplay = sprite.autoplay;
-                    sprite.play(nameIn(&autoplay), 1, false);
+                    sprite.play(fixed_text.get(&autoplay), 1, false);
                     try notice(app, e, sprite, &said);
                 };
             }
-            if (flowing and sprite.playing and app.isProcessing(e)) try advance(app, e, sprite, delta, &said);
+            if (sprite.playing and app.timeMovesFor(e)) try advance(app, e, sprite, delta, &said);
         }
     }
     try said.emit(app);
@@ -1011,7 +997,7 @@ fn notice(app: *App, e: Entity, sprite: *AnimatedSprite2D, said: *Said) !void {
         // nothing said.
         sprite.seen = true;
         if (app.sprite_frames.get(sprite.sprite_frames)) |frames| {
-            if (!frames.hasAnimation(sprite.animationName()) and frames.animations.items.len > 0) setName(&sprite.animation, frames.animations.items[0].name);
+            if (!frames.hasAnimation(sprite.animationName()) and frames.animations.items.len > 0) fixed_text.set(&sprite.animation, frames.animations.items[0].name);
         }
         sprite.seen_frames = sprite.sprite_frames;
         sprite.seen_animation = sprite.animation;
@@ -1029,7 +1015,7 @@ fn notice(app: *App, e: Entity, sprite: *AnimatedSprite2D, said: *Said) !void {
         sprite.animation = sprite.seen_animation;
         sprite.frame = sprite.seen_frame;
         if (new_frames) sprite.setSpriteFrames(frames);
-        if (new_name) sprite.setAnimation(nameIn(&name));
+        if (new_name) sprite.setAnimation(fixed_text.get(&name));
         if (new_frame) sprite.setFrame(frame);
     }
     fit(app, e, sprite);

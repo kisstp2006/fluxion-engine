@@ -51,6 +51,7 @@ const attr = @import("../reflect/attr.zig");
 const file_table = @import("../assets/file_table.zig");
 const property_mod = @import("../reflect/property.zig");
 const Color = @import("../math/color.zig").Color;
+const fixed_text = @import("../reflect/fixed_text.zig");
 
 const Entity = ecs.Entity;
 const Property = property_mod.Property;
@@ -534,17 +535,6 @@ pub const Libraries = struct {
 /// How long an animation's name may be, in a player.
 pub const name_len = 32;
 
-fn nameIn(buffer: *const [name_len]u8) []const u8 {
-    const end = std.mem.indexOfScalar(u8, buffer, 0) orelse buffer.len;
-    return buffer[0..end];
-}
-
-fn setName(buffer: *[name_len]u8, name: []const u8) void {
-    buffer.* = @splat(0);
-    const kept = @min(name.len, name_len);
-    @memcpy(buffer[0..kept], name[0..kept]);
-}
-
 /// Plays the animations of a library on its entity and the ones under it.
 /// See the top of this file.
 pub const AnimationPlayer = extern struct {
@@ -619,7 +609,7 @@ pub const AnimationPlayer = extern struct {
             return;
         }
         self.request = .play;
-        setName(&self.wanted, name);
+        fixed_text.set(&self.wanted, name);
         self.from = 0;
         self.backwards = false;
         self.playing = true;
@@ -672,19 +662,19 @@ pub const AnimationPlayer = extern struct {
     /// nothing.
     pub fn queue(self: *AnimationPlayer, name: []const u8) void {
         if (!self.playing and self.request != .play) return self.play(name);
-        setName(&self.next, name);
+        fixed_text.set(&self.next, name);
     }
 
     pub fn currentName(self: *const AnimationPlayer) []const u8 {
-        return nameIn(&self.current);
+        return fixed_text.get(&self.current);
     }
 
     pub fn autoplayName(self: *const AnimationPlayer) []const u8 {
-        return nameIn(&self.autoplay);
+        return fixed_text.get(&self.autoplay);
     }
 
     pub fn setAutoplay(self: *AnimationPlayer, name: []const u8) void {
-        setName(&self.autoplay, name);
+        fixed_text.set(&self.autoplay, name);
     }
 };
 
@@ -717,25 +707,26 @@ pub const Players = struct {
         self.said.deinit(gpa);
     }
 
-    pub fn clear(self: *Players, gpa: Allocator) void {
-        for (self.by.values()) |*binding| binding.tracks.deinit(gpa);
+    pub fn clear(self: *Players, app: *App) void {
+        for (self.by.values()) |*binding| binding.tracks.deinit(app.gpa);
         self.by.clearRetainingCapacity();
     }
 
-    pub fn forgetDead(self: *Players, gpa: Allocator, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Players, app: *App) void {
         var at = self.by.count();
         while (at > 0) {
             at -= 1;
-            if (world.isAlive(self.by.keys()[at])) continue;
-            self.by.values()[at].tracks.deinit(gpa);
+            if (app.world.isAlive(self.by.keys()[at])) continue;
+            self.by.values()[at].tracks.deinit(app.gpa);
             self.by.swapRemoveAt(at);
         }
     }
 };
 
-/// Move every player on by `delta` seconds, and pose what each plays. What
-/// `App.step` calls.
-pub fn update(app: *App, delta: f32) !void {
+/// Move every player on by the frame's time, and pose what each plays: a
+/// pass of `app/frame_steps.zig`.
+pub fn update(app: *App) !void {
+    const delta = app.time.delta;
     const players = &app.animation_players;
     players.said.clearRetainingCapacity();
     const flowing = delta > 0;
@@ -748,7 +739,7 @@ pub fn update(app: *App, delta: f32) !void {
         for (chunk.entities, chunk.slice(AnimationPlayer)) |e, *player| try advance(app, e, player, delta, flowing);
     }
     for (players.said.items) |said| {
-        const name = nameIn(&said.name);
+        const name = fixed_text.get(&said.name);
         if (said.started) {
             try app.emit(said.entity, AnimationPlayer, .animation_started, .{ .name = name });
         } else try app.emit(said.entity, AnimationPlayer, .animation_finished, .{ .name = name });
@@ -768,7 +759,7 @@ fn advance(app: *App, e: Entity, player: *AnimationPlayer, delta: f32, flowing: 
         // Nothing starts in a frame with no time.
         .play => if (flowing) {
             player.request = .none;
-            try start(app, e, player, nameIn(&player.wanted), player.from);
+            try start(app, e, player, fixed_text.get(&player.wanted), player.from);
         },
         .seek => {
             player.request = .none;
@@ -778,10 +769,10 @@ fn advance(app: *App, e: Entity, player: *AnimationPlayer, delta: f32, flowing: 
     }
     if (!player.started and flowing) {
         player.started = true;
-        const name = nameIn(&player.autoplay);
+        const name = fixed_text.get(&player.autoplay);
         if (name.len > 0 and !player.playing) try start(app, e, player, name, 0);
     }
-    if (!player.playing or player.paused or !flowing or !app.isProcessing(e)) return;
+    if (!player.playing or player.paused or !app.timeMovesFor(e)) return;
 
     const library = app.animation_libraries.get(player.library) orelse return;
     const animation = library.find(player.currentName()) orelse {
@@ -805,11 +796,11 @@ fn advance(app: *App, e: Entity, player: *AnimationPlayer, delta: f32, flowing: 
     if (!ended) return;
     player.playing = false;
     try players.said.append(app.gpa, .{ .entity = e, .started = false, .name = player.current });
-    const next = nameIn(&player.next);
+    const next = fixed_text.get(&player.next);
     if (next.len > 0) {
         var name: [name_len]u8 = player.next;
         player.next = @splat(0);
-        try start(app, e, player, nameIn(&name), 0);
+        try start(app, e, player, fixed_text.get(&name), 0);
     }
 }
 
@@ -823,7 +814,7 @@ fn start(app: *App, e: Entity, player: *AnimationPlayer, name: []const u8, from:
         player.playing = false;
         return;
     };
-    setName(&player.current, name);
+    fixed_text.set(&player.current, name);
     player.position = if (from == AnimationPlayer.from_the_end) animation.length else from;
     player.playing = true;
     try app.animation_players.said.append(app.gpa, .{ .entity = e, .started = true, .name = player.current });

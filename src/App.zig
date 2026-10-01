@@ -37,6 +37,7 @@ const Uuid = @import("fluxion_id").Uuid;
 
 // What an app is made with, and the parts of it that are its own.
 const display = @import("app/display.zig");
+const frame_steps = @import("app/frame_steps.zig");
 
 // core
 const Commands = @import("core/commands.zig");
@@ -264,8 +265,6 @@ inherited: Inherited = .{},
 /// Where each interpolating transform was before the last fixed step: the
 /// engine's own bookkeeping, beside the world. See `Transform2D.interpolate`.
 snapshots: hierarchy.Snapshots = .empty,
-/// What `despawnOrphans` found. Kept for its capacity.
-orphans: std.ArrayList(ecs.Entity) = .empty,
 /// Every instance of a scene in the world, by its root. See
 /// `scene/instances.zig`.
 instances: scene_instances.Instances = .{},
@@ -494,8 +493,22 @@ random_source: std.Random.DefaultPrng,
 // Making and ending an app
 // -------------------------------------------------------------------------
 
+/// The tables kept beside the world by entity, by field. Each lets go of
+/// everything when the world goes - `clear(app)` - and one that keeps what a
+/// despawn leaves forgets the dead once a frame - `forgetDead(app)`: see
+/// `clearWorld` and `forgetTheDead`. A table of an entity's is listed here,
+/// or a world cleared hands its old entries to the new world's entities.
+const entity_tables = .{
+    .names,            .uuids,       .tree,               .groups,
+    .slide_collisions, .instances,   .unknown_components, .exports,
+    .tweens,           .drawings,    .particles,          .texts,
+    .shader_params,    .views,       .animation_players,  .signals,
+    .current_scene,    .tile_chunks, .bodies,             .areas,
+    .picking,          .audio,       .control_tree,
+};
+
 /// The engine's own components: what every scene can hold from the start.
-const engine_components = .{
+pub const engine_components = .{
     components.Transform2D,
     components.Sprite,
     components.Text2D,
@@ -630,7 +643,6 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         else
             .{ .fixed = options.fixed_delta orelse Resolved.default_fixed_delta }),
         .snapshots = .empty,
-        .orphans = .empty,
         .names = .{},
         .uuids = .init(options.io),
         .random_source = undefined,
@@ -808,7 +820,6 @@ pub fn destroy(self: *App) void {
     self.schedule.deinit(gpa);
     self.states.deinit(gpa);
     self.snapshots.deinit(gpa);
-    self.orphans.deinit(gpa);
     self.names.deinit(gpa);
     self.tree.deinit(gpa);
     self.groups.deinit(gpa);
@@ -857,7 +868,7 @@ pub fn destroy(self: *App) void {
     self.sprites.deinit(gpa);
     self.screen.deinit();
     self.shaders.deinit(gpa, &self.device);
-    self.views.deinit(gpa, &self.assets);
+    self.views.deinit(gpa);
     self.assets.deinit();
     self.project.deinit();
     self.jobs.deinit();
@@ -898,11 +909,11 @@ pub fn startup(self: *App) anyerror!void {
     self.started = true;
     if (self.open_project) try self.openProject();
     try self.schedule.run(.startup, self);
-    try self.enterFirstStates();
+    try States.enterFirst(self);
 }
 
-/// One frame. Says whether there should be another. Public for a game that
-/// drives its own loop.
+/// One frame - the lists of `app/frame_steps.zig` - and whether there should be
+/// another. Public for a game that drives its own loop.
 pub fn step(self: *App) anyerror!bool {
     if (!self.running) return false;
 
@@ -923,6 +934,33 @@ pub fn step(self: *App) anyerror!bool {
     self.event_channels.update();
     self.resized = false;
 
+    if (!try self.readWindows()) return false;
+    try frame_steps.run(self, &frame_steps.news);
+
+    // In the background - an Android app switched away from, a page hidden -
+    // a frame runs nothing and draws nothing, save the one the news came in,
+    // for its systems to save what they must.
+    if (self.input.suspended and !self.input.justSuspended()) {
+        try self.waitForNextFrame(true);
+        return self.running;
+    }
+    try frame_steps.run(self, &frame_steps.order);
+
+    if (self.frames_left) |left| {
+        if (left <= 1) {
+            self.running = false;
+        } else {
+            self.frames_left = left - 1;
+        }
+    }
+
+    if (self.running) try self.waitForNextFrame(self.windowMode() == .minimized);
+    return self.running;
+}
+
+/// The windows' news: their events into the input, a close asked for, a new
+/// size. False when the window is gone and the loop should end.
+fn readWindows(self: *App) !bool {
     if (self.window) |*window| {
         if (!window.pump(&self.input, .{ .context = self, .event = ToolWindow.route })) {
             self.running = false;
@@ -947,195 +985,7 @@ pub fn step(self: *App) anyerror!bool {
         tool.resized = false;
         if (tool.surface) |surface| try self.device.resizeSurface(surface, tool.width, tool.height);
     }
-    // The touch buttons the fingers press, and the actions they hold; then
-    // every action from this frame's keys, buttons, sticks and those, for
-    // the interface and the first system alike.
-    try touch_buttons.update(self);
-    self.input.updateActions();
-    for (self.tool_windows.items) |tool| tool.input.updateActions();
-    display.fitFrame(self);
-    display.fitInterface(self);
-
-    // In the background - an Android app switched away from, a page hidden -
-    // a frame runs nothing and draws nothing, save the one the news came in,
-    // for its systems to save what they must. Coming back starts the clock
-    // again, so the time away is not a frame.
-    if (self.input.suspended and !self.input.justSuspended()) {
-        try self.waitForNextFrame(true);
-        return self.running;
-    }
-    if (self.input.justResumed()) self.time.restart();
-
-    self.time.tick();
-    // What the fingers made - taps, swipes, two fingers' pinch - for the
-    // scripts to hear with the rest of the frame's input.
-    self.input.trackFingers(self.time.unscaled_delta);
-    self.inherited.forget();
-    // A game that wrote `paused` itself is taken at its word from here on.
-    self.schedule.paused = self.paused;
-    self.debug_frame.advance(self.time.delta);
-    self.debug_under_frame.advance(self.time.delta);
-    if (self.hasInterface()) try self.feedInterface();
-
-    // What was asked for outside any system - between frames, by a tool -
-    // is done before the first system of this one, and then the states
-    // change that the last frame asked to.
-    try self.commands.apply();
-    try self.changeStates();
-
-    // Bodies are synced before each fixed step. A frame with no time - and
-    // the first, which has no time to step - is synced here instead, so the
-    // queries find what was spawned, and so is a paused game's, whose steps
-    // move no body.
-    self.bodies.beginFrame();
-    if (self.time.delta == 0 or self.paused) try self.bodies.sync(self);
-
-    // The scripts hear the frame's input first: each `input`, and what
-    // none took to each `unhandled_input`.
-    if (self.scripts) |scripts| try scripts.calls.pass(scripts, .input);
-    try self.schedule.run(.input, self);
-    self.shortcuts();
-    // The pointer's speed, from everything this frame has said of it,
-    // including what an `.input` system put in.
-    self.input.trackPointer(self.time.unscaled_delta);
-    // After the game's own input systems, which may take the pointer with
-    // `input.setAsHandled`, and before the first step.
-    try self.picking.update(self);
-
-    // A backlog too big to work through is dropped. See
-    // `Time.max_fixed_steps`.
-    self.time.dropBacklog();
-    {
-        // Inside `.fixed`, the edges are counted since the last step and
-        // `time.delta` is the step. Both are put back with `defer`, so a step
-        // that fails leaves nothing wrong for the stages after it.
-        self.input.clock = .fixed;
-        defer self.input.clock = .frame;
-        const frame_delta = self.time.delta;
-        self.time.delta = self.time.fixed_delta;
-        defer self.time.delta = frame_delta;
-        self.debug.canvas = &self.debug_steps;
-        defer self.debug.canvas = &self.debug_frame;
-        self.debug_under.canvas = &self.debug_under_steps;
-        defer self.debug_under.canvas = &self.debug_under_frame;
-
-        while (self.time.takeFixedStep()) |_| {
-            self.inherited.forget();
-            self.debug_steps.advance(self.time.fixed_delta);
-            self.debug_under_steps.advance(self.time.fixed_delta);
-            // Where everything was before this step, to draw between steps.
-            try hierarchy.snapshot(self.gpa, &self.world, &self.snapshots);
-            try timer.count(self, .fixed, self.time.fixed_delta);
-            try self.signals.drain(self);
-            if (self.scripts) |scripts| {
-                try scripts.calls.pass(scripts, .{ .fixed = self.time.fixed_delta });
-                try self.signals.drain(self);
-            }
-            try self.schedule.run(.fixed, self);
-            // Nothing moves a paused game's bodies: there is one physics.
-            if (!self.paused) try self.stepPhysics();
-            // Seen, so gone: the next step hears only what comes after.
-            self.input.endFixedStep();
-        }
-    }
-    // A paused frame gives the fixed stage no time, and so no edges: a key
-    // pressed on a pause menu must not reach the first step after it.
-    if (self.time.delta == 0) self.input.endFixedStep();
-
-    self.inherited.forget();
-    self.clocks.step(self.time.delta, self, game_clocks.runsIn);
-    try timer.count(self, .update, self.time.delta);
-    try tweening.update(self, self.time.delta);
-    try animation.update(self, self.time.delta);
-    try sprite_animation.update(self, self.time.delta);
-    try self.signals.drain(self);
-    if (self.scripts) |scripts| {
-        try scripts.calls.pass(scripts, .{ .update = self.time.delta });
-        try self.signals.drain(self);
-    }
-    try self.schedule.run(.update, self);
-    try self.schedule.run(.late, self);
-    // Deferred signal calls: after `.late`, before the engine's own
-    // passes, so what they despawn is gone by the draw.
-    try self.signals.flushDeferred(self);
-
-    // The scene `changeScene` asked for, before the engine's passes: what
-    // hung from the old one goes with it this frame.
-    playing.openAsked(self);
-    // A load with no thread of its own is worked a piece a frame.
-    self.loads.work();
-
-    // The engine's own passes, after the game's `.late` systems and before
-    // drawing: whatever hung from something despawned goes with it, and then
-    // the names of everything that died are given back.
-    try self.despawnOrphans();
-    // Every player's sound as its component says, and every emitter's
-    // particles moved on, after everything that could say otherwise: and
-    // each `finished` heard before the frame is drawn.
-    try self.audio.update(self);
-    try particle_emitters.update(self, self.time.delta, .game);
-    try self.signals.drain(self);
-    // The scripts of the dead, and of what lost its `Script`, hear `exit`
-    // in the frame it happened.
-    if (self.scripts) |scripts| {
-        try scripts.calls.pass(scripts, .end_of_frame);
-        try self.signals.drain(self);
-    }
-    self.names.forgetDead(self.gpa, &self.world);
-    self.uuids.forgetDead(&self.world);
-    self.tree.forgetDead(&self.world);
-    self.groups.forgetDead(&self.world);
-    self.slide_collisions.forgetDead(self.gpa, &self.world);
-    self.instances.forgetDead(self.gpa, &self.world);
-    self.unknown_components.forgetDead(self.gpa, &self.world);
-    self.exports.forgetDead(&self.world);
-    self.tweens.forgetDead(self);
-    self.drawings.forgetDead(self.gpa, &self.world);
-    self.particles.forgetDead(self.gpa, &self.world);
-    self.texts.forgetDead(self.gpa, &self.world);
-    self.shader_params.forgetDead(self.gpa, &self.world);
-    self.views.forgetDead(self.gpa, &self.world, &self.assets);
-    self.animation_players.forgetDead(self.gpa, &self.world);
-    self.signals.forgetDead(&self.world);
-    // Every animated sprite's frame in its Sprite, and every smoothed
-    // camera a step nearer, after all that could change them.
-    try sprite_animation.show(self);
-    try cameras.follow(self);
-    if (self.debug_visible and self.debug_views.any()) try self.debug_views.draw(self);
-
-    // What the systems changed of how things show is seen by the drawing.
-    self.inherited.forget();
-    if (self.hasInterface()) try self.layOutInterface();
-    for (self.tool_windows.items) |tool| try tool.layOut(self);
-
-    // Nothing to draw on while Android has taken the surface away.
-    const minimized = self.windowMode() == .minimized;
-    if (!minimized and !self.input.surface_lost) try layers.render(self);
-    for (self.tool_windows.items) |tool| try tool.render(self);
-
-    if (self.frames_left) |left| {
-        if (left <= 1) {
-            self.running = false;
-        } else {
-            self.frames_left = left - 1;
-        }
-    }
-
-    if (self.running) try self.waitForNextFrame(minimized);
-    return self.running;
-}
-
-/// After the game's `.fixed` systems, so what they wrote into the components
-/// is in this step.
-fn stepPhysics(self: *App) !void {
-    try self.bodies.sync(self);
-    try self.physics.step(self.time.fixed_delta, &self.jobs);
-    try self.bodies.afterStep(self);
-    // What the step found each area holding, said and heard before the
-    // systems of the next step run.
-    try self.areas.update(self);
-    try ray_casts.updateAll(self);
-    try self.signals.drain(self);
+    return true;
 }
 
 fn waitForNextFrame(self: *App, minimized: bool) !void {
@@ -1162,89 +1012,9 @@ pub fn inForeground(self: *const App) bool {
     return false;
 }
 
-/// The engine's own keys, after the game's `.input` systems.
-fn shortcuts(self: *App) void {
-    if (self.quit_key) |key| {
-        if (self.input.justPressed(key)) self.quit();
-    }
-    if (self.fullscreen_key) |key| {
-        if (self.input.justPressed(key)) self.toggleFullscreen() catch |err| {
-            log.warn("could not change fullscreen: {t}", .{err});
-        };
-    }
-    if (self.debug_key) |key| {
-        if (self.input.justPressed(key)) self.debug_visible = !self.debug_visible;
-    }
-}
-
 /// Whether the interface is laid out at all: a game with a `.ui` system.
 pub fn hasInterface(self: *const App) bool {
     return self.schedule.systemsIn(.ui).len != 0;
-}
-
-/// Before the `.input` stage, so a game system can ask `app.ui.wantsPointer()`
-/// about this frame.
-fn feedInterface(self: *App) !void {
-    if (self.interface.fillFaces(&self.assets).len != 0) self.ui.setMeasurer(Interface.measurer(&self.interface.faces));
-    // Asked of the system when the wheel turned, so a changed setting is
-    // taken at once - and only then, since on Linux asking reads a file.
-    if (self.input.wheel.x != 0 or self.input.wheel.y != 0) {
-        if (self.window) |*window| self.interface.scroll_lines = window.scrollLines();
-    }
-    try self.interface.feed(self.gpa, &self.ui, &self.input, &self.clipboard, self.time.unscaled_delta);
-}
-
-fn layOutInterface(self: *App) !void {
-    self.interface.commands = &.{};
-    self.ui.begin(self.interface.surface(@floatFromInt(self.frame.width), @floatFromInt(self.frame.height)));
-    {
-        // One root for every `.ui` system: fluxion-ui makes the first element
-        // the root, so a second system's would land beside it. `.grow`,
-        // because fluxion-ui gives a `.fit` root its content's height.
-        self.ui.open(.{ .width = .grow, .height = .grow });
-        defer self.ui.close();
-        try self.schedule.run(.ui, self);
-    }
-    self.interface.commands = try self.ui.end();
-    self.cursors.want(self.ui.cursor());
-    if (self.window) |*window| {
-        self.cursors.apply(window);
-        self.interface.applyTextInput(&self.ui, window.handle);
-    }
-}
-
-/// Despawn everything whose parent has died, and what hangs from that in
-/// turn; see `Parent`. Once a frame, because a game despawns through
-/// `world.despawn` and nothing here sees it. It goes round until a pass
-/// finds nothing, so a turret's barrel goes one pass after the turret.
-fn despawnOrphans(self: *App) !void {
-    while (true) {
-        self.orphans.clearRetainingCapacity();
-
-        var it = try ecs.Query(.{components.Parent}).over(&self.world);
-        while (it.next()) |chunk| {
-            for (chunk.slice(components.Parent), chunk.entities) |held, entity| {
-                if (held.entity.isNone() or self.world.isAlive(held.entity)) continue;
-                try self.orphans.append(self.gpa, entity);
-            }
-        }
-
-        // A chunk is its map's rather than its child, and goes the same way:
-        // a map despawned takes its tiles with it.
-        var chunks = try ecs.Query(.{tilemap.TileChunk}).over(&self.world);
-        while (chunks.next()) |chunk| {
-            for (chunk.slice(tilemap.TileChunk), chunk.entities) |held, entity| {
-                if (self.world.has(held.map, tilemap.TileMap)) continue;
-                try self.orphans.append(self.gpa, entity);
-                self.tile_chunks.remove(.{ .map = held.map, .x = held.x, .y = held.y });
-            }
-        }
-
-        // Found first and despawned after: a despawn moves rows, and the
-        // slices above point at rows.
-        if (self.orphans.items.len == 0) return;
-        for (self.orphans.items) |orphan| self.world.despawn(orphan);
-    }
 }
 
 /// Run the `.shutdown` stage. Called by `run`; call it yourself if you drive
@@ -1410,33 +1180,6 @@ fn addHook(self: *App, on: Hook.On, value: anytype, comptime name: []const u8, s
         .state = .of(value),
         .entry = .{ .name = name, .run = system, .gate = self.gate },
     });
-}
-
-/// Do the changes `setState` asked for. At the top of each frame.
-fn changeStates(self: *App) anyerror!void {
-    // By index: a hook may name a new state, and the list may move.
-    var at: usize = 0;
-    while (at < self.states.slots.items.len) : (at += 1) {
-        const slot = self.states.slots.items[at];
-        const next = slot.pending orelse continue;
-        self.states.slots.items[at].pending = null;
-        if (next == slot.current) continue;
-        try self.schedule.runHooks(.exit, .{ .key = slot.key, .value = slot.current }, self);
-        self.states.slots.items[at].current = next;
-        try self.schedule.runHooks(.enter, .{ .key = slot.key, .value = next }, self);
-    }
-}
-
-/// Enter every state at its first value, or the one `.startup` asked for.
-fn enterFirstStates(self: *App) anyerror!void {
-    var at: usize = 0;
-    while (at < self.states.slots.items.len) : (at += 1) {
-        const slot = &self.states.slots.items[at];
-        if (slot.pending) |chosen| slot.current = chosen;
-        slot.pending = null;
-        const entered: States.Value = .{ .key = slot.key, .value = slot.current };
-        try self.schedule.runHooks(.enter, entered, self);
-    }
 }
 
 // -------------------------------------------------------------------------
@@ -1706,7 +1449,8 @@ pub fn callNamed(self: *App, name: []const u8, args: []const reflect.Value, resu
 /// or under its `pub const scene_name`, which is how two types of one name
 /// are told apart, or its `reflect_name`. Registering one twice does
 /// nothing. Each is described in `types` as well, so `componentOf` can find
-/// it by that name, and an `attr.Property` it declares is checked.
+/// it by that name, and the attributes it declares are checked: see
+/// `attr.check`.
 pub fn registerComponents(self: *App, comptime list: anytype) scene.Registry.Error!void {
     @setEvalBranchQuota(10_000);
     inline for (list) |T| {
@@ -1779,34 +1523,22 @@ pub fn single(self: *App, comptime T: type) ?*T {
 /// `loadScene`. Not from inside a query, which is walking the world it
 /// throws away.
 pub fn clearWorld(self: *App) void {
-    self.bodies.clear(self);
-    self.areas.clear();
-    self.picking.clear();
+    inline for (entity_tables) |field| @field(self, @tagName(field)).clear(self);
     self.commands.clear();
     self.world.deinit();
     self.world = .init(self.gpa);
     self.snapshots.clearRetainingCapacity();
-    self.orphans.clearRetainingCapacity();
-    self.tile_chunks.clear();
-    self.names.clear(self.gpa);
-    self.tree.clear();
-    self.groups.clear(self.gpa);
-    self.uuids.clear();
-    self.unknown_components.clear(self.gpa);
-    self.exports.clear();
-    self.instances.clear(self.gpa);
-    self.current_scene.clear();
-    self.signals.clear();
-    self.audio.clear();
-    self.tweens.clear(self);
-    self.drawings.clearAll(self.gpa);
-    self.particles.clearAll(self.gpa);
-    self.texts.clear(self.gpa);
-    self.shader_params.clear(self.gpa);
-    self.views.clear(&self.assets);
-    self.animation_players.clear(self.gpa);
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
+}
+
+/// What every table beside the world kept of the entities that died, let
+/// go of: once a frame, after the last despawn the engine makes.
+pub fn forgetTheDead(self: *App) void {
+    inline for (entity_tables) |field| {
+        const table = &@field(self, @tagName(field));
+        if (@hasDecl(@TypeOf(table.*), "forgetDead")) table.forgetDead(self);
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -2237,6 +1969,13 @@ pub fn isPaused(self: *const App) bool {
 /// it, against the pause.
 pub fn isProcessing(self: *App, entity: ecs.Entity) bool {
     return self.inherited.of(self.gpa, &self.world, entity).processing.runs(self.paused);
+}
+
+/// Whether `entity`'s own time moves on now: time passes - the frame's, or
+/// in a fixed step the step's - and nothing above it holds it. What a timer,
+/// a tween, an animation and a particle emitter ask before they move.
+pub fn timeMovesFor(self: *App, entity: ecs.Entity) bool {
+    return self.time.delta > 0 and self.isProcessing(entity);
 }
 
 /// How an entity shows, everything above it counted: whether it is drawn,

@@ -259,8 +259,9 @@ fn lastStep(app: *App, tween_entity: Entity) error{ NotATween, NoStep }!*Step {
     return &plan.steps.items[plan.steps.items.len - 1];
 }
 
-/// Move every tween on by `delta` seconds. What `App.step` calls.
-pub fn update(app: *App, delta: f32) !void {
+/// Move every tween on by the frame's time: a pass of `app/frame_steps.zig`.
+pub fn update(app: *App) !void {
+    const delta = app.time.delta;
     const tweens = &app.tweens;
     tweens.ended.clearRetainingCapacity();
     var gone: std.ArrayList(Entity) = .empty;
@@ -276,7 +277,7 @@ pub fn update(app: *App, delta: f32) !void {
                 try gone.append(app.gpa, e);
                 continue;
             }
-            if (delta <= 0 or tween.paused or !app.isProcessing(e)) continue;
+            if (tween.paused or !app.timeMovesFor(e)) continue;
             // One with nothing in it has nothing to wait for.
             const plan = tweens.by.getPtr(e) orelse {
                 tween.done = true;

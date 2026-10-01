@@ -78,7 +78,10 @@ const ecs = @import("fluxion_ecs");
 const json = @import("fluxion_json");
 const Uuid = @import("fluxion_id").Uuid;
 
+const App = @import("../App.zig");
 const SceneHandle = @import("../assets/scene_table.zig").SceneHandle;
+const Saving = @import("scene_write.zig").Saving;
+const Loading = @import("scene_read.zig").Loading;
 
 const Entity = ecs.Entity;
 
@@ -167,6 +170,29 @@ pub const Loaded = struct {
 // the list already exists when a value names it. Numbers stay the digits the
 // file has until a field asks for them as its own type, so a `u64` comes
 // back to the last digit, which a tree's `i64` could not promise.
+
+/// What a component keeps beside it - in a table of the app's rather than
+/// in its fields - written among its fields under `key`: a map's tiles, a
+/// material's numbers. A component lists its own in `scene_beside`. Its
+/// words are kept beside it too, and written the same way: see
+/// `component_texts.zig`.
+pub const Beside = struct {
+    key: []const u8,
+    /// `key` and the value, for the entity `s` is writing - or nothing,
+    /// when it keeps none.
+    write: fn (s: *Saving, w: *json.Writer) json.Writer.Error!void,
+    /// The value after `key`, for the entity `l` is reading.
+    read: fn (l: *Loading) anyerror!void,
+    /// Let go of what `entity` kept, when a scene says the whole component:
+    /// one left out is then none. An instance's override, which says only
+    /// what differs, keeps it.
+    forget: ?fn (app: *App, entity: Entity) void = null,
+};
+
+/// What `T` keeps beside it: its `scene_beside`, or nothing.
+pub fn besideOf(comptime T: type) []const Beside {
+    return if (@hasDecl(T, "scene_beside")) &T.scene_beside else &.{};
+}
 
 /// What scenes can hold, and the components they held that nothing here is
 /// registered as. See `registry.zig`.

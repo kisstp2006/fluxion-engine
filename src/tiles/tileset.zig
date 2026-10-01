@@ -46,6 +46,7 @@ const App = @import("../App.zig");
 const Assets = @import("../assets/assets.zig");
 const Project = @import("../project/Project.zig");
 const Region = @import("../scene/components.zig").Region;
+const fixed_text = @import("../reflect/fixed_text.zig");
 const Cell = @import("tilemap.zig").Cell;
 
 const log = std.log.scoped(.fluxion_engine);
@@ -138,21 +139,17 @@ pub const Value = union(DataKind) {
 /// A value every tile of a set may carry under one name.
 pub const DataLayer = struct {
     name_bytes: [name_capacity]u8 = @splat(0),
-    name_len: u8 = 0,
     kind: DataKind = .int,
 
     pub const name_capacity = 31;
 
     pub fn name(self: *const DataLayer) []const u8 {
-        return self.name_bytes[0..@min(self.name_len, name_capacity)];
+        return fixed_text.get(&self.name_bytes);
     }
 
     /// Kept to `name_capacity` bytes, cut where a character starts.
     pub fn setName(self: *DataLayer, text: []const u8) void {
-        var cut = @min(text.len, name_capacity);
-        while (cut > 0 and cut < text.len and text[cut] & 0xC0 == 0x80) cut -= 1;
-        @memcpy(self.name_bytes[0..cut], text[0..cut]);
-        self.name_len = @intCast(cut);
+        fixed_text.set(&self.name_bytes, text);
     }
 };
 

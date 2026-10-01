@@ -40,8 +40,8 @@ const ViewTexture = components.ViewTexture;
 pub const Views = struct {
     textures: std.AutoHashMapUnmanaged(Entity, Assets.TextureHandle) = .empty,
 
-    pub fn deinit(self: *Views, gpa: Allocator, assets: *Assets) void {
-        self.clear(assets);
+    /// The pictures themselves go with the assets that hold them.
+    pub fn deinit(self: *Views, gpa: Allocator) void {
         self.textures.deinit(gpa);
     }
 
@@ -58,22 +58,22 @@ pub const Views = struct {
     }
 
     /// Let go of the pictures of views that are gone, or are views no more.
-    pub fn forgetDead(self: *Views, gpa: Allocator, world: *const ecs.World, assets: *Assets) void {
+    pub fn forgetDead(self: *Views, app: *App) void {
         var dead: std.ArrayList(Entity) = .empty;
-        defer dead.deinit(gpa);
+        defer dead.deinit(app.gpa);
         var it = self.textures.keyIterator();
         while (it.next()) |view| {
-            if (!world.isAlive(view.*) or !world.has(view.*, RenderView)) dead.append(gpa, view.*) catch break;
+            if (!app.world.isAlive(view.*) or !app.world.has(view.*, RenderView)) dead.append(app.gpa, view.*) catch break;
         }
         for (dead.items) |view| {
             const gone = self.textures.fetchRemove(view) orelse continue;
-            assets.unload(gone.value);
+            app.assets.unload(gone.value);
         }
     }
 
-    pub fn clear(self: *Views, assets: *Assets) void {
+    pub fn clear(self: *Views, app: *App) void {
         var it = self.textures.valueIterator();
-        while (it.next()) |texture| assets.unload(texture.*);
+        while (it.next()) |texture| app.assets.unload(texture.*);
         self.textures.clearRetainingCapacity();
     }
 };
@@ -91,9 +91,8 @@ pub fn drawAll(app: *App) !void {
             const placed = hierarchy.resolve(&app.world, &app.snapshots, entity, local, app.time.alpha()) orelse continue;
             const picture = try pictureOf(app, entity, view);
             const gpu = (app.assets.get(picture) orelse continue).gpu;
-            app.sprites.drawing = entity;
-            defer app.sprites.drawing = .none;
-            const through: View = .through(camera, placed, @floatFromInt(@max(view.width, 1)), @floatFromInt(@max(view.height, 1)));
+            var through: View = .through(camera, placed, @floatFromInt(@max(view.width, 1)), @floatFromInt(@max(view.height, 1)));
+            through.render_view = entity;
             try app.sprites.draw(app.gpa, &app.world, &app.assets, &app.tile_sets, &app.snapshots, &app.inherited, .{ .texture = gpu }, through, view.clear_color, app.time.alpha());
         }
     }

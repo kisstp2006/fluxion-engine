@@ -49,6 +49,11 @@ pub const View = struct {
     /// The render layers it sees: its camera's `cull_mask`.
     cull_mask: u32 = 0xFFFF_FFFF,
 
+    /// The `RenderView` whose picture this draws, or `.none` for the screen.
+    /// What shows that picture is left out of it: a picture cannot be read
+    /// while it is drawn into.
+    render_view: ecs.Entity = .none,
+
     /// A world with no camera: the origin at the top left, one unit to the
     /// pixel.
     pub fn screen(width: f32, height: f32) View {

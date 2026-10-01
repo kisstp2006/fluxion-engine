@@ -238,10 +238,9 @@ test "a scene keeps the theme a control names, what it is drawn as, and a button
     _ = loaded;
 
     const entity = app.find("Delete").?;
-    const delete = app.world.get(entity, Control).?;
-    try testing.expectEqualStrings("Danger", delete.variationSlice());
+    try testing.expectEqualStrings("Danger", app.textOf(entity, Control, "type_variation"));
     try testing.expectEqualStrings("Delete", app.textOf(entity, Button, "text"));
-    try testing.expect(!delete.theme.isNone());
+    try testing.expect(!app.world.get(entity, Control).?.theme.isNone());
 
     const style = app.control_tree.resolvedStyle(.{ .app = app, .layout = &app.ui }, entity, .button, .normal);
     try testing.expectEqual(Color.parse("#C8434F").?, style.background_color);
@@ -271,9 +270,8 @@ test "a control is drawn from the theme the control above it names" {
     });
     const button = try app.world.spawnWith(.{ Control{}, Parent.of(root), Button{} });
     try app.setText(button, Button, "text", "Styled");
-    var loud: Control = .{};
-    loud.setVariation("Loud");
-    const shouty = try app.world.spawnWith(.{ loud, Parent.of(root), Button{} });
+    const shouty = try app.world.spawnWith(.{ Control{}, Parent.of(root), Button{} });
+    try app.setText(shouty, Control, "type_variation", "Loud");
     try app.setText(shouty, Button, "text", "Loud");
     try app.run();
 

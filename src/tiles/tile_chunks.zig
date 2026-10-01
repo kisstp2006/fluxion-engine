@@ -14,12 +14,16 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
+const json = @import("fluxion_json");
 const math = @import("fluxion_math");
 
 const App = @import("../App.zig");
 const tilemap = @import("tilemap.zig");
 const tileset = @import("tileset.zig");
 const geometry = @import("../math/geometry.zig");
+const scene = @import("../scene/scene.zig");
+const Saving = @import("../scene/scene_write.zig").Saving;
+const Loading = @import("../scene/scene_read.zig").Loading;
 
 const Entity = ecs.Entity;
 const TileMap = tilemap.TileMap;
@@ -36,6 +40,111 @@ pub const ChunkKey = struct {
 
 pub const SetTileError = error{ NotATileMap, OutOfMemory };
 
+/// Despawn every chunk whose map is gone: a chunk is its map's rather than
+/// its child, and goes the same way, so a map despawned takes its tiles with
+/// it. A pass of `app/frame_steps.zig`, after the tree's orphans, so a map that
+/// went with its parent is gone by then.
+pub fn despawnOrphans(app: *App) !void {
+    var orphans: std.ArrayList(Entity) = .empty;
+    defer orphans.deinit(app.gpa);
+    var it = try ecs.Query(.{TileChunk}).over(&app.world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(TileChunk), chunk.entities) |held, entity| {
+            if (app.world.has(held.map, TileMap)) continue;
+            try orphans.append(app.gpa, entity);
+            app.tile_chunks.remove(.{ .map = held.map, .x = held.x, .y = held.y });
+        }
+    }
+    // Found first and despawned after: a despawn moves rows.
+    for (orphans.items) |orphan| app.world.despawn(orphan);
+}
+
+/// A map's tiles in a scene: under `cells`, beside its fields. See
+/// `scene.Beside`.
+pub const scene_cells: scene.Beside = .{ .key = "cells", .write = writeCells, .read = readCells };
+
+/// How many bytes a chunk's cells are, and the text they become.
+const chunk_bytes = tilemap.tiles_per_chunk * @sizeOf(tilemap.Cell);
+
+const chunk_text_len = std.base64.standard.Encoder.calcSize(chunk_bytes);
+
+/// A map's tiles: one line of text a chunk, under the chunk's place.
+///
+/// A chunk at a time rather than one long line so that a change to a corner
+/// of a level is a change to one line of the file, and base64 rather than
+/// numbers because a chunk is a kilobyte of them and nobody reads a
+/// thousand numbers.
+fn writeCells(s: *Saving, w: *json.Writer) json.Writer.Error!void {
+    const app = s.app;
+    var any = false;
+    // In the order the chunks were made, which for a level painted left to
+    // right is the order it was painted: a scene saved again keeps its
+    // lines where they were.
+    var it = app.tile_chunks.by_key.iterator();
+    while (it.next()) |entry| {
+        if (!entry.key_ptr.map.eql(s.entity)) continue;
+        const chunk = app.world.getConst(entry.value_ptr.*, TileChunk) orelse continue;
+        if (chunk.isEmpty()) continue;
+        if (!any) {
+            try w.key("cells");
+            try w.beginObject();
+            any = true;
+        }
+        var name: [32]u8 = undefined;
+        var text: [chunk_text_len]u8 = undefined;
+        try w.key(std.fmt.bufPrint(&name, "{d},{d}", .{ chunk.x, chunk.y }) catch unreachable);
+        try w.writeString(std.base64.standard.Encoder.encode(&text, std.mem.asBytes(&chunk.cells)));
+    }
+    if (any) try w.endObject();
+}
+
+/// One chunk of a map's tiles, read and waiting for the scene to be over.
+const Pending = struct {
+    map: Entity,
+    x: i32,
+    y: i32,
+    cells: [tilemap.tiles_per_chunk]tilemap.Cell,
+};
+
+/// A map's `cells`: a line of base64 under each chunk's place, as
+/// `writeCells` put them. The chunks themselves are made once every value in
+/// the scene has been written: see `Loading.whenRead`.
+fn readCells(l: *Loading) anyerror!void {
+    try l.open(.object_begin, "the map's tiles, which is an object of its chunks");
+    while (try l.key()) |name| {
+        const mark = l.path.push("{s}", .{name});
+        const comma = std.mem.indexOfScalar(u8, name, ',') orelse
+            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+        const x = std.fmt.parseInt(i32, name[0..comma], 10) catch
+            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+        const y = std.fmt.parseInt(i32, name[comma + 1 ..], 10) catch
+            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
+
+        const token = try l.next();
+        const text = switch (token) {
+            .string => |held| held,
+            else => return l.wrong("a chunk's tiles, which is a line of base64", token),
+        };
+        var pending: Pending = .{ .map = l.entity, .x = x, .y = y, .cells = undefined };
+        const room = std.mem.asBytes(&pending.cells);
+        const size = std.base64.standard.Decoder.calcSizeForSlice(text) catch
+            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
+        if (size != room.len) return l.fail(error.OutOfRange, "a chunk is {d} bytes of tiles, and this is {d}", .{ room.len, size });
+        std.base64.standard.Decoder.decode(room, text) catch
+            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
+
+        try l.whenRead(pending, makeRead);
+        l.path.pop(mark);
+    }
+}
+
+/// A chunk the scene read, made now that every value in it is written.
+fn makeRead(app: *App, pending: *const Pending, made: *std.ArrayList(Entity)) anyerror!void {
+    const entity = try app.makeTileChunk(pending.map, pending.x, pending.y);
+    try made.append(app.gpa, entity);
+    app.world.get(entity, TileChunk).?.cells = pending.cells;
+}
+
 pub const TileChunks = struct {
     by_key: std.AutoArrayHashMapUnmanaged(ChunkKey, Entity) = .empty,
 
@@ -44,7 +153,7 @@ pub const TileChunks = struct {
     }
 
     /// Every chunk forgotten, as a world thrown away takes them.
-    pub fn clear(self: *TileChunks) void {
+    pub fn clear(self: *TileChunks, _: *App) void {
         self.by_key.clearRetainingCapacity();
     }
 

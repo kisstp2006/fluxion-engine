@@ -53,6 +53,9 @@ pub const TileMap = extern struct {
     /// the shadows of the lights that have them.
     light_occlusion: bool = false,
 
+    /// Its tiles, which live in chunks of their own, written with it.
+    pub const scene_beside = [_]@import("../scene/scene.zig").Beside{@import("tile_chunks.zig").scene_cells};
+
     pub const reflect_name = "TileMap";
     pub const reflect_fields = .{
         .tile_set = .{attr.Doc{ .text = "The .tileset file its tiles come from" }},
@@ -126,6 +129,8 @@ pub const TileChunk = extern struct {
     revision: u32 = 1,
     cells: [tiles_per_chunk]Cell = @splat(.{}),
 
+    /// Not a thing in a scene: its map writes its tiles.
+    pub const reflect_attributes = .{attr.Unsaved{}};
     pub const reflect_name = "TileChunk";
     pub const reflect_fields = .{
         .map = .{attr.Doc{ .text = "The TileMap these tiles belong to" }},

@@ -27,6 +27,8 @@ const Allocator = std.mem.Allocator;
 
 const reflect = @import("fluxion_reflect");
 
+const App = @import("../App.zig");
+
 const States = @This();
 
 slots: std.ArrayList(Slot) = .empty,
@@ -152,4 +154,32 @@ pub fn set(self: *States, gpa: Allocator, value: anytype) Allocator.Error!void {
 pub fn is(self: *const States, wanted: Value) bool {
     const i = self.find(wanted.key) orelse return false;
     return self.slots.items[i].current == wanted.value;
+}
+
+/// Do the changes `App.setState` asked for: a pass of `app/frame_steps.zig`, at
+/// the top of each frame.
+pub fn changeAsked(app: *App) anyerror!void {
+    // By index: a hook may name a new state, and the list may move.
+    var at: usize = 0;
+    while (at < app.states.slots.items.len) : (at += 1) {
+        const slot = app.states.slots.items[at];
+        const next = slot.pending orelse continue;
+        app.states.slots.items[at].pending = null;
+        if (next == slot.current) continue;
+        try app.schedule.runHooks(.exit, .{ .key = slot.key, .value = slot.current }, app);
+        app.states.slots.items[at].current = next;
+        try app.schedule.runHooks(.enter, .{ .key = slot.key, .value = next }, app);
+    }
+}
+
+/// Enter every state at its first value, or the one `.startup` asked for.
+pub fn enterFirst(app: *App) anyerror!void {
+    var at: usize = 0;
+    while (at < app.states.slots.items.len) : (at += 1) {
+        const slot = &app.states.slots.items[at];
+        if (slot.pending) |chosen| slot.current = chosen;
+        slot.pending = null;
+        const entered: Value = .{ .key = slot.key, .value = slot.current };
+        try app.schedule.runHooks(.enter, entered, app);
+    }
 }

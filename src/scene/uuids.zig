@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
 const Uuid = @import("fluxion_id").Uuid;
+const App = @import("../App.zig");
 
 const Entity = ecs.Entity;
 
@@ -46,7 +47,7 @@ pub const Uuids = struct {
     }
 
     /// Every UUID gone, as a world thrown away takes them.
-    pub fn clear(self: *Uuids) void {
+    pub fn clear(self: *Uuids, _: *App) void {
         self.of_entity.clearRetainingCapacity();
         self.by_uuid.clearRetainingCapacity();
     }
@@ -111,12 +112,12 @@ pub const Uuids = struct {
     }
 
     /// Give back the UUIDs of everything that has died.
-    pub fn forgetDead(self: *Uuids, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Uuids, app: *App) void {
         var at = self.of_entity.count();
         while (at > 0) {
             at -= 1;
             const entity = self.of_entity.keys()[at];
-            if (!world.isAlive(entity)) self.forget(entity);
+            if (!app.world.isAlive(entity)) self.forget(entity);
         }
     }
 };

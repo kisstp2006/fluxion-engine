@@ -20,9 +20,6 @@ const AssetKind = @import("../assets/asset_kind.zig").AssetKind;
 const Project = @import("../project/Project.zig");
 const signals = @import("../core/signals.zig");
 const Color = @import("../math/color.zig").Color;
-const Control = @import("../ui/control.zig").Control;
-const Material = @import("../render/shaders.zig").Material;
-const tilemap = @import("../tiles/tilemap.zig");
 const components = @import("components.zig");
 const component_texts = @import("component_texts.zig");
 const registry = @import("registry.zig");
@@ -31,8 +28,6 @@ const scene = @import("scene.zig");
 const Entity = ecs.Entity;
 const ComponentId = ecs.component.Id;
 const FontHandle = Assets.FontHandle;
-const TileMap = tilemap.TileMap;
-const TileChunk = tilemap.TileChunk;
 const nameOf = registry.nameOf;
 const copyValue = registry.copyValue;
 const version = scene.version;
@@ -153,8 +148,8 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
         try app.keepInstance(inner.root, handle, made.items[before..]);
     }
 
-    var chunks: std.ArrayList(PendingChunk) = .empty;
-    defer chunks.deinit(gpa);
+    var later: std.ArrayList(Later) = .empty;
+    defer later.deinit(gpa);
     {
         var reader: json.Reader = .init(gpa, bytes, readerOptions(options));
         defer reader.deinit();
@@ -165,7 +160,7 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
             .diagnostics = options.diagnostics,
             .entities = entities.items,
             .told = &told,
-            .chunks = &chunks,
+            .later = &later,
             .parent = options.parent,
             .instance = options.instance,
         };
@@ -178,14 +173,9 @@ pub fn read(app: *App, bytes: []const u8, options: LoadOptions) anyerror!Loaded 
         loaded.connections_skipped = @intCast(l.connections_skipped);
     }
 
-    // Last of all: a chunk is an entity, and making one while the values
-    // above were being written would have moved the rows they went into.
-    for (chunks.items) |pending| {
-        const entity = try app.makeTileChunk(pending.map, pending.x, pending.y);
-        try made.append(gpa, entity);
-        const chunk = app.world.get(entity, TileChunk).?;
-        chunk.cells = pending.cells;
-    }
+    // Last of all, what had to wait for the values to be written: see
+    // `Loading.whenRead`.
+    for (later.items) |job| try job.run(app, job.value, made);
     if (told.roots == 1) loaded.root = entities.items[told.root_place.?];
     loaded.entities = @intCast(made.items.len - first);
     return loaded;
@@ -233,6 +223,13 @@ pub fn readerOptions(options: LoadOptions) json.Reader.Options {
 
 pub const Token = json.Reader.Token;
 
+/// Work left until the whole scene is read, with its own copy of what it
+/// needs: see `Loading.whenRead`.
+pub const Later = struct {
+    run: *const fn (app: *App, value: *const anyopaque, made: *std.ArrayList(Entity)) anyerror!void,
+    value: *const anyopaque,
+};
+
 pub const Loading = struct {
     app: *App,
     reader: *json.Reader,
@@ -251,10 +248,8 @@ pub const Loading = struct {
     /// The entity being filled in, for a value kept beside its component:
     /// a map's tiles.
     entity: Entity = .none,
-    /// The chunks the maps' cells make, kept until the whole scene is read:
-    /// making an entity now would move the rows the values are being
-    /// written into.
-    chunks: ?*std.ArrayList(PendingChunk) = null,
+    /// What has to wait until the whole scene is read: see `whenRead`.
+    later: ?*std.ArrayList(Later) = null,
     /// What the scene's roots hang from: see `LoadOptions.parent`.
     parent: Entity = .none,
     /// The instance being read, when it is one: see `LoadOptions.instance`.
@@ -270,6 +265,23 @@ pub const Loading = struct {
     connections_unknown: usize = 0,
     connections_skipped: usize = 0,
     path: Path = .{},
+
+    /// Run `job` with a copy of `value` once the whole scene is read: what
+    /// makes an entity - a map's chunk - since making one now would move the
+    /// rows the values are being written into. What it makes goes in
+    /// `made`, with the rest of what the scene made.
+    pub fn whenRead(l: *Loading, value: anytype, comptime job: fn (app: *App, value: *const @TypeOf(value), made: *std.ArrayList(Entity)) anyerror!void) !void {
+        const list = l.later orelse return;
+        const T = @TypeOf(value);
+        const kept = try l.arena.create(T);
+        kept.* = value;
+        const Run = struct {
+            fn run(app: *App, held: *const anyopaque, made: *std.ArrayList(Entity)) anyerror!void {
+                return job(app, @ptrCast(@alignCast(held)), made);
+            }
+        };
+        try list.append(l.app.gpa, .{ .run = Run.run, .value = kept });
+    }
 
     /// The first pass: an entity for every object in `entities`, with every
     /// registered component it has, each entity's UUID, and the tables of
@@ -688,29 +700,33 @@ pub const Loading = struct {
         try l.open(.array_end, "the end of the list");
     }
 
-    fn next(l: *Loading) anyerror!Token {
+    /// The next token, which the scene has to have.
+    pub fn next(l: *Loading) anyerror!Token {
         return (try l.reader.next()) orelse l.fail(error.SyntaxError, "the scene ends too soon", .{});
     }
 
     /// The next member's name, or null at the end of the object.
-    fn key(l: *Loading) anyerror!?[]const u8 {
+    pub fn key(l: *Loading) anyerror!?[]const u8 {
         return switch (try l.next()) {
             .key => |name| name,
             else => null,
         };
     }
 
-    fn open(l: *Loading, comptime kind: std.meta.Tag(Token), comptime what: []const u8) anyerror!void {
+    /// The next token, which has to be a `kind`: `what` it is, said when it
+    /// is not.
+    pub fn open(l: *Loading, comptime kind: std.meta.Tag(Token), comptime what: []const u8) anyerror!void {
         const token = try l.next();
         if (token != kind) return l.wrong(what, token);
     }
 
-    fn wrong(l: *Loading, comptime expected: []const u8, token: Token) anyerror {
+    /// Say the last token is not what was `expected`.
+    pub fn wrong(l: *Loading, comptime expected: []const u8, token: Token) anyerror {
         return l.fail(error.WrongType, "expected " ++ expected ++ ", found {f}", .{found(token)});
     }
 
     /// Say what is wrong with the last token, and where in the scene it is.
-    fn fail(l: *Loading, err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
+    pub fn fail(l: *Loading, err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
         l.reader.report(fmt, args);
         if (l.diagnostics) |d| d.setPath(l.path.slice());
         return err;
@@ -824,12 +840,10 @@ pub fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
         inline for (comptime component_texts.declared(T)) |text| {
             if (!l.entity.isNone()) try l.app.setText(l.entity, T, text.name, "");
         }
-        if (T == Control) {
-            out.variation = @splat(0);
-            out.variation_len = 0;
+        // What it keeps beside it, left out, is none.
+        inline for (comptime scene.besideOf(T)) |beside| {
+            if (beside.forget) |forget| if (!l.entity.isNone()) forget(l.app, l.entity);
         }
-        // Numbers left out are the file's.
-        if (T == Material and !l.entity.isNone()) l.app.shader_params.clearOf(l.app.gpa, l.entity);
     }
     while (try l.key()) |name| {
         var said = false;
@@ -839,27 +853,18 @@ pub fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
                 try readText(l, T, text.name);
             }
         }
+        inline for (comptime scene.besideOf(T)) |beside| {
+            if (!said and std.mem.eql(u8, name, beside.key)) {
+                said = true;
+                const mark = l.path.push("{s}", .{beside.key});
+                try beside.read(l);
+                l.path.pop(mark);
+            }
+        }
         if (said) continue;
-        if (T == TileMap and std.mem.eql(u8, name, "cells")) {
-            const mark = l.path.push("cells", .{});
-            try readCells(l);
-            l.path.pop(mark);
-            continue;
-        }
-        if (T == Control and std.mem.eql(u8, name, "type_variation")) {
-            try readVariation(l, out);
-            continue;
-        }
-        if (T == Material and std.mem.eql(u8, name, "params")) {
-            const mark = l.path.push("params", .{});
-            try readParams(l);
-            l.path.pop(mark);
-            continue;
-        }
         var matched = false;
         inline for (fields, 0..) |field, i| {
-            const hidden = comptime T == Control and isVariationBuffer(field.name);
-            if (!hidden and !matched and std.mem.eql(u8, name, field.name)) {
+            if (!matched and std.mem.eql(u8, name, field.name)) {
                 matched = true;
                 seen.set(i);
                 const mark = l.path.push("{s}", .{field.name});
@@ -875,8 +880,7 @@ pub fn readComponent(l: *Loading, comptime T: type, out: *T) anyerror!void {
 
 fn defaultTheRest(l: *Loading, comptime T: type, out: *T, seen: anytype) anyerror!void {
     inline for (@typeInfo(T).@"struct".fields, 0..) |field, i| {
-        const hidden = comptime T == Control and isVariationBuffer(field.name);
-        if (!hidden and !seen.isSet(i)) {
+        if (!seen.isSet(i)) {
             @field(out.*, field.name) = field.defaultValue() orelse
                 return l.fail(error.MissingField, "{s} has no {s}, and it has no default to take", .{ nameOf(T), field.name });
         }
@@ -895,41 +899,6 @@ fn readName(l: *Loading, out: []u8) anyerror!void {
     @memcpy(out[0..text.len], text);
 }
 
-/// A material's numbers, by field: a number, a list of up to sixteen, or a
-/// colour written `"#rrggbb"`.
-fn readParams(l: *Loading) anyerror!void {
-    try l.open(.object_begin, "a material's numbers, which is an object of its shader's fields");
-    while (try l.key()) |name| {
-        var numbers: [16]f32 = undefined;
-        var len: usize = 0;
-        switch (try l.next()) {
-            .number => |n| {
-                numbers[0] = n.asFloat(f32);
-                len = 1;
-            },
-            .string => |text| {
-                const colour = Color.parse(text) orelse
-                    return l.fail(error.WrongType, "{s} is not a colour, which is written #rrggbb or #rrggbbaa", .{text});
-                numbers[0..4].* = .{ colour.r, colour.g, colour.b, colour.a };
-                len = 4;
-            },
-            .array_begin => while (true) {
-                switch (try l.next()) {
-                    .array_end => break,
-                    .number => |n| {
-                        if (len == numbers.len) return l.fail(error.OutOfRange, "{s} is more than sixteen numbers", .{name});
-                        numbers[len] = n.asFloat(f32);
-                        len += 1;
-                    },
-                    else => |other| return l.wrong("a number", other),
-                }
-            },
-            else => |other| return l.wrong("a number, a list of them or a colour", other),
-        }
-        if (!l.entity.isNone()) try l.app.setShaderParam(l.entity, name, numbers[0..len]);
-    }
-}
-
 /// One of a component's words, kept beside it for the entity being read.
 fn readText(l: *Loading, comptime T: type, comptime property: []const u8) anyerror!void {
     const token = try l.next();
@@ -938,63 +907,6 @@ fn readText(l: *Loading, comptime T: type, comptime property: []const u8) anyerr
         else => return l.wrong("words, as text", token),
     };
     if (!l.entity.isNone()) try l.app.setText(l.entity, T, property, text);
-}
-
-/// The name a control is drawn as, written as the text it is.
-fn readVariation(l: *Loading, out: *Control) anyerror!void {
-    const token = try l.next();
-    const text = switch (token) {
-        .string => |held| held,
-        else => return l.wrong("the name a control is drawn as", token),
-    };
-    if (text.len > Control.variation_capacity) return l.fail(error.OutOfRange, "this name is {d} bytes, and a Control holds {d}", .{ text.len, Control.variation_capacity });
-    out.setVariation(text);
-}
-
-/// The buffer and the length a `Control` keeps the name it is drawn as in,
-/// written as one string called `type_variation` instead.
-pub fn isVariationBuffer(comptime name: []const u8) bool {
-    return std.mem.eql(u8, name, "variation") or std.mem.eql(u8, name, "variation_len");
-}
-
-/// One chunk of a map's tiles, read and waiting for the scene to be over.
-const PendingChunk = struct {
-    map: Entity,
-    x: i32,
-    y: i32,
-    cells: [tilemap.tiles_per_chunk]tilemap.Cell,
-};
-
-/// A map's `cells`: a line of base64 under each chunk's place, as
-/// `writeCells` put them. The chunks themselves are made once every value in
-/// the scene has been written, by `read`.
-fn readCells(l: *Loading) anyerror!void {
-    try l.open(.object_begin, "the map's tiles, which is an object of its chunks");
-    while (try l.key()) |name| {
-        const mark = l.path.push("{s}", .{name});
-        const comma = std.mem.indexOfScalar(u8, name, ',') orelse
-            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
-        const x = std.fmt.parseInt(i32, name[0..comma], 10) catch
-            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
-        const y = std.fmt.parseInt(i32, name[comma + 1 ..], 10) catch
-            return l.fail(error.WrongType, "\"{s}\" is not a chunk's place, which is written \"x,y\"", .{name});
-
-        const token = try l.next();
-        const text = switch (token) {
-            .string => |held| held,
-            else => return l.wrong("a chunk's tiles, which is a line of base64", token),
-        };
-        var pending: PendingChunk = .{ .map = l.entity, .x = x, .y = y, .cells = undefined };
-        const room = std.mem.asBytes(&pending.cells);
-        const size = std.base64.standard.Decoder.calcSizeForSlice(text) catch
-            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
-        if (size != room.len) return l.fail(error.OutOfRange, "a chunk is {d} bytes of tiles, and this is {d}", .{ room.len, size });
-        std.base64.standard.Decoder.decode(room, text) catch
-            return l.fail(error.WrongType, "a chunk's tiles are base64, and this is not", .{});
-
-        if (l.chunks) |waiting| try waiting.append(l.app.gpa, pending);
-        l.path.pop(mark);
-    }
 }
 
 /// A value inside a component. A nested struct may leave fields out too.
@@ -1133,14 +1045,14 @@ const Path = struct {
     buf: [256]u8 = undefined,
     len: usize = 0,
 
-    fn push(p: *Path, comptime fmt: []const u8, args: anytype) usize {
+    pub fn push(p: *Path, comptime fmt: []const u8, args: anytype) usize {
         const mark = p.len;
         const written = std.fmt.bufPrint(p.buf[p.len..], "/" ++ fmt, args) catch "";
         p.len += written.len;
         return mark;
     }
 
-    fn pop(p: *Path, mark: usize) void {
+    pub fn pop(p: *Path, mark: usize) void {
         p.len = mark;
     }
 

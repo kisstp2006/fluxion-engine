@@ -23,6 +23,30 @@ const NameError = @import("names.zig").NameError;
 
 const Entity = ecs.Entity;
 
+/// Despawn everything whose parent has died, and what hangs from that in
+/// turn: see `Parent`. Once a frame, a pass of `app/frame_steps.zig`, because a
+/// game despawns through `world.despawn` and nothing here sees it. It goes
+/// round until a pass finds nothing, so a turret's barrel goes one pass
+/// after the turret.
+pub fn despawnOrphans(app: *App) !void {
+    var orphans: std.ArrayList(Entity) = .empty;
+    defer orphans.deinit(app.gpa);
+    while (true) {
+        orphans.clearRetainingCapacity();
+        var it = try ecs.Query(.{components.Parent}).over(&app.world);
+        while (it.next()) |chunk| {
+            for (chunk.slice(components.Parent), chunk.entities) |held, entity| {
+                if (held.entity.isNone() or app.world.isAlive(held.entity)) continue;
+                try orphans.append(app.gpa, entity);
+            }
+        }
+        // Found first and despawned after: a despawn moves rows, and the
+        // slices above point at rows.
+        if (orphans.items.len == 0) return;
+        for (orphans.items) |orphan| app.world.despawn(orphan);
+    }
+}
+
 pub const Tree = struct {
     /// Each placed entity's rank among its siblings.
     ranks: std.AutoArrayHashMapUnmanaged(Entity, u64) = .empty,
@@ -48,7 +72,7 @@ pub const Tree = struct {
     }
 
     /// Every place forgotten, as a world thrown away takes them.
-    pub fn clear(self: *Tree) void {
+    pub fn clear(self: *Tree, _: *App) void {
         self.ranks.clearRetainingCapacity();
         self.forget();
     }
@@ -161,12 +185,12 @@ pub const Tree = struct {
     }
 
     /// Forget the places of everything that has died.
-    pub fn forgetDead(self: *Tree, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Tree, app: *App) void {
         var at = self.ranks.count();
         while (at > 0) {
             at -= 1;
             const entity = self.ranks.keys()[at];
-            if (!world.isAlive(entity)) self.ranks.swapRemoveAt(at);
+            if (!app.world.isAlive(entity)) self.ranks.swapRemoveAt(at);
         }
     }
 };

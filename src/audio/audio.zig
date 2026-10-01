@@ -52,6 +52,7 @@ const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
 const attr = @import("../reflect/attr.zig");
 const file_table = @import("../assets/file_table.zig");
+const fixed_text = @import("../reflect/fixed_text.zig");
 
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;
@@ -90,17 +91,6 @@ pub fn linearToDb(linear: f32) f32 {
 /// How long a bus's name may be, in a player.
 pub const bus_name_len = 32;
 
-fn named(comptime text: []const u8) [bus_name_len]u8 {
-    var out: [bus_name_len]u8 = @splat(0);
-    @memcpy(out[0..text.len], text);
-    return out;
-}
-
-fn nameIn(buffer: *const [bus_name_len]u8) []const u8 {
-    const end = std.mem.indexOfScalar(u8, buffer, 0) orelse buffer.len;
-    return buffer[0..end];
-}
-
 // -------------------------------------------------------------------------
 // Components
 // -------------------------------------------------------------------------
@@ -114,7 +104,7 @@ pub const AudioPlayer = extern struct {
     /// up at twice the speed. For a sound a little different each time.
     pitch: f32 = 1,
     /// The bus it is mixed on, by name. See `busName` and `setBus`.
-    bus: [bus_name_len]u8 = named(master),
+    bus: [bus_name_len]u8 = fixed_text.of(bus_name_len, master),
     /// Whether it starts by itself the first time the game plays its entity.
     autoplay: bool = false,
     /// From the start again at the end, rather than stopping.
@@ -184,7 +174,7 @@ pub const AudioPlayer = extern struct {
     }
 
     pub fn busName(self: *const AudioPlayer) []const u8 {
-        return nameIn(&self.bus);
+        return fixed_text.get(&self.bus);
     }
 
     /// Mixed on the bus called `name` - cut at `bus_name_len` - from the
@@ -563,7 +553,7 @@ pub const Audio = struct {
     // ---------------------------------------------------------------------
 
     /// Stop everything the players play: the world is cleared.
-    pub fn clear(self: *Audio) void {
+    pub fn clear(self: *Audio, _: *App) void {
         for (self.voices.values()) |playing| self.device.stop(playing.voice);
         self.voices.clearRetainingCapacity();
     }

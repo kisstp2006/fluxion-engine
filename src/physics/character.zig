@@ -97,13 +97,19 @@ pub const Slides = struct {
         return met.items;
     }
 
+    /// Every move forgotten, as a world thrown away takes its entities.
+    pub fn clear(self: *Slides, app: *App) void {
+        for (self.by_entity.values()) |*met| met.deinit(app.gpa);
+        self.by_entity.clearRetainingCapacity();
+    }
+
     /// Forget the slides of the dead.
-    pub fn forgetDead(self: *Slides, gpa: std.mem.Allocator, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Slides, app: *App) void {
         var at = self.by_entity.count();
         while (at > 0) {
             at -= 1;
-            if (world.isAlive(self.by_entity.keys()[at])) continue;
-            self.by_entity.values()[at].deinit(gpa);
+            if (app.world.isAlive(self.by_entity.keys()[at])) continue;
+            self.by_entity.values()[at].deinit(app.gpa);
             self.by_entity.swapRemoveAt(at);
         }
     }

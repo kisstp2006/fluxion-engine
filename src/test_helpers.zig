@@ -22,6 +22,11 @@ pub fn pressOf(key: platform.Key) platform.Event {
     } };
 }
 
+/// A finger's news, as the platform would deliver it.
+pub fn touchOf(finger: u32, phase: platform.event.TouchPhase, x: f64, y: f64) platform.Event {
+    return .{ .touch = .{ .window = .none, .finger = finger, .phase = phase, .x = x, .y = y } };
+}
+
 /// The physics of a world with the earth's pull and nothing to slow it: what
 /// the body tests fall in.
 pub const earth: @import("project/Project.zig").Physics2D = .{ .default_gravity = 981, .default_linear_damp = 0, .default_angular_damp = 0 };

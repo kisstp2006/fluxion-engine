@@ -11,9 +11,11 @@ const ecs = @import("fluxion_ecs");
 const json = @import("fluxion_json");
 const reflect = @import("fluxion_reflect");
 
+const attr = @import("../reflect/attr.zig");
 const signals = @import("../core/signals.zig");
 const scene_read = @import("scene_read.zig");
 const scene_write = @import("scene_write.zig");
+const App = @import("../App.zig");
 
 const Entity = ecs.Entity;
 const World = ecs.World;
@@ -60,6 +62,9 @@ pub const Registry = struct {
         type: *const reflect.Type,
         /// What it can say: its `pub const signals`. See `App.signal`.
         signals: []const signals.Decl,
+        /// Whether an entity that has it is left out of every scene: its
+        /// type says `attr.Unsaved`.
+        unsaved: bool,
         idIn: *const fn (world: *World) World.Error!ComponentId,
         findIdIn: *const fn (world: *const World) ?ComponentId,
         /// Put one holding its defaults on an entity, or overwrite the one
@@ -99,6 +104,7 @@ pub const Registry = struct {
                 .key = ecs.component.keyOf(T),
                 .type = reflect.typeOf(T),
                 .signals = signals.declsOf(T),
+                .unsaved = comptime unsavedType(T),
                 .idIn = Shim.idIn,
                 .findIdIn = Shim.findIdIn,
                 .addTo = Shim.addTo,
@@ -117,6 +123,15 @@ pub const Registry = struct {
             return .init(self.type, cell);
         }
     };
+
+    /// Whether `entity` is left out of every scene: it has a component whose
+    /// type says `attr.Unsaved` - a map's chunk, which its map writes.
+    pub fn keepsOut(self: *const Registry, world: *World, entity: Entity) bool {
+        for (self.entries.items) |*entry| {
+            if (entry.unsaved and entry.valueOn(world, entity) != null) return true;
+        }
+        return false;
+    }
 
     pub fn deinit(self: *Registry, gpa: Allocator) void {
         self.entries.deinit(gpa);
@@ -209,8 +224,8 @@ pub const Unknown = struct {
     }
 
     /// Every one forgotten: the world was cleared.
-    pub fn clear(self: *Unknown, gpa: Allocator) void {
-        for (self.by_entity.values()) |*list| freeAll(gpa, list);
+    pub fn clear(self: *Unknown, app: *App) void {
+        for (self.by_entity.values()) |*list| freeAll(app.gpa, list);
         self.by_entity.clearRetainingCapacity();
     }
 
@@ -243,14 +258,14 @@ pub const Unknown = struct {
 
     /// Forget those of every entity that has died. Once a frame, as the
     /// names are.
-    pub fn forgetDead(self: *Unknown, gpa: Allocator, world: *const World) void {
+    pub fn forgetDead(self: *Unknown, app: *App) void {
         // Backwards, so the entry a swap-remove moves into the gap has
         // already been looked at.
         var at = self.by_entity.count();
         while (at > 0) {
             at -= 1;
-            if (world.isAlive(self.by_entity.keys()[at])) continue;
-            freeAll(gpa, &self.by_entity.values()[at]);
+            if (app.world.isAlive(self.by_entity.keys()[at])) continue;
+            freeAll(app.gpa, &self.by_entity.values()[at]);
             self.by_entity.swapRemoveAt(at);
         }
     }
@@ -311,4 +326,13 @@ pub fn nameOf(comptime T: type) []const u8 {
     const end = std.mem.indexOfScalar(u8, full, '(') orelse full.len;
     const start = if (std.mem.lastIndexOfScalar(u8, full[0..end], '.')) |dot| dot + 1 else 0;
     return full[start..];
+}
+
+/// Whether `T` says `attr.Unsaved` of itself.
+fn unsavedType(comptime T: type) bool {
+    if (!@hasDecl(T, "reflect_attributes")) return false;
+    inline for (T.reflect_attributes) |attribute| {
+        if (@TypeOf(attribute) == attr.Unsaved) return true;
+    }
+    return false;
 }

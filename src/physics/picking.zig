@@ -77,7 +77,7 @@ pub fn deinit(self: *Picking, gpa: Allocator) void {
 }
 
 /// Over nothing, with nothing said: a world cleared.
-pub fn clear(self: *Picking) void {
+pub fn clear(self: *Picking, _: *App) void {
     self.over.clearRetainingCapacity();
     self.over_shapes.clearRetainingCapacity();
     self.hits.clearRetainingCapacity();

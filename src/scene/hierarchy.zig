@@ -98,7 +98,7 @@ pub fn resolve(
 
     while (!above.isNone()) {
         const parent_local = world.get(above, Transform2D) orelse {
-            // Dead: the chain is broken. See `App.despawnOrphans`.
+            // Dead: the chain is broken. See `tree.despawnOrphans`.
             if (!world.isAlive(above)) return null;
             // Alive with no transform: the chain stops here.
             break;

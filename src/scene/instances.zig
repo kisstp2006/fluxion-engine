@@ -46,8 +46,8 @@ pub const Instances = struct {
     }
 
     /// Every instance forgotten, as a world thrown away takes them.
-    pub fn clear(self: *Instances, gpa: Allocator) void {
-        for (self.by_root.values()) |held| held.deinit(gpa);
+    pub fn clear(self: *Instances, app: *App) void {
+        for (self.by_root.values()) |held| held.deinit(app.gpa);
         self.by_root.clearRetainingCapacity();
     }
 
@@ -85,12 +85,12 @@ pub const Instances = struct {
     }
 
     /// Forget the instances whose root has died.
-    pub fn forgetDead(self: *Instances, gpa: Allocator, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Instances, app: *App) void {
         var at = self.by_root.count();
         while (at > 0) {
             at -= 1;
-            if (world.isAlive(self.by_root.keys()[at])) continue;
-            self.by_root.values()[at].deinit(gpa);
+            if (app.world.isAlive(self.by_root.keys()[at])) continue;
+            self.by_root.values()[at].deinit(app.gpa);
             self.by_root.swapRemoveAt(at);
         }
     }

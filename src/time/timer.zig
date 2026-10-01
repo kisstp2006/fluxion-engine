@@ -91,9 +91,11 @@ pub const Timer = extern struct {
     }
 };
 
-/// Count every timer of `mode` by `delta`, and say each `timeout` that came.
-/// What `App.step` calls.
-pub fn count(app: *App, clock: Timer.Clock, delta: f32) !void {
+/// Count every timer on `clock` by the time that passed - the frame's, or
+/// in a fixed step the step's - and say each `timeout` that came: a pass of
+/// `app/frame_steps.zig`.
+pub fn count(app: *App, clock: Timer.Clock) !void {
+    const delta = app.time.delta;
     if (delta <= 0) return;
     var gone: std.ArrayList(Entity) = .empty;
     defer gone.deinit(app.gpa);
@@ -109,7 +111,7 @@ pub fn count(app: *App, clock: Timer.Clock, delta: f32) !void {
         for (chunk.entities, chunk.slice(Timer)) |e, *timer| {
             if (timer.clock != clock) continue;
             // Not counted, not even started, while its entity waits.
-            if (!app.isProcessing(e)) continue;
+            if (!app.timeMovesFor(e)) continue;
             if (!timer.counted) {
                 timer.counted = true;
                 if (timer.autostart) timer.start(-1);

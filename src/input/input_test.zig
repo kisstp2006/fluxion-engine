@@ -26,6 +26,7 @@ const drop_capacity = Input.drop_capacity;
 const max_pads = Input.max_pads;
 const mouse_as_finger = Input.mouse_as_finger;
 const pressOf = helpers.pressOf;
+const touchOf = helpers.touchOf;
 
 test "a key held, and an axis of two keys" {
     const app = try App.create(testing.allocator, .{ .headless = true });
@@ -614,17 +615,13 @@ fn cursorEvent(x: f64, y: f64, dx: f64, dy: f64) platform.Event {
     return .{ .cursor = .{ .window = .none, .x = x, .y = y, .dx = dx, .dy = dy } };
 }
 
-fn touchEvent(finger: u32, phase: platform.event.TouchPhase, x: f64, y: f64) platform.Event {
-    return .{ .touch = .{ .window = .none, .finger = finger, .phase = phase, .x = x, .y = y } };
-}
-
 test "every finger is a touch of its own, from the frame it touches to the frame it is lifted" {
     var input: Input = .{};
     input.frame_origin = .init(100, 0);
     input.frame_ratio = 0.5;
 
-    input.apply(touchEvent(4, .down, 300, 200));
-    input.apply(touchEvent(9, .down, 500, 100));
+    input.apply(touchOf(4, .down, 300, 200));
+    input.apply(touchOf(9, .down, 500, 100));
     try testing.expect(input.touchscreen);
     try testing.expectEqual(@as(usize, 2), input.fingersDown());
     const first = input.touchOf(4).?;
@@ -633,9 +630,9 @@ test "every finger is a touch of its own, from the frame it touches to the frame
     try testing.expect(!input.touchOf(9).?.mouse);
 
     // Moves in one frame are one event a finger, added up.
-    input.apply(touchEvent(4, .move, 310, 200));
-    input.apply(touchEvent(9, .move, 520, 100));
-    input.apply(touchEvent(4, .move, 320, 210));
+    input.apply(touchOf(4, .move, 310, 200));
+    input.apply(touchOf(9, .move, 520, 100));
+    input.apply(touchOf(4, .move, 320, 210));
     const heard = input.pointerEvents();
     try testing.expectEqual(@as(usize, 4), heard.len);
     try testing.expectEqual(@as(f32, 10), heard[2].touch_motion.relative.x);
@@ -647,8 +644,8 @@ test "every finger is a touch of its own, from the frame it touches to the frame
     input.endFrame();
     input.beginFrame();
     try testing.expect(!input.touchOf(4).?.pressed);
-    input.apply(touchEvent(4, .up, 320, 210));
-    input.apply(touchEvent(9, .cancel, 520, 100));
+    input.apply(touchOf(4, .up, 320, 210));
+    input.apply(touchOf(9, .cancel, 520, 100));
     try testing.expect(input.touchOf(4).?.released);
     try testing.expect(input.touchOf(9).?.canceled);
     try testing.expectEqual(@as(usize, 0), input.fingersDown());
@@ -658,8 +655,8 @@ test "every finger is a touch of its own, from the frame it touches to the frame
     try testing.expectEqual(@as(usize, 0), input.touches().len);
 
     // A finger touched and lifted inside one frame is still seen.
-    input.apply(touchEvent(1, .down, 0, 0));
-    input.apply(touchEvent(1, .up, 0, 0));
+    input.apply(touchOf(1, .down, 0, 0));
+    input.apply(touchOf(1, .up, 0, 0));
     try testing.expect(input.touchOf(1).?.pressed and input.touchOf(1).?.released);
 }
 
@@ -702,26 +699,26 @@ fn gesturesOf(input: *const Input) []const events.InputEvent {
 
 test "a finger lifted soon and near is a tap, and another soon after is a double tap" {
     var input: Input = .{};
-    frameOf(&input, &.{touchEvent(1, .down, 100, 100)});
-    frameOf(&input, &.{touchEvent(1, .move, 104, 102)});
-    frameOf(&input, &.{touchEvent(1, .up, 104, 102)});
+    frameOf(&input, &.{touchOf(1, .down, 100, 100)});
+    frameOf(&input, &.{touchOf(1, .move, 104, 102)});
+    frameOf(&input, &.{touchOf(1, .up, 104, 102)});
     try testing.expectEqual(@as(u32, 1), gesturesOf(&input)[0].tap.count);
 
     frameOf(&input, &.{});
-    frameOf(&input, &.{touchEvent(2, .down, 110, 100)});
-    frameOf(&input, &.{touchEvent(2, .up, 110, 100)});
+    frameOf(&input, &.{touchOf(2, .down, 110, 100)});
+    frameOf(&input, &.{touchOf(2, .up, 110, 100)});
     try testing.expectEqual(@as(u32, 2), gesturesOf(&input)[0].tap.count);
 
     // Too late for a third: a tap of its own.
     for (0..30) |_| frameOf(&input, &.{});
-    frameOf(&input, &.{touchEvent(3, .down, 110, 100)});
-    frameOf(&input, &.{touchEvent(3, .up, 110, 100)});
+    frameOf(&input, &.{touchOf(3, .down, 110, 100)});
+    frameOf(&input, &.{touchOf(3, .up, 110, 100)});
     try testing.expectEqual(@as(u32, 1), gesturesOf(&input)[0].tap.count);
 }
 
 test "a finger held still is a long press, once, and then no tap" {
     var input: Input = .{};
-    frameOf(&input, &.{touchEvent(1, .down, 100, 100)});
+    frameOf(&input, &.{touchOf(1, .down, 100, 100)});
     var pressed: usize = 0;
     for (0..40) |_| {
         frameOf(&input, &.{});
@@ -730,48 +727,48 @@ test "a finger held still is a long press, once, and then no tap" {
         }
     }
     try testing.expectEqual(@as(usize, 1), pressed);
-    frameOf(&input, &.{touchEvent(1, .up, 100, 100)});
+    frameOf(&input, &.{touchOf(1, .up, 100, 100)});
     try testing.expectEqual(@as(usize, 0), gesturesOf(&input).len);
 }
 
 test "a finger flicked and lifted while going fast is a swipe, and a slow drag is none" {
     var input: Input = .{};
-    frameOf(&input, &.{touchEvent(1, .down, 100, 300)});
-    for (1..6) |i| frameOf(&input, &.{touchEvent(1, .move, 100, 300 - @as(f64, @floatFromInt(i)) * 20)});
-    frameOf(&input, &.{touchEvent(1, .up, 100, 180)});
+    frameOf(&input, &.{touchOf(1, .down, 100, 300)});
+    for (1..6) |i| frameOf(&input, &.{touchOf(1, .move, 100, 300 - @as(f64, @floatFromInt(i)) * 20)});
+    frameOf(&input, &.{touchOf(1, .up, 100, 180)});
     const swiped = gesturesOf(&input)[0].swipe;
     try testing.expectEqual(events.SwipeEvent.Direction.up, swiped.direction);
     try testing.expectEqual(@as(f32, 300), swiped.start.y);
     try testing.expect(swiped.velocity.y < -1000);
 
-    frameOf(&input, &.{touchEvent(2, .down, 100, 300)});
-    for (1..60) |i| frameOf(&input, &.{touchEvent(2, .move, 100 + @as(f64, @floatFromInt(i)), 300)});
-    frameOf(&input, &.{touchEvent(2, .up, 160, 300)});
+    frameOf(&input, &.{touchOf(2, .down, 100, 300)});
+    for (1..60) |i| frameOf(&input, &.{touchOf(2, .move, 100 + @as(f64, @floatFromInt(i)), 300)});
+    frameOf(&input, &.{touchOf(2, .up, 160, 300)});
     try testing.expectEqual(@as(usize, 0), gesturesOf(&input).len);
 }
 
 test "two fingers pinch, pan and turn, and make no tap" {
     var input: Input = .{};
-    frameOf(&input, &.{ touchEvent(1, .down, 100, 100), touchEvent(2, .down, 200, 100) });
+    frameOf(&input, &.{ touchOf(1, .down, 100, 100), touchOf(2, .down, 200, 100) });
     try testing.expect(input.gestures.two_fingers.active);
     try testing.expectEqual(@as(f32, 1), input.gestures.two_fingers.factor);
 
     // Twice as far apart, about the same middle.
-    frameOf(&input, &.{ touchEvent(1, .move, 50, 100), touchEvent(2, .move, 250, 100) });
+    frameOf(&input, &.{ touchOf(1, .move, 50, 100), touchOf(2, .move, 250, 100) });
     try testing.expectApproxEqAbs(@as(f32, 2), input.gestures.two_fingers.factor, 0.0001);
     try testing.expectApproxEqAbs(@as(f32, 2), gesturesOf(&input)[0].pinch.factor, 0.0001);
 
     // Moved together, then a quarter turn about the middle.
-    frameOf(&input, &.{ touchEvent(1, .move, 60, 120), touchEvent(2, .move, 260, 120) });
+    frameOf(&input, &.{ touchOf(1, .move, 60, 120), touchOf(2, .move, 260, 120) });
     try testing.expectEqual(@as(f32, 20), input.gestures.two_fingers.relative.y);
     try testing.expectEqual(@as(f32, 20), gesturesOf(&input)[0].pan.relative.y);
-    frameOf(&input, &.{ touchEvent(1, .move, 160, 20), touchEvent(2, .move, 160, 220) });
+    frameOf(&input, &.{ touchOf(1, .move, 160, 20), touchOf(2, .move, 160, 220) });
     try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), input.gestures.two_fingers.rotation, 0.0001);
     try testing.expectApproxEqAbs(@as(f32, std.math.pi / 2.0), input.gestures.two_fingers.angle, 0.0001);
     try testing.expectApproxEqAbs(@as(f32, 2), input.gestures.two_fingers.scale, 0.0001);
 
     // Lifted: no tap, no swipe, and no two fingers.
-    frameOf(&input, &.{ touchEvent(1, .up, 160, 20), touchEvent(2, .up, 160, 220) });
+    frameOf(&input, &.{ touchOf(1, .up, 160, 20), touchOf(2, .up, 160, 220) });
     try testing.expectEqual(@as(usize, 0), gesturesOf(&input).len);
     try testing.expect(!input.gestures.two_fingers.active);
 }
@@ -811,7 +808,7 @@ test "a wheel turned with Ctrl is a pinch at the pointer, as a touchpad's pinch 
 
 test "the window losing the keyboard lifts every finger" {
     var input: Input = .{};
-    input.apply(touchEvent(2, .down, 0, 0));
+    input.apply(touchOf(2, .down, 0, 0));
     input.apply(.{ .focus = .{ .window = .none, .value = false } });
     try testing.expect(input.touchOf(2).?.canceled);
     try testing.expectEqual(@as(usize, 0), input.fingersDown());

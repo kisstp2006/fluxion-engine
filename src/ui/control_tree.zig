@@ -21,7 +21,6 @@ const Rect2 = @import("../math/geometry.zig").Rect2;
 const Region = @import("../scene/components.zig").Region;
 const ShaderHandle = @import("../render/shaders.zig").ShaderHandle;
 const Style = @import("theme.zig").Style;
-const TouchButton = @import("touch_button.zig").TouchButton;
 const View = @import("../render/view.zig").View;
 const hierarchy = @import("../scene/hierarchy.zig");
 
@@ -118,6 +117,15 @@ pub const ControlTree = struct {
         if (self.preview_ui) |*held_ui| held_ui.deinit();
         self.preview_interface.deinit();
         self.* = .{};
+    }
+
+    /// What was seen of the controls forgotten, as a world thrown away
+    /// takes them: a new world's entity is not the old one of its number.
+    pub fn clear(self: *ControlTree, _: *App) void {
+        self.seen.clearRetainingCapacity();
+        self.tooltip_under = .none;
+        self.tooltip_was = .none;
+        self.tooltip_rested = 0;
     }
 
     pub fn enable(self: *ControlTree, app: *App) !void {
@@ -306,11 +314,9 @@ pub const ControlTree = struct {
             if (!looks.visible) return;
             tint = looks.modulate;
         }
-        // Shown only on a touch screen, and this is none - but in an editor,
-        // which lays it out where the game would.
-        if (app.world.get(entity, TouchButton)) |button| {
-            if (context.layout == &app.ui and !button.shown(app.input.touchscreen)) return;
-        }
+        // Hidden by what is beside it - but not in an editor, which lays it
+        // out where the game would.
+        if (context.layout == &app.ui and hiddenBeside(app, entity)) return;
         const own = context.at(entity);
         const popup = app.world.get(entity, Popup);
         if (popup) |held| {
@@ -851,7 +857,7 @@ fn themeOf(app: *App, entity: Entity) struct { handle: ThemeHandle, variation: [
         const control = app.world.get(at, Control) orelse break;
         // The control's own name, not one inherited: a variation says what
         // this control is, and saying it once should not paint its children.
-        if (at.eql(entity)) variation = control.variationSlice();
+        if (at.eql(entity)) variation = app.textOf(entity, Control, "type_variation");
         if (!control.theme.isNone()) {
             found = control.theme;
             break;
@@ -1137,6 +1143,17 @@ const Pictures = struct {
 
 /// Where a control was laid out when the interface was last drawn, in the
 /// units its anchors and offsets are in: see `App.controlRect`.
+/// Whether a component beside a control hides it here, by its own
+/// `hidesControl(app)`: a touch button where there is no touch screen.
+fn hiddenBeside(app: *App, entity: Entity) bool {
+    inline for (App.engine_components) |T| {
+        if (comptime @hasDecl(T, "hidesControl")) {
+            if (app.world.get(entity, T)) |held| if (held.hidesControl(app)) return true;
+        }
+    }
+    return false;
+}
+
 pub fn rectOf(app: *App, entity: Entity) ?Rect2 {
     var id: [48]u8 = undefined;
     const box = app.ui.boxOf(idOf(&id, entity)) orelse return null;

@@ -70,7 +70,7 @@ pub fn deinit(self: *Areas, gpa: Allocator) void {
 }
 
 /// Everything forgotten, with nothing said: a world cleared.
-pub fn clear(self: *Areas) void {
+pub fn clear(self: *Areas, _: *App) void {
     self.pairs.clearRetainingCapacity();
     self.objects.clearRetainingCapacity();
     self.warned.clearRetainingCapacity();

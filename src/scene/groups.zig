@@ -24,8 +24,8 @@ pub const Groups = struct {
     }
 
     /// Every group gone, as a world thrown away takes them.
-    pub fn clear(self: *Groups, gpa: Allocator) void {
-        self.freeAll(gpa);
+    pub fn clear(self: *Groups, app: *App) void {
+        self.freeAll(app.gpa);
         self.by_name.clearRetainingCapacity();
     }
 
@@ -93,8 +93,8 @@ pub const Groups = struct {
     }
 
     /// Take the dead out of every group.
-    pub fn forgetDead(self: *Groups, world: *const ecs.World) void {
-        for (self.by_name.values()) |*held| dropDead(held, world);
+    pub fn forgetDead(self: *Groups, app: *App) void {
+        for (self.by_name.values()) |*held| dropDead(held, &app.world);
     }
 
     fn dropDead(held: *std.ArrayListUnmanaged(Entity), world: *const ecs.World) void {

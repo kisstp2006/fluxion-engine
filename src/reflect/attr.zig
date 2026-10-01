@@ -18,7 +18,6 @@
 //! Any value can be an attribute; these are the ones worth one spelling
 //! between the engine, a game and an editor.
 
-const std = @import("std");
 const reflect = @import("fluxion_reflect");
 const AssetKind = @import("../assets/asset_kind.zig").AssetKind;
 
@@ -176,24 +175,6 @@ pub const Placement = struct {
 /// setter - it says so of that text.
 pub const Multiline = struct {};
 
-/// A value a type reaches through its own methods rather than through a
-/// field: read with `get`, written with `set`, both in its
-/// `reflect_methods`. For words kept as a buffer and a length, which a
-/// field-by-field edit would leave disagreeing - or anything else a setter
-/// keeps right. On the type:
-///
-/// ```zig
-/// pub const reflect_attributes = .{fx.attr.Property{ .name = "text", .get = "slice", .set = "set" }};
-/// ```
-///
-/// `get` takes the value alone and returns what `set` takes after it;
-/// `App.registerComponents` does not compile a property that does not.
-pub const Property = struct {
-    name: []const u8,
-    get: []const u8,
-    set: []const u8,
-};
-
 /// Words a component keeps beside it rather than in a field, as long as
 /// they need to be: kept by the app under its entity - see `component_texts.zig`. A
 /// scene writes them among the component's fields, an editor shows them as
@@ -208,9 +189,8 @@ pub const Text = struct {
     multiline: bool = false,
 };
 
-/// Stop the build at a property of `T`'s that names a method `T` does not
-/// list in `reflect_methods`, or a getter and a setter that do not agree -
-/// and at a placement naming fields `T` does not have, or of other types.
+/// Stop the build at a placement of `T`'s naming fields `T` does not have,
+/// or of other types.
 pub fn check(comptime T: type) void {
     if (!@hasDecl(T, "reflect_attributes")) return;
     inline for (T.reflect_attributes) |attribute| {
@@ -223,31 +203,5 @@ pub fn check(comptime T: type) void {
                 @compileError(where ++ " names " ++ attribute.rotation ++ ", which is not an f32 field of it");
             }
         }
-        if (@TypeOf(attribute) != Property) continue;
-        const where = "fluxion-engine: " ++ @typeName(T) ++ "'s property " ++ attribute.name;
-        inline for (.{ attribute.get, attribute.set }) |name| {
-            if (!listed(T, name)) @compileError(where ++ " names " ++ name ++ ", which its reflect_methods does not list");
-        }
-        const get = @typeInfo(@TypeOf(@field(T, attribute.get))).@"fn";
-        const set = @typeInfo(@TypeOf(@field(T, attribute.set))).@"fn";
-        if (get.params.len != 1 or set.params.len != 2 or get.return_type.? != set.params[1].type.?) {
-            @compileError(where ++ ": " ++ attribute.get ++ " should take the value alone, and return what " ++ attribute.set ++ " takes after it");
-        }
     }
-}
-
-/// Whether `T`'s `reflect_methods` has `name`, in either of its shapes: a
-/// list of names, or names with attributes.
-fn listed(comptime T: type, comptime name: []const u8) bool {
-    if (!@hasDecl(T, "reflect_methods") or !@hasDecl(T, name)) return false;
-    const Spec = @TypeOf(T.reflect_methods);
-    if (!@typeInfo(Spec).@"struct".is_tuple) return @hasField(Spec, name);
-    inline for (T.reflect_methods) |entry| {
-        const entry_name = switch (@typeInfo(@TypeOf(entry))) {
-            .enum_literal => @tagName(entry),
-            else => entry,
-        };
-        if (std.mem.eql(u8, entry_name, name)) return true;
-    }
-    return false;
 }

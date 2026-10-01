@@ -58,13 +58,11 @@ pub const Corners = theme_file.Corners;
 /// The rectangular base of every UI entity.
 pub const Control = extern struct {
     /// The `.theme` file this control and everything under it is drawn from.
-    /// `.none` takes whatever the control above it uses.
+    /// `.none` takes whatever the control above it uses. Its text
+    /// `type_variation` is a name in that theme to be drawn as, over the kind
+    /// of control this is: a "Header" built on "Label" is one Label among
+    /// many that is drawn differently.
     theme: ThemeHandle = .none,
-    /// A name in that theme to be drawn as, over the kind of control this is:
-    /// a type variation. A "Header" built on "Label" is one Label among many
-    /// that is drawn differently.
-    variation: [variation_capacity]u8 = @splat(0),
-    variation_len: u8 = 0,
     width: Size = .{},
     height: Size = .{},
     position: Position = .flow,
@@ -92,7 +90,6 @@ pub const Control = extern struct {
     /// it takes: what a button popping in is drawn with.
     scale: f32 = 1,
 
-    pub const variation_capacity = 31;
     /// In its parent's flow - one after another, as a box container lays
     /// them out - or **anchored**: held between two points of its parent on
     /// each axis, `anchor_left` and `anchor_right` across, `anchor_top` and
@@ -145,14 +142,12 @@ pub const Control = extern struct {
 
     pub const reflect_name = "Control";
     pub const reflect_attributes = .{
-        attr.Property{ .name = "type_variation", .get = "variationSlice", .set = "setVariation" },
+        attr.Text{ .name = "type_variation" },
         attr.Text{ .name = "tooltip_text", .multiline = true },
         // A UI over the whole screen would take every click in the scene.
         attr.Pickable{ .by_default = false },
     };
     pub const reflect_fields = .{
-        .variation = .{attr.Hidden{}},
-        .variation_len = .{attr.Hidden{}},
         .anchor_left = .{attr.Range{ .min = 0, .max = 1 }},
         .anchor_top = .{attr.Range{ .min = 0, .max = 1 }},
         .anchor_right = .{attr.Range{ .min = 0, .max = 1 }},
@@ -163,8 +158,6 @@ pub const Control = extern struct {
         .offset_bottom = .{attr.Unit{ .text = "px" }},
     };
     pub const reflect_methods = .{
-        .setVariation = .{attr.Params{ .names = &.{"name"} }},
-        .variationSlice = .{},
         .setAnchorsPreset = .{attr.Params{ .names = &.{"preset"} }},
     };
 
@@ -219,17 +212,6 @@ pub const Control = extern struct {
                 probe.anchor_right == self.anchor_right and probe.anchor_bottom == self.anchor_bottom) return preset;
         }
         return null;
-    }
-
-    pub fn setVariation(self: *Control, name: []const u8) void {
-        var cut = @min(name.len, variation_capacity);
-        while (cut > 0 and cut < name.len and name[cut] & 0xC0 == 0x80) cut -= 1;
-        @memcpy(self.variation[0..cut], name[0..cut]);
-        self.variation_len = @intCast(cut);
-    }
-
-    pub fn variationSlice(self: *const Control) []const u8 {
-        return self.variation[0..@min(self.variation_len, variation_capacity)];
     }
 };
 

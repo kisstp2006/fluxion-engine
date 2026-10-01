@@ -21,6 +21,7 @@ const testing = std.testing;
 
 const ecs = @import("fluxion_ecs");
 const json = @import("fluxion_json");
+const App = @import("../App.zig");
 
 const Entity = ecs.Entity;
 
@@ -28,12 +29,16 @@ pub const Exports = struct {
     by: std.AutoArrayHashMapUnmanaged(Entity, json.Document) = .empty,
 
     pub fn deinit(self: *Exports, gpa: Allocator) void {
-        self.clear();
+        self.freeAll();
         self.by.deinit(gpa);
     }
 
     /// Every entity's gone: the world was cleared.
-    pub fn clear(self: *Exports) void {
+    pub fn clear(self: *Exports, _: *App) void {
+        self.freeAll();
+    }
+
+    fn freeAll(self: *Exports) void {
         for (self.by.values()) |doc| doc.deinit();
         self.by.clearRetainingCapacity();
     }
@@ -89,11 +94,11 @@ pub const Exports = struct {
     }
 
     /// Let go of what the dead had. Once a frame, with the names.
-    pub fn forgetDead(self: *Exports, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Exports, app: *App) void {
         var at = self.by.count();
         while (at > 0) {
             at -= 1;
-            if (world.isAlive(self.by.keys()[at])) continue;
+            if (app.world.isAlive(self.by.keys()[at])) continue;
             self.by.values()[at].deinit();
             self.by.swapRemoveAt(at);
         }
@@ -117,12 +122,12 @@ pub const Exports = struct {
 };
 
 test "an entity's values are set, read, taken back to their defaults, copied and let go of" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
     var exports: Exports = .{};
     defer exports.deinit(testing.allocator);
-    var world: ecs.World = .init(testing.allocator);
-    defer world.deinit();
-    const guard = try world.spawn();
-    const other = try world.spawn();
+    const guard = try app.world.spawn();
+    const other = try app.world.spawn();
 
     var doc = try json.parse(testing.allocator, "{ \"hp\": 20, \"path\": [[0, 0], [16, 0]] }", .{});
     defer doc.deinit();
@@ -138,7 +143,7 @@ test "an entity's values are set, read, taken back to their defaults, copied and
     try testing.expect(exports.of(guard) == null);
     try testing.expectEqual(@as(usize, 2), exports.of(other).?.len());
 
-    world.despawn(other);
-    exports.forgetDead(&world);
+    app.world.despawn(other);
+    exports.forgetDead(app);
     try testing.expect(exports.of(other) == null);
 }

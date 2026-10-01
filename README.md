@@ -132,6 +132,14 @@ A system is `fn (*App) anyerror!void` - a plain function, not a closure and
 not a method on a node. The state it works on is in the world it is handed, so
 the function needs nothing of its own.
 
+**The engine's own work goes between the stages**, in one list that is the
+frame in order: `src/app/frame_steps.zig`. The scripts' `input` before the
+`input` stage, the timers, tweens and animations before `update`, the scene
+change, the sound and the particles after `late`, then the drawing. **What
+the engine says is heard at the end of the pass that said it** - a timer's
+`timeout` before the scripts' `update` - as a system's emits are heard when
+the system returns.
+
 **`late` earns its place**: a camera that follows a player has to run after
 the player has moved, and putting both in `update` makes that an accident of
 registration order.
@@ -2830,10 +2838,7 @@ as data, and the engine hands its components and its calls out through it.
   and the fields after it are shown under that heading in an editor.
 
   Two types given one `reflect_name` are `error.ComponentNameTaken`: a name
-  is what a description is found by. A `Property` in `reflect_attributes`
-  is checked when the component is registered: a getter or a setter it
-  names that `reflect_methods` does not list, or a getter that does not
-  return what the setter takes, stops the build.
+  is what a description is found by.
 - **A component says how an editor's scene treats what has it.**
   `fx.attr.Pickable{ .by_default = false }` in its `reflect_attributes` has
   a click in the scene pass over an entity that has it, until the editor

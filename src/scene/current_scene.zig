@@ -14,7 +14,6 @@ const ecs = @import("fluxion_ecs");
 const App = @import("../App.zig");
 const scene = @import("scene.zig");
 const hierarchy = @import("hierarchy.zig");
-const TileChunk = @import("../tiles/tilemap.zig").TileChunk;
 const SceneHandle = @import("../assets/scene_table.zig").SceneHandle;
 
 const Entity = ecs.Entity;
@@ -33,7 +32,7 @@ pub const CurrentScene = struct {
     }
 
     /// No scene playing, as a world thrown away leaves none.
-    pub fn clear(self: *CurrentScene) void {
+    pub fn clear(self: *CurrentScene, _: *App) void {
         self.roots.clearRetainingCapacity();
         self.handle = .none;
     }
@@ -60,7 +59,7 @@ pub fn open(app: *App, scene_handle: SceneHandle) !void {
     defer made.deinit(app.gpa);
     _ = try scene.read(app, held.bytes, .{ .spawned = &made });
     for (made.items) |e| {
-        if (hierarchy.parentOf(&app.world, e).isNone() and !app.world.has(e, TileChunk)) try playing.roots.append(app.gpa, e);
+        if (hierarchy.parentOf(&app.world, e).isNone() and !app.scene_components.keepsOut(&app.world, e)) try playing.roots.append(app.gpa, e);
     }
     playing.handle = scene_handle;
 }
@@ -68,7 +67,7 @@ pub fn open(app: *App, scene_handle: SceneHandle) !void {
 /// The scene `App.changeScene` asked for, opened: at the end of the frame,
 /// before the engine's own passes, so what hung from the old one goes with
 /// it this frame. One that does not open is said, and the old one is gone.
-pub fn openAsked(app: *App) void {
+pub fn openAsked(app: *App) !void {
     const next = app.current_scene.next orelse return;
     app.current_scene.next = null;
     open(app, next) catch |err| log.err("the scene {s} did not open: {t}", .{ app.sceneSource(next) orelse "?", err });

@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
 const hierarchy = @import("hierarchy.zig");
+const App = @import("../App.zig");
 
 const Entity = ecs.Entity;
 
@@ -44,9 +45,9 @@ pub const Names = struct {
     }
 
     /// Every name gone, as a world thrown away takes them.
-    pub fn clear(self: *Names, gpa: Allocator) void {
+    pub fn clear(self: *Names, app: *App) void {
         self.of_entity.clearRetainingCapacity();
-        self.freeAll(gpa);
+        self.freeAll(app.gpa);
     }
 
     /// Give back every name's text and list, and empty `by_name`.
@@ -161,14 +162,14 @@ pub const Names = struct {
     }
 
     /// Give back the names of everything that has died.
-    pub fn forgetDead(self: *Names, gpa: Allocator, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Names, app: *App) void {
         // Backwards, so the entry a swap-remove moves into the gap has
         // already been looked at.
         var at = self.of_entity.count();
         while (at > 0) {
             at -= 1;
             const entity = self.of_entity.keys()[at];
-            if (!world.isAlive(entity)) self.forget(gpa, entity);
+            if (!app.world.isAlive(entity)) self.forget(app.gpa, entity);
         }
     }
 };

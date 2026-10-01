@@ -31,6 +31,7 @@ const ecs = @import("fluxion_ecs");
 
 const App = @import("../App.zig");
 const Color = @import("../math/color.zig").Color;
+const fixed_text = @import("fixed_text.zig");
 
 /// What a property holds, as a tween and a track move it.
 pub const Value = union(enum) {
@@ -60,7 +61,7 @@ pub const Value = union(enum) {
 
     /// A name's text, without the zeros after it.
     pub fn text(self: *const Value) []const u8 {
-        return std.mem.sliceTo(&self.name, 0);
+        return fixed_text.get(&self.name);
     }
 
     pub const reflect_name = "AnimatedValue";

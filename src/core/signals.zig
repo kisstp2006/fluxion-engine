@@ -495,7 +495,7 @@ pub const Signals = struct {
     }
 
     pub fn deinit(self: *Signals) void {
-        self.clear();
+        self.forgetAll();
         self.from.deinit(self.gpa);
         self.blocked.deinit(self.gpa);
         var names = self.methods.keyIterator();
@@ -508,7 +508,11 @@ pub const Signals = struct {
 
     /// Every connection gone, and every call waiting: a world cleared.
     /// The methods stay, being the game's rather than the world's.
-    pub fn clear(self: *Signals) void {
+    pub fn clear(self: *Signals, _: *App) void {
+        self.forgetAll();
+    }
+
+    fn forgetAll(self: *Signals) void {
         for (self.from.values()) |*list| {
             for (list.items) |c| self.freeConnection(c);
             list.deinit(self.gpa);
@@ -854,13 +858,13 @@ pub const Signals = struct {
 
     /// Let go of the connections of and to whatever has died, and of their
     /// blocks. Once a frame, with the names.
-    pub fn forgetDead(self: *Signals, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Signals, app: *App) void {
         var at = self.from.count();
         while (at > 0) {
             at -= 1;
             const source = self.from.keys()[at];
             const list = &self.from.values()[at];
-            if (!world.isAlive(source)) {
+            if (!app.world.isAlive(source)) {
                 for (list.items) |c| self.freeConnection(c);
                 list.deinit(self.gpa);
                 self.from.swapRemoveAt(at);
@@ -868,7 +872,7 @@ pub const Signals = struct {
             }
             var kept: usize = 0;
             for (list.items) |c| {
-                if (c.callable == .named and !world.isAlive(c.callable.named.target)) {
+                if (c.callable == .named and !app.world.isAlive(c.callable.named.target)) {
                     self.freeConnection(c);
                     continue;
                 }
@@ -879,7 +883,7 @@ pub const Signals = struct {
         }
         var blocks = self.blocked.keyIterator();
         while (blocks.next()) |e| {
-            if (!world.isAlive(e.*)) {
+            if (!app.world.isAlive(e.*)) {
                 _ = self.blocked.remove(e.*);
                 // Removing invalidates the iterator: start again.
                 blocks = self.blocked.keyIterator();

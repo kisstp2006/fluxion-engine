@@ -34,6 +34,7 @@ const App = @import("../App.zig");
 const attr = @import("../reflect/attr.zig");
 const control = @import("control.zig");
 const Input = @import("../input/input.zig");
+const fixed_text = @import("../reflect/fixed_text.zig");
 
 const Entity = ecs.Entity;
 const log = std.log.scoped(.fluxion_engine);
@@ -74,19 +75,23 @@ pub const TouchButton = extern struct {
     /// Hold `name` down while pressed; empty for none. A name longer than
     /// the button keeps is cut short.
     pub fn setAction(self: *TouchButton, name: []const u8) void {
-        self.action = @splat(0);
-        const kept = @min(name.len, self.action.len);
-        @memcpy(self.action[0..kept], name[0..kept]);
+        fixed_text.set(&self.action, name);
     }
 
     /// The action it holds, or empty.
     pub fn actionName(self: *const TouchButton) []const u8 {
-        return std.mem.sliceTo(&self.action, 0);
+        return fixed_text.get(&self.action);
     }
 
     /// Whether it is drawn, and so pressed: on a touch screen, or always.
     pub fn shown(self: TouchButton, touchscreen: bool) bool {
         return self.visibility == .always or touchscreen;
+    }
+
+    /// Whether its control is left out of the interface: where it is not
+    /// shown. What the control tree asks of what is beside a control.
+    pub fn hidesControl(self: *const TouchButton, app: *App) bool {
+        return !self.shown(app.input.touchscreen);
     }
 };
 
@@ -186,12 +191,12 @@ fn holdActions(app: *App) !void {
     }
     for (now.items) |action| {
         if (holds(app.touch_actions.items, action)) continue;
-        const name = std.mem.sliceTo(&action, 0);
+        const name = fixed_text.get(&action);
         app.input.pressAction(name, 1) catch log.warn("a touch button holds the action \"{s}\", which the project has not", .{name});
     }
     for (app.touch_actions.items) |action| {
         if (holds(now.items, action)) continue;
-        app.input.releaseAction(std.mem.sliceTo(&action, 0)) catch {};
+        app.input.releaseAction(fixed_text.get(&action)) catch {};
     }
     app.touch_actions.deinit(app.gpa);
     app.touch_actions = now;
@@ -210,24 +215,24 @@ test "a finger touching inside presses a button until it is lifted; with passby,
     var button: TouchButton = .{};
 
     // A finger already down that slides on does not press a plain button.
-    input.apply(touchEvent(1, .down, 100, 100));
+    input.apply(touchOf(1, .down, 100, 100));
     input.endFrame();
     input.beginFrame();
-    input.apply(touchEvent(1, .move, 20, 20));
+    input.apply(touchOf(1, .move, 20, 20));
     press(&input, &button, box);
     try testing.expect(!button.down);
 
     // One that touches inside does, and holds it off the button too.
-    input.apply(touchEvent(2, .down, 30, 30));
+    input.apply(touchOf(2, .down, 30, 30));
     press(&input, &button, box);
     try testing.expect(button.down);
     try testing.expectEqual(@as(u32, 2), button.finger);
     input.endFrame();
     input.beginFrame();
-    input.apply(touchEvent(2, .move, 200, 200));
+    input.apply(touchOf(2, .move, 200, 200));
     press(&input, &button, box);
     try testing.expect(button.down);
-    input.apply(touchEvent(2, .up, 200, 200));
+    input.apply(touchOf(2, .up, 200, 200));
     press(&input, &button, box);
     try testing.expect(!button.down);
 
@@ -236,18 +241,16 @@ test "a finger touching inside presses a button until it is lifted; with passby,
     press(&input, &button, box);
     try testing.expect(button.down);
     try testing.expectEqual(@as(u32, 1), button.finger);
-    input.apply(touchEvent(1, .move, 300, 20));
+    input.apply(touchOf(1, .move, 300, 20));
     press(&input, &button, box);
     try testing.expect(!button.down);
 
     // Not laid out, or hidden: let go.
-    input.apply(touchEvent(1, .move, 20, 20));
+    input.apply(touchOf(1, .move, 20, 20));
     press(&input, &button, box);
     try testing.expect(button.down);
     press(&input, &button, null);
     try testing.expect(!button.down);
 }
 
-fn touchEvent(finger: u32, phase: @import("fluxion_platform").event.TouchPhase, x: f64, y: f64) @import("fluxion_platform").Event {
-    return .{ .touch = .{ .window = .none, .finger = finger, .phase = phase, .x = x, .y = y } };
-}
+const touchOf = @import("../test_helpers.zig").touchOf;

@@ -307,21 +307,21 @@ pub const Particles = struct {
     }
 
     /// Those of the dead, and of what lost its `Particles2D`, let go.
-    pub fn forgetDead(self: *Particles, gpa: Allocator, world: *ecs.World) void {
+    pub fn forgetDead(self: *Particles, app: *App) void {
         var at: usize = 0;
         while (at < self.by.count()) {
             const entity = self.by.keys()[at];
-            if (world.isAlive(entity) and world.has(entity, Particles2D)) {
+            if (app.world.isAlive(entity) and app.world.has(entity, Particles2D)) {
                 at += 1;
                 continue;
             }
-            self.by.values()[at].deinit(gpa);
+            self.by.values()[at].deinit(app.gpa);
             self.by.swapRemoveAt(at);
         }
     }
 
-    pub fn clearAll(self: *Particles, gpa: Allocator) void {
-        for (self.by.values()) |*e| e.deinit(gpa);
+    pub fn clear(self: *Particles, app: *App) void {
+        for (self.by.values()) |*e| e.deinit(app.gpa);
         self.by.clearRetainingCapacity();
     }
 

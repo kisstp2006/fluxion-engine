@@ -32,13 +32,19 @@ const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
 const id = @import("fluxion_id");
+const json = @import("fluxion_json");
 const rhi = @import("fluxion_rhi");
 const shader = @import("fluxion_shader");
 
 const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
+const Color = @import("../math/color.zig").Color;
 const attr = @import("../reflect/attr.zig");
 const file_table = @import("../assets/file_table.zig");
+const scene = @import("../scene/scene.zig");
+const Saving = @import("../scene/scene_write.zig").Saving;
+const Loading = @import("../scene/scene_read.zig").Loading;
+
 pub const material = @import("material.zig");
 /// What an editor asks about a `.shader` file being written.
 pub const edit = @import("shader_edit.zig");
@@ -56,6 +62,9 @@ pub const ShaderHandle = file_table.Handle("ShaderHandle");
 /// `Sprite`, a `ColorRect` or a `TextureRect`. Its numbers are the app's,
 /// under the entity: see `App.setShaderParam`.
 pub const Material = extern struct {
+    /// Its numbers, kept by the app, written with it.
+    pub const scene_beside = [_]scene.Beside{scene_params};
+
     shader: ShaderHandle = .none,
 
     pub const reflect_name = "Material";
@@ -94,6 +103,71 @@ pub const Shader = struct {
         return block.fields;
     }
 };
+
+/// A material's numbers in a scene: under `params`, beside its fields. See
+/// `scene.Beside`.
+pub const scene_params: scene.Beside = .{ .key = "params", .write = writeParams, .read = readParams, .forget = forgetParams };
+
+/// Numbers left out of a scene are the shader's own.
+fn forgetParams(app: *App, entity: Entity) void {
+    app.shader_params.clearOf(app.gpa, entity);
+}
+
+/// A material's numbers, as an object by field: one number, or a list of
+/// them for a vector or a matrix. What it gives nothing is left out.
+fn writeParams(s: *Saving, w: *json.Writer) json.Writer.Error!void {
+    const given = s.app.shader_params.of(s.entity);
+    if (given.len == 0) return;
+    try w.key("params");
+    try w.beginObject();
+    for (given) |*param| {
+        try w.key(param.name);
+        const numbers = param.slice();
+        if (numbers.len == 1) {
+            try w.writeFloat(numbers[0]);
+            continue;
+        }
+        try w.beginArray();
+        for (numbers) |number| try w.writeFloat(number);
+        try w.endArray();
+    }
+    try w.endObject();
+}
+
+/// A material's numbers, by field: a number, a list of up to sixteen, or a
+/// colour written `"#rrggbb"`.
+fn readParams(l: *Loading) anyerror!void {
+    try l.open(.object_begin, "a material's numbers, which is an object of its shader's fields");
+    while (try l.key()) |name| {
+        var numbers: [16]f32 = undefined;
+        var len: usize = 0;
+        switch (try l.next()) {
+            .number => |n| {
+                numbers[0] = n.asFloat(f32);
+                len = 1;
+            },
+            .string => |text| {
+                const colour = Color.parse(text) orelse
+                    return l.fail(error.WrongType, "{s} is not a colour, which is written #rrggbb or #rrggbbaa", .{text});
+                numbers[0..4].* = .{ colour.r, colour.g, colour.b, colour.a };
+                len = 4;
+            },
+            .array_begin => while (true) {
+                switch (try l.next()) {
+                    .array_end => break,
+                    .number => |n| {
+                        if (len == numbers.len) return l.fail(error.OutOfRange, "{s} is more than sixteen numbers", .{name});
+                        numbers[len] = n.asFloat(f32);
+                        len += 1;
+                    },
+                    else => |other| return l.wrong("a number", other),
+                }
+            },
+            else => |other| return l.wrong("a number, a list of them or a colour", other),
+        }
+        if (!l.entity.isNone()) try l.app.setShaderParam(l.entity, name, numbers[0..len]);
+    }
+}
 
 const Table = id.handle.Table(Shader);
 
@@ -299,7 +373,7 @@ pub const Params = struct {
     map: std.AutoHashMapUnmanaged(Entity, std.ArrayListUnmanaged(Param)) = .empty,
 
     pub fn deinit(self: *Params, gpa: Allocator) void {
-        self.clear(gpa);
+        self.freeAll(gpa);
         self.map.deinit(gpa);
     }
 
@@ -350,17 +424,21 @@ pub const Params = struct {
     }
 
     /// Let go of what the dead gave. Once a frame.
-    pub fn forgetDead(self: *Params, gpa: Allocator, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Params, app: *App) void {
         var dead: std.ArrayList(Entity) = .empty;
-        defer dead.deinit(gpa);
+        defer dead.deinit(app.gpa);
         var it = self.map.keyIterator();
         while (it.next()) |entity| {
-            if (!world.isAlive(entity.*)) dead.append(gpa, entity.*) catch break;
+            if (!app.world.isAlive(entity.*)) dead.append(app.gpa, entity.*) catch break;
         }
-        for (dead.items) |entity| self.clearOf(gpa, entity);
+        for (dead.items) |entity| self.clearOf(app.gpa, entity);
     }
 
-    pub fn clear(self: *Params, gpa: Allocator) void {
+    pub fn clear(self: *Params, app: *App) void {
+        self.freeAll(app.gpa);
+    }
+
+    fn freeAll(self: *Params, gpa: Allocator) void {
         var it = self.map.valueIterator();
         while (it.next()) |list| freeList(gpa, list);
         self.map.clearRetainingCapacity();

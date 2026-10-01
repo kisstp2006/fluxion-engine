@@ -117,22 +117,22 @@ pub const Texts = struct {
     }
 
     /// Let go of what the dead said. Once a frame.
-    pub fn forgetDead(self: *Texts, gpa: Allocator, world: *const ecs.World) void {
+    pub fn forgetDead(self: *Texts, app: *App) void {
         var dead: std.ArrayList(Key) = .empty;
-        defer dead.deinit(gpa);
+        defer dead.deinit(app.gpa);
         var it = self.map.keyIterator();
         while (it.next()) |key| {
-            if (world.isAlive(key.entity)) continue;
-            dead.append(gpa, key.*) catch break;
+            if (app.world.isAlive(key.entity)) continue;
+            dead.append(app.gpa, key.*) catch break;
         }
         for (dead.items) |key| {
-            if (self.map.fetchRemove(key)) |gone| gpa.free(gone.value);
+            if (self.map.fetchRemove(key)) |gone| app.gpa.free(gone.value);
         }
     }
 
-    pub fn clear(self: *Texts, gpa: Allocator) void {
+    pub fn clear(self: *Texts, app: *App) void {
         var it = self.map.valueIterator();
-        while (it.next()) |text| gpa.free(text.*);
+        while (it.next()) |text| app.gpa.free(text.*);
         self.map.clearRetainingCapacity();
     }
 };

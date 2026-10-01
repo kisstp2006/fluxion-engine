@@ -300,8 +300,6 @@ pub const Renderer = struct {
     drawings: ?*const drawing_mod.Drawings = null,
     /// Each emitter's particles. None are drawn without.
     particles: ?*const particles_mod.Particles = null,
-    /// The render view being drawn, whose own picture is not drawn into it.
-    drawing: ecs.Entity = .none,
     /// The font whose atlas the last label found full.
     full: ?*Assets.Font = null,
     /// The fonts whose atlases this frame's words emptied: one that fills
@@ -790,7 +788,7 @@ pub const Renderer = struct {
                 const looks = has.looks(gpa, world, inherited, entity, row);
                 const tint = looks.tint(sprite.tint);
                 if (!looks.visible or tint.a <= 0 or looks.render_layers & view.cull_mask == 0) continue;
-                const picture = if (has.view_texture) (self.pictureOf(world, entity, sprite.texture) orelse continue) else sprite.texture;
+                const picture = if (has.view_texture) (self.pictureOf(world, entity, sprite.texture, view) orelse continue) else sprite.texture;
 
                 // Interpolated, then carried through whatever it hangs from.
                 // What cannot be placed - its parent died this frame, or its
@@ -1021,12 +1019,12 @@ pub const Renderer = struct {
     }
 
     /// The texture a sprite shows: a render view's picture, for one with a
-    /// `ViewTexture`, or its own. Null for one showing the view being drawn,
-    /// which cannot be read while it is drawn into.
-    fn pictureOf(self: *const Renderer, world: *ecs.World, entity: ecs.Entity, own: Assets.TextureHandle) ?Assets.TextureHandle {
+    /// `ViewTexture`, or its own. Null for one showing the picture `view`
+    /// draws, which cannot be read while it is drawn into.
+    fn pictureOf(self: *const Renderer, world: *ecs.World, entity: ecs.Entity, own: Assets.TextureHandle, view: View) ?Assets.TextureHandle {
         const views = self.views orelse return own;
         if (world.get(entity, components.ViewTexture)) |held| {
-            if (!self.drawing.isNone() and held.view.eql(self.drawing)) return null;
+            if (!view.render_view.isNone() and held.view.eql(view.render_view)) return null;
         }
         return views.shown(world, entity, own);
     }

@@ -536,6 +536,7 @@ test {
     _ = @import("project/Project.zig");
     _ = @import("project/settings.zig");
     _ = @import("project/settings_file.zig");
+    _ = @import("reflect/fixed_text.zig");
     _ = @import("reflect/property.zig");
     _ = @import("render/GlyphAtlas.zig");
     _ = @import("render/debug_views.zig");

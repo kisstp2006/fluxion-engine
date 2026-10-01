@@ -17,17 +17,11 @@ const AssetKind = @import("../assets/asset_kind.zig").AssetKind;
 const Project = @import("../project/Project.zig");
 const attr = @import("../reflect/attr.zig");
 const signals = @import("../core/signals.zig");
-const Control = @import("../ui/control.zig").Control;
-const Material = @import("../render/shaders.zig").Material;
-const tilemap = @import("../tiles/tilemap.zig");
 const component_texts = @import("component_texts.zig");
 const registry = @import("registry.zig");
 const scene = @import("scene.zig");
-const isVariationBuffer = @import("scene_read.zig").isVariationBuffer;
 
 const Entity = ecs.Entity;
-const TileMap = tilemap.TileMap;
-const TileChunk = tilemap.TileChunk;
 const copyValue = registry.copyValue;
 const version = scene.version;
 const SaveOptions = scene.SaveOptions;
@@ -186,9 +180,9 @@ pub const Saving = struct {
         const gpa = s.app.gpa;
         for (s.app.world.archetypeSlice()) |*archetype| {
             for (archetype.entities.items) |e| {
-                // A chunk is not a thing in the scene: its map writes its
-                // tiles, and reading them makes the chunks again.
-                if (s.app.world.has(e, TileChunk)) continue;
+                // Not a thing in the scene: a map's chunk, which its map
+                // writes, and reading that makes again.
+                if (s.app.scene_components.keepsOut(&s.app.world, e)) continue;
                 if (s.root) |root| if (!e.eql(root) and !s.app.hangsFrom(e, root)) continue;
                 try s.order.append(gpa, e);
             }
@@ -516,41 +510,6 @@ fn writeRaw(gpa: Allocator, w: *json.Writer, text: []const u8) json.Writer.Error
     };
 }
 
-/// How many bytes a chunk's cells are, and the text they become.
-const chunk_bytes = tilemap.tiles_per_chunk * @sizeOf(tilemap.Cell);
-
-const chunk_text_len = std.base64.standard.Encoder.calcSize(chunk_bytes);
-
-/// A map's tiles: one line of text a chunk, under the chunk's place.
-///
-/// A chunk at a time rather than one long line so that a change to a corner
-/// of a level is a change to one line of the file, and base64 rather than
-/// numbers because a chunk is a kilobyte of them and nobody reads a
-/// thousand numbers.
-fn writeCells(s: *Saving, w: *json.Writer) json.Writer.Error!void {
-    const app = s.app;
-    var any = false;
-    // In the order the chunks were made, which for a level painted left to
-    // right is the order it was painted: a scene saved again keeps its
-    // lines where they were.
-    var it = app.tile_chunks.by_key.iterator();
-    while (it.next()) |entry| {
-        if (!entry.key_ptr.map.eql(s.entity)) continue;
-        const chunk = app.world.getConst(entry.value_ptr.*, TileChunk) orelse continue;
-        if (chunk.isEmpty()) continue;
-        if (!any) {
-            try w.key("cells");
-            try w.beginObject();
-            any = true;
-        }
-        var name: [32]u8 = undefined;
-        var text: [chunk_text_len]u8 = undefined;
-        try w.key(std.fmt.bufPrint(&name, "{d},{d}", .{ chunk.x, chunk.y }) catch unreachable);
-        try w.writeString(std.base64.standard.Encoder.encode(&text, std.mem.asBytes(&chunk.cells)));
-    }
-    if (any) try w.endObject();
-}
-
 /// A component: an object of the fields that do not hold their defaults.
 pub fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
     if (@typeInfo(T) != .@"struct") return writeValue(s, w, T, value);
@@ -560,19 +519,17 @@ pub fn writeComponent(s: *Saving, w: *json.Writer, comptime T: type, value: *con
         const said = s.app.textOf(s.entity, T, text.name);
         if (said.len > 0 or s.every_field) try w.field(text.name, said);
     }
-    if (T == Control and (value.variation_len > 0 or s.every_field)) try w.field("type_variation", value.variationSlice());
     inline for (@typeInfo(T).@"struct".fields) |field| {
         const held = &@field(value.*, field.name);
-        const skip = (comptime T == Control and isVariationBuffer(field.name)) or
-            (comptime isUnsaved(T, field.name)) or
+        const skip = (comptime isUnsaved(T, field.name)) or
             (if (field.defaultValue()) |default| !s.every_field and std.meta.eql(held.*, default) else false);
         if (!skip) {
             try w.key(field.name);
             try writeValue(s, w, field.type, held);
         }
     }
-    if (T == TileMap) try writeCells(s, w);
-    if (T == Material) try writeParams(s, w);
+    // What it keeps beside it.
+    inline for (comptime scene.besideOf(T)) |beside| try beside.write(s, w);
     try w.endObject();
 }
 
@@ -583,27 +540,6 @@ fn isUnsaved(comptime T: type, comptime name: []const u8) bool {
         if (@TypeOf(entry) == attr.Unsaved) return true;
     }
     return false;
-}
-
-/// A material's numbers, as an object by field: one number, or a list of
-/// them for a vector or a matrix. What it gives nothing is left out.
-fn writeParams(s: *Saving, w: *json.Writer) json.Writer.Error!void {
-    const given = s.app.shader_params.of(s.entity);
-    if (given.len == 0) return;
-    try w.key("params");
-    try w.beginObject();
-    for (given) |*param| {
-        try w.key(param.name);
-        const numbers = param.slice();
-        if (numbers.len == 1) {
-            try w.writeFloat(numbers[0]);
-            continue;
-        }
-        try w.beginArray();
-        for (numbers) |number| try w.writeFloat(number);
-        try w.endArray();
-    }
-    try w.endObject();
 }
 
 /// A value inside a component, whole: a nested struct with all its fields,
