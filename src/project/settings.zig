@@ -458,11 +458,15 @@ pub const Touch = struct {
     /// The left mouse button is a finger as well: see
     /// `Input.touch_from_mouse`.
     touch_from_mouse: bool = false,
+    /// A wheel turned with Ctrl is a pinch as well: see
+    /// `Input.pinch_from_ctrl_wheel`.
+    pinch_from_ctrl_wheel: bool = true,
 
     pub const reflect_attributes = .{attr.Label{ .text = "Touch" }};
     pub const reflect_fields = .{
         .mouse_from_touch = .{attr.Doc{ .text = "The first finger on a touch screen is the mouse as well: it moves the pointer and holds the left button, so the interface and whatever is made for a mouse work under a finger." }},
         .touch_from_mouse = .{attr.Doc{ .text = "The left mouse button is a finger as well, so a game made for a touch screen - its touch buttons, its fingers - can be tried with a mouse." }},
+        .pinch_from_ctrl_wheel = .{attr.Doc{ .text = "A wheel turned with Ctrl is a pinch as well, at the pointer: what a laptop touchpad's pinch is on Windows and in a browser. The wheel's own event comes too." }},
     };
 };
 

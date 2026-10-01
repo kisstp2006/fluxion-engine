@@ -936,6 +936,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     if (options.project_input) if (self.project.settings) |held| {
         self.input.mouse_from_touch = held.touch.mouse_from_touch;
         self.input.touch_from_mouse = held.touch.touch_from_mouse;
+        self.input.pinch_from_ctrl_wheel = held.touch.pinch_from_ctrl_wheel;
     };
     errdefer self.input.deinit(gpa);
     // The sound device, and the project's buses on it.
@@ -5347,6 +5348,8 @@ pub const reflect_methods = .{
     .mouseFromTouch = .{},
     .setTouchFromMouse = .{attr.Params{ .names = &.{"on"} }},
     .touchFromMouse = .{},
+    .setPinchFromCtrlWheel = .{attr.Params{ .names = &.{"on"} }},
+    .pinchFromCtrlWheel = .{},
     .connectedPads = .{},
     .padConnected = .{ attr.Params{ .names = &.{"pad"} }, attr.defaults(.{@as(?u8, null)}) },
     .padButtonDown = .{ attr.Params{ .names = &.{ "button", "pad" } }, attr.defaults(.{@as(?u8, null)}) },
@@ -6112,6 +6115,17 @@ pub fn setTouchFromMouse(self: *App, on: bool) void {
 
 pub fn touchFromMouse(self: *const App) bool {
     return self.input.touch_from_mouse;
+}
+
+/// Whether a wheel turned with Ctrl is a `PinchEvent` as well, at the
+/// pointer: the project's `touch.pinch_from_ctrl_wheel`. A laptop
+/// touchpad's pinch is that on Windows and in a browser.
+pub fn setPinchFromCtrlWheel(self: *App, on: bool) void {
+    self.input.pinch_from_ctrl_wheel = on;
+}
+
+pub fn pinchFromCtrlWheel(self: *const App) bool {
+    return self.input.pinch_from_ctrl_wheel;
 }
 
 /// One controller slot, or every connected controller for null.

@@ -582,6 +582,11 @@ for (app.input.touches()) |finger| {
     touched), a `PanEvent` (`relative`, how far their middle moved) and a
     `RotateEvent` (`angle` since the last, `total`), each about their
     `center`; and the same, asked rather than heard, as `app.twoFingers()`.
+  - a `PinchEvent` too for the wheel turned with Ctrl, at the pointer - a
+    notch up a tenth larger, `scale` going on until the wheel rests 0.3 s -
+    since that is what a laptop touchpad's pinch is on Windows and in a
+    browser (the wheel's own event comes as well). `touch.pinch_from_ctrl_wheel`
+    turns it off, `app.setPinchFromCtrlWheel` as it runs.
 
   A dp is a 160th of an inch, so a gesture is the same size under a finger
   on any screen. Only a finger alone - no other down while it was, and no

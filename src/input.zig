@@ -200,6 +200,13 @@ pair: ?Pair = null,
 last_tap: ?LastTap = null,
 /// What two fingers did this frame.
 two_fingers: TwoFingers = .{},
+/// Whether a wheel turned with Ctrl is a pinch as well: what a precision
+/// touchpad's pinch is on Windows and in a browser. A project's
+/// `touch.pinch_from_ctrl_wheel`.
+pinch_from_ctrl_wheel: bool = true,
+/// The pinch the wheel is making: how far it has gone, and when it last
+/// turned, on the fingers' clock.
+wheel_pinch: struct { scale: f32 = 1, time: f64 = -std.math.inf(f64) } = .{},
 
 /// Whether the window has the keyboard. For a game that pauses when nobody
 /// is looking at it.
@@ -608,6 +615,10 @@ pub const double_tap_slop_dp = 100;
 /// lifted, in density-independent pixels and those a second.
 pub const swipe_distance_dp = 30;
 pub const swipe_speed_dp = 300;
+/// How much larger a notch of the wheel turned with Ctrl makes a pinch,
+/// and how long a pause ends one.
+pub const wheel_pinch_per_notch = 1.1;
+pub const wheel_pinch_pause = 0.3;
 
 /// One finger down, as the gestures follow it.
 const Track = struct {
@@ -1089,6 +1100,17 @@ fn trackPair(self: *Input) void {
     if (rotation != 0) self.pushPointer(.{ .rotate = .{ .center = center, .angle = rotation, .total = pair.turned } });
 }
 
+/// A wheel turned with Ctrl, as a pinch at the pointer: a notch up is a
+/// tenth larger, a notch down a tenth smaller. One pinch goes on until the
+/// wheel rests `wheel_pinch_pause`.
+fn wheelPinch(self: *Input, notches: f32) void {
+    const factor = std.math.pow(f32, wheel_pinch_per_notch, notches);
+    if (self.finger_time - self.wheel_pinch.time > wheel_pinch_pause) self.wheel_pinch.scale = 1;
+    self.wheel_pinch.scale *= factor;
+    self.wheel_pinch.time = self.finger_time;
+    self.pushPointer(.{ .pinch = .{ .center = .init(self.pointer.x, self.pointer.y), .factor = factor, .scale = self.wheel_pinch.scale } });
+}
+
 /// An angle between minus and plus half a turn.
 fn wrapAngle(angle: f32) f32 {
     var wrapped = angle;
@@ -1481,6 +1503,7 @@ pub fn apply(self: *Input, ev: platform.Event) void {
                 .buttons = self.buttonMask(),
                 .mods = w.mods,
             } });
+            if (w.mods.control and w.y != 0 and self.pinch_from_ctrl_wheel) self.wheelPinch(@floatCast(w.y));
         },
         .focus => |s| {
             self.focused = s.value;
@@ -2096,6 +2119,39 @@ test "two fingers pinch, pan and turn, and make no tap" {
     frameOf(&input, &.{ touchEvent(1, .up, 160, 20), touchEvent(2, .up, 160, 220) });
     try testing.expectEqual(@as(usize, 0), gesturesOf(&input).len);
     try testing.expect(!input.two_fingers.active);
+}
+
+test "a wheel turned with Ctrl is a pinch at the pointer, as a touchpad's pinch is sent" {
+    var input: Input = .{};
+    input.apply(cursorEvent(40, 50, 0, 0));
+    const ctrl: platform.Mods = .{ .control = true };
+    input.apply(.{ .scroll = .{ .window = .none, .x = 0, .y = 2, .mods = ctrl } });
+    var heard = input.pointerEvents();
+    // The wheel's own event, and the pinch after it.
+    try testing.expect(heard[heard.len - 2] == .wheel);
+    var pinch = heard[heard.len - 1].pinch;
+    try testing.expectApproxEqAbs(@as(f32, 1.21), pinch.factor, 0.0001);
+    try testing.expectEqual(@as(f32, 40), pinch.center.x);
+    input.apply(.{ .scroll = .{ .window = .none, .x = 0, .y = -1, .mods = ctrl } });
+    heard = input.pointerEvents();
+    pinch = heard[heard.len - 1].pinch;
+    try testing.expectApproxEqAbs(@as(f32, 1.0 / 1.1), pinch.factor, 0.0001);
+    try testing.expectApproxEqAbs(@as(f32, 1.1), pinch.scale, 0.0001);
+
+    // A pause starts another.
+    input.trackFingers(0.5);
+    input.apply(.{ .scroll = .{ .window = .none, .x = 0, .y = 1, .mods = ctrl } });
+    heard = input.pointerEvents();
+    try testing.expectApproxEqAbs(@as(f32, 1.1), heard[heard.len - 1].pinch.scale, 0.0001);
+
+    // Without Ctrl, or with the project saying not, the wheel alone.
+    input.apply(.{ .scroll = .{ .window = .none, .x = 0, .y = 1, .mods = .{} } });
+    heard = input.pointerEvents();
+    try testing.expect(heard[heard.len - 1] == .wheel);
+    input.pinch_from_ctrl_wheel = false;
+    input.apply(.{ .scroll = .{ .window = .none, .x = 0, .y = 1, .mods = ctrl } });
+    heard = input.pointerEvents();
+    try testing.expect(heard[heard.len - 1] == .wheel);
 }
 
 test "the window losing the keyboard lifts every finger" {
