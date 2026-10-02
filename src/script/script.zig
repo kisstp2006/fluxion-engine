@@ -236,6 +236,13 @@ pub const Options = struct {
     /// listed all the same, and connections to them kept. A signal's call
     /// into a method is `error.NotRunning`.
     run: bool = true,
+    /// Whether the scripts are the world's: put on the entities whose
+    /// `Script` names them, each given its `ready`, `update` and the rest.
+    /// Off is a host's own scripts that are no entity's - an editor's
+    /// plugins - which run, and whose tasks, web requests and signals go on,
+    /// with the world left alone. Their tasks' owners are the host's to
+    /// count, and none is held for a pause.
+    entities: bool = true,
 };
 
 /// A `.flux` file loaded into the app's VM, the way a `FontHandle` is a
@@ -920,17 +927,20 @@ pub const Scripts = struct {
     fn pass(self: *Scripts, moment: Moment) Allocator.Error!void {
         // An editor's scripts are never made, stepped or looked for.
         if (!self.options.run) return;
+        const world = self.options.entities;
         switch (moment) {
             .input => {
-                try self.sync();
-                self.readyTheNew();
-                self.deliverInput();
+                if (world) {
+                    try self.sync();
+                    self.readyTheNew();
+                    self.deliverInput();
+                }
                 self.answerDialogs();
                 self.hearDrops();
                 self.answerWeb();
                 self.tellFocus();
             },
-            .fixed => |dt| {
+            .fixed => |dt| if (world) {
                 try self.sync();
                 self.readyTheNew();
                 self.callEach(.fixed, dt);
@@ -944,8 +954,10 @@ pub const Scripts = struct {
                         try self.watchFiles();
                     }
                 }
-                try self.sync();
-                self.readyTheNew();
+                if (world) {
+                    try self.sync();
+                    self.readyTheNew();
+                }
                 // What waited for this frame goes on first.
                 if (self.frame_due.tag == .signal) {
                     const due = self.frame_due;
@@ -958,11 +970,11 @@ pub const Scripts = struct {
                     };
                 }
                 self.emitClocks();
-                self.callEach(.update, dt);
+                if (world) self.callEach(.update, dt);
                 // The scripts' own clock, so `await wait(1.0)` wakes - but
                 // not the waits of the entities that do not run now.
                 self.vm.setBudget(self.options.budget);
-                self.vm.updateHolding(dt, .{ .context = self.app, .held = heldOwner }) catch |err| switch (err) {
+                self.vm.updateHolding(dt, .{ .context = self.app, .held = if (world) heldOwner else heldNever }) catch |err| switch (err) {
                     error.OutOfMemory => self.outOfMemory(null),
                     error.Panic => self.sayPanic(null, "the tasks of"),
                 };
@@ -1175,6 +1187,10 @@ pub const Scripts = struct {
     /// Whether the tasks of an owner - an entity, as `call` gives them one -
     /// wait. A task of no entity's waits while the game is paused, as a
     /// root with no `Processing` would.
+    fn heldNever(_: ?*anyopaque, _: u64) bool {
+        return false;
+    }
+
     fn heldOwner(context: ?*anyopaque, owner: u64) bool {
         const app: *App = @ptrCast(@alignCast(context.?));
         if (owner == 0) return app.paused;

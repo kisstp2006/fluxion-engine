@@ -135,6 +135,33 @@ const Seen = struct {
     }
 };
 
+test "scripts that are no entity's run, their tasks with them, and leave the world's scripts alone" {
+    const app = try scripted(.{ .run = false });
+    defer app.destroy();
+    // A host's own, beside the world's: an editor's plugins.
+    const own = try script.Scripts.create(app, .{ .entities = false });
+    defer own.calls.destroy(own);
+    const door = try own.add("door.flux", door_script);
+    const tool = try own.add("tool.flux",
+        \\var ticks = 0;
+        \\fn go() {
+        \\    await wait(1.0);
+        \\    ticks += 1;
+        \\}
+    );
+    const entity = try app.world.spawnWith(.{ Counter{}, Script.of(door) });
+    _ = try own.vm.callName(own.moduleOf(tool).?, "go", &.{});
+    for (0..5) |_| {
+        try own.calls.pass(own, .input);
+        try own.calls.pass(own, .{ .fixed = 0.25 });
+        try own.calls.pass(own, .{ .update = 0.25 });
+        try own.calls.pass(own, .end_of_frame);
+    }
+    try testing.expectEqual(@as(i64, 1), own.vm.get(own.moduleOf(tool).?, "ticks").?.asInt());
+    try testing.expect(own.instanceOf(entity) == null);
+    try testing.expectEqual(@as(i64, 0), own.vm.get(own.moduleOf(door).?, "readied").?.asInt());
+}
+
 test "a script is readied once, then stepped and updated before the game's own systems" {
     const app = try scripted(.{});
     defer app.destroy();
