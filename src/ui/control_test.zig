@@ -22,6 +22,7 @@ const BoxContainer = control.BoxContainer;
 const Button = control.Button;
 const CanvasLayer = control.CanvasLayer;
 const CheckBox = control.CheckBox;
+const ColorRect = control.ColorRect;
 const Context = control_tree.Context;
 const Control = control.Control;
 const Entity = ecs.Entity;
@@ -30,6 +31,7 @@ const LineEdit = control.LineEdit;
 const MarginContainer = control.MarginContainer;
 const NinePatchRect = control.NinePatchRect;
 const PanelContainer = control.PanelContainer;
+const Popup = control.Popup;
 const ProgressBar = control.ProgressBar;
 const ScrollContainer = control.ScrollContainer;
 const Slider = control.Slider;
@@ -91,6 +93,74 @@ test "control components build one screen-space Fluxion UI tree" {
     };
     try testing.expect(found_outline);
     try testing.expect(found_nine_slice);
+}
+
+test "a control that clips cuts off what is anchored in it, however deep, but not a popup" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 320, .height = 240, .frames = 2 });
+    defer app.destroy();
+    try app.useControlNodes();
+    const root = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{} });
+    // A window that clips, a box in its flow that does not, and a square
+    // anchored in that box and reaching past the window's bottom edge.
+    const window = try app.world.spawnWith(.{
+        Control{ .width = .{ .mode = .fixed, .value = 100 }, .height = .{ .mode = .fixed, .value = 100 }, .clip = true },
+        Parent.of(root),
+    });
+    const inside = try app.world.spawnWith(.{
+        Control{ .width = .{ .mode = .fixed, .value = 40 }, .height = .{ .mode = .fixed, .value = 40 } },
+        Parent.of(window),
+    });
+    _ = try app.world.spawnWith(.{
+        Control{
+            .position = .anchored,
+            .offset_left = 60,
+            .offset_top = 80,
+            .width = .{ .mode = .fixed, .value = 30 },
+            .height = .{ .mode = .fixed, .value = 30 },
+        },
+        Parent.of(inside),
+        ColorRect{ .color = .white },
+    });
+    // A popup pinned at the same place, 20 tall: over everything, cut off by
+    // nothing.
+    _ = try app.world.spawnWith(.{
+        Control{
+            .position = .anchored,
+            .offset_left = 60,
+            .offset_top = 80,
+            .width = .{ .mode = .fixed, .value = 30 },
+            .height = .{ .mode = .fixed, .value = 20 },
+        },
+        Parent.of(inside),
+        ColorRect{ .color = .white },
+        Popup{ .open = true, .modal = false, .centered = false },
+    });
+    try app.run();
+
+    // The square is drawn inside a scissor that is the window, the popup
+    // inside none.
+    var id: [48]u8 = undefined;
+    const window_box = app.ui.boxOf(idOf(&id, window)).?;
+    var scissors: [8]@TypeOf(window_box) = undefined;
+    var depth: usize = 0;
+    var square_cut: ?@TypeOf(window_box) = null;
+    var popup_drawn = false;
+    for (app.interface.commands) |command| switch (command.config) {
+        .scissor_start => {
+            scissors[depth] = command.bounding_box;
+            depth += 1;
+        },
+        .scissor_end => depth -= 1,
+        .rectangle => if (command.bounding_box.height == 30 and depth > 0) {
+            square_cut = scissors[depth - 1];
+        } else if (command.bounding_box.height == 20) {
+            popup_drawn = true;
+            try testing.expectEqual(@as(usize, 0), depth);
+        },
+        else => {},
+    };
+    try testing.expectEqual(window_box, square_cut.?);
+    try testing.expect(popup_drawn);
 }
 
 test "a world Viewport projects its Control tree through the camera" {

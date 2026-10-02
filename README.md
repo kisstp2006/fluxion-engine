@@ -1737,6 +1737,10 @@ app.grabFocus(play);                                                            
   `grow_horizontal` and `grow_vertical` say. `setAnchorsPreset` - on the
   control, or `app.setAnchorsPreset(e, .bottom_right)` - puts it in a
   corner, an edge's middle, the middle, along an edge or over the whole.
+- **A control that clips cuts off all it holds** at its edges (`clip`, and
+  a `ScrollContainer`): what is in its flow, and what is anchored in it or
+  in anything inside it - a window that shows part of a strip sliding
+  behind it. A `Popup` and a tooltip are not cut off.
 - **Their words are the app's**, kept beside them as long as they are: a
   label's, a button's, a field's and its placeholder, a rich text's, a
   control's tooltip. `app.setText(e, fx.Label, "text", "Paused")`,

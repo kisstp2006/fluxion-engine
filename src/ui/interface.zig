@@ -191,6 +191,7 @@ pub const WorldPlacement = struct {
     anchor_y: ui.AlignY = .bottom,
     offset: ui.geometry.Vec2 = .{ .x = 0, .y = 0 },
     z_index: i16 = 0,
+    /// Whether it is cut off at the edge of the screen's safe area.
     clip: bool = false,
 };
 
@@ -210,7 +211,7 @@ pub fn openAt(self: *const Interface, layout: *ui.Ui, screen: ui.geometry.Vec2, 
             .y = screen.y / scale + placement.offset.y,
         },
         .z_index = placement.z_index,
-        .clip = placement.clip,
+        .clip = if (placement.clip) .target else .none,
     };
     layout.open(placed);
 }

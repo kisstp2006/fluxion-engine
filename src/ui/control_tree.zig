@@ -342,10 +342,12 @@ pub const ControlTree = struct {
                 .capture = true,
                 .floating = .{ .attach = .root, .z_index = z - 1 },
             });
+            // Over everything, and cut off by nothing it is inside.
             if (held.centered) {
                 declared.floating = .{ .attach = .root, .anchor = .centered, .z_index = z };
             } else if (declared.floating) |*float| {
                 float.z_index = z;
+                float.clip = .none;
             } else declared.floating = .{ .z_index = z };
         }
         context.layout.open(declared);
@@ -407,6 +409,9 @@ pub const ControlTree = struct {
                     .target_y = control.anchor_top,
                 },
                 .offset = .{ .x = control.offset_left, .y = control.offset_top },
+                // Placed on its own, but still inside: a control that clips
+                // cuts off what it holds, anchored or in its flow.
+                .clip = .like_children,
             };
         }
         if (app.world.get(entity, ColorRect)) |rect| out.background_color = color(rect.color);
@@ -1045,6 +1050,7 @@ fn progressContent(context: Context, progress: *const ProgressBar, style: Resolv
         .floating = .{
             .anchor = .{ .element_x = .center, .element_y = .center, .parent_x = .center, .parent_y = .center },
             .z_index = 1,
+            .clip = .like_children,
         },
     });
     defer layout.close();

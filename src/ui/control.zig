@@ -82,6 +82,8 @@ pub const Control = extern struct {
     grow_horizontal: Grow = .end,
     grow_vertical: Grow = .end,
     visible: bool = true,
+    /// Whether what it holds is cut off at its edges: all of it, in its flow
+    /// or anchored.
     clip: bool = false,
     mouse_filter: MouseFilter = .pass,
     z_index: i16 = 0,
