@@ -241,7 +241,9 @@ pub const Options = struct {
     /// Off is a host's own scripts that are no entity's - an editor's
     /// plugins - which run, and whose tasks, web requests and signals go on,
     /// with the world left alone. Their tasks' owners are the host's to
-    /// count, and none is held for a pause.
+    /// count, and none is held for a pause. The host stops what it made of
+    /// a file before it is read again, and starts it after: so the file is
+    /// compiled afresh, not put in place in the old code.
     entities: bool = true,
 };
 
@@ -851,9 +853,9 @@ pub const Scripts = struct {
 
         // As in `compile`: a default the reload runs can load a script.
         const source = file.source;
-        if (!self.options.run) {
-            // Nothing runs and no instance holds the old code: compiled
-            // afresh.
+        if (!self.options.run or !self.options.entities) {
+            // Nothing runs and no instance holds the old code - or the host
+            // let go of what it made of it: compiled afresh.
             self.compile(handle);
         } else if (file.module) |module| {
             const report = self.vm.reload(module, kept) catch |err| switch (err) {

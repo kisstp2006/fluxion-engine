@@ -50,7 +50,8 @@ pub const version = 1;
 /// What a plugin's `plugin.fluxion` says. Paths in it are inside the
 /// plugin's folder.
 pub const Manifest = struct {
-    fluxion_plugin: u32 = version,
+    /// Always written, whatever else is left out.
+    comptime fluxion_plugin: u32 = version,
     name: []const u8 = "",
     description: []const u8 = "",
     author: []const u8 = "",
@@ -199,9 +200,9 @@ pub fn read(a: Allocator, text: []const u8) ReadError!Manifest {
     return parsed.value;
 }
 
-/// A manifest as its file's text.
+/// A manifest as its file's text: what it says besides the defaults.
 pub fn write(gpa: Allocator, manifest: Manifest) json.StringifyError![]u8 {
-    return json.stringify(gpa, manifest, .{ .indent = 2, .emit_null = false });
+    return json.stringify(gpa, manifest, .{ .indent = 2, .skip_nulls = true, .skip_defaults = true });
 }
 
 /// Why a plugin turned on does not start.
@@ -456,4 +457,26 @@ test "plugins start after those they require; one that needs a missing or older 
     try testing.expect(!ships(&found, &.{"gamejolt"}, "res://addons/gamejolt/example/demo.json"));
     try testing.expect(!ships(&found, &.{}, "res://addons/gamejolt/game_jolt.flux"));
     try testing.expect(ships(&found, &.{}, "res://scenes/main.json"));
+}
+
+test "a manifest written says its header and what is not a default, and reads back the same" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const manifest: Manifest = .{
+        .name = "Game Jolt API",
+        .version = "1.0.0",
+        .editor = "editor.flux",
+        .autoload = &.{.{ .name = "GameJolt", .path = "game_jolt.flux" }},
+        .settings = .{ .section = "game_jolt", .script = "settings.flux" },
+    };
+    const text = try write(a, manifest);
+    try testing.expect(std.mem.indexOf(u8, text, "\"fluxion_plugin\": 1") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"icon\"") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"requires\"") == null);
+    const back = try read(a, text);
+    try testing.expectEqualStrings("Game Jolt API", back.name);
+    try testing.expectEqualStrings("game_jolt.flux", back.autoload[0].path);
+    try testing.expectEqualStrings("game_jolt", back.settings.?.section);
+    try testing.expectEqualStrings("", back.icon);
 }
