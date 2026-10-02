@@ -2548,6 +2548,14 @@ addons/gamejolt/
 - **What a game ships of it** - `ships` - is all but its editor part, its
   `templates/` and what its `leave_out` names (`*` for any run of
   characters).
+- **A host's own scripts** - an editor's plugins - run in a `Scripts` of
+  their own, made with `.entities = false`: their tasks, web answers and
+  signals go on, and no entity is given them. Their methods are their own -
+  `draw`, `update` - so `App.hostScriptSetup` checks them without the
+  methods the engine calls on an entity. A file of theirs read again is
+  compiled afresh, the host having stopped what it made of it; and a call
+  that makes a script's value - `app.pluginSettings`, `app.readData` - makes
+  it in the VM that asked.
 
 ## 💾 Saves and settings
 
