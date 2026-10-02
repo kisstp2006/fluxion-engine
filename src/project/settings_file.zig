@@ -201,9 +201,10 @@ fn check(comptime T: type, settings: *const T, diagnostics: ?*json.Diagnostics) 
                 if (isEmpty(value)) return fail(diagnostics, error.MissingField, "\"" ++ f.name ++ "." ++ g.name ++ "\" has to say something, and says nothing", .{});
             }
             if (comptime attribute(f.type, g.name, attr.ProjectFile) != null) {
-                if (value.len > 0 and !Project.isValidProjectPath(value)) {
-                    return fail(diagnostics, error.WrongType, "\"" ++ f.name ++ "." ++ g.name ++ "\" is a res:// or uid:// path, or empty, and this is \"{s}\"", .{value});
-                }
+                const paths: []const []const u8 = if (@TypeOf(value) == []const u8) &.{value} else value;
+                for (paths) |path| if (path.len > 0 and !Project.isValidProjectPath(path)) {
+                    return fail(diagnostics, error.WrongType, "\"" ++ f.name ++ "." ++ g.name ++ "\" is a res:// or uid:// path, or empty, and this is \"{s}\"", .{path});
+                };
             }
         }
     }
@@ -329,10 +330,12 @@ const Sample = struct {
         name: []const u8 = "",
         scene: []const u8 = "",
         tags: []const []const u8 = &.{},
+        levels: []const []const u8 = &.{},
 
         pub const reflect_fields = .{
             .name = .{attr.Required{}},
-            .scene = .{attr.ProjectFile{ .kind = .scene }},
+            .scene = .{attr.ProjectFile{ .kinds = &.{.scene} }},
+            .levels = .{attr.ProjectFile{ .kinds = &.{.scene} }},
         };
     };
 };
@@ -378,6 +381,7 @@ test "a settings file that is wrong says what, and where" {
         .{ .text = "{ \"sample\": 2, \"words\": { \"name\": \"A\" } }", .err = error.UnsupportedVersion, .message = "this settings file is version 2, written for an older Fluxion; this one reads version 3" },
         .{ .text = "{ \"sample\": 3 }", .err = error.MissingField, .message = "\"words.name\" has to say something, and says nothing" },
         .{ .text = "{ \"sample\": 3, \"words\": { \"name\": \"A\", \"scene\": \"C:/a.json\" } }", .err = error.WrongType, .message = "\"words.scene\" is a res:// or uid:// path, or empty, and this is \"C:/a.json\"" },
+        .{ .text = "{ \"sample\": 3, \"words\": { \"name\": \"A\", \"levels\": [\"res://a.json\", \"b.json\"] } }", .err = error.WrongType, .message = "\"words.levels\" is a res:// or uid:// path, or empty, and this is \"b.json\"" },
     };
     for (cases) |case| {
         try testing.expectError(case.err, parse(Sample, sample, testing.allocator, case.text, "sample.json", &diagnostics));

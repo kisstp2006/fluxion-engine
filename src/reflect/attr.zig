@@ -18,6 +18,7 @@
 //! Any value can be an attribute; these are the ones worth one spelling
 //! between the engine, a game and an editor.
 
+const std = @import("std");
 const reflect = @import("fluxion_reflect");
 const AssetKind = @import("../assets/asset_kind.zig").AssetKind;
 
@@ -87,10 +88,17 @@ pub const Layers = struct {
 // `settings_file.zig`. An editor draws its settings windows by them.
 
 /// Text that names a file of the project's - `res://` or `uid://`, or empty -
-/// of this kind, or of any kind when it says none: checked when the file is
-/// read and written, and shown as a field that takes a file of the kind.
+/// of one of these kinds, or of any kind when it names none; or a list of
+/// such texts. Checked when the file is read and written, and shown as a
+/// field that lists the project's files of the kinds to pick from.
 pub const ProjectFile = struct {
-    kind: ?AssetKind = null,
+    kinds: []const AssetKind = &.{},
+
+    /// Whether a file of `kind` is one it takes.
+    pub fn takes(self: ProjectFile, kind: AssetKind) bool {
+        if (self.kinds.len == 0) return true;
+        return std.mem.indexOfScalar(AssetKind, self.kinds, kind) != null;
+    }
 };
 
 /// Text that names one of the project's audio buses - `audio.buses` - which

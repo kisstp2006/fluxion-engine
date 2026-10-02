@@ -123,7 +123,7 @@ pub const Application = struct {
         pub const reflect_fields = .{
             .show = .{attr.Doc{ .text = "Show it while the scenes the game opens with are read." }},
             .color = .{attr.Doc{ .text = "What the window is filled with." }},
-            .image = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "A picture in the middle of it." } },
+            .image = .{ attr.ProjectFile{ .kinds = &.{.texture} }, attr.Doc{ .text = "A picture in the middle of it." } },
         };
     };
 
@@ -131,11 +131,11 @@ pub const Application = struct {
         .name = .{ attr.Required{}, attr.Doc{ .text = "What the project is called: the game window's title, and what the project list shows." } },
         .description = .{ attr.Multiline{}, attr.Doc{ .text = "A line or two about the project, for the project list." } },
         .version = .{attr.Doc{ .text = "Which version of the game this is - 1.2.0, say - for its menus to show: app.gameVersion()." }},
-        .icon = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "The project's picture: the game window's icon, and the project list's. Any size and shape: it is fitted into a square at each size the system draws an icon. A Windows program exported with an icon of its own shows that one." } },
-        .main_scene = .{ attr.ProjectFile{ .kind = .scene }, attr.Doc{ .text = "The scene the game opens with, and what Play runs." } },
+        .icon = .{ attr.ProjectFile{ .kinds = &.{.texture} }, attr.Doc{ .text = "The project's picture: the game window's icon, and the project list's. Any size and shape: it is fitted into a square at each size the system draws an icon. A Windows program exported with an icon of its own shows that one." } },
+        .main_scene = .{ attr.ProjectFile{ .kinds = &.{.scene} }, attr.Doc{ .text = "The scene the game opens with, and what Play runs." } },
         .tags = .{attr.Doc{ .text = "Words to find the project by in the project list." }},
         .max_fps = .{ attr.Range{ .min = 0, .max = 1000, .step = 1 }, attr.Advanced{}, attr.Doc{ .text = "The most frames a second the game draws; nought for no limit." } },
-        .autoload = .{attr.Doc{ .text = "Scenes and scripts made before the main scene, each named after its file, and kept when the scene changes." }},
+        .autoload = .{ attr.ProjectFile{ .kinds = &.{ .scene, .script } }, attr.Doc{ .text = "Scenes and scripts made before the main scene, each named after its file, and kept when the scene changes." } },
         .boot_splash = .{attr.Doc{ .text = "What the window shows while the game opens." }},
         .user_folder = .{ attr.Advanced{}, attr.Doc{ .text = "The folder user:// is, in the system's folder for programs' data: empty for the project's name. Studio/Game keeps a studio's games together." } },
         .quit_on_close = .{ attr.Advanced{}, attr.Doc{ .text = "Whether the window's close button quits at once. Off, it only asks: app.closeRequested() says so, and the game quits with app.quit() when it agrees - after saving, say." } },
@@ -197,7 +197,7 @@ pub const Display = struct {
         .stretch_scale_mode = .{attr.Doc{ .text = "Fractional: scaled to fill the window. Integer: scaled only by a whole number, so every pixel of pixel art is the same size, with bars round what is left." }},
         .min_width = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Doc{ .text = "The narrowest the window may be dragged to; nought is no least." } },
         .min_height = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Doc{ .text = "The lowest the window may be dragged to; nought is no least." } },
-        .mouse_cursor = .{ attr.ProjectFile{ .kind = .texture }, attr.Doc{ .text = "A picture for the pointer, instead of the system's arrow: 256 pixels a side at most." } },
+        .mouse_cursor = .{ attr.ProjectFile{ .kinds = &.{.texture} }, attr.Doc{ .text = "A picture for the pointer, instead of the system's arrow: 256 pixels a side at most." } },
         .mouse_cursor_hotspot = .{ attr.Unit{ .text = "px" }, attr.Doc{ .text = "The pixel of the pointer's picture that points: the tip of an arrow, the middle of a crosshair." } },
         .keep_screen_on = .{ attr.Advanced{}, attr.Doc{ .text = "Keep the screen from blanking, and the machine from sleeping, while the game runs: a game played with a pad sees no mouse or keyboard for a long while." } },
     };
@@ -378,7 +378,7 @@ pub const Gui = struct {
 
     pub const reflect_attributes = .{attr.Label{ .text = "GUI" }};
     pub const reflect_fields = .{
-        .theme = .{ attr.ProjectFile{ .kind = .theme }, attr.Doc{ .text = "The .theme every control is drawn with, under the one it names itself." } },
+        .theme = .{ attr.ProjectFile{ .kinds = &.{.theme} }, attr.Doc{ .text = "The .theme every control is drawn with, under the one it names itself." } },
         .tooltip_delay = .{ attr.Unit{ .text = "s" }, attr.Range{ .min = 0, .max = 10 }, attr.Doc{ .text = "How long the pointer rests on a control before its tooltip shows." } },
         .scale = .{ attr.Range{ .min = 0.25, .max = 4 }, attr.Doc{ .text = "How big the interface is drawn, on top of the display's own scale: two for twice the size." } },
     };

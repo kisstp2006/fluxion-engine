@@ -2285,8 +2285,9 @@ const path = app.assetSource(sprite.texture) orelse "made in memory";          /
   (`AssetKind.Handle(.texture)`, `AssetKind.of(fx.TextureHandle)`).
   `app.assetSource`, `app.loadAsset` and `app.findAsset` take any handle
   type. A scene writes and reads every handle through them, a project
-  setting names a file of a kind with `attr.ProjectFile{ .kind = .scene }`,
-  and an editor draws a field for each kind the list has.
+  setting names a file of a kind with `attr.ProjectFile{ .kinds = &.{.scene} }`
+  - or a list of them, the autoloads' scenes and scripts - and an editor
+  draws a field for each kind the list has.
 
 ```zig
 try app.moveFile("res://art/hero.png", "res://art/people/ada.png"); // with its .uid, and what was read from it
