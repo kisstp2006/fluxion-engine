@@ -102,6 +102,13 @@ test "a flag that is wrong stops the program rather than being passed over" {
     try testing.expectError(error.InvalidValue, parseFlags(Flags, &.{ "game", "--backend", "metal" }));
 }
 
+test "a shipped game passes over the flags it does not know: a launcher's, its own" {
+    const flags = try App.parseKnownFlags(Flags, &.{ "game", "--gj-username", "ann", "--quiet", "--frames=30", "loose", "--width", "640" });
+    try testing.expectEqual(@as(u32, 30), flags.frames.?);
+    try testing.expectEqual(@as(u32, 640), flags.width.?);
+    try testing.expectError(error.InvalidValue, App.parseKnownFlags(Flags, &.{ "game", "--frames", "ten" }));
+}
+
 test "flags override what they say and leave the rest, and a capture is reproducible" {
     const base: Options = .{ .width = 960, .height = 540, .frames = null };
 

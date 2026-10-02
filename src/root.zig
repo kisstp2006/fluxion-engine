@@ -31,6 +31,11 @@
 const std = @import("std");
 
 pub const App = @import("App.zig");
+/// The engine's version: what a plugin's manifest is checked against.
+pub const version = @import("engine_options").version;
+/// Plugins: folders under `res://addons/` with a manifest. See
+/// `project/plugins.zig`.
+pub const plugins = @import("project/plugins.zig");
 pub const Window = @import("platform/window.zig");
 pub const Input = @import("input/input.zig");
 pub const Time = @import("time/frame_time.zig");
@@ -440,6 +445,10 @@ pub const vfs = @import("fluxion_vfs");
 /// what the runtime reads and the export writes.
 pub const shipped = @import("files/pack_locator.zig");
 
+/// Web requests: the client `App.webSend` asks through, for a tool of its
+/// own. See `net/web.zig`.
+pub const net = @import("fluxion_net");
+
 /// Rigid bodies in the plane: what `App.physics` is, for joints, gravity and
 /// anything else a body can do.
 pub const physics = @import("fluxion_physics");
@@ -492,6 +501,8 @@ test {
     _ = @import("files/files_test.zig");
     _ = @import("files/pack_test.zig");
     _ = @import("input/input_test.zig");
+    _ = @import("net/web_test.zig");
+    _ = @import("project/plugins_test.zig");
     _ = @import("physics/areas_test.zig");
     _ = @import("physics/bodies_test.zig");
     _ = @import("physics/character_test.zig");
@@ -536,6 +547,7 @@ test {
     _ = @import("platform/clipboard.zig");
     _ = @import("project/Project.zig");
     _ = @import("project/settings.zig");
+    _ = @import("project/plugins.zig");
     _ = @import("project/settings_file.zig");
     _ = @import("reflect/fixed_text.zig");
     _ = @import("reflect/property.zig");

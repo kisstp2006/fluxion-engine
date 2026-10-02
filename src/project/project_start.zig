@@ -10,6 +10,7 @@ const ecs = @import("fluxion_ecs");
 
 const App = @import("../App.zig");
 const Project = @import("Project.zig");
+const plugins = @import("plugins.zig");
 const components = @import("../scene/components.zig");
 const layers = @import("../render/layers.zig");
 const Script = @import("../script/script.zig").Script;
@@ -29,12 +30,14 @@ pub fn open(app: *App) !void {
 }
 
 /// The project's `application.autoload` list, made: each scene or script an
-/// entity named after its file, which a scene change leaves. What
+/// entity named after its file, which a scene change leaves - after the
+/// singletons of the plugins it turns on, which those find. What
 /// `openProject` does before the main scene, for a tool that opens another.
 pub fn openAutoloads(app: *App) !void {
     const settings = app.project.settings orelse return;
+    try plugins.openAutoloads(app);
     for (settings.application.autoload) |path| {
-        autoload(app, path) catch |err| {
+        autoload(app, path, std.fs.path.stem(path)) catch |err| {
             log.err("the autoload {s} did not open: {t}", .{ path, err });
             return err;
         };
@@ -42,9 +45,8 @@ pub fn openAutoloads(app: *App) !void {
 }
 
 /// One autoload: a script on an entity of its own, or a scene's instance,
-/// named after its file.
-fn autoload(app: *App, path: []const u8) !void {
-    const name = std.fs.path.stem(path);
+/// named `name`.
+pub fn autoload(app: *App, path: []const u8, name: []const u8) !void {
     const made = if (std.ascii.endsWithIgnoreCase(path, ".flux")) blk: {
         const file = try app.loadScript(path);
         break :blk try app.world.spawnWith(.{Script.of(file)});

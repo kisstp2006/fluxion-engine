@@ -2450,6 +2450,104 @@ zig build -Dtarget=aarch64-linux-android           # zig-out/lib/libmain.so, wit
   newest in the Android SDK, and the lowest Android is 10 (API 29).
 - **`fx.shipped` says where the pack is**, for the runtime and for an
   export that puts it there.
+- **A launcher's word.** The runtime passes over the flags it does not know
+  and hands the command line on: `app.commandArgument("level")` is `"3"` for
+  `game --level 3` or `--level=3`, `""` for a `--quiet` with nothing after
+  it, and null for one not given. `app.pageParameter(name)` is what a page's
+  address gives, and null where the game is no page. `program://` is the
+  folder the program is in, read-only: what a launcher left beside it - Game
+  Jolt's `.gj-credentials`.
+
+## 🌐 The web
+
+```zig
+const asked = try app.webSend(.{ .url = "https://api.example.com/scores?game=1" });
+// a frame or a few later:
+if (app.takeWebAnswer(asked)) |answer| {
+    var done = answer;
+    defer done.deinit();
+    const response = done.result catch |err| return log.warn("{t}: {s}", .{ err, done.reason });
+    show(response.status, response.body);
+}
+```
+
+```zig
+const reply = await web.get("https://api.example.com/scores?game=1") catch |err| {
+    print("no scores:", err);
+    return;
+};
+if (reply.ok) { show(reply.json()); }                       // reply.status, reply.text, reply.header(name)
+const sent = await web.postForm(url, {"score": 120, "sort": 120}) catch return;
+const level = web.download("https://example.com/level2.bin", "user://levels/2.bin");
+bar.value = web.progress(level);                            // each frame; web.cancel(level)
+const bytes = await level catch 0;
+```
+
+- **Each request on a thread of its own**, through
+  [fluxion-net](https://github.com/kisstp2006/fluxion-net): HTTPS over the
+  standard library's client and TLS, with the system's certificates. A few
+  at a time - the project's `network.max_requests`, 4 - the rest in turn.
+  Plain `http://` only where `network.allow_plain_http` says so.
+- **Answers are collected once a frame**, in the background too, and kept
+  until whoever asked takes them: a script's the same frame, a Zig game's
+  with `takeWebAnswer`. `webProgress` and `cancelWebRequest` for the rest.
+- **A URL goes out as it is written**, so a request signed over its URL
+  arrives with the URL it was signed over.
+- **From a script, each call is a task** to `await` - for its `Response`, or
+  for the bytes a download was - or to keep and await later. What could not
+  be asked or answered is an error caught where it is awaited: `Timeout`,
+  `Dns`, `Connect`, `Tls`, `NotSecure`, `Cancelled`, `TooLarge`. A 404 is an
+  answer, with its `status`; a download that is no success saves nothing and
+  fails with `HttpStatus`.
+- **A program that ends gives what it asked last a moment** - three seconds -
+  to go: a session closed as the player quit. `app.quitting` is said first,
+  for a script to ask it; `app.focus_changed(front)` when the game comes to
+  the front or goes behind.
+
+## 🧩 Plugins
+
+```
+addons/gamejolt/
+  plugin.fluxion        what it is and what it adds
+  game_jolt.flux        a singleton the game opens with
+  settings.flux         its section of the project's settings
+  editor.flux           its part in the editor
+```
+
+```json
+{
+  "fluxion_plugin": 1,
+  "name": "Game Jolt API",
+  "version": "1.0.0",
+  "engine": "0.4",
+  "editor": "editor.flux",
+  "autoload": [{ "name": "GameJolt", "path": "game_jolt.flux" }],
+  "settings": { "section": "game_jolt", "label": "Game Jolt", "script": "settings.flux" },
+  "requires": [{ "plugin": "http_tools", "version": "1.2" }],
+  "leave_out": ["example/*"]
+}
+```
+
+- **A plugin is a folder under `res://addons/` with a `plugin.fluxion`.**
+  `fx.plugins.discover` finds them, a manifest that does not read with its
+  problem. The project file's `plugins.enabled` names those turned on.
+- **What it adds comes and goes with it.** Its singletons open before the
+  project's own autoloads, each named as its manifest says, so those find
+  it: `app.find("GameJolt")`. Turned off, nothing of it opens and none of
+  its files ships.
+- **One that needs another starts after it**, `requires` and `optional` in
+  its manifest: `startOrder` gives the order, and why one does not start -
+  what it requires is missing, turned off, older than it needs, or itself
+  through others; or it was made for a newer engine than `fx.version`.
+- **Its settings are a section of the project file**, its struct's `@export`
+  fields: `app.pluginSettings("game_jolt")` gives the struct, filled in. A
+  field marked `@secret` - a private key - is kept out of the project file,
+  in the project's `.fluxion/secrets.json`, which version control leaves out
+  and an export puts in the pack. A secret in a game can still be dug out of
+  it.
+- **What a game ships of it** - `ships` - is all but its editor part, its
+  `templates/` and what its `leave_out` names (`*` for any run of
+  characters).
 
 ## 💾 Saves and settings
 
@@ -3244,7 +3342,8 @@ what it is about:
 | `ui/` | Controls, themes, the interface, touch buttons and tool windows |
 | `script/` | What a script sees of the engine and how it gets there |
 | `assets/` | The tables of files of each kind, background loading, data files |
-| `project/` | The project file and its settings |
+| `project/` | The project file and its settings, and plugins |
+| `net/` | The game's web requests and their answers |
 | `files/` | A game's own files, config files, sealed files and the pack a shipped game reads |
 | `platform/` | The window, its cursor and icon, the clipboard and the system's dialogs |
 | `math/` | Colours, points and boxes |
@@ -3407,7 +3506,16 @@ Here, and checked by the tests:
   a path of them, and free again the moment their entity dies; and groups, one
   entity in any number, called together.
 - The engine's command-line flags, read into a struct by name with room for
-  a game's own, and captures that are the same picture on every machine.
+  a game's own, and captures that are the same picture on every machine; a
+  shipped game passes over a launcher's flags, and reads its own with
+  `commandArgument`; `program://` for what a launcher left beside it.
+- The web: requests on threads of their own, answered once a frame, HTTPS
+  with the system's certificates, a URL sent as it is written, downloads into
+  the player's files; a script awaits each, and catches what failed.
+- Plugins: folders under `res://addons/` with a manifest, turned on in the
+  project, started after what they require, their singletons and settings
+  sections, `@secret` values kept out of the project file, and only what a
+  game needs of them shipped.
 - Controllers: sixteen slots, levels and edges, round dead zones, any pad or
   one pad, and SDL mappings for the ones the system does not know.
 - The pointer in world coordinates, through the camera; locked, confined or

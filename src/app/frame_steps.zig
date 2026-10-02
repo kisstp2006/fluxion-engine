@@ -34,6 +34,7 @@ const timer = @import("../time/timer.zig");
 const touch_button = @import("../ui/touch_button.zig");
 const tree = @import("../scene/tree.zig");
 const tween = @import("../animation/tween.zig");
+const web = @import("../net/web.zig");
 
 const log = std.log.scoped(.fluxion_engine);
 
@@ -52,6 +53,9 @@ pub const Step = union(enum) {
 /// What every frame does with the window's news, even one that runs
 /// nothing else because the program is in the background.
 pub const news = [_]Step{
+    // The web's answers, whoever asked: nothing on its way is lost while
+    // the program is away.
+    .{ .pass = web.collect },
     .{ .pass = touch_button.update },
     .{ .pass = actions },
     .{ .pass = fitGameArea },

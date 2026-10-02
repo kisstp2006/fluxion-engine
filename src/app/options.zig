@@ -181,6 +181,15 @@ pub const Options = struct {
     /// beside it. See `Project.userRoot`.
     user_root: ?[]const u8 = null,
 
+    /// Where `program://` is: the folder of the files beside the program -
+    /// what a launcher left there for the game. Null is the running
+    /// program's own folder. A test gives its own. See `Project.programRoot`.
+    program_root: ?[]const u8 = null,
+
+    /// The program's command line, its own name first: what
+    /// `commandArgument` reads. Borrowed, for as long as the app lives.
+    arguments: []const []const u8 = &.{},
+
     /// The pack a shipped game is: `res://`, `uid://` and the project file
     /// are read out of it instead of `root`. The App owns it from `create`
     /// on, whether `create` succeeds or not. See `Project.usePack`.

@@ -39,6 +39,8 @@ const Lifecycle = @import("script.zig").Lifecycle;
 const RefOf = @import("asset_refs.zig").RefOf;
 const Scripts = @import("script.zig").Scripts;
 const TimeAccess = @import("time_access.zig").TimeAccess;
+const WebAccess = @import("web_access.zig").WebAccess;
+const WebResponse = @import("web_access.zig").WebResponse;
 const entityHandle = @import("script.zig").entityHandle;
 const member_docs = @import("script.zig").member_docs;
 const typeName = @import("script.zig").typeName;
@@ -140,6 +142,12 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
         if (std.mem.eql(u8, name, "resource_path")) return try vm.string(file.resourcePath());
         return null;
     };
+    if (now.asConst(WebResponse)) |response| return response.member(vm, name);
+    // `app.focus_changed`, `app.quitting`.
+    if (now.as(App) != null) {
+        const which = std.meta.stringToEnum(Scripts.AppSignal, name) orelse return null;
+        return try self.appSignal(which);
+    }
     if (now.as(ClockRef)) |clock| {
         const which = for (ClockRef.signal_names, 0..) |signal_name, i| {
             if (std.mem.eql(u8, signal_name, name)) break i;
@@ -385,9 +393,9 @@ fn notAnEntity(vm: *flux.Vm, value: flux.Value) flux.Vm.Error {
     };
 }
 
-/// The values behind `app`, `files`, `time` and `images` where the scripts
-/// run.
-pub const Given = struct { app: flux.Value, files: flux.Value, time: flux.Value, images: flux.Value };
+/// The values behind `app`, `files`, `time`, `images` and `web` where the
+/// scripts run.
+pub const Given = struct { app: flux.Value, files: flux.Value, time: flux.Value, images: flux.Value, web: flux.Value };
 
 /// What every VM that compiles the game's scripts is given - the game's own,
 /// with the values `given` holds, and each of an editor's analyses, with
@@ -409,11 +417,13 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
         try vm.defineGlobal("files", g.files, files_doc);
         try vm.defineGlobal("time", g.time, time_doc);
         try vm.defineGlobal("images", g.images, images_doc);
+        try vm.defineGlobal("web", g.web, web_doc);
     } else {
         try vm.declareGlobal("app", reflect.typeOf(App), app_doc);
         try vm.declareGlobal("files", reflect.typeOf(FileAccess), files_doc);
         try vm.declareGlobal("time", reflect.typeOf(TimeAccess), time_doc);
         try vm.declareGlobal("images", reflect.typeOf(ImagesAccess), images_doc);
+        try vm.declareGlobal("web", reflect.typeOf(WebAccess), web_doc);
     }
     try vm.extend(reflect.typeOf(EntityRef), reflect.typeOf(App), if (given) |g| g.app else .null);
     for (named_types) |t| try vm.declareType(t);
@@ -429,6 +439,9 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "position", .type = .vec2, .writable = true, .doc = "`x` and `y` as one vector: `t.position += velocity * delta`." });
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "scale", .type = .vec2, .writable = true, .doc = "`scale_x` and `scale_y` as one vector." });
     for (ClockRef.signal_names) |name| try vm.declareMember(.{ .of = reflect.typeOf(ClockRef), .name = name, .type = .signal });
+    for (WebResponse.fields) |f| try vm.declareMember(.{ .of = reflect.typeOf(WebResponse), .name = f.name, .type = f.type, .doc = f.doc });
+    try vm.declareMember(.{ .of = reflect.typeOf(App), .name = "focus_changed", .type = .signal, .doc = "Said when the game comes to the front or goes behind another program, with whether it is in front now: `app.focus_changed.connect(fn(front: bool) { ... })`." });
+    try vm.declareMember(.{ .of = reflect.typeOf(App), .name = "quitting", .type = .signal, .doc = "Said as the game ends, before its last frame is let go: what is asked of the web then is given a moment to go - a session closed, a score sent." });
     inline for (AssetKind.handled) |kind| {
         if (kind != .frames) try vm.declareType(reflect.typeOf(AssetRef(kind)));
         try vm.declareMember(.{ .of = reflect.typeOf(RefOf(kind)), .name = "resource_path", .type = .string, .doc = "The file it was read from, or \"\" for one made in memory and not saved yet." });
@@ -449,6 +462,8 @@ const named_types = [_]*const reflect.Type{
     reflect.typeOf(ImageRef),
     reflect.typeOf(TimeAccess),
     reflect.typeOf(ClockRef),
+    reflect.typeOf(WebAccess),
+    reflect.typeOf(WebResponse),
     reflect.typeOf(FramesRef),
     reflect.typeOf(datetime.DateTime),
     reflect.typeOf(datetime.Duration),
@@ -463,6 +478,7 @@ const annotations = [_]flux.Annotation{
     .{ .name = "group", .sig = "@group(name: string)", .doc = "Where an exported field is listed in the Inspector, under a heading of its own." },
     .{ .name = "file", .sig = "@file(ending: string, ...)", .doc = "An exported string that names a file of the project's, by its endings: `@file(\"png\", \"jpg\")`." },
     .{ .name = "entity", .sig = "@entity", .doc = "An exported field that names an entity of the scene, chosen from its tree." },
+    .{ .name = "secret", .sig = "@secret", .doc = "An exported field of a plugin's settings kept out of the project file - a private key - in the project's .fluxion/secrets.json, which version control leaves out and an export puts in the game's pack. Anyone with the game can still dig it out of it." },
 };
 
 const entity_doc = "The entity this script is on: `get(Sprite)`, `find(Sprite)`, `has`, `add`, `remove`, `alive()`, `uuid()`, and every call of `app`'s given an entity first - `name()`, `parent()`, `globalPosition()`.";
@@ -472,5 +488,7 @@ const app_doc = "The engine: the calls `App.reflect_methods` lists.";
 const files_doc = "The game's files to read (`res://`) and the player's to read and write (`user://`): `readText(path)`, `writeText(path, text)`, `appendText`, `exists`, `isDir`, `list`, `copy`, `move`, `remove`, `size`, `modifiedTime`, `sha256`; kept sealed with `writeSecret(path, text, password)` or small with `writeCompressed`; `config(path)` for settings and `writeData(value, path)` for a struct; paths with `join`, `dirName`, `fileName`, `stem`, `extension`, `validName`; the player's own with `choose(title, extensions)` and `dropped()`.";
 
 const time_doc = "Dates, times and spans, written in the game's culture: `now()`, `date(year, month, day)`, `parse(text)`, `minutes(n)`, `locale()`, `setLocale(tag)`, and `clock(start, rate)` for a clock of the game's own.";
+
+const web_doc = "The web, asked without the game waiting: `get(url)`, `post(url, body)`, `postForm(url, values)`, `request(method, url, headers, body)` - each a task to `await` for its `Response`, `catch` for what went wrong - and `download(url, path)` into a file under `user://`; `progress(task)`, `received(task)`, `cancel(task)`.";
 
 const images_doc = "Pictures in memory: `new(width, height, color)`, `read(path)`, `capture()` of the frame, `fromTexture(texture)`; an image's `getPixel`, `setPixel`, `fill`, `fillRect`, `region`, `blit`, `blend`, `resize`, `flipX`, `flipY`, `savePng`, `saveJpg`; `toTexture(image)` draws it.";

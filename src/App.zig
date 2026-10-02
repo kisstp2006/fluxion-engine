@@ -141,6 +141,9 @@ const script = @import("script/script.zig");
 const flux = script.flux;
 const Exports = @import("script/script_exports.zig").Exports;
 
+// The web: `net/`.
+const web_requests = @import("net/web.zig");
+
 // assets
 const Assets = @import("assets/assets.zig");
 const AssetKind = @import("assets/asset_kind.zig").AssetKind;
@@ -196,6 +199,7 @@ const Resolved = @import("app/options.zig").Resolved;
 pub const Flags = @import("app/flags.zig").Flags;
 pub const FlagError = @import("app/flags.zig").FlagError;
 pub const parseFlags = @import("app/flags.zig").parse;
+pub const parseKnownFlags = @import("app/flags.zig").parseKnown;
 
 // The app itself.
 gpa: Allocator,
@@ -207,6 +211,8 @@ started: bool = false,
 /// The frames left before the run ends: `Options.frames`, counted down.
 /// Null runs until something else stops it.
 frames_left: ?u32,
+/// The program's command line: `Options.arguments`. Borrowed.
+arguments: []const []const u8 = &.{},
 
 // The world, its systems, and what they say to each other: `core/`.
 /// Everything in the game.
@@ -452,6 +458,11 @@ project: Project,
 /// `Options.open_project`.
 open_project: bool = false,
 
+// The web: `net/`.
+/// The game's web requests and their answers, once it asks. See
+/// `webSend`.
+web: web_requests.Web = .{},
+
 // A game's files: `files/`.
 /// How hard `writeSecret`'s password is made to guess. See `sealed.Cost`.
 secret_cost: sealed.Cost = .default,
@@ -669,6 +680,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .running = true,
         .close_pressed = false,
         .frames_left = options.frames,
+        .arguments = options.arguments,
         .started = false,
     };
     errdefer self.world.deinit();
@@ -680,6 +692,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     self.project = try .init(gpa, options.io, options.root);
     errdefer self.project.deinit();
     if (options.user_root) |held| self.project.user_root = try gpa.dupe(u8, held);
+    if (options.program_root) |held| self.project.program_root = try gpa.dupe(u8, held);
     if (options.title) |held| self.project.fallback_name = try gpa.dupe(u8, held);
     if (pack) |held| {
         pack = null;
@@ -816,6 +829,9 @@ pub fn destroy(self: *App) void {
 
     // First, while everything a script's handle points at is still there.
     if (self.scripts) |scripts| scripts.calls.destroy(scripts);
+    // What the game asked last - a session closed as it quit - is given a
+    // moment to go.
+    self.web.deinit(self);
     self.input.deinit(gpa);
     self.schedule.deinit(gpa);
     self.states.deinit(gpa);
@@ -1020,6 +1036,9 @@ pub fn hasInterface(self: *const App) bool {
 /// Run the `.shutdown` stage. Called by `run`; call it yourself if you drive
 /// `step` and want the stage to happen.
 pub fn stop(self: *App) anyerror!void {
+    // The scripts hear it first, for a last request or a save: what they
+    // ask the web is given a moment to go before the app ends.
+    if (self.scripts) |scripts| try scripts.calls.pass(scripts, .quitting);
     try self.schedule.run(.shutdown, self);
 }
 
@@ -3730,6 +3749,16 @@ pub fn readData(self: *App, handle: data_file.DataHandle) !flux.Value {
     return scripts.calls.readData(scripts, &contents, held.source);
 }
 
+/// A plugin's settings: the struct its manifest's `settings` names, its
+/// `@export` fields given what the project file's `section` says, and its
+/// `@secret` ones what `.fluxion/secrets.json` keeps. From Flux,
+/// `app.pluginSettings("game_jolt")`. `error.NoSuchSection` when no plugin
+/// has one of the name.
+pub fn pluginSettings(self: *App, section: []const u8) !flux.Value {
+    const scripts = self.scripts orelse return error.NoScripts;
+    return scripts.calls.pluginSettings(scripts, section);
+}
+
 /// Write a data file of a script's struct: the values of its `@export`
 /// fields, as `readData` gives them back - the struct as a save. From Flux,
 /// `app.writeData(save, "user://saves/one.data")`. A data file read from
@@ -4198,6 +4227,67 @@ pub fn openAutoloads(self: *App) !void {
 pub fn gameVersion(self: *const App) []const u8 {
     const held = self.project.settings orelse return "";
     return held.application.version;
+}
+
+/// What the program's command line gives `--name`: the word after it, or
+/// what follows `--name=`; "" for a `--name` with nothing after it, and
+/// null for one not given. What a launcher or a test tells the game:
+/// `app.commandArgument("level")` for `game --level 3`.
+pub fn commandArgument(self: *const App, name: []const u8) ?[]const u8 {
+    const given = if (self.arguments.len > 0) self.arguments[1..] else self.arguments;
+    for (given, 0..) |argument, i| {
+        if (!std.mem.startsWith(u8, argument, "--")) continue;
+        const rest = argument[2..];
+        if (std.mem.startsWith(u8, rest, name) and rest.len > name.len and rest[name.len] == '=') return rest[name.len + 1 ..];
+        if (!std.mem.eql(u8, rest, name)) continue;
+        if (i + 1 < given.len and !std.mem.startsWith(u8, given[i + 1], "--")) return given[i + 1];
+        return "";
+    }
+    return null;
+}
+
+/// What the address of the page a game runs in gives `name`: `level` in
+/// `game.html?level=3`. Null for one not given, and always where the game
+/// is no page.
+pub fn pageParameter(self: *const App, name: []const u8) ?[]const u8 {
+    _ = self;
+    _ = name;
+    return null;
+}
+
+// -------------------------------------------------------------------------
+// The web
+// -------------------------------------------------------------------------
+//
+// See `net/web.zig`: each request on a thread of its own, its answer
+// collected once a frame. A script asks through `web`.
+
+pub const WebRequest = web_requests.Request;
+pub const WebAnswer = web_requests.Done;
+pub const WebRequestId = web_requests.Id;
+
+/// Ask the web: the request is copied, and goes at once, or when its turn
+/// comes after the project's `network.max_requests`. Its answer is kept,
+/// once it comes, for `takeWebAnswer`.
+pub fn webSend(self: *App, request: WebRequest) !WebRequestId {
+    return web_requests.send(self, request);
+}
+
+/// The answer to a request, once it has come, and null until then. Taken:
+/// the caller `deinit`s it.
+pub fn takeWebAnswer(self: *App, id: WebRequestId) ?WebAnswer {
+    return web_requests.takeAnswer(self, id);
+}
+
+/// How far a request has come: whether it has started, and the bytes of its
+/// answer so far, of how many. Null for one that has ended.
+pub fn webProgress(self: *App, id: WebRequestId) ?web_requests.Progress {
+    return web_requests.progress(self, id);
+}
+
+/// Stop a request: its answer says `error.Cancelled`.
+pub fn cancelWebRequest(self: *App, id: WebRequestId) void {
+    web_requests.cancel(self, id);
 }
 
 // -------------------------------------------------------------------------
@@ -5078,6 +5168,7 @@ pub const reflect_methods = .{
     .nextFrame = .{flux.Returns{ .builtin = .signal }},
     .callDeferred = .{attr.Params{ .names = &.{"function"} }},
     .readData = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+    .pluginSettings = .{ attr.Params{ .names = &.{"section"} }, flux.GivesErrors{} },
     // Files of every kind
     .loadInBackground = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
     .loadProgress = .{attr.Params{ .names = &.{"path"} }},

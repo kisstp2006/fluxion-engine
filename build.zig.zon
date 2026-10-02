@@ -111,8 +111,14 @@
         // fluxion-reflect and fluxion-json are pinned where these are, so a
         // `reflect.Value` is one type across the two.
         .fluxion_script = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-script#2e88bfe28b3df8c62aa58961288dc5ba17698849",
-            .hash = "fluxion_script-0.1.0-rt2DKt3dFACkYDqviDJhp5A9kXv2XUk7oETuP-ZB2y0U",
+            .url = "git+https://github.com/kisstp2006/fluxion-script#fca8a75be1a6fe41287b92105ee4d0c3bacfdb43",
+            .hash = "fluxion_script-0.1.0-rt2DKsweFQAyreDxLgtjcGtESSxRxJUXS-4PqP0ZQAtg",
+        },
+        // Web requests: a script's `web` global, each request on a thread of
+        // its own and its answer handed over once a frame.
+        .fluxion_net = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-net#abe87f877ca8d8d8a430efaf60d0f7e303f00b93",
+            .hash = "fluxion_net-0.1.0-VdxHa7GEAACHCcA1rVNM29oWqEjapk5lnCKRrWveWWnY",
         },
 
         // Generational handles: what the asset tables hand out, and what a

@@ -153,6 +153,7 @@ const App = @import("../App.zig");
 const actions = @import("../input/actions.zig");
 const AssetKind = @import("../assets/asset_kind.zig").AssetKind;
 const data_file = @import("../assets/data_files.zig");
+const plugins = @import("../project/plugins.zig");
 const property = @import("../reflect/property.zig");
 const attr = @import("../reflect/attr.zig");
 const Project = @import("../project/Project.zig");
@@ -184,6 +185,9 @@ pub const ImagesAccess = @import("image_access.zig").ImagesAccess;
 pub const ImageRef = @import("image_access.zig").ImageRef;
 pub const TimeAccess = @import("time_access.zig").TimeAccess;
 pub const ClockRef = @import("time_access.zig").ClockRef;
+pub const WebAccess = @import("web_access.zig").WebAccess;
+pub const WebResponse = @import("web_access.zig").WebResponse;
+const web_access = @import("web_access.zig");
 pub const FramesRef = @import("asset_refs.zig").FramesRef;
 pub const AssetRef = @import("asset_refs.zig").AssetRef;
 pub const RefOf = @import("asset_refs.zig").RefOf;
@@ -447,6 +451,9 @@ pub const Calls = struct {
     structFields: *const fn (self: *Scripts, script: ScriptHandle, struct_name: []const u8, found: []flux.FieldInfo) []flux.FieldInfo,
     /// A data file's struct, made and given its values: `app.readData`.
     readData: *const fn (self: *Scripts, contents: *const data_file.Contents, source: []const u8) anyerror!flux.Value,
+    /// A plugin's section of the project's settings, its struct given what
+    /// the project file and the secrets say: `app.pluginSettings`.
+    pluginSettings: *const fn (self: *Scripts, section: []const u8) anyerror!flux.Value,
     /// A script's struct as a data file's text: `app.writeData`.
     writeData: *const fn (self: *Scripts, value: flux.Value) anyerror![]u8,
     /// Keep a script's function while the engine holds it - a tween's
@@ -469,6 +476,9 @@ pub const Moment = union(enum) {
     /// After the game's `.late` systems: the instances of the dead, and of
     /// the entities whose `Script` went, are let go of.
     end_of_frame,
+    /// The game is ending: `app.quitting` is said, for a last request or
+    /// save. See `App.stop`.
+    quitting,
 };
 
 /// The app's scripts: `app.scripts`, once `App.useScripts` has made them.
@@ -489,6 +499,16 @@ pub const Scripts = struct {
     time_access: TimeAccess,
     /// What scripts reach as `images`.
     images_access: ImagesAccess,
+    /// What scripts reach as `web`.
+    web_access: WebAccess,
+    /// The web requests scripts made, each with the task its answer ends.
+    web_waiting: std.ArrayList(web_access.Waiting) = .empty,
+    /// `app.focus_changed` and `app.quitting`, once a script has reached
+    /// for them; `.null` before.
+    app_signals: [2]flux.Value = @splat(.null),
+    /// Whether the program was in front when last looked: what
+    /// `focus_changed` says a change of.
+    was_in_front: ?bool = null,
     files: FileTable = .empty,
     /// Each entity's instance, in the order they were made.
     instances: std.AutoArrayHashMapUnmanaged(Entity, Instance) = .empty,
@@ -572,6 +592,7 @@ pub const Scripts = struct {
                 .exportedFields = exportedFields,
                 .structFields = structFields,
                 .readData = readData,
+                .pluginSettings = pluginSettings,
                 .writeData = writeData,
                 .hold = holdCallable,
                 .release = releaseCallable,
@@ -585,6 +606,7 @@ pub const Scripts = struct {
             .file_access = .{ .app = app },
             .time_access = .{ .app = app },
             .images_access = .{ .app = app },
+            .web_access = .{ .app = app },
         };
         const vm = try flux.Vm.create(app.gpa, .{
             .out = options.out orelse &self.printed.writer,
@@ -601,6 +623,7 @@ pub const Scripts = struct {
             .files = try vm.handle(&self.file_access),
             .time = try vm.handle(&self.time_access),
             .images = try vm.handle(&self.images_access),
+            .web = try vm.handle(&self.web_access),
         });
         self.frame = try vm.newSignal("frame", 0);
         try vm.hold(self.frame);
@@ -632,6 +655,7 @@ pub const Scripts = struct {
         }
         self.files.deinit(gpa);
         self.dialogs.deinit(gpa);
+        self.web_waiting.deinit(gpa);
         var given = self.granted.keyIterator();
         while (given.next()) |path| gpa.free(path.*);
         self.granted.deinit(gpa);
@@ -903,6 +927,8 @@ pub const Scripts = struct {
                 self.deliverInput();
                 self.answerDialogs();
                 self.hearDrops();
+                self.answerWeb();
+                self.tellFocus();
             },
             .fixed => |dt| {
                 try self.sync();
@@ -974,6 +1000,7 @@ pub const Scripts = struct {
                     self.handles.removeByPtr(entry.key_ptr);
                 }
             },
+            .quitting => self.sayAppSignal(.quitting, &.{}),
         }
     }
 
@@ -1496,6 +1523,49 @@ pub const Scripts = struct {
         return made;
     }
 
+    fn pluginSettings(self: *Scripts, section: []const u8) anyerror!flux.Value {
+        const app = self.app;
+        var found = try plugins.discover(app, app.gpa);
+        defer found.deinit();
+        const said = for (found.plugins) |*p| {
+            const s = p.manifest.settings orelse continue;
+            if (std.mem.eql(u8, s.section, section)) break .{ p, s };
+        } else return error.NoSuchSection;
+        const script_path = try said[0].path(app.gpa, said[1].script);
+        defer app.gpa.free(script_path);
+        const handle = try self.load(script_path);
+        const file = self.files.get(handle.toId()) orelse return error.NoSuchScript;
+        const module = file.module orelse return error.ScriptDoesNotCompile;
+        var spelled: [64]u8 = undefined;
+        const class = classAsked(self.vm, module, said[1].@"struct", file.source, &spelled) orelse return error.NoSuchStruct;
+        const vm = self.vm;
+        const made = vm.instantiate(class, &.{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Panic => {
+                self.sayPanic(null, "making a plugin's settings");
+                return error.DefaultsStopped;
+            },
+        };
+        try vm.pushRoot(made);
+        defer vm.popRoot();
+        // What the project file says, then what it keeps out of itself.
+        if (app.project.settings) |*settings| if (settings.kept.rest) |doc| {
+            try self.applyValues(made, class, doc.root.get(section), .{ .file = "the project file" });
+        };
+        const secrets = app.readText(app.gpa, plugins.secrets_path) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return made,
+        };
+        defer app.gpa.free(secrets);
+        const doc = json.parse(app.gpa, secrets, .{}) catch {
+            log.warn("{s} is not JSON: its secrets are passed over", .{plugins.secrets_path});
+            return made;
+        };
+        defer doc.deinit();
+        try self.applyValues(made, class, doc.root.get(section), .{ .file = plugins.secrets_path });
+        return made;
+    }
+
     /// A value a scene wrote as the script's own, as a field of `field`'s
     /// kind holds it; null for one it cannot hold.
     fn fluxOf(self: *Scripts, field: flux.FieldInfo, value: json.Value) flux.Vm.Error!?flux.Value {
@@ -1833,6 +1903,70 @@ pub const Scripts = struct {
         if (entity) |e| {
             log.warn("the scripts ran out of memory making the script of {f}", .{e});
         } else log.warn("the scripts ran out of memory", .{});
+    }
+
+    /// The signals of `app`'s a script reaches as members:
+    /// `app.focus_changed`, `app.quitting`.
+    pub const AppSignal = enum {
+        focus_changed,
+        quitting,
+
+        pub fn params(which: AppSignal) u8 {
+            return switch (which) {
+                .focus_changed => 1,
+                .quitting => 0,
+            };
+        }
+    };
+
+    /// The signal of `app`'s, made the first time a script reaches for it.
+    pub fn appSignal(self: *Scripts, which: AppSignal) flux.Vm.Error!flux.Value {
+        const held = &self.app_signals[@intFromEnum(which)];
+        if (held.tag != .signal) {
+            const made = try self.vm.newSignal(@tagName(which), which.params());
+            try self.vm.hold(made);
+            held.* = made;
+        }
+        return held.*;
+    }
+
+    fn sayAppSignal(self: *Scripts, which: AppSignal, args: []const flux.Value) void {
+        const signal = self.app_signals[@intFromEnum(which)];
+        if (signal.tag != .signal) return;
+        self.vm.setBudget(self.options.budget);
+        self.vm.emitSignalValue(signal, args) catch |err| switch (err) {
+            error.OutOfMemory => self.outOfMemory(null),
+            error.Panic => self.sayPanic(null, "a script told " ++ "the app's news"),
+        };
+    }
+
+    /// `focus_changed`, said when the program comes to the front or goes
+    /// behind another: with whether it is in front now.
+    fn tellFocus(self: *Scripts) void {
+        const now = self.app.inForeground();
+        defer self.was_in_front = now;
+        const before = self.was_in_front orelse return;
+        if (before != now) self.sayAppSignal(.focus_changed, &.{.boolean(now)});
+    }
+
+    /// The web's answers to the scripts' requests, each ending the task
+    /// that waited for it.
+    fn answerWeb(self: *Scripts) void {
+        var at: usize = 0;
+        while (at < self.web_waiting.items.len) {
+            const waiting = self.web_waiting.items[at];
+            var done = self.app.takeWebAnswer(waiting.id) orelse {
+                at += 1;
+                continue;
+            };
+            _ = self.web_waiting.orderedRemove(at);
+            defer self.vm.release(waiting.task);
+            self.vm.setBudget(self.options.budget);
+            web_access.finish(self, waiting, &done) catch |err| switch (err) {
+                error.OutOfMemory => self.outOfMemory(null),
+                error.Panic => self.sayPanic(null, "a script given a web answer"),
+            };
+        }
     }
 
     /// A file dialog a script asked for, and the signal its answer is said

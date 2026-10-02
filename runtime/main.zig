@@ -43,14 +43,16 @@ const Flags = struct {
 
 pub fn main(init: std.process.Init) !void {
     const arguments = try init.minimal.args.toSlice(init.arena.allocator());
-    // A flag nobody knows - a launcher's own - leaves the game to start
-    // with none, rather than not at all.
-    const flags = App.parseFlags(Flags, arguments) catch |err| blk: {
+    // A flag nobody here knows - a launcher's own, the game's - is passed
+    // over, and the game reads its own with `app.commandArgument`. One of
+    // the engine's with a wrong value leaves the game to start with none,
+    // rather than not at all.
+    const flags = App.parseKnownFlags(Flags, arguments) catch |err| blk: {
         log.warn("the command line was passed over: {t}", .{err});
         break :blk Flags{};
     };
     // What went wrong is in the log already.
-    run(init.gpa, init.io, flags) catch std.process.exit(1);
+    run(init.gpa, init.io, flags, arguments) catch std.process.exit(1);
 }
 
 /// What the platform's activity runs, on a thread of its own: Android has
@@ -59,7 +61,7 @@ fn fluxionMain() callconv(.c) void {
     const gpa = std.heap.c_allocator;
     var threaded: std.Io.Threaded = .init(gpa, .{});
     defer threaded.deinit();
-    run(gpa, threaded.io(), .{}) catch {};
+    run(gpa, threaded.io(), .{}, &.{}) catch {};
 }
 
 comptime {
@@ -67,7 +69,7 @@ comptime {
 }
 
 /// The game, until it ends. What goes wrong is logged.
-fn run(gpa: std.mem.Allocator, io: std.Io, flags: Flags) !void {
+fn run(gpa: std.mem.Allocator, io: std.Io, flags: Flags, arguments: []const []const u8) !void {
     // A project's folder when one is named, and no pack is: a game looked at
     // without exporting it.
     const pack: ?fx.vfs.Pack = if (flags.app.root != null and flags.pack == null) null else pack: {
@@ -86,6 +88,7 @@ fn run(gpa: std.mem.Allocator, io: std.Io, flags: Flags) !void {
     options.io = io;
     options.pack = pack;
     options.open_project = true;
+    options.arguments = arguments;
     const app = App.create(gpa, options) catch |err| {
         log.err("the game did not start: {t}", .{err});
         return err;

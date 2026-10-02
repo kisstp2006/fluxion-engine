@@ -108,6 +108,11 @@ pub const uid_scheme = "uid://";
 /// settings, which a game writes and its files are not. See `userRoot`.
 pub const user_scheme = "user://";
 
+/// What a path beside the running program starts with: what a launcher put
+/// there for the game - Game Jolt's `.gj-credentials`. Only read. See
+/// `programRoot`.
+pub const program_scheme = "program://";
+
 /// What is added to a file's name for the file its UUID is kept in.
 pub const uid_extension = ".uid";
 
@@ -125,6 +130,9 @@ pub const Error = error{
     /// A `user://` path on a system that keeps no folder for a program's
     /// data, or with no `Io` to ask it.
     NoUserFolder,
+    /// A `program://` path where the running program's folder cannot be
+    /// found, or with no `Io` to ask.
+    NoProgramFolder,
 } || Allocator.Error;
 
 pub const InitError = std.Io.Dir.OpenError || std.Io.Dir.RealPathError || Allocator.Error;
@@ -183,6 +191,9 @@ source: std.Random.DefaultCsprng,
 /// Where `user://` is, once `userRoot` has worked it out - or set first: a
 /// test's folder, a game kept on a stick with its saves beside it. Owned.
 user_root: ?[]u8 = null,
+/// Where `program://` is, once `programRoot` has worked it out - or set
+/// first, as a test does. Owned.
+program_root: ?[]u8 = null,
 /// The pack `res://` is read from, when the game shipped as one: see
 /// `usePack`. Owned.
 pack: ?*vfs.Pack = null,
@@ -254,6 +265,7 @@ pub fn deinit(self: *Project) void {
     self.gpa.free(self.root);
     self.gpa.free(self.cwd);
     if (self.user_root) |held| self.gpa.free(held);
+    if (self.program_root) |held| self.gpa.free(held);
     if (self.fallback_name) |held| self.gpa.free(held);
     self.* = undefined;
 }
@@ -290,7 +302,7 @@ pub fn isValidProjectPath(path: []const u8) bool {
 /// absolute path for one outside it. With no `Io`, as it is. The caller
 /// frees it.
 pub fn canonical(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
-    inline for (.{ scheme, user_scheme }) |prefix| {
+    inline for (.{ scheme, user_scheme, program_scheme }) |prefix| {
         if (std.mem.startsWith(u8, path, prefix)) {
             const inside = try tidy(gpa, path[prefix.len..]);
             defer gpa.free(inside);
@@ -323,6 +335,7 @@ pub fn canonical(self: *Project, gpa: Allocator, path: []const u8) Error![]u8 {
 /// game whose project is a pack: `error.InPack`.
 pub fn osPath(self: *Project, gpa: Allocator, path: []const u8) PathError![]u8 {
     if (std.mem.startsWith(u8, path, user_scheme)) return joinUnder(gpa, try self.userRoot(), path[user_scheme.len..]);
+    if (std.mem.startsWith(u8, path, program_scheme)) return joinUnder(gpa, try self.programRoot(), path[program_scheme.len..]);
     const project_path = if (std.mem.startsWith(u8, path, uid_scheme))
         try self.pathOfUidPath(path)
     else
@@ -497,6 +510,18 @@ fn joinUnder(gpa: Allocator, base: []const u8, inside_given: []const u8) Error![
     const joined = if (inside.len == 0) try gpa.dupe(u8, base) else try std.fs.path.join(gpa, &.{ base, inside });
     if (std.fs.path.sep != '/') std.mem.replaceScalar(u8, joined, '/', std.fs.path.sep);
     return joined;
+}
+
+/// Where `program://` is: the folder the running program is in. Worked out
+/// once.
+pub fn programRoot(self: *Project) Error![]const u8 {
+    if (self.program_root) |held| return held;
+    const io = self.io orelse return error.NoProgramFolder;
+    self.program_root = std.process.executableDirPathAlloc(io, self.gpa) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.NoProgramFolder,
+    };
+    return self.program_root.?;
 }
 
 /// Where `user://` is: a folder of the game's own under the one the system
@@ -908,7 +933,7 @@ pub fn forgetFile(self: *Project, path: []const u8) Allocator.Error!void {
     const named = self.canonical(self.gpa, path) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         // A path that names nothing here has nothing to forget.
-        error.OutsideProject, error.NoSuchUid, error.NoUserFolder => return,
+        error.OutsideProject, error.NoSuchUid, error.NoUserFolder, error.NoProgramFolder => return,
     };
     defer self.gpa.free(named);
     try self.repoint(named, null);

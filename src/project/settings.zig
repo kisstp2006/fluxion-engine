@@ -470,6 +470,29 @@ pub const Touch = struct {
     };
 };
 
+/// What the game may ask of the web. See `net/web.zig`.
+pub const Network = struct {
+    /// How many of the game's requests are on their way at once; the rest
+    /// wait their turn.
+    max_requests: u8 = 4,
+    /// Whether `http://` addresses are asked, not only `https://` ones.
+    allow_plain_http: bool = false,
+
+    pub const reflect_attributes = .{attr.Label{ .text = "Network" }};
+    pub const reflect_fields = .{
+        .max_requests = .{ attr.Doc{ .text = "How many of the game's web requests are on their way at once; the rest wait their turn." }, attr.Range{ .min = 1, .max = 16, .step = 1 } },
+        .allow_plain_http = .{attr.Doc{ .text = "Ask http:// addresses too, not only https:// ones. Off, a request over plain HTTP fails with NotSecure: what it carries - keys, scores, a player's name - anyone on the way could read and change." }},
+    };
+};
+
+/// The plugins the project turns on: see `plugins.zig`.
+pub const Plugins = struct {
+    /// Their folders under `res://addons/`, in order.
+    enabled: []const []const u8 = &.{},
+
+    pub const reflect_attributes = .{ attr.Label{ .text = "Plugins" }, attr.Hidden{} };
+};
+
 /// What a project file says: a section a field.
 pub const Settings = struct {
     application: Application = .{},
@@ -483,6 +506,8 @@ pub const Settings = struct {
     scripting: Scripting = .{},
     input: InputMap = .{},
     touch: Touch = .{},
+    network: Network = .{},
+    plugins: Plugins = .{},
     /// The memory the text above is kept in, and the file's keys this build
     /// has no section for.
     kept: settings_file.Kept = .{},

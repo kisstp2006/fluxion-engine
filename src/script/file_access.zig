@@ -20,8 +20,9 @@ const dialog = @import("../platform/dialog.zig");
 const Scripts = @import("script.zig").Scripts;
 const jsonOf = @import("script.zig").jsonOf;
 
-/// What a script reaches as `files`: the files a game ships to read, and the
-/// player's own under `user://` to read and write. Nothing else on the
+/// What a script reaches as `files`: the files a game ships to read, the
+/// player's own under `user://` to read and write, and those a launcher left
+/// beside the program, under `program://`, to read. Nothing else on the
 /// computer - a path anywhere else is `error.NotAllowed` - so a script can
 /// neither read the player's documents nor break the game it came with.
 /// A call that fails gives an error to `catch`: `FileNotFound`,
@@ -403,7 +404,7 @@ pub const FileAccess = struct {
     }
 
     fn readable(path: []const u8) error{NotAllowed}!void {
-        inline for (.{ Project.scheme, Project.uid_scheme, Project.user_scheme }) |prefix| {
+        inline for (.{ Project.scheme, Project.uid_scheme, Project.user_scheme, Project.program_scheme }) |prefix| {
             if (std.mem.startsWith(u8, path, prefix)) return;
         }
         return error.NotAllowed;

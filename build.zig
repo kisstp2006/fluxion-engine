@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
     const script = b.dependency("fluxion_script", .{ .target = target, .optimize = optimize });
     const audio = b.dependency("fluxion_audio", .{ .target = target, .optimize = optimize });
     const vfs = b.dependency("fluxion_vfs", .{ .target = target, .optimize = optimize });
+    const net = b.dependency("fluxion_net", .{ .target = target, .optimize = optimize });
 
     // The two renderers below are built from their packages' source with this
     // package's rhi, font and shader, so that a `Device` stays one type:
@@ -80,6 +81,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "fluxion_script", .module = script.module("fluxion_script") },
             .{ .name = "fluxion_audio", .module = audio.module("fluxion_audio") },
             .{ .name = "fluxion_vfs", .module = vfs.module("fluxion_vfs") },
+            .{ .name = "fluxion_net", .module = net.module("fluxion_net") },
         },
     });
 
@@ -96,6 +98,12 @@ pub fn build(b: *std.Build) void {
     const docs_zig = write_docs.addOutputFileArg("member_docs.zig");
     addSources(b, write_docs);
     mod.addAnonymousImport("member_docs", .{ .root_source_file = docs_zig });
+
+    // The engine's version, said in one place - `build.zig.zon` - for a
+    // plugin's manifest to be checked against.
+    const engine_options = b.addOptions();
+    engine_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    mod.addImport("engine_options", engine_options.createModule());
 
     // zig build test
     //
@@ -145,6 +153,7 @@ pub fn build(b: *std.Build) void {
         .{ "fluxion-ecs", ecs },         .{ "fluxion-rhi", rhi },             .{ "fluxion-image", image },
         .{ "fluxion-font", typeface },   .{ "fluxion-debugdraw", debugdraw }, .{ "fluxion-ui", ui },
         .{ "fluxion-physics", physics }, .{ "fluxion-script", script },       .{ "fluxion-vfs", vfs },
+        .{ "fluxion-net", net },
     };
     for (noticed) |entry| _ = notices.addCopyFile(entry[1].path("LICENSE"), b.fmt("{s}.txt", .{entry[0]}));
     _ = notices.addCopyFile(.{ .cwd_relative = b.pathJoin(&.{ b.graph.zig_lib_directory.path orelse ".", "..", "LICENSE" }) }, "zig-standard-library.txt");

@@ -105,6 +105,35 @@ pub fn parse(comptime T: type, arguments: []const []const u8) FlagError!T {
     return flags;
 }
 
+/// `parse`, passing over what `T` has no field for: a launcher's own flags,
+/// and the game's, which it reads with `App.commandArgument`. A flag of
+/// `T`'s with a wrong value still fails. `--name=value` is read as well as
+/// `--name value`.
+pub fn parseKnown(comptime T: type, arguments: []const []const u8) FlagError!T {
+    var flags: T = .{};
+    var at: usize = 1;
+    while (at < arguments.len) {
+        const argument = arguments[at];
+        if (!std.mem.startsWith(u8, argument, "--")) {
+            at += 1;
+            continue;
+        }
+        if (std.mem.indexOfScalar(u8, argument, '=')) |cut| {
+            _ = try setFlag(T, &flags, argument[0..cut], argument[cut + 1 ..]);
+            at += 1;
+            continue;
+        }
+        const has_value = at + 1 < arguments.len and !std.mem.startsWith(u8, arguments[at + 1], "--");
+        if (!has_value) {
+            at += 1;
+            continue;
+        }
+        _ = try setFlag(T, &flags, argument, arguments[at + 1]);
+        at += 2;
+    }
+    return flags;
+}
+
 /// Set the field of `T` - or of a struct inside it - that `name` names.
 /// False when no field answers to it.
 fn setFlag(comptime T: type, into: *T, name: []const u8, value: []const u8) FlagError!bool {
