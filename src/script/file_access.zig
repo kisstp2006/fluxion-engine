@@ -61,8 +61,8 @@ pub const FileAccess = struct {
         .writeSecret = .{ attr.Params{ .names = &.{ "path", "text", "password" } }, flux.GivesErrors{} },
         .readSecret = .{ attr.Params{ .names = &.{ "vm", "path", "password" } }, flux.Returns.of([]const u8), flux.GivesErrors{} },
         .config = .{ attr.Params{ .names = &.{ "vm", "path", "password" } }, attr.defaults(.{""}), flux.Returns.of(ConfigRef), flux.GivesErrors{} },
-        .writeData = .{ attr.Params{ .names = &.{ "value", "path" } }, flux.GivesErrors{} },
-        .readData = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+        .writeData = .{ attr.Params{ .names = &.{ "vm", "value", "path" } }, flux.GivesErrors{} },
+        .readData = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.GivesErrors{} },
         .join = .{ attr.Params{ .names = &.{ "vm", "path", "name" } }, flux.Returns.of([]const u8) },
         .dirName = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8) },
         .fileName = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8) },
@@ -237,16 +237,16 @@ pub const FileAccess = struct {
     /// Write a struct of a script's as a data file under `user://`: its
     /// `@export` fields' values, which `readData` makes it again from - a
     /// save as a struct.
-    pub fn writeData(self: *FileAccess, value: flux.Value, path: []const u8) anyerror!void {
+    pub fn writeData(self: *FileAccess, vm: *flux.Vm, value: flux.Value, path: []const u8) anyerror!void {
         try writable(path);
-        try self.app.writeData(value, path);
+        try self.app.writeData(vm, value, path);
     }
 
     /// A data file's struct, made anew with the file's values: the game's
     /// (`res://`) or one `writeData` wrote. The same as `app.readData`.
-    pub fn readData(self: *FileAccess, path: []const u8) anyerror!flux.Value {
+    pub fn readData(self: *FileAccess, vm: *flux.Vm, path: []const u8) anyerror!flux.Value {
         try mayRead(self.app, path);
-        return self.app.readData(try self.app.loadData(path));
+        return self.app.readData(vm, try self.app.loadData(path));
     }
 
     /// `name` in the folder `path`: `join("user://saves", "one.json")`.

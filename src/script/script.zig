@@ -679,6 +679,12 @@ pub const Scripts = struct {
     /// Read a `.flux` file and compile it, or find the one read from there
     /// already. A file that reads and does not compile is kept, and its
     /// reasons are said: see `Script`.
+    /// The scripts whose VM `vm` is: what a call of the engine's given the
+    /// VM works with - the world's, or a host's own.
+    pub fn of(vm: *flux.Vm) *Scripts {
+        return @ptrCast(@alignCast(vm.host.?));
+    }
+
     pub fn load(self: *Scripts, path: []const u8) !ScriptHandle {
         const app = self.app;
         const io = app.io orelse return error.NoIo;

@@ -100,3 +100,29 @@ test "a plugin's singleton opens before the project's autoloads, and reads its s
     const main = scripts.moduleOf(scripts.find("res://main.flux").?).?;
     try testing.expect(scripts.vm.get(main, "saw_it").?.asBool());
 }
+
+test "a host's own scripts read a plugin's settings in their own VM" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (files) |f| {
+        if (std.fs.path.dirname(f[0])) |parent| try tmp.dir.createDirPath(testing.io, parent);
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = f[0], .data = f[1] });
+    }
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = root[0..try tmp.dir.realPath(testing.io, &root)];
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = path });
+    defer app.destroy();
+    // The world's scripts, compiled and never run, as an editor's are; and
+    // a host's own beside them, as an editor's plugins are.
+    try app.useScripts(.{ .run = false });
+    const own = try @import("../script/script.zig").Scripts.create(app, .{ .entities = false });
+    defer own.calls.destroy(own);
+    const tool = try own.add("tool.flux",
+        \\fn id() int {
+        \\    const s: any = app.pluginSettings("game_jolt") catch null;
+        \\    return s.game_id;
+        \\}
+    );
+    const got = try own.vm.callName(own.moduleOf(tool).?, "id", &.{});
+    try testing.expectEqual(@as(i64, 42), got.asInt());
+}

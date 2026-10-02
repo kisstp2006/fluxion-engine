@@ -3731,25 +3731,28 @@ pub fn hostScriptSetup(self: *App) flux.service.Options {
     return script.hostServiceOptions(self);
 }
 
-/// What a script awaits for the next frame: `await app.nextFrame()`. Null
-/// in a game with no scripts.
-pub fn nextFrame(self: *App) flux.Value {
-    const scripts = self.scripts orelse return .null;
+// The calls below make or keep a script's values, so they are the VM's
+// that asks - the world's, or a host's own, an editor's plugins' - and are
+// handed it.
+
+/// What a script awaits for the next frame: `await app.nextFrame()`.
+pub fn nextFrame(_: *App, vm: *flux.Vm) flux.Value {
+    const scripts = script.Scripts.of(vm);
     return scripts.calls.nextFrame(scripts);
 }
 
 /// Call a script's function at the end of this frame, after its systems and
 /// signals: `app.callDeferred(self.respawn)`.
-pub fn callDeferred(self: *App, callable: flux.Value) !void {
-    const scripts = self.scripts orelse return error.NoScripts;
+pub fn callDeferred(_: *App, vm: *flux.Vm, callable: flux.Value) !void {
+    const scripts = script.Scripts.of(vm);
     return scripts.calls.callDeferred(scripts, callable);
 }
 
 /// A data file's struct, made anew and given the file's values - from Flux,
 /// `app.readData("res://dialogue/intro.data")`. A value the struct cannot
 /// hold is said and passed over, as a scene's `"exports"` are.
-pub fn readData(self: *App, handle: data_file.DataHandle) !flux.Value {
-    const scripts = self.scripts orelse return error.NoScripts;
+pub fn readData(self: *App, vm: *flux.Vm, handle: data_file.DataHandle) !flux.Value {
+    const scripts = script.Scripts.of(vm);
     const held = self.data_files.get(handle) orelse return error.NoSuchData;
     const contents = try data_file.read(self.gpa, held.bytes);
     defer contents.deinit();
@@ -3761,8 +3764,8 @@ pub fn readData(self: *App, handle: data_file.DataHandle) !flux.Value {
 /// `@secret` ones what `.fluxion/secrets.json` keeps. From Flux,
 /// `app.pluginSettings("game_jolt")`. `error.NoSuchSection` when no plugin
 /// has one of the name.
-pub fn pluginSettings(self: *App, section: []const u8) !flux.Value {
-    const scripts = self.scripts orelse return error.NoScripts;
+pub fn pluginSettings(_: *App, vm: *flux.Vm, section: []const u8) !flux.Value {
+    const scripts = script.Scripts.of(vm);
     return scripts.calls.pluginSettings(scripts, section);
 }
 
@@ -3772,8 +3775,8 @@ pub fn pluginSettings(self: *App, section: []const u8) !flux.Value {
 /// there already is read again, so the next `readData` gives what was
 /// written. A field whose value a file cannot say - an entity, a function -
 /// is passed over with a warning.
-pub fn writeData(self: *App, value: flux.Value, path: []const u8) !void {
-    const scripts = self.scripts orelse return error.NoScripts;
+pub fn writeData(self: *App, vm: *flux.Vm, value: flux.Value, path: []const u8) !void {
+    const scripts = script.Scripts.of(vm);
     const text = try scripts.calls.writeData(scripts, value);
     defer self.gpa.free(text);
     try self.writeText(path, text);
@@ -5172,10 +5175,10 @@ pub const reflect_methods = .{
     .setInterfaceZoom = .{attr.Params{ .names = &.{"zoom"} }},
     .interfaceZoom = .{},
     // Scripts
-    .nextFrame = .{flux.Returns{ .builtin = .signal }},
-    .callDeferred = .{attr.Params{ .names = &.{"function"} }},
-    .readData = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
-    .pluginSettings = .{ attr.Params{ .names = &.{"section"} }, flux.GivesErrors{} },
+    .nextFrame = .{ attr.Params{ .names = &.{"vm"} }, flux.Returns{ .builtin = .signal } },
+    .callDeferred = .{attr.Params{ .names = &.{ "vm", "function" } }},
+    .readData = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.GivesErrors{} },
+    .pluginSettings = .{ attr.Params{ .names = &.{ "vm", "section" } }, flux.GivesErrors{} },
     // Files of every kind
     .loadInBackground = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
     .loadProgress = .{attr.Params{ .names = &.{"path"} }},
@@ -5187,6 +5190,9 @@ pub const reflect_methods = .{
     .saveSpriteFrames = .{ attr.Params{ .names = &.{ "frames", "path" } }, flux.GivesErrors{} },
     // The project
     .gameVersion = .{},
+    // What the game was started with
+    .commandArgument = .{attr.Params{ .names = &.{"name"} }},
+    .pageParameter = .{attr.Params{ .names = &.{"name"} }},
     // A game's files
     .openUrl = .{ attr.Params{ .names = &.{"url"} }, flux.GivesErrors{} },
     // The window
