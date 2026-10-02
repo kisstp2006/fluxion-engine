@@ -194,6 +194,7 @@ pub const RefOf = @import("asset_refs.zig").RefOf;
 pub const Given = @import("script_host.zig").Given;
 pub const install = @import("script_host.zig").install;
 pub const serviceOptions = @import("script_service.zig").serviceOptions;
+pub const hostServiceOptions = @import("script_service.zig").hostServiceOptions;
 
 /// The largest script file read.
 const file_limit = 16 << 20;
@@ -633,7 +634,7 @@ pub const Scripts = struct {
             .time = try vm.handle(&self.time_access),
             .images = try vm.handle(&self.images_access),
             .web = try vm.handle(&self.web_access),
-        });
+        }, if (options.entities) .world else .host);
         self.frame = try vm.newSignal("frame", 0);
         try vm.hold(self.frame);
         self.vm = vm;

@@ -3724,6 +3724,13 @@ pub fn scriptSetup(self: *App) flux.service.Options {
     return script.serviceOptions(self);
 }
 
+/// The same, for a host's own scripts that are no entity's - an editor's
+/// plugins: no method of theirs is one the engine calls, so `draw` and
+/// `update` are theirs to name.
+pub fn hostScriptSetup(self: *App) flux.service.Options {
+    return script.hostServiceOptions(self);
+}
+
 /// What a script awaits for the next frame: `await app.nextFrame()`. Null
 /// in a game with no scripts.
 pub fn nextFrame(self: *App) flux.Value {

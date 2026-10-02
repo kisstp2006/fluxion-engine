@@ -397,13 +397,18 @@ fn notAnEntity(vm: *flux.Vm, value: flux.Value) flux.Vm.Error {
 /// scripts run.
 pub const Given = struct { app: flux.Value, files: flux.Value, time: flux.Value, images: flux.Value, web: flux.Value };
 
+/// Whose scripts a VM compiles: the world's, on its entities, which the
+/// engine calls the methods of - `ready`, `update`, `draw` - or a host's own
+/// that are no entity's, an editor's plugins, whose methods are their own.
+pub const Whose = enum { world, host };
+
 /// What every VM that compiles the game's scripts is given - the game's own,
 /// with the values `given` holds, and each of an editor's analyses, with
 /// their types only - so the two agree on what a script may name, what it
 /// can call, and what is said of it: the engine's types and enums by name,
 /// the calls an entity has of `app`'s, what its components have beside
 /// their fields, the methods the engine calls and the annotations it reads.
-pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
+pub fn install(vm: *flux.Vm, app: *App, given: ?Given, whose: Whose) Allocator.Error!void {
     // The project says how strict the compiler is, for the game and for an
     // editor's analyses alike.
     vm.options.unhandled_errors = if (app.project.settings) |s| s.scripting.unhandled_errors else (Project.Settings{}).scripting.unhandled_errors;
@@ -446,7 +451,7 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given) Allocator.Error!void {
         if (kind != .frames) try vm.declareType(reflect.typeOf(AssetRef(kind)));
         try vm.declareMember(.{ .of = reflect.typeOf(RefOf(kind)), .name = "resource_path", .type = .string, .doc = "The file it was read from, or \"\" for one made in memory and not saved yet." });
     }
-    for (std.enums.values(Lifecycle)) |which| try vm.declareHook(which.hook());
+    if (whose == .world) for (std.enums.values(Lifecycle)) |which| try vm.declareHook(which.hook());
     for (annotations) |a| try vm.declareAnnotation(a);
 }
 

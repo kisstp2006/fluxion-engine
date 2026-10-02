@@ -29,6 +29,18 @@ pub fn serviceOptions(app: *App) flux.service.Options {
     };
 }
 
+/// For `App.hostScriptSetup`: the same, for a host's own scripts that are
+/// no entity's, whose methods the engine does not call.
+pub fn hostServiceOptions(app: *App) flux.service.Options {
+    return .{
+        .setup = .{ .context = app, .run = installHostForAnalysis },
+        .loader = .{ .context = app, .load = loadImport },
+        .io = app.io,
+        .strings = .{ .context = app, .values = stringValues },
+        .imports = .{ .context = app, .list = importableScripts },
+    };
+}
+
 /// The project's scripts, for an editor's `@import("` and the names they
 /// declare: every `.flux` file under `res://` but in hidden folders and
 /// what a build leaves, `zig-out` and `zig-pkg`. None without a project.
@@ -166,7 +178,11 @@ fn actionValue(arena: Allocator, action: actions.Action, doc: ?[]const u8) Alloc
 /// What the game's VM is given, with nothing behind `app` and `files`: see
 /// `install`.
 fn installForAnalysis(context: ?*anyopaque, vm: *flux.Vm) anyerror!void {
-    try install(vm, @ptrCast(@alignCast(context.?)), null);
+    try install(vm, @ptrCast(@alignCast(context.?)), null, .world);
+}
+
+fn installHostForAnalysis(context: ?*anyopaque, vm: *flux.Vm) anyerror!void {
+    try install(vm, @ptrCast(@alignCast(context.?)), null, .host);
 }
 
 /// The struct a `Script` names: the one it names, or else the one named

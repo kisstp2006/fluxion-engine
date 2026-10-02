@@ -162,6 +162,24 @@ test "scripts that are no entity's run, their tasks with them, and leave the wor
     try testing.expectEqual(@as(i64, 0), own.vm.get(own.moduleOf(door).?, "readied").?.asInt());
 }
 
+test "a host's own scripts name methods as they like: the engine's are the world's" {
+    const app = try scripted(.{ .run = false });
+    defer app.destroy();
+    const source =
+        \\struct Panel {
+        \\    fn draw(self, ui: any) {
+        \\        print(ui);
+        \\    }
+        \\}
+    ;
+    const world = try flux.service.Analysis.init(testing.allocator, "panel.flux", source, app.scriptSetup());
+    defer world.deinit();
+    try testing.expectEqual(@as(usize, 1), world.diagnostics.items.items.len);
+    const host = try flux.service.Analysis.init(testing.allocator, "panel.flux", source, app.hostScriptSetup());
+    defer host.deinit();
+    try testing.expectEqual(@as(usize, 0), host.diagnostics.items.items.len);
+}
+
 test "a script is readied once, then stepped and updated before the game's own systems" {
     const app = try scripted(.{});
     defer app.destroy();
