@@ -13,6 +13,7 @@ const Entity = ecs.Entity;
 
 const Scripts = @import("script.zig").Scripts;
 const shortName = @import("script.zig").shortName;
+const componentHandle = @import("script.zig").componentHandle;
 
 /// What a script reaches as `self.entity`: its entity, and the calls on it.
 /// The collector owns it, so a script that keeps it after `exit` holds
@@ -75,7 +76,7 @@ pub const EntityRef = struct {
     pub fn find(self: *EntityRef, vm: *flux.Vm, component: *const reflect.Type) flux.Vm.Error!?flux.Value {
         _ = try self.entryOf(vm, component);
         if (self.scripts.app.componentOfType(self.entity, component) == null) return null;
-        return try vm.liveHandle(&self.scripts.resolver, self.entity.toInt(), component);
+        return try componentHandle(self.scripts, self.entity, component);
     }
 
     /// Put a `component` on, holding its defaults, and hand it back to fill
@@ -83,7 +84,7 @@ pub const EntityRef = struct {
     pub fn add(self: *EntityRef, vm: *flux.Vm, component: *const reflect.Type) flux.Vm.Error!flux.Value {
         const entry = try self.entryOf(vm, component);
         const added = self.scripts.app.addComponentNamed(self.entity, entry.name) catch |err| return refused(vm, err, "add", entry.name);
-        return vm.liveHandle(&self.scripts.resolver, self.entity.toInt(), added.type);
+        return componentHandle(self.scripts, self.entity, added.type);
     }
 
     /// Take a `component` off. One it has not got does nothing.

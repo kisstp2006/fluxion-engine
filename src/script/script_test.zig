@@ -979,12 +979,24 @@ test "an entity is one handle to the scripts, wherever they are handed it" {
     var handles = scripts.handles.valueIterator();
     while (handles.next()) |handle| try testing.expect(scripts.vm.held.contains(handle.obj()));
     const other_handle = scripts.handles.get(other).?;
+    // So is each component a script reached, one handle however often it
+    // asked: the finder's Health three times and its Transform2D once, the
+    // other's Transform2D once.
+    try testing.expectEqual(@as(usize, 3), scripts.component_handles.count());
+    var other_place: ?flux.Value = null;
+    var asked = scripts.component_handles.iterator();
+    while (asked.next()) |entry| {
+        try testing.expect(scripts.vm.held.contains(entry.value_ptr.obj()));
+        if (entry.key_ptr.entity.eql(other)) other_place = entry.value_ptr.*;
+    }
     // Taken back to the root first, or it would go with the one it hangs from.
     try app.setParent(finder, .none, false);
     app.world.despawn(other);
     _ = try app.step();
     try testing.expect(!scripts.handles.contains(other));
     try testing.expect(!scripts.vm.held.contains(other_handle.obj()));
+    try testing.expectEqual(@as(usize, 2), scripts.component_handles.count());
+    try testing.expect(!scripts.vm.held.contains(other_place.?.obj()));
     try testing.expect(scripts.handles.contains(finder));
     try testing.expect(!(try scripts.vm.callName(module, "keptAlive", &.{})).asBool());
     try testing.expectEqual(@as(usize, 0), scripts.failures);

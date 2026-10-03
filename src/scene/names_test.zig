@@ -151,6 +151,27 @@ test "the names of the dead are given back at the end of the frame" {
     try testing.expectEqual(@as(u32, 1), app.names.by_name.count());
 }
 
+test "the dead are forgotten in a world cleared and filled again as the old one was" {
+    const app = try App.create(testing.allocator, .{ .headless = true });
+    defer app.destroy();
+
+    const ship = try app.world.spawn();
+    try app.setName(ship, "ship");
+    app.world.despawn(ship);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.names.of_entity.count());
+
+    // The new world counts its changes from nought again, and comes to the
+    // number the old one was swept at: its dead are forgotten all the same.
+    app.clearWorld();
+    const buoy = try app.world.spawn();
+    try app.setName(buoy, "buoy");
+    app.world.despawn(buoy);
+    _ = try app.step();
+    try testing.expect(app.find("buoy") == null);
+    try testing.expectEqual(@as(usize, 0), app.names.of_entity.count());
+}
+
 test "a name is its siblings' own: two parents may each have a child of it, and a clash takes the next free one" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();

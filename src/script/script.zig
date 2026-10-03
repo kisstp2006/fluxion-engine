@@ -527,6 +527,10 @@ pub const Scripts = struct {
     /// The handle each entity is to the scripts, held from the first time
     /// one is handed to them until the end of the frame it dies in.
     handles: std.AutoHashMapUnmanaged(Entity, flux.Value) = .empty,
+    /// The handle each component is to the scripts, by its entity and type,
+    /// held as `handles` are: one component, one value. See
+    /// `componentHandle`.
+    component_handles: std.AutoHashMapUnmanaged(ComponentKey, flux.Value) = .empty,
     /// The value each file is to the scripts, once handed to them: one
     /// file, one value. See `assetValue`.
     asset_values: std.AutoHashMapUnmanaged(AssetKey, flux.Value) = .empty,
@@ -649,6 +653,7 @@ pub const Scripts = struct {
         self.instances.deinit(gpa);
         self.entity_of.deinit(gpa);
         self.handles.deinit(gpa);
+        self.component_handles.deinit(gpa);
         self.asset_values.deinit(gpa);
         self.clock_values.deinit(gpa);
         self.clock_signals.deinit(gpa);
@@ -1019,6 +1024,12 @@ pub const Scripts = struct {
                     if (self.app.world.isAlive(entry.key_ptr.*)) continue;
                     self.vm.release(entry.value_ptr.*);
                     self.handles.removeByPtr(entry.key_ptr);
+                }
+                var component_handles = self.component_handles.iterator();
+                while (component_handles.next()) |entry| {
+                    if (self.app.world.isAlive(entry.key_ptr.entity)) continue;
+                    self.vm.release(entry.value_ptr.*);
+                    self.component_handles.removeByPtr(entry.key_ptr);
                 }
             },
             .quitting => self.sayAppSignal(.quitting, &.{}),
@@ -2220,6 +2231,25 @@ pub fn entityHandle(scripts: *Scripts, entity: Entity) flux.Vm.Error!flux.Value 
     };
     try vm.hold(handle);
     scripts.handles.putAssumeCapacityNoClobber(entity, handle);
+    return handle;
+}
+
+/// A component of an entity's, by both.
+const ComponentKey = struct { entity: Entity, type: *const reflect.Type };
+
+/// The handle a component is to the scripts: made the first time one asks
+/// for it and the same one after, until the end of the frame its entity
+/// dies in. A handle finds its component again at each use, so the first
+/// serves every later `get` - and a script reading a component each frame
+/// makes nothing for the collector to free.
+pub fn componentHandle(scripts: *Scripts, entity: Entity, component: *const reflect.Type) flux.Vm.Error!flux.Value {
+    const key: ComponentKey = .{ .entity = entity, .type = component };
+    if (scripts.component_handles.get(key)) |known| return known;
+    const vm = scripts.vm;
+    try scripts.component_handles.ensureUnusedCapacity(scripts.app.gpa, 1);
+    const handle = try vm.liveHandle(&scripts.resolver, entity.toInt(), component);
+    try vm.hold(handle);
+    scripts.component_handles.putAssumeCapacityNoClobber(key, handle);
     return handle;
 }
 

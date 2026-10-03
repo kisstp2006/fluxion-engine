@@ -219,6 +219,9 @@ page: []const []const u8 = &.{},
 // The world, its systems, and what they say to each other: `core/`.
 /// Everything in the game.
 world: ecs.World,
+/// The world's `structure` when the tables beside it last forgot the dead:
+/// see `forgetTheDead`. Null for a world never swept.
+swept_at: ?u64 = null,
 /// Spawns, despawns, adds and removes that wait for the system asking for
 /// them to return, so a query can ask. See `core/commands.zig`.
 commands: Commands,
@@ -1563,18 +1566,26 @@ pub fn clearWorld(self: *App) void {
     self.commands.clear();
     self.world.deinit();
     self.world = .init(self.gpa);
+    self.swept_at = null;
     self.snapshots.clearRetainingCapacity();
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
 }
 
 /// What every table beside the world kept of the entities that died, let
-/// go of: once a frame, after the last despawn the engine makes.
+/// go of: once a frame, after the last despawn the engine makes. A world
+/// whose make-up has not changed since the last time has lost no one, and
+/// no table takes a dead entity in, so then there is nothing to walk.
 pub fn forgetTheDead(self: *App) void {
+    const structure = self.world.structure;
+    if (self.swept_at == structure) return;
     inline for (entity_tables) |field| {
         const table = &@field(self, @tagName(field));
         if (@hasDecl(@TypeOf(table.*), "forgetDead")) table.forgetDead(self);
     }
+    // As it was before the walk: a table that despawned something on the
+    // way is walked again next time.
+    self.swept_at = structure;
 }
 
 // -------------------------------------------------------------------------
