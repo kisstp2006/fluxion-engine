@@ -137,6 +137,17 @@ commands: []const ui.RenderCommand = &.{},
 /// Unscaled seconds since the first frame: what animated text moves on.
 seconds: f64 = 0,
 
+/// A tap still being shown: see `pointerDown`.
+tap: Tap = .none,
+
+const Tap = enum {
+    none,
+    /// Shown down last frame, and up this one.
+    up_next,
+    /// Another tap came while one was coming up, and is shown down this one.
+    down_next,
+};
+
 pub fn deinit(self: *Interface) void {
     if (self.renderer) |*renderer| renderer.deinit();
     self.* = undefined;
@@ -293,7 +304,7 @@ pub fn feed(
     self.field_style = null;
 
     layout.setShift(input.mods.shift);
-    const down = input.buttonDown(.left);
+    const down = self.pointerDown(input);
     if (input.pointer.locked or (!input.pointer.inside and !down)) {
         layout.setPointer(-1, -1, false);
     } else {
@@ -327,6 +338,30 @@ pub fn feed(
     const typing = layout.wantsKeyboard();
     layout.holdNavigation(if (layout.navigable()) heldDirection(input, typing) else null);
     layout.setActivate(input.actionDown("ui_accept") and !typing);
+}
+
+/// Whether the interface sees the left button down this frame. The
+/// interface sees one state a frame, so a tap - down and up again within
+/// one frame, as a touchpad's or a quick click can be - is shown down for
+/// that frame and up for the next; a second tap while the first comes up
+/// waits a frame of its own.
+fn pointerDown(self: *Interface, input: *const Input) bool {
+    const held = input.buttonDown(.left);
+    const tapped = input.buttonJustPressed(.left) and !held;
+    switch (self.tap) {
+        .none => {
+            if (tapped) self.tap = .up_next;
+            return held or tapped;
+        },
+        .up_next => {
+            self.tap = if (tapped) .down_next else .none;
+            return false;
+        },
+        .down_next => {
+            self.tap = if (held) .none else .up_next;
+            return true;
+        },
+    }
 }
 
 /// How far a turn of the wheel scrolls, in pixels, sideways and up: notches
@@ -655,6 +690,10 @@ fn pointerAt(x: f64, y: f64) platform.Event {
     return .{ .cursor = .{ .window = .none, .x = x, .y = y, .dx = 0, .dy = 0 } };
 }
 
+fn leftButton(action: platform.Action, x: f64, y: f64) platform.Event {
+    return .{ .mouse_button = .{ .window = .none, .button = .left, .action = action, .mods = .{}, .x = x, .y = y } };
+}
+
 fn wheelTurned(notches: f64) platform.Event {
     return .{ .scroll = .{ .window = .none, .x = 0, .y = notches, .mods = .{} } };
 }
@@ -708,6 +747,17 @@ fn twoButtons(layout: *ui.Ui) void {
     layout.empty(.{ .id = "play", .width = .fixed(80), .height = .fixed(20), .focus = .{} });
     layout.empty(.{ .id = "quit", .width = .fixed(80), .height = .fixed(20), .focus = .{} });
 }
+
+/// A button that counts its clicks: the pointer coming up on it.
+const Clicks = struct {
+    var count: u32 = 0;
+
+    fn button(layout: *ui.Ui) void {
+        layout.open(.{ .id = "play", .width = .fixed(80), .height = .fixed(20) });
+        if (layout.justReleased()) count += 1;
+        layout.close();
+    }
+};
 
 fn wideRow(layout: *ui.Ui) void {
     layout.open(.{ .direction = .top_to_bottom });
@@ -866,6 +916,42 @@ test "the arrows are the game's until the interface has the focus" {
     fixture.input.apply(keyDown(.down, .{}));
     try fixture.frame(twoButtons);
     try testing.expect(fixture.layout.isFocused("quit"));
+}
+
+test "a click pressed and released in one frame is a click, and so is another in the next frame" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+    Clicks.count = 0;
+
+    fixture.input.apply(pointerAt(10, 10));
+    try fixture.frame(Clicks.button);
+
+    // Down and up before the frame: shown down in it, and up in the next.
+    fixture.input.apply(leftButton(.press, 10, 10));
+    fixture.input.apply(leftButton(.release, 10, 10));
+    try fixture.frame(Clicks.button);
+    try testing.expectEqual(@as(u32, 0), Clicks.count);
+    try fixture.frame(Clicks.button);
+    try testing.expectEqual(@as(u32, 1), Clicks.count);
+
+    // Two such taps in frames running: the second waits until the first has
+    // come up, and each is a click.
+    for (0..2) |_| {
+        fixture.input.apply(leftButton(.press, 10, 10));
+        fixture.input.apply(leftButton(.release, 10, 10));
+        try fixture.frame(Clicks.button);
+    }
+    try fixture.frame(Clicks.button);
+    try fixture.frame(Clicks.button);
+    try testing.expectEqual(@as(u32, 3), Clicks.count);
+
+    // A press held over frames is one click, when it comes up.
+    fixture.input.apply(leftButton(.press, 10, 10));
+    try fixture.frame(Clicks.button);
+    try fixture.frame(Clicks.button);
+    fixture.input.apply(leftButton(.release, 10, 10));
+    try fixture.frame(Clicks.button);
+    try testing.expectEqual(@as(u32, 4), Clicks.count);
 }
 
 test "a wheel the interface scrolled with does not reach the game" {
