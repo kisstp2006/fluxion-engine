@@ -63,7 +63,9 @@ pub fn build(b: *std.Build) void {
     // The notices the libraries built into the runtime ask a program made
     // from them to carry - what an export writes beside a game as
     // LICENSES.txt - a file each. The runtime's own licence asks for none,
-    // and nor do the Boost licence and CC0 the rest are under.
+    // and nor do the Boost licence and CC0 the rest are under. stb_vorbis,
+    // the Ogg decoder in fluxion-audio, is used under the Unlicense, which
+    // asks for nothing either; it is named all the same.
     const notices = b.addWriteFiles();
     _ = notices.addCopyFile(b.path("LICENSE"), "fluxion-engine.txt");
     const noticed = [_]struct { []const u8, *std.Build.Dependency }{
@@ -73,6 +75,7 @@ pub fn build(b: *std.Build) void {
         .{ "fluxion-net", net },
     };
     for (noticed) |entry| _ = notices.addCopyFile(entry[1].path("LICENSE"), b.fmt("{s}.txt", .{entry[0]}));
+    _ = notices.addCopyFile(audio.namedLazyPath("stb_vorbis.txt"), "stb_vorbis.txt");
     _ = notices.addCopyFile(.{ .cwd_relative = b.pathJoin(&.{ b.graph.zig_lib_directory.path orelse ".", "..", "LICENSE" }) }, "zig-standard-library.txt");
     b.addNamedLazyPath("notices", notices.getDirectory());
 
