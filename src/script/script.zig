@@ -2341,14 +2341,34 @@ const Printed = struct {
                 self.len = 0;
                 continue;
             }
-            // A line longer than the buffer is said in parts.
+            // A line longer than the buffer is said in parts, each cut
+            // between characters: a character it would cut in half goes
+            // whole into the next part.
             if (self.len == self.line.len) {
-                said.info("{s}", .{self.line[0..self.len]});
-                self.len = 0;
+                const cut = wholeCharacters(self.line[0..self.len]);
+                said.info("{s}", .{self.line[0..cut]});
+                std.mem.copyForwards(u8, self.line[0 .. self.len - cut], self.line[cut..self.len]);
+                self.len -= cut;
             }
             self.line[self.len] = c;
             self.len += 1;
         }
+    }
+
+    /// How much of `bytes` is whole characters: all of it, but for a last
+    /// one whose bytes have not all come yet. Bytes that are not UTF-8 count
+    /// as whole, each on its own.
+    fn wholeCharacters(bytes: []const u8) usize {
+        var start = bytes.len;
+        // Back over the continuation bytes a character can have, at most.
+        while (start > 0 and bytes.len - start < 4) {
+            start -= 1;
+            if (bytes[start] & 0xC0 != 0x80) break;
+        }
+        const length = std.unicode.utf8ByteSequenceLength(bytes[start]) catch return bytes.len;
+        // A lead byte with its last continuation byte still to come; never
+        // the whole buffer, or nothing would be said.
+        return if (start + length > bytes.len and start > 0) start else bytes.len;
     }
 };
 
@@ -2373,6 +2393,25 @@ test "what a script prints is said a line at a time" {
     try testing.expectEqualStrings("and ", printed.line[0..printed.len]);
     try printed.writer.splatByteAll('x', 600);
     try testing.expectEqual(@as(usize, 600 + 4 - 512), printed.len);
+}
+
+test "a printed line too long for one part is cut between characters" {
+    var printed: Printed = .{};
+    // One byte, then two-byte characters: the 512th byte is the first half
+    // of one, which waits for the next part.
+    try printed.writer.writeAll("a");
+    try printed.writer.splatBytesAll("ő", 300);
+    try testing.expectEqual(@as(usize, 1 + 600 - 511), printed.len);
+    const rest = printed.line[0..printed.len];
+    try testing.expect(std.unicode.utf8ValidateSlice(rest));
+    try testing.expect(std.mem.startsWith(u8, rest, "ő"));
+
+    // Whole characters are whole, a half one is not, and bytes that are not
+    // UTF-8 are their own.
+    try testing.expectEqual(@as(usize, 3), Printed.wholeCharacters("aő"));
+    try testing.expectEqual(@as(usize, 1), Printed.wholeCharacters("a\xC5"));
+    try testing.expectEqual(@as(usize, 1), Printed.wholeCharacters("a\xF0\x9F"));
+    try testing.expectEqual(@as(usize, 4), Printed.wholeCharacters("\x80\x80\x80\x80"));
 }
 
 /// A script's value as a scene writes an `@export`'s: what an editor shows
