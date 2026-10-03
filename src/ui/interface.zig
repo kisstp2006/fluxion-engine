@@ -93,8 +93,11 @@ caret_refused: bool = false,
 
 /// A print of what the platform last had of the input with the keyboard -
 /// told it, or heard from its bar - so it is told again only when the game
-/// changed it. See `tellField`.
+/// changed it: its text, caret and kind, and apart from them, its look -
+/// which is said each frame only as the interface is declared, after a bar's
+/// change is put in. See `tellField`.
 field_told: ?u64 = null,
+look_told: ?u64 = null,
 
 /// What the input with the keyboard shows while empty, and how a phone's bar
 /// above its keyboard is to look for it: said each frame by what declared
@@ -479,6 +482,7 @@ pub fn applyTextInput(self: *Interface, layout: *ui.Ui, window: platform.Window)
         self.typing = wanted;
         self.caret_area = null;
         self.field_told = null;
+        self.look_told = null;
         window.setTextInput(wanted) catch |err| {
             log.warn("could not turn text input {s}: {t}", .{ if (wanted) "on" else "off", err });
         };
@@ -502,13 +506,22 @@ pub fn applyTextInput(self: *Interface, layout: *ui.Ui, window: platform.Window)
 /// somewhere of its own - a phone's bar above its keyboard - whenever it is
 /// not what the platform last had: a new input, or one the game changed.
 fn tellField(self: *Interface, layout: *ui.Ui, window: platform.Window) void {
-    const field = self.fieldOf(layout) orelse return;
-    const key = fieldKey(field);
-    if (self.field_told == key) return;
-    self.field_told = key;
+    const field = self.fieldToTell(layout) orelse return;
     window.setTextInputField(field) catch |err| {
         log.warn("could not show the text field: {t}", .{err});
     };
+}
+
+/// The input with the keyboard, when it is not what the platform last had;
+/// null when it is.
+fn fieldToTell(self: *Interface, layout: *ui.Ui) ?platform.text.Field {
+    const field = self.fieldOf(layout) orelse return null;
+    const key = fieldKey(field);
+    const look = lookKey(field);
+    if (self.field_told == key and self.look_told == look) return null;
+    self.field_told = key;
+    self.look_told = look;
+    return field;
 }
 
 /// The input with the keyboard, as `platform.text.Field` says one: its text,
@@ -528,15 +541,23 @@ fn fieldOf(self: *const Interface, layout: *ui.Ui) ?platform.text.Field {
     };
 }
 
+/// A print of what a field holds and what kind it is.
 fn fieldKey(field: platform.text.Field) u64 {
     var hasher = std.hash.Wyhash.init(0);
     hasher.update(field.text);
-    hasher.update(field.hint);
     std.hash.autoHash(&hasher, field.selection_start);
     std.hash.autoHash(&hasher, field.selection_end);
     std.hash.autoHash(&hasher, field.password);
     std.hash.autoHash(&hasher, field.multiline);
     std.hash.autoHash(&hasher, field.max_length);
+    return hasher.final();
+}
+
+/// A print of how a field looks: its placeholder and its look.
+fn lookKey(field: platform.text.Field) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(field.hint);
+    std.hash.autoHash(&hasher, field.look != null);
     if (field.look) |look| {
         inline for (.{ look.field, look.button }) |box| {
             inline for (std.meta.fields(platform.text.Box)) |part| std.hash.autoHash(&hasher, @as(u32, @bitCast(@field(box, part.name))));
@@ -699,12 +720,26 @@ test "a phone's bar puts its whole text in the input with the keyboard, and its 
     // What the bar has is not told back to it.
     try testing.expectEqual(fieldKey(fixture.interface.fieldOf(&fixture.layout).?), fixture.interface.field_told.?);
 
+    // Told the bar once, in its look; a change from the bar is not told back,
+    // though its look is said again only after the change is put in.
+    const style: FieldStyle = .{ .hint = "Name", .look = .{} };
+    fixture.interface.field_style = style;
+    try testing.expect(fixture.interface.fieldToTell(&fixture.layout) != null);
+    try testing.expect(fixture.interface.fieldToTell(&fixture.layout) == null);
+    fixture.input.field_edited = .{ .text = "hello!", .selection_start = 6, .selection_end = 6 };
+    try fixture.frame(nameField);
+    fixture.interface.field_style = style;
+    try testing.expect(fixture.interface.fieldToTell(&fixture.layout) == null);
+    // One the game made is told.
+    fixture.layout.setTextValue("name", "hi");
+    try testing.expectEqualStrings("hi", fixture.interface.fieldToTell(&fixture.layout).?.text);
+
     // Its Done: answered, as Enter answers, and the keyboard let go of.
     fixture.input.apply(.{ .text_done = .{ .window = .none, .submitted = true } });
     try fixture.frame(nameField);
     try testing.expect(fixture.layout.textSubmitted("name"));
     try testing.expect(!fixture.layout.isFocused("name"));
-    try testing.expectEqualStrings("hello", fixture.layout.textValueOf("name").?);
+    try testing.expectEqualStrings("hi", fixture.layout.textValueOf("name").?);
 }
 
 fn pathField(layout: *ui.Ui) void {
