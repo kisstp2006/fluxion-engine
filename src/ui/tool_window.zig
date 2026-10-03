@@ -248,7 +248,7 @@ pub fn route(context: *anyopaque, ev: platform.Event) void {
 /// in the main interface's fonts; its pointer's shape and text input told.
 pub fn layOut(self: *ToolWindow, app: *App) !void {
     self.fit(&app.interface);
-    if (app.interface.fillFaces(&app.assets).len != 0) self.ui.setMeasurer(Interface.measurer(&app.interface.faces));
+    if (!app.interface.fillFaces(&app.assets).isEmpty()) self.ui.setMeasurer(Interface.measurer(&app.interface.faces));
     try self.interface.feed(app.gpa, &self.ui, &self.input, &app.clipboard, app.time.unscaled_delta);
 
     self.interface.commands = &.{};

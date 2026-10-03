@@ -23,6 +23,7 @@ const platform = @import("fluxion_platform");
 const typeface = @import("fluxion_font");
 
 const Assets = @import("../assets/assets.zig");
+const GlyphAtlas = @import("../render/GlyphAtlas.zig");
 const Clipboard = @import("../platform/clipboard.zig");
 const Input = @import("../input/input.zig");
 
@@ -147,10 +148,15 @@ pub const FieldStyle = struct {
     look: ?platform.text.Look = null,
 };
 
-/// The faces a frame's text is in, by the index a style's `font` gives.
+/// The faces a frame's text is in, by the index a style's `font` gives,
+/// and after them the ones every run falls back on - the system's emoji
+/// fonts, see `Assets.loadEmojiFonts`.
 pub const Faces = struct {
-    items: [max_fonts]*const typeface.Font = undefined,
+    items: [max_fonts + Assets.max_fallback_fonts]*const typeface.Font = undefined,
+    /// How many a style can name, from `font` on.
     len: u16 = 0,
+    /// How many after those are fallbacks.
+    fallbacks: u16 = 0,
 
     /// The face a run with this index is in: its own, or the first for an
     /// index past the end, as the renderer draws it.
@@ -158,8 +164,21 @@ pub const Faces = struct {
         return self.items[if (index < self.len) index else 0];
     }
 
+    /// Every face, the fallbacks last: the renderer's table.
     pub fn slice(self: *const Faces) []const *const typeface.Font {
-        return self.items[0..self.len];
+        return self.items[0 .. self.len + self.fallbacks];
+    }
+
+    pub fn isEmpty(self: *const Faces) bool {
+        return self.len == 0;
+    }
+
+    /// A run's face and the fallbacks after it, in `out`: what Fluxion Font's
+    /// `fallback` chooses between.
+    pub fn chain(self: *const Faces, index: u16, out: *[1 + Assets.max_fallback_fonts]*const typeface.Font) []const *const typeface.Font {
+        out[0] = self.faceFor(index);
+        for (self.items[self.len..][0..self.fallbacks], out[1..][0..self.fallbacks]) |face, *link| link.* = face;
+        return out[0 .. 1 + self.fallbacks];
     }
 };
 
@@ -187,21 +206,27 @@ pub fn addFont(self: *Interface, handle: Assets.FontHandle) error{TooManyFonts}!
 }
 
 /// This frame's faces, filled into `faces` from the fonts: `font` first,
-/// then each `addFont` gave it. A font that has been let go of takes the
-/// first face's place, so the indices after it stay where they are. None at
-/// all when `font` has no face, which lays the interface out and draws no
-/// text.
-pub fn fillFaces(self: *Interface, assets: *Assets) []const *const typeface.Font {
+/// then each `addFont` gave it, then the ones every run falls back on. A
+/// font that has been let go of takes the first face's place, so the indices
+/// after it stay where they are. None at all when `font` has no face, which
+/// lays the interface out and draws no text.
+pub fn fillFaces(self: *Interface, assets: *Assets) *const Faces {
     const faces = &self.faces;
     faces.len = 0;
-    const first = &(assets.fontOf(self.font) orelse return faces.slice()).face;
+    faces.fallbacks = 0;
+    const first = &(assets.fontOf(self.font) orelse return faces).face;
     faces.items[0] = first;
     const others = self.other_fonts[0..self.other_font_count];
     for (others, faces.items[1..][0..others.len]) |handle, *face| {
         face.* = if (assets.fontOf(handle)) |font| &font.face else first;
     }
     faces.len = @intCast(1 + others.len);
-    return faces.slice();
+    var fallbacks: [Assets.max_fallback_fonts]*Assets.Font = undefined;
+    for (assets.fallbacks(&fallbacks)) |font| {
+        faces.items[faces.len + faces.fallbacks] = &font.face;
+        faces.fallbacks += 1;
+    }
+    return faces;
 }
 
 /// How an interface element is pinned to a point in the world: see
@@ -417,8 +442,11 @@ pub fn measurer(faces: *const Faces) ui.Measurer {
 }
 
 fn measure(context: ?*const anyopaque, run: []const u8, style: ui.TextStyle) ui.text.Size {
-    const scaled = facesOf(context).faceFor(style.font).at(@floatFromInt(style.font_size));
-    return .{ .width = scaled.measure(run) catch 0, .height = scaled.lineHeight() };
+    const faces = facesOf(context);
+    var chain: [1 + Assets.max_fallback_fonts]*const typeface.Font = undefined;
+    const size: f32 = @floatFromInt(style.font_size);
+    const width = typeface.fallback.measure(faces.chain(style.font, &chain), size, run) catch 0;
+    return .{ .width = width, .height = faces.faceFor(style.font).at(size).lineHeight() };
 }
 
 fn lineHeight(context: ?*const anyopaque, style: ui.TextStyle) f32 {
@@ -436,17 +464,20 @@ pub fn draw(
     self: *Interface,
     gpa: Allocator,
     device: *rhi.Device,
-    faces: []const *const typeface.Font,
+    faces: *const Faces,
     target: rhi.RenderTarget,
     width: f32,
     height: f32,
 ) !void {
-    if (self.commands.len == 0 or faces.len == 0) return;
+    if (self.commands.len == 0 or faces.isEmpty()) return;
 
-    const renderer = try self.rendererFor(gpa, device, faces[0]);
+    const renderer = try self.rendererFor(gpa, device, faces.items[0]);
     // Every frame: the renderer forgets the glyphs of a slot whose face is
     // not the one it was, and keeps the rest.
-    try renderer.setFaces(faces);
+    try renderer.setFaces(faces.slice());
+    var slots: [Assets.max_fallback_fonts]u16 = undefined;
+    for (slots[0..faces.fallbacks], faces.len..) |*slot, at| slot.* = @intCast(at);
+    try renderer.setFallbacks(slots[0..faces.fallbacks]);
     renderer.setTextures(self.textures);
     renderer.setTime(self.seconds);
     try renderer.drawWith(target, .init(width, height), self.commands, null, self.custom);
@@ -458,12 +489,15 @@ pub fn draw(
 /// texture stay.
 pub fn forgetGlyphs(self: *Interface) void {
     const renderer = if (self.renderer) |*held| held else return;
-    for (0..max_fonts) |slot| renderer.forgetFace(@intCast(slot));
+    for (0..max_fonts + Assets.max_fallback_fonts) |slot| renderer.forgetFace(@intCast(slot));
 }
 
 fn rendererFor(self: *Interface, gpa: Allocator, device: *rhi.Device, first: *const typeface.Font) !*ui_rhi.Renderer {
     if (self.renderer) |*renderer| return renderer;
     self.renderer = try .init(gpa, device, first);
+    // A font that keeps its emoji as pictures - Android's flags - is read
+    // with the engine's PNG decoder.
+    self.renderer.?.setColorOptions(.{ .decode_png = GlyphAtlas.decodePicture });
     return &self.renderer.?;
 }
 

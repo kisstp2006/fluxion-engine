@@ -1244,11 +1244,13 @@ pub const Renderer = struct {
         const sampler = assets.samplerFor(.linear, .clamp_to_edge);
         try self.items.ensureUnusedCapacity(gpa, laid.glyphs.items.len);
         for (laid.glyphs.items) |glyph| {
-            const own = switch (glyph.kind) {
+            var own = switch (glyph.kind) {
                 .shadow => glyph.color.?,
                 .outline => label.outline_color,
                 .letter => glyph.color orelse label.color,
             };
+            // An emoji keeps its own colours: only the alpha is the label's.
+            if (glyph.colored) own = .rgba(1, 1, 1, own.a);
             var shown = looks.tint(own);
             shown.a *= glyph.opacity;
             if (!(shown.a > 0)) continue;
@@ -1324,10 +1326,13 @@ pub const Renderer = struct {
     ) !void {
         const font = faces.get(letter.face);
         const pixels = letter.size.pixels;
-        const entry = (if (reach == 0)
-            font.atlas.glyph(&font.face, letter.glyph, pixels)
+        // A shadow and an outline are the glyph's shape, an emoji's too.
+        const entry = (if (reach > 0)
+            font.atlas.outline(&font.face, letter.glyph, pixels, reach)
+        else if (kind == .shadow)
+            font.atlas.shape(&font.face, letter.glyph, pixels)
         else
-            font.atlas.outline(&font.face, letter.glyph, pixels, reach)) catch |err| {
+            font.atlas.glyph(&font.face, letter.glyph, pixels)) catch |err| {
             if (err == error.AtlasFull) self.full = font;
             return err;
         };
@@ -1348,6 +1353,7 @@ pub const Renderer = struct {
                 .kind = kind,
                 .color = color,
                 .opacity = letter.opacity,
+                .colored = entry.colored,
             });
         }
     }
@@ -1553,7 +1559,7 @@ pub const Renderer = struct {
                     placed.x = start.x;
                     placed.y = start.y;
                     const label: Text2D = .{ .font = held.font, .size = held.size, .color = held.color, .order = self.order };
-                    try self.renderer.layOut(self.gpa, assets, .{ .own = face }, label, self.looks, run, placed, bounds, self.key, .none);
+                    try self.renderer.layOut(self.gpa, assets, .withFallbacks(assets, face, null), label, self.looks, run, placed, bounds, self.key, .none);
                 },
             }
         }
@@ -1609,6 +1615,8 @@ const LaidGlyph = struct {
     color: ?Color,
     /// Multiplied into the alpha.
     opacity: f32,
+    /// An emoji in its own colours, which only the alpha tints.
+    colored: bool = false,
 
     const Kind = enum { shadow, outline, letter };
 };
@@ -1619,6 +1627,7 @@ const LaidGlyph = struct {
 fn layoutHash(faces: Faces, label: Text2D, run: []const u8) u64 {
     var hasher: std.hash.Wyhash = .init(faces.own.atlas.generation);
     if (faces.bold) |bold| hasher.update(std.mem.asBytes(&bold.atlas.generation));
+    for (faces.fallbacks[0..faces.fallback_count]) |fallback| hasher.update(std.mem.asBytes(&fallback.atlas.generation));
     hasher.update(run);
     inline for (.{ "size", "line_spacing", "alignment", "wrap_width", "outline_size", "markup" }) |field| {
         hasher.update(std.mem.asBytes(&@field(label, field)));

@@ -16,12 +16,20 @@
 //! so a glyph is a picture like any other and the sprite shader needs no
 //! special case. Packed on shelves, which suits glyphs of one size: they are
 //! nearly all the same height.
+//!
+//! **An emoji is a picture in its own colours** (`Entry.colored`), straight
+//! alpha like any texture, drawn white so the colours are its own. It gets a
+//! pixel of its own colour all round inside its place, transparent, so a
+//! linear sampler at its edge blends towards its colour and not towards the
+//! letter beside it. Its shadow and its outline are its shape - `shape`, and
+//! `outline` grown from it - as a letter's are.
 
 const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const font = @import("fluxion_font");
+const image = @import("fluxion_image");
 
 const Atlas = @This();
 
@@ -48,14 +56,27 @@ pub const Entry = struct {
     top: f32,
     /// How far the pen moves afterwards.
     advance: f32,
+    /// A picture in its own colours - an emoji - rather than coverage.
+    colored: bool = false,
 };
 
-/// One glyph at one size, and how far its outline reaches, as a number.
+/// One glyph at one size, how far its outline reaches, and whether it is
+/// its picture in colour, as a number.
 const Key = u64;
 
-inline fn keyOf(index: u16, size: u16, reach: u16) Key {
-    return (@as(Key, reach) << 32) | (@as(Key, size) << 16) | index;
+inline fn keyOf(index: u16, size: u16, reach: u16, colored: bool) Key {
+    return (@as(Key, @intFromBool(colored)) << 48) | (@as(Key, reach) << 32) | (@as(Key, size) << 16) | index;
 }
+
+/// What turns a font's PNG glyph - Android's flags - into pixels, for
+/// `font.Font.renderColor`: and for the interface's renderer, which draws
+/// the same fonts.
+pub fn decodePicture(gpa: Allocator, png: []const u8) anyerror!font.Decoded {
+    const decoded = try image.png.decode(gpa, png);
+    return .{ .pixels = decoded.pixels, .width = decoded.width, .height = decoded.height };
+}
+
+const color_options: font.ColorOptions = .{ .decode_png = decodePicture };
 
 /// The furthest an outline reaches from its glyph, in pixels: one asked to
 /// reach further reaches this far.
@@ -132,9 +153,27 @@ pub fn markClean(self: *Atlas) void {
 }
 
 /// Where this glyph is in the atlas, rasterising it the first time it is
-/// asked for. `size` is in whole pixels per em. The face is passed in rather
-/// than held, because the font table may move.
+/// asked for: in colour when it has a colour form - an emoji - and as its
+/// coverage otherwise. `size` is in whole pixels per em. The face is passed
+/// in rather than held, because the font table may move.
 pub fn glyph(self: *Atlas, face: *const font.Font, index: u16, size: u16) Error!Entry {
+    if (face.hasColor(index)) {
+        const key = keyOf(index, size, 0, true);
+        if (self.entries.get(key)) |entry| return entry;
+        if (try drawColored(self.gpa, face, index, size)) |found| {
+            var picture = found;
+            defer picture.deinit(self.gpa);
+            const entry = try self.placeColored(picture);
+            try self.entries.put(self.gpa, key, entry);
+            return entry;
+        }
+    }
+    return self.entryOf(face, index, size, 0);
+}
+
+/// The glyph as its shape alone - an emoji's too, where its picture is drawn
+/// - to be drawn in one colour: what a shadow is.
+pub fn shape(self: *Atlas, face: *const font.Font, index: u16, size: u16) Error!Entry {
     return self.entryOf(face, index, size, 0);
 }
 
@@ -146,16 +185,45 @@ pub fn outline(self: *Atlas, face: *const font.Font, index: u16, size: u16, reac
 }
 
 fn entryOf(self: *Atlas, face: *const font.Font, index: u16, size: u16, reach: u16) Error!Entry {
-    const key = keyOf(index, size, reach);
+    const key = keyOf(index, size, reach, false);
     if (self.entries.get(key)) |entry| return entry;
 
-    var rendered = try face.render(self.gpa, index, face.scaleFor(@floatFromInt(size)));
+    var rendered = try coverageOf(self.gpa, face, index, size);
     defer rendered.deinit(self.gpa);
     if (reach > 0) try grow(self.gpa, &rendered, reach);
 
     const entry = try self.place(rendered);
     try self.entries.put(self.gpa, key, entry);
     return entry;
+}
+
+/// A glyph in colour, or null when it has none that draws: a picture the
+/// decoder refuses leaves the glyph its shape.
+fn drawColored(gpa: Allocator, face: *const font.Font, index: u16, size: u16) Allocator.Error!?font.Colored {
+    return face.renderColor(gpa, index, @floatFromInt(size), color_options) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => null,
+    };
+}
+
+/// A glyph's coverage: its outline's, or, for a glyph drawn in colour, its
+/// picture's alpha - an emoji font of pictures has no outlines at all.
+fn coverageOf(gpa: Allocator, face: *const font.Font, index: u16, size: u16) Error!font.Rendered {
+    if (face.hasColor(index)) {
+        if (try drawColored(gpa, face, index, size)) |found| {
+            var picture = found;
+            defer picture.deinit(gpa);
+            const pixels = try gpa.alloc(u8, @as(usize, picture.width) * picture.height);
+            for (pixels, 0..) |*cover, i| cover.* = picture.pixels[i * 4 + 3];
+            return .{
+                .bitmap = .{ .pixels = pixels, .width = picture.width, .height = picture.height },
+                .left = picture.left,
+                .top = picture.top,
+                .advance = picture.advance,
+            };
+        }
+    }
+    return face.render(gpa, index, face.scaleFor(@floatFromInt(size)));
 }
 
 /// A glyph grown into its outline: each pixel as covered as it is within
@@ -269,23 +337,11 @@ fn place(self: *Atlas, rendered: font.Rendered) Error!Entry {
         };
     }
 
-    if (bitmap.width + padding * 2 > self.width) return Error.AtlasFull;
-
-    // Not enough room left on this shelf: open another above it.
-    if (self.pen + bitmap.width + padding > self.width) {
-        self.shelf_top += self.shelf_height + padding;
-        self.shelf_height = 0;
-        self.pen = padding;
-    }
-    if (bitmap.height > self.shelf_height) {
-        // A taller glyph raises its shelf, as long as the shelf still fits.
-        if (self.shelf_top + bitmap.height + padding > self.height) return Error.AtlasFull;
-        self.shelf_height = bitmap.height;
-    }
-    if (self.shelf_top + self.shelf_height + padding > self.height) return Error.AtlasFull;
-
-    const x = self.pen;
-    const y = self.shelf_top;
+    // Not enough room left on its shelf opens another above it; a taller
+    // glyph raises its shelf, as long as the shelf still fits.
+    const at = try self.room(bitmap.width, bitmap.height);
+    const x = at.x;
+    const y = at.y;
 
     for (0..bitmap.height) |row| {
         const source = bitmap.row(@intCast(row));
@@ -296,7 +352,6 @@ fn place(self: *Atlas, rendered: font.Rendered) Error!Entry {
         }
     }
 
-    self.pen += bitmap.width + padding;
     self.dirty = true;
 
     const w: f32 = @floatFromInt(self.width);
@@ -314,11 +369,67 @@ fn place(self: *Atlas, rendered: font.Rendered) Error!Entry {
     };
 }
 
+/// Find room for a `w` by `h` box on the shelves, and say where.
+fn room(self: *Atlas, w: u32, h: u32) Error!struct { x: u32, y: u32 } {
+    if (w + padding * 2 > self.width) return Error.AtlasFull;
+    if (self.pen + w + padding > self.width) {
+        self.shelf_top += self.shelf_height + padding;
+        self.shelf_height = 0;
+        self.pen = padding;
+    }
+    if (h > self.shelf_height) {
+        if (self.shelf_top + h + padding > self.height) return Error.AtlasFull;
+        self.shelf_height = h;
+    }
+    if (self.shelf_top + self.shelf_height + padding > self.height) return Error.AtlasFull;
+    const x = self.pen;
+    self.pen += w + padding;
+    return .{ .x = x, .y = self.shelf_top };
+}
+
+/// Copy a colour glyph in, inside a ring of its own edge's colour, and say
+/// where it is.
+fn placeColored(self: *Atlas, picture: font.Colored) Error!Entry {
+    const w = picture.width;
+    const h = picture.height;
+    const at = try self.room(w + 2, h + 2);
+    const x = at.x + 1;
+    const y = at.y + 1;
+
+    // The ring first, each pixel the colour of the nearest one inside it,
+    // with nothing of its alpha; then the picture over the middle.
+    for (0..h + 2) |ry| for (0..w + 2) |rx| {
+        const sx = std.math.clamp(@as(isize, @intCast(rx)) - 1, 0, @as(isize, @intCast(w)) - 1);
+        const sy = std.math.clamp(@as(isize, @intCast(ry)) - 1, 0, @as(isize, @intCast(h)) - 1);
+        const from = picture.pixels[(@as(usize, @intCast(sy)) * w + @as(usize, @intCast(sx))) * 4 ..][0..4];
+        const to = self.pixels[((at.y + ry) * self.width + at.x + rx) * 4 ..][0..4];
+        const inside = rx >= 1 and ry >= 1 and rx <= w and ry <= h;
+        to.* = .{ from[0], from[1], from[2], if (inside) from[3] else 0 };
+    };
+    self.dirty = true;
+
+    const width: f32 = @floatFromInt(self.width);
+    const height: f32 = @floatFromInt(self.height);
+    return .{
+        .u0 = @as(f32, @floatFromInt(x)) / width,
+        .v0 = @as(f32, @floatFromInt(y)) / height,
+        .u1 = @as(f32, @floatFromInt(x + w)) / width,
+        .v1 = @as(f32, @floatFromInt(y + h)) / height,
+        .width = @floatFromInt(w),
+        .height = @floatFromInt(h),
+        .left = @floatFromInt(picture.left),
+        .top = @floatFromInt(picture.top),
+        .advance = picture.advance,
+        .colored = true,
+    };
+}
+
 /// Every glyph forgotten and the image blank, to be filled anew: what a
 /// frame whose letters no longer fit does before it lays them out again.
 pub fn clear(self: *Atlas) void {
     self.entries.clearRetainingCapacity();
-    for (0..self.pixels.len / 4) |i| self.pixels[i * 4 + 3] = 0;
+    // White and transparent again: a colour glyph wrote its colours.
+    for (0..self.pixels.len / 4) |i| self.pixels[i * 4 ..][0..4].* = .{ 255, 255, 255, 0 };
     self.shelf_top = padding;
     self.shelf_height = 0;
     self.pen = padding;

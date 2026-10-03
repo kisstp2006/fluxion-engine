@@ -1325,6 +1325,18 @@ _ = try world.spawnWith(.{
   `.mono = true` opens its monospaced font instead - Cascadia Mono or
   Consolas, fontconfig's monospace, Menlo, Droid Sans Mono - for a code
   editor or a console. A game's own words are set in a font it ships.
+- **Emoji are drawn in colour, in every text.** `app.assets.loadEmojiFonts()`
+  opens the system's emoji fonts - Segoe UI Emoji on Windows, Noto Color
+  Emoji and its flags on a phone, what fontconfig names on Linux, the ones a
+  page brings in a browser - which the runtime and the editor do at start.
+  From then on a label, a control's words and a field typed into draw an
+  emoji from them, in its own colours, and a character their own font has no
+  glyph for too: the words are walked a cluster at a time, so a family, a
+  flag or a thumb with a skin tone is one picture, put together by the
+  emoji font's own rules, and a caret steps over it whole. Only the text's
+  alpha tints an emoji; its shadow and its outline are its shape. The fonts
+  are Fluxion Font's colour glyphs - layers and paints (`COLR`), pictures
+  (`CBDT`) - drawn into the same atlases as the letters.
 - **What the camera cannot see is dropped before it costs anything**, one
   comparison per sprite, which is the difference between a renderer that costs
   what is drawn and one that costs what exists.
@@ -2466,7 +2478,8 @@ zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall   # zig-out/bin/fluxion-r
   until it answers false - and `deinit`. Its command line and the page's
   address come in as WASI's arguments and environment, and its files are the
   page's: the pack at `/game.fxpack` (`--pack`), the font at
-  `/fonts/ui.ttf`, and the player's folder under `/user`, which the browser
+  `/fonts/ui.ttf`, the emoji fonts at `/fonts/emoji.ttf` and
+  `/fonts/emoji-flags.ttf`, and the player's folder under `/user`, which the browser
   keeps (see fluxion-platform's `web.js`). It runs on the page's one thread:
   no worker threads, a background load done a piece a frame, and a frame cap
   that passes over the animation frames that come too soon instead of
@@ -2475,9 +2488,10 @@ zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall   # zig-out/bin/fluxion-r
   `fetch`.
 - **`runtime/web` is what goes round the module**: `index.html`, the page an
   export fills in; `fluxion.js`, which downloads the module, the pack and the
-  font with a bar, and runs the module with the libraries' glues; and Noto
+  fonts with a bar, and runs the module with the libraries' glues; Noto
   Sans with its licence (SIL OFL 1.1), the font a game writes with when its
-  theme names none. The build hands the folder on, with the glues of the
+  theme names none; and Noto Color Emoji and its flags with theirs (SIL OFL
+  1.1), what it draws emoji with - a page's `emoji` list, empty for none. The build hands the folder on, with the glues of the
   libraries at the commits built in, as the named path `web`; the tests build
   the module for a browser too, so a change that breaks it is found where it
   is made.

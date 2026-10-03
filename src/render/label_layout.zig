@@ -15,11 +15,18 @@
 //! `{shadow_color=black_offset=0.1,0.1|...}`, `{size=24|...}` in the
 //! label's units to the em, and `{b|...}` in the `bold_font`, or struck
 //! twice in the label's own font when it names none.
+//!
+//! **Emoji** come from the fonts every text falls back on - see
+//! `Assets.loadEmojiFonts` - as does a character the label's font has no
+//! glyph for: the words are walked a cluster at a time, so an emoji sequence
+//! is one, and Fluxion Font's `fallback` says which font draws it. A line is
+//! as tall as its label's fonts make it, whatever an emoji's font says.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const ui = @import("fluxion_ui");
+const typeface = @import("fluxion_font");
 
 const Assets = @import("../assets/assets.zig");
 const Color = @import("../math/color.zig").Color;
@@ -27,27 +34,51 @@ const Text2D = @import("render_components.zig").Text2D;
 
 const markup = ui.markup;
 
-/// Which of a label's two fonts a letter is in.
-pub const Face = enum(u1) { own, bold };
+/// Which of a label's fonts a letter is in: its own, its bold one, or one
+/// it fell back on, numbered from `fallback`.
+pub const Face = enum(u8) {
+    own,
+    bold,
+    _,
 
-/// A label's fonts: its own, and the one its `{b|...}` stretches are set in
-/// when it names one that is loaded.
+    pub const fallback = 2;
+
+    pub fn fallbackAt(index: usize) Face {
+        return @enumFromInt(fallback + index);
+    }
+};
+
+/// A label's fonts: its own, the one its `{b|...}` stretches are set in when
+/// it names one that is loaded, and the ones every text falls back on.
 pub const Faces = struct {
     own: *Assets.Font,
     bold: ?*Assets.Font = null,
+    fallbacks: [Assets.max_fallback_fonts]*Assets.Font = undefined,
+    fallback_count: u8 = 0,
 
     /// What a label is drawn in, from what the assets hold: null when not
     /// even its own font is there.
     pub fn of(assets: *Assets, label: Text2D) ?Faces {
         const own = assets.fontOf(label.font) orelse return null;
         const bold = if (label.bold_font.isNone()) null else assets.fontOf(label.bold_font);
-        return .{ .own = own, .bold = bold };
+        return withFallbacks(assets, own, bold);
     }
 
-    pub fn get(self: Faces, face: Face) *Assets.Font {
+    /// `own` and `bold`, and what the assets fall back on.
+    pub fn withFallbacks(assets: *Assets, own: *Assets.Font, bold: ?*Assets.Font) Faces {
+        var faces: Faces = .{ .own = own, .bold = bold };
+        faces.fallback_count = @intCast(assets.fallbacks(&faces.fallbacks).len);
+        return faces;
+    }
+
+    pub fn get(self: *const Faces, face: Face) *Assets.Font {
         return switch (face) {
             .own => self.own,
             .bold => self.bold orelse self.own,
+            _ => {
+                const index = @intFromEnum(face) - Face.fallback;
+                return if (index < self.fallback_count) self.fallbacks[index] else self.own;
+            },
         };
     }
 };
@@ -151,16 +182,17 @@ pub const Layout = struct {
         try self.place(gpa, faces, label);
     }
 
-    /// Each character in its font and size, and how far it moves the pen.
+    /// Each character in its font and size, and how far it moves the pen:
+    /// a cluster at a time, each glyph in the font that draws it.
     fn measure(self: *Layout, gpa: Allocator, faces: Faces, label: Text2D, words: []const u8) Allocator.Error!void {
         var span_at: usize = 0;
         var previous: ?Character = null;
         var at: usize = 0;
-        var characters = std.unicode.Utf8View.initUnchecked(words).iterator();
-        while (characters.nextCodepointSlice()) |bytes| {
-            defer at += bytes.len;
-            const codepoint = std.unicode.utf8Decode(bytes) catch continue;
-            if (codepoint == '\n') {
+        while (at < words.len) {
+            const end = typeface.emoji.clusterEnd(words, at);
+            defer at = end;
+            const cluster = words[at..end];
+            if (cluster.len == 1 and cluster[0] == '\n') {
                 try self.characters.append(gpa, .{ .kind = .newline });
                 previous = null;
                 continue;
@@ -168,29 +200,38 @@ pub const Layout = struct {
 
             const span = self.spanAt(&span_at, at);
             const look = spanOf(self.spans.items, span);
-            const face: Face = if (look.bold and faces.bold != null) .bold else .own;
-            const font = faces.get(face);
+            const base: Face = if (look.bold and faces.bold != null) .bold else .own;
             const size: GlyphSize = .of(look.size orelse label.size);
-            const scaled = font.face.at(@floatFromInt(size.pixels));
-            const units = scaled.scale * size.stretch;
-            const glyph = font.face.glyphFor(codepoint);
+            // The line is as tall as the label's own font makes it.
+            const lined = faces.get(base).face.at(@floatFromInt(size.pixels));
+            const space = cluster.len == 1 and (cluster[0] == ' ' or cluster[0] == '\t');
 
-            var character: Character = .{
-                .kind = if (codepoint == ' ' or codepoint == '\t') .space else .letter,
-                .glyph = glyph,
-                .face = face,
-                .size = size,
-                .span = span,
-                .advance = (scaled.advance(glyph) catch 0) * size.stretch,
-                .ascent = scaled.ascent() * size.stretch,
-                .line_height = scaled.lineHeight() * size.stretch,
-            };
-            if (previous) |left| if (left.face == face and left.size.pixels == size.pixels) {
-                const kerning = font.face.kern(left.glyph, glyph) catch 0;
-                character.kern = @as(f32, @floatFromInt(kerning)) * units;
-            };
-            try self.characters.append(gpa, character);
-            previous = character;
+            var chain: [1 + Assets.max_fallback_fonts]*const typeface.Font = undefined;
+            chain[0] = &faces.get(base).face;
+            for (faces.fallbacks[0..faces.fallback_count], chain[1..][0..faces.fallback_count]) |font, *link| link.* = &font.face;
+            var glyphs: typeface.fallback.Glyphs = .init(chain[0 .. 1 + faces.fallback_count], cluster);
+            while (glyphs.next()) |placed| {
+                const face: Face = if (placed.face == 0) base else .fallbackAt(placed.face - 1);
+                const font = faces.get(face);
+                const scaled = font.face.at(@floatFromInt(size.pixels));
+                const units = scaled.scale * size.stretch;
+                var character: Character = .{
+                    .kind = if (space) .space else .letter,
+                    .glyph = placed.glyph,
+                    .face = face,
+                    .size = size,
+                    .span = span,
+                    .advance = (scaled.advance(placed.glyph) catch 0) * size.stretch,
+                    .ascent = lined.ascent() * size.stretch,
+                    .line_height = lined.lineHeight() * size.stretch,
+                };
+                if (previous) |left| if (left.face == face and left.size.pixels == size.pixels) {
+                    const kerning = font.face.kern(left.glyph, placed.glyph) catch 0;
+                    character.kern = @as(f32, @floatFromInt(kerning)) * units;
+                };
+                try self.characters.append(gpa, character);
+                previous = character;
+            }
         }
     }
 

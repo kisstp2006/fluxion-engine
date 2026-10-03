@@ -214,7 +214,7 @@ fn freshFrame(app: *App) anyerror!void {
 /// an interface.
 fn feedInterface(app: *App) anyerror!void {
     if (!app.hasInterface()) return;
-    if (app.interface.fillFaces(&app.assets).len != 0) app.ui.setMeasurer(Interface.measurer(&app.interface.faces));
+    if (!app.interface.fillFaces(&app.assets).isEmpty()) app.ui.setMeasurer(Interface.measurer(&app.interface.faces));
     // Asked of the system when the wheel turned, so a changed setting is
     // taken at once - and only then, since on Linux asking reads a file.
     if (app.input.wheel.x != 0 or app.input.wheel.y != 0) {

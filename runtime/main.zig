@@ -180,6 +180,8 @@ fn start(gpa: std.mem.Allocator, io: std.Io, flags: Flags, arguments: []const []
 
     // A label with no font of its own is drawn in the first font loaded.
     _ = app.assets.loadSystemFont(.{ .label = "default font" }) catch |err| log.warn("the system's font did not open: {t}", .{err});
+    // And what every text falls back on, for its emoji.
+    app.assets.loadEmojiFonts() catch |err| log.warn("the system's emoji fonts did not open: {t}", .{err});
     app.useScripts(.{}) catch |err| return failed(app, err);
     app.useControlNodes() catch |err| return failed(app, err);
 

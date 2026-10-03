@@ -829,6 +829,40 @@ test "a second font for the interface is measured and drawn by the index it was 
     try testing.expectEqual(@as(usize, 16), app.interface.renderer.?.instances.items.len);
 }
 
+const Emoji = struct {
+    fn label(app: *App) anyerror!void {
+        Code.box(app, "plain", "aa", 0);
+        Code.box(app, "smiling", "a😀", 0);
+    }
+};
+
+test "an emoji in the interface is measured and drawn from the emoji font, in colour" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .io = testing.io });
+    defer app.destroy();
+    _ = app.assets.loadSystemFont(.{ .atlas = 256 }) catch return error.SkipZigTest;
+    try app.assets.loadEmojiFonts();
+    if (app.assets.fallback_count == 0) return error.SkipZigTest;
+    try app.addSystem(.ui, "label", Emoji.label);
+    try app.run();
+
+    // The emoji takes room - its own font's advance, not an empty box's.
+    const plain = app.ui.boxOf("plain").?.width;
+    const smiling = app.ui.boxOf("smiling").?.width;
+    try testing.expect(smiling > plain);
+
+    // The fallback is last in the table, and the renderer falls back on it.
+    const emoji_face = &app.assets.fontOf(app.assets.fallback_fonts[0]).?.face;
+    const faces = app.interface.faces.slice();
+    try testing.expectEqual(@as(*const typeface.Font, emoji_face), faces[faces.len - 1]);
+    const renderer = &app.interface.renderer.?;
+    try testing.expectEqualSlices(u16, &.{@intCast(faces.len - 1)}, renderer.fallbacks.items);
+    var colored: usize = 0;
+    for (renderer.instances.items) |instance| {
+        if (instance.textured == @TypeOf(instance).Kind.color_glyph) colored += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), colored);
+}
+
 test "a font read again is drawn again in the interface, not from the old one's glyphs" {
     const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
     defer app.destroy();
@@ -1004,7 +1038,7 @@ test "an interface font let go of draws in the first, and the indices after it k
     try testing.expectEqual(@as(u16, 1), try app.interface.addFont(gone));
     try testing.expectEqual(@as(u16, 2), try app.interface.addFont(mono));
 
-    const faces = app.interface.fillFaces(&app.assets);
+    const faces = app.interface.fillFaces(&app.assets).slice();
     try testing.expectEqual(@as(usize, 3), faces.len);
     try testing.expectEqual(faces[0], faces[1]);
     try testing.expectEqual(&app.assets.fontOf(mono).?.face, faces[2]);

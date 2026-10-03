@@ -656,7 +656,7 @@ pub const ControlTree = struct {
         defer self.preview_editing = &.{};
         if (self.preview_ui == null) self.preview_ui = .init(app.gpa);
         const layout = &self.preview_ui.?;
-        if (faces.len > 0) layout.setMeasurer(Interface.measurer(&faces));
+        if (!faces.isEmpty()) layout.setMeasurer(Interface.measurer(&faces));
         // The interface is laid out at the game's size, over what the camera
         // shows, and drawn as big as the world is there: a view zoomed in
         // shows it bigger, as it shows a sprite bigger.
@@ -674,7 +674,7 @@ pub const ControlTree = struct {
         self.preview_interface.commands = try layout.end();
         self.preview_interface.textures = self.textures.items;
         self.preview_interface.custom = app.interface.custom;
-        try self.preview_interface.draw(app.gpa, &app.device, faces.slice(), .{ .texture = into }, width, height);
+        try self.preview_interface.draw(app.gpa, &app.device, &faces, .{ .texture = into }, width, height);
     }
 
     /// The number of the box a `ColorRect` or a `TextureRect` with a

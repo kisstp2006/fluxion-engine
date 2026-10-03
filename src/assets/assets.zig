@@ -192,6 +192,12 @@ fonts: FontTable = .empty,
 /// loaded.
 default_font: FontHandle = .none,
 
+/// What every text falls back on, most wanted first, for an emoji and for a
+/// character its own font has no glyph for: the system's emoji fonts, once
+/// `loadEmojiFonts` has opened them.
+fallback_fonts: [max_fallback_fonts]FontHandle = @splat(.none),
+fallback_count: u8 = 0,
+
 /// How many times a font has been read again, counting up. A font read
 /// again keeps its address, so whoever holds glyphs drawn from one - the
 /// interface's renderer - watches this to draw them again. See `reloadFont`.
@@ -527,6 +533,48 @@ pub fn loadSystemFont(self: *Assets, options: FontOptions) !FontHandle {
     var asked = options;
     asked.member = found.index;
     return self.loadFont(found.path, asked);
+}
+
+/// The most fonts text falls back on.
+pub const max_fallback_fonts = 4;
+
+/// Open the system's emoji fonts - Segoe UI Emoji on Windows, Noto Color
+/// Emoji and its flags on a phone, what fontconfig names on Linux, what a
+/// page put in its files in a browser - for every text to fall back on: an
+/// emoji in a game's words, or in the editor's fields, is drawn in colour
+/// from them. A font that will not open is said in the log and passed over;
+/// none at all is not an error. Opened after the default font, which they
+/// never become.
+pub fn loadEmojiFonts(self: *Assets) !void {
+    const io = self.io orelse return Error.NoIo;
+    const faces = platform.fonts.systemEmoji(self.gpa, io) catch |err| switch (err) {
+        error.Unsupported => return,
+        else => return err,
+    };
+    defer platform.fonts.freeAll(self.gpa, faces);
+    const default = self.default_font;
+    defer self.default_font = default;
+    for (faces) |face| {
+        if (self.fallback_count == max_fallback_fonts) break;
+        const handle = self.loadFont(face.path, .{ .member = face.index, .label = "emoji" }) catch |err| {
+            std.log.scoped(.fluxion_engine).warn("the emoji font {s} does not open: {s}", .{ face.path, @errorName(err) });
+            continue;
+        };
+        self.fallback_fonts[self.fallback_count] = handle;
+        self.fallback_count += 1;
+    }
+}
+
+/// The fonts text falls back on, in `out`, as they are now: one that has
+/// been let go of is left out.
+pub fn fallbacks(self: *Assets, out: *[max_fallback_fonts]*Font) []*Font {
+    var held: usize = 0;
+    for (self.fallback_fonts[0..self.fallback_count]) |handle| {
+        const found = self.fonts.get(handle.toId()) orelse continue;
+        out[held] = found.*;
+        held += 1;
+    }
+    return out[0..held];
 }
 
 /// Open a TrueType file from the disc, named as `loadTexture` names one - or

@@ -603,6 +603,35 @@ test "a label becomes one quad per letter" {
     try testing.expectEqual(@as(usize, 3), face.atlas.count());
 }
 
+test "an emoji in a label is drawn in colour from the system's emoji font, and its shadow is its shape" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1, .width = 320, .height = 240, .io = threaded.io() });
+    defer app.destroy();
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 256 }) catch return error.SkipZigTest;
+    try app.assets.loadEmojiFonts();
+    if (app.assets.fallback_count == 0) return error.SkipZigTest;
+    // The emoji font is not the default.
+    try testing.expect(!std.meta.eql(app.assets.default_font, app.assets.fallback_fonts[0]));
+
+    const label = try app.world.spawnWith(.{
+        components.Transform2D.at(20, 20),
+        components.Text2D{ .markup = true },
+    });
+    try app.setText(label, components.Text2D, "text", "a{shadow_color=black|😀}👍🏽");
+    try app.run();
+
+    // A letter, an emoji with its shadow, and an emoji with a skin tone that
+    // is one glyph.
+    try testing.expectEqual(@as(u32, 4), app.sprites.drawn);
+    const emoji_font = app.assets.fontOf(app.assets.fallback_fonts[0]).?;
+    // Two pictures in colour and one shape.
+    try testing.expectEqual(@as(usize, 3), emoji_font.atlas.count());
+    const smile = emoji_font.face.glyphFor(0x1F600);
+    try testing.expect((try emoji_font.atlas.glyph(&emoji_font.face, smile, 16)).colored);
+    try testing.expect(!(try emoji_font.atlas.shape(&emoji_font.face, smile, 16)).colored);
+}
+
 test "a label is laid out once, and again when its words or its atlas change" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

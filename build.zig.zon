@@ -29,15 +29,15 @@
         // this; an engine is exactly the thing that may, because opening the
         // window is its job.
         .fluxion_platform = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-platform#81d54b6648dc746f1cc4db4575cabe573ab57a0b",
-            .hash = "fluxion_platform-0.1.0-WsOjUWjHGgAmqFX6psGiiVQy3sTSx6rNrBWAe4d9s5x2",
+            .url = "git+https://github.com/kisstp2006/fluxion-platform#3d5b671d2166f893f14218e8163af0a5e33dae14",
+            .hash = "fluxion_platform-0.1.0-WsOjUSDaGgA8rrh0Pf8cDoJtMgYf-cez1WvI2v4LH_QV",
         },
 
         // The interface layer: the layout `.ui` systems declare into, and the
         // renderer that draws it over the 2D layer.
         .fluxion_ui = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-ui#28b0d7cc3fc27799c388b89127c4021d0c218f02",
-            .hash = "fluxion_ui-0.1.0-lw4Wszh_EAADOWXVtZMp9ZKowZyCGWfK-Le22oxu1Wod",
+            .url = "git+https://github.com/kisstp2006/fluxion-ui#6692ea6aebfbd49a2ad30c1346aa414c7e983999",
+            .hash = "fluxion_ui-0.1.0-lw4Ws_2mEACU8hQ4l81WiegTg-1LA0fBB_7E1j9dTUjo",
         },
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.
@@ -72,8 +72,8 @@
         // TrueType, rasterised into the glyph atlas the 2D pass draws text
         // from.
         .fluxion_font = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-font#f666e62f498e5bfe04361c7f1bf6531334a51dbf",
-            .hash = "fluxion_font-0.1.0-f3pT4rn1AwBbbEom4emICxRn1vGPQvsRhUc0_lCawLB8",
+            .url = "git+https://github.com/kisstp2006/fluxion-font#d77cb3e41a1796a650fff4c30c49f06d42a20d85",
+            .hash = "fluxion_font-0.1.0-f3pT4ramBQCNGu9qtEhIzdiA66dzjcY88RD7BQPxCrGR",
         },
 
         // Lines, shapes and text over the world, for looking at what a game

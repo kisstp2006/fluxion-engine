@@ -15,7 +15,8 @@
 //   <script type="module" src="fluxion.js"></script>
 //
 // `module` and `pack` are where the two are; `font` the font a game writes
-// with when its theme names none (`fonts/NotoSans-Regular.ttf`); `storage`
+// with when its theme names none (`fonts/NotoSans-Regular.ttf`); `emoji` the
+// fonts it draws emoji with, the flags second, or none (`[]`); `storage`
 // the name the player's own files are kept under in the browser; `args` more
 // of the game's command line; `clickToStart` whether it waits for a press
 // first. The page's own address - `?level=3` - is what the game's
@@ -114,10 +115,12 @@ async function main() {
   }
   say("Loading...");
   const progress = new Progress();
-  const [module, pack, font] = await Promise.all([
+  const emojiFiles = config.emoji ?? ["fonts/NotoColorEmoji.ttf", "fonts/NotoColorEmojiFlags.ttf"];
+  const [module, pack, font, ...emoji] = await Promise.all([
     download(config.module, progress),
     download(config.pack, progress),
     download(config.font ?? "fonts/NotoSans-Regular.ttf", progress),
+    ...emojiFiles.map((url) => download(url, progress)),
   ]);
 
   say("Starting...");
@@ -129,6 +132,8 @@ async function main() {
   });
   platform.files.put("/game.fxpack", pack);
   platform.files.put("/fonts/ui.ttf", font);
+  // Where the platform looks for the system's emoji fonts.
+  emoji.forEach((bytes, at) => platform.files.put(at === 0 ? "/fonts/emoji.ttf" : "/fonts/emoji-flags.ttf", bytes));
   // The WebGL context first, on the canvas the platform's window is.
   const webgl = new Fluxion(canvas);
   await platform.instantiate(module, { with: [webgl, new Audio(), new Net()] });
