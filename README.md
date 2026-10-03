@@ -1700,14 +1700,16 @@ try app.addSystem(.ui, "pause menu", pauseMenu);
   sits between a game and its keys. `owns_text_input = false` leaves it to a
   game with a text box of its own.
 - **On a phone the typing shows above the keyboard.** The keyboard covers
-  the field, so Android puts a bar with the field's text, its placeholder
-  and an OK button on top of the keyboard, and the keyboard types into that:
+  the field, so Android - and a browser on a phone - puts a bar with the
+  field's text, its placeholder and an OK button on top of the keyboard, and
+  the keyboard types into that:
   each change comes back whole into the field, `text_changed` and all. It
   looks as the project's theme draws the `LineEdit` - its fill, edge,
   corners, colours, size and face - with the theme's `Button` for OK and its
   `Panel` behind, so it looks like the field it stands for. OK or the
   keyboard's Done submits the field (`text_submitted`); Back, or a tap past
-  the bar, just puts the keyboard away. Either lets go of the field.
+  the bar, just puts the keyboard away - in a browser, Enter and Escape. Either
+  lets go of the field.
 - **The wheel scrolls as the system says**: the lines a notch is set to in
   Windows' mouse settings or KDE's, a page at a time where that was chosen,
   and three lines elsewhere. `input.wheel` stays in notches, which is what a
