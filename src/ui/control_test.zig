@@ -254,6 +254,45 @@ test "a control that names no theme is drawn with the project's, which the proje
     try testing.expect(!std.meta.eql(Color.hex(0x123456), app.control_tree.resolvedStyle(context, panel, .panel, .normal).background_color));
 }
 
+test "a line edit with the keyboard says how a phone's bar is to look: as its theme draws it, with its placeholder" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "game.theme", .data =
+        \\{ "fluxion_theme": 1, "types": {
+        \\  "LineEdit": { "styles": { "normal": { "background": "#204060", "border_color": "#a0b0c0", "border": 2, "corners": 5, "font_color": "#f0e0d0" } } },
+        \\  "Button": { "styles": { "normal": { "background": "#ff8800" } } },
+        \\  "Panel": { "styles": { "normal": { "background": "#101010" } } } } }
+    });
+    try @import("../project/Project.zig").create(testing.allocator, testing.io, root, .{ .application = .{ .name = "Themed" }, .gui = .{ .theme = "res://game.theme" } });
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root, .width = 200, .height = 100, .frames = 1 });
+    defer app.destroy();
+    try app.useControlNodes();
+    const canvas = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .grow }, .height = .{ .mode = .grow } }, CanvasLayer{} });
+    const field = try app.world.spawnWith(.{ Control{ .width = .{ .mode = .fixed, .value = 180 }, .height = .{ .mode = .fixed, .value = 32 } }, Parent.of(canvas), LineEdit{} });
+    try app.setText(field, LineEdit, "placeholder_text", "Your name");
+    try app.run();
+    // Nothing has the keyboard: nothing to say.
+    try testing.expect(app.interface.field_style == null);
+
+    app.grabFocus(field);
+    app.frames_left = 2;
+    app.running = true;
+    try app.run();
+    const said = app.interface.field_style.?;
+    try testing.expectEqualStrings("Your name", said.hint);
+    const look = said.look.?;
+    try testing.expectEqual(@as(u32, 0xFF204060), look.field.background);
+    try testing.expectEqual(@as(u32, 0xFFA0B0C0), look.field.border);
+    try testing.expectEqual(@as(f32, 2) * app.interface.scale, look.field.border_width);
+    try testing.expectEqual(@as(f32, 5) * app.interface.scale, look.field.corner_radius);
+    try testing.expectEqual(@as(u32, 0xFFFF8800), look.button.background);
+    try testing.expectEqual(@as(u32, 0xFF101010), look.bar);
+    // No face of its theme's own: the system's, as the interface's is.
+    try testing.expectEqualStrings("", look.font);
+}
+
 test "a control's own overrides change its own part and not its children's, and a scene keeps them" {
     const app = try App.create(testing.allocator, .{ .headless = true, .width = 200, .height = 100, .frames = 1 });
     defer app.destroy();

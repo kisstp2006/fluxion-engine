@@ -29,15 +29,15 @@
         // this; an engine is exactly the thing that may, because opening the
         // window is its job.
         .fluxion_platform = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-platform#80b6b3e7066693546596b127f077b8eceecd7bf0",
-            .hash = "fluxion_platform-0.1.0-WsOjUR_UGQDgB8xrrUhtHRVWqGrTwQogh-vcZ60H7j9V",
+            .url = "git+https://github.com/kisstp2006/fluxion-platform#aca2328ac6ab805f3435491e2b45c04ca78afbe4",
+            .hash = "fluxion_platform-0.1.0-WsOjUTBqGgB15xrzCa19A1-TCHjhJzNn4I5JlFyb5o3n",
         },
 
         // The interface layer: the layout `.ui` systems declare into, and the
         // renderer that draws it over the 2D layer.
         .fluxion_ui = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-ui#d57e5e3e90f3750fa442376ff37800c556cb66cb",
-            .hash = "fluxion_ui-0.1.0-lw4Ws1xsEADjTQAoU4DyCeTJwBy3PqwfMZLXqQONMQ2e",
+            .url = "git+https://github.com/kisstp2006/fluxion-ui#28b0d7cc3fc27799c388b89127c4021d0c218f02",
+            .hash = "fluxion_ui-0.1.0-lw4Wszh_EAADOWXVtZMp9ZKowZyCGWfK-Le22oxu1Wod",
         },
 
         // What a texture is read from. A sprite atlas is a PNG on a disc.

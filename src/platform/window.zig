@@ -700,6 +700,9 @@ pub fn pump(self: *Window, input: *Input, route: ?Route) bool {
         input.apply(ev);
         switch (ev) {
             .close => self.close_pressed = true,
+            // What the bar holds is the platform's to keep till the next
+            // pump, by then read.
+            .text_edited => input.field_edited = self.ctx.editedText(),
             .focus => |change| self.focused = change.value,
             .scale => |to| self.content_scale = to.x,
             .framebuffer_resize => |size| {

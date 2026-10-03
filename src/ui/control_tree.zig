@@ -10,6 +10,7 @@ const std = @import("std");
 
 const rhi = @import("fluxion_rhi");
 const ui = @import("fluxion_ui");
+const platform = @import("fluxion_platform");
 
 const App = @import("../App.zig");
 const Appearance = @import("../scene/inherited.zig").Appearance;
@@ -979,6 +980,53 @@ fn lineEditContent(context: Context, entity: Entity, line: *LineEdit, style: Res
         if (!std.mem.eql(u8, held, typed)) layout.setTextValue(name, typed);
     }
     if (context.interactive and layout.textSubmitted(name)) try app.signal(entity, LineEdit, .text_submitted).emit(.{});
+    // A phone shows it in a bar above its keyboard: in its own look.
+    if (context.interactive and layout.isFocused(name)) app.interface.field_style = .{
+        .hint = placeholder,
+        .look = barLook(app, entity, style, quiet),
+    };
+}
+
+/// How the bar a phone shows above its keyboard looks for a line edit: the
+/// edit's own style, and its theme's button and panel, in the window's
+/// pixels, so the bar looks like the field it stands for. The face is the
+/// theme's; one with none is the system's, which is the interface's too.
+fn barLook(app: *App, entity: Entity, field: ResolvedStyle, hint: Color) platform.text.Look {
+    const theme = themeOf(app, entity).handle;
+    const button = ResolvedStyle.from(app.themes.styleWith(theme, app.projectTheme(), .button, .normal, "", .{}));
+    const panel = ResolvedStyle.from(app.themes.styleWith(theme, app.projectTheme(), .panel, .normal, "", .{}));
+    const scale = app.interface.scale;
+    const face = if (field.font.isNone()) null else app.assets.fontOf(field.font);
+    return .{
+        .bar = argb(panel.background_color),
+        .field = barBox(field, scale),
+        .button = barBox(button, scale),
+        .hint_color = argb(hint),
+        .font_size = @as(f32, @floatFromInt(field.font_size)) * scale,
+        .font = if (face) |held| held.bytes else "",
+    };
+}
+
+fn barBox(style: ResolvedStyle, scale: f32) platform.text.Box {
+    return .{
+        .background = argb(style.background_color),
+        .border = argb(style.border_color),
+        .border_width = @as(f32, @floatFromInt(style.border_width)) * scale,
+        .corner_radius = style.corner_radius.top_left * scale,
+        .padding_x = @as(f32, @floatFromInt(style.padding.left)) * scale,
+        .padding_y = @as(f32, @floatFromInt(style.padding.top)) * scale,
+        .text = argb(style.text_color),
+    };
+}
+
+/// A colour as 0xAARRGGBB, as a platform takes one.
+fn argb(value: Color) u32 {
+    const channel = struct {
+        fn of(part: f32) u32 {
+            return @intFromFloat(@round(std.math.clamp(part, 0, 1) * 255));
+        }
+    }.of;
+    return channel(value.a) << 24 | channel(value.r) << 16 | channel(value.g) << 8 | channel(value.b);
 }
 
 fn sliderContent(context: Context, entity: Entity, slider: *Slider, fill_style: ResolvedStyle) !void {

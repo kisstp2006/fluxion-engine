@@ -149,6 +149,15 @@ pointer_still: f32 = 0,
 typed: [typed_capacity]Typed = undefined,
 typed_len: usize = 0,
 
+/// The whole of the text input with the keyboard, as a phone's bar above
+/// its keyboard has it after this frame's typing, or null: see
+/// `platform.Window.setTextInputField`. The platform's own text, good until
+/// the next pump.
+field_edited: ?platform.text.Edited = null,
+/// The bar put away this frame: true when by its Done, which answers the
+/// input as Enter would.
+field_done: ?bool = null,
+
 /// Every key that went down, came up or repeated this frame, in order: what
 /// a script's `input` is handed. One given between frames is the next
 /// frame's, as a pointer event is.
@@ -840,6 +849,8 @@ pub fn beginFrame(self: *Input) void {
     self.pointer.dy = 0;
     self.wheel = .{};
     self.typed_len = 0;
+    self.field_edited = null;
+    self.field_done = null;
     self.handled = false;
 
     // The fingers last frame saw lifted are gone, and the rest start the
@@ -1016,6 +1027,7 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             self.mods = c.mods;
             self.pushTyped(.{ .character = c.codepoint });
         },
+        .text_done => |done| self.field_done = done.submitted,
         .mouse_button => |b| {
             if (b.from_touch and !self.mouse_from_touch) return;
             self.mods = b.mods;

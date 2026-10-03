@@ -91,6 +91,17 @@ caret_area: ?platform.text.Area = null,
 /// Whether the system has refused a caret's place once: told of it once.
 caret_refused: bool = false,
 
+/// A print of what the platform last had of the input with the keyboard -
+/// told it, or heard from its bar - so it is told again only when the game
+/// changed it. See `tellField`.
+field_told: ?u64 = null,
+
+/// What the input with the keyboard shows while empty, and how a phone's bar
+/// above its keyboard is to look for it: said each frame by what declared
+/// it - a `LineEdit`, from its theme - and null for an input that says
+/// nothing, which the bar shows in its own look.
+field_style: ?FieldStyle = null,
+
 /// What the system scrolls text by for a notch of the wheel, as `App` last
 /// asked it: lines, or a page. See `pixels_per_line`.
 scroll_lines: platform.ScrollLines = .{},
@@ -126,6 +137,12 @@ pub fn deinit(self: *Interface) void {
     if (self.renderer) |*renderer| renderer.deinit();
     self.* = undefined;
 }
+
+/// See `field_style`.
+pub const FieldStyle = struct {
+    hint: []const u8 = "",
+    look: ?platform.text.Look = null,
+};
 
 /// The faces a frame's text is in, by the index a style's `font` gives.
 pub const Faces = struct {
@@ -244,6 +261,8 @@ pub fn feed(
 ) Allocator.Error!void {
     layout.tick(dt);
     self.seconds += dt;
+    // Said again by this frame's declarations.
+    self.field_style = null;
 
     layout.setShift(input.mods.shift);
     const down = input.buttonDown(.left);
@@ -254,6 +273,17 @@ pub fn feed(
     }
 
     for (input.typedThisFrame()) |typed| try receive(gpa, layout, clipboard, typed);
+    // A phone's bar above its keyboard: the whole text as it has it, and
+    // then whether it was put away.
+    if (input.field_edited) |edited| {
+        layout.replaceFocusedText(edited.text, edited.selection_start, edited.selection_end);
+        // The bar has this already: not told back to it.
+        if (self.fieldOf(layout)) |field| self.field_told = fieldKey(field);
+    }
+    if (input.field_done) |submitted| {
+        if (submitted) layout.submitFocused();
+        layout.clearFocus();
+    }
 
     if ((input.wheel.x != 0 or input.wheel.y != 0) and !input.mods.control) {
         // The wheel counts up as positive, and a scroll moves the content: a
@@ -448,11 +478,13 @@ pub fn applyTextInput(self: *Interface, layout: *ui.Ui, window: platform.Window)
         // Asked once per change, so a system that refuses is told once.
         self.typing = wanted;
         self.caret_area = null;
+        self.field_told = null;
         window.setTextInput(wanted) catch |err| {
             log.warn("could not turn text input {s}: {t}", .{ if (wanted) "on" else "off", err });
         };
     }
     if (!wanted) return;
+    self.tellField(layout, window);
 
     const at = layout.caret() orelse return;
     const area = caretArea(at) orelse return;
@@ -464,6 +496,58 @@ pub fn applyTextInput(self: *Interface, layout: *ui.Ui, window: platform.Window)
         if (!self.caret_refused) log.warn("could not say where the caret is: {t}", .{err});
         self.caret_refused = true;
     };
+}
+
+/// What the input with the keyboard holds, told to a platform that shows it
+/// somewhere of its own - a phone's bar above its keyboard - whenever it is
+/// not what the platform last had: a new input, or one the game changed.
+fn tellField(self: *Interface, layout: *ui.Ui, window: platform.Window) void {
+    const field = self.fieldOf(layout) orelse return;
+    const key = fieldKey(field);
+    if (self.field_told == key) return;
+    self.field_told = key;
+    window.setTextInputField(field) catch |err| {
+        log.warn("could not show the text field: {t}", .{err});
+    };
+}
+
+/// The input with the keyboard, as `platform.text.Field` says one: its text,
+/// its caret or selection, what kind of field it is, and how it looks.
+fn fieldOf(self: *const Interface, layout: *ui.Ui) ?platform.text.Field {
+    const edit_of = layout.focusedEdit() orelse return null;
+    const style: FieldStyle = self.field_style orelse .{};
+    return .{
+        .text = edit_of.value(),
+        .selection_start = edit_of.anchor orelse edit_of.cursor,
+        .selection_end = edit_of.cursor,
+        .password = edit_of.password,
+        .multiline = edit_of.multiline,
+        .max_length = edit_of.max_length orelse 0,
+        .hint = style.hint,
+        .look = style.look,
+    };
+}
+
+fn fieldKey(field: platform.text.Field) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(field.text);
+    hasher.update(field.hint);
+    std.hash.autoHash(&hasher, field.selection_start);
+    std.hash.autoHash(&hasher, field.selection_end);
+    std.hash.autoHash(&hasher, field.password);
+    std.hash.autoHash(&hasher, field.multiline);
+    std.hash.autoHash(&hasher, field.max_length);
+    if (field.look) |look| {
+        inline for (.{ look.field, look.button }) |box| {
+            inline for (std.meta.fields(platform.text.Box)) |part| std.hash.autoHash(&hasher, @as(u32, @bitCast(@field(box, part.name))));
+        }
+        std.hash.autoHash(&hasher, look.bar);
+        std.hash.autoHash(&hasher, look.hint_color);
+        std.hash.autoHash(&hasher, @as(u32, @bitCast(look.font_size)));
+        std.hash.autoHash(&hasher, @intFromPtr(look.font.ptr));
+        std.hash.autoHash(&hasher, look.font.len);
+    }
+    return hasher.final();
 }
 
 /// The caret's box in whole pixels round it, or null for one no window could
@@ -596,6 +680,31 @@ test "typing reaches the text input that has the focus" {
     try fixture.frame(nameField);
 
     try testing.expectEqualStrings("hi", fixture.layout.textValueOf("name").?);
+}
+
+test "a phone's bar puts its whole text in the input with the keyboard, and its Done answers and lets go" {
+    var fixture: Fixture = .init();
+    defer fixture.deinit();
+
+    try fixture.frame(nameField);
+    fixture.layout.setFocus("name");
+    fixture.input.apply(character('h'));
+    try fixture.frame(nameField);
+
+    // The bar has the whole text, and its caret after "he".
+    fixture.input.field_edited = .{ .text = "hello", .selection_start = 2, .selection_end = 2 };
+    try fixture.frame(nameField);
+    try testing.expectEqualStrings("hello", fixture.layout.textValueOf("name").?);
+    try testing.expectEqual(@as(usize, 2), fixture.layout.focusedEdit().?.cursor);
+    // What the bar has is not told back to it.
+    try testing.expectEqual(fieldKey(fixture.interface.fieldOf(&fixture.layout).?), fixture.interface.field_told.?);
+
+    // Its Done: answered, as Enter answers, and the keyboard let go of.
+    fixture.input.apply(.{ .text_done = .{ .window = .none, .submitted = true } });
+    try fixture.frame(nameField);
+    try testing.expect(fixture.layout.textSubmitted("name"));
+    try testing.expect(!fixture.layout.isFocused("name"));
+    try testing.expectEqualStrings("hello", fixture.layout.textValueOf("name").?);
 }
 
 fn pathField(layout: *ui.Ui) void {
