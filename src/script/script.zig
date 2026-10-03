@@ -319,6 +319,33 @@ pub const Script = extern struct {
     }
 };
 
+/// How much memory a VM's scripts hold, and how often it is collected:
+/// `app.scriptStats()`. Whether `objects` and `live` keep rising, or only
+/// `bytes` between collections, tells a leak from collection that is late.
+pub const ScriptStats = struct {
+    /// Bytes the scripts' objects take, their lists' and maps' storage too.
+    bytes: usize = 0,
+    /// How many objects there are, alive or not yet collected.
+    objects: usize = 0,
+    /// How many collections have finished.
+    cycles: u64 = 0,
+    /// How many objects the last collection left alive.
+    live: usize = 0,
+    /// How many bytes the next collection starts at.
+    threshold: usize = 0,
+
+    pub fn of(vm: *const flux.Vm) ScriptStats {
+        const stats = vm.stats();
+        return .{
+            .bytes = stats.bytes,
+            .objects = stats.objects,
+            .cycles = stats.cycles,
+            .live = stats.live,
+            .threshold = stats.threshold,
+        };
+    }
+};
+
 /// The app a VM's scripts belong to: for a call of the engine's given the
 /// VM, as `InputEvent.isAction` is.
 pub fn appOf(vm: *flux.Vm) *App {

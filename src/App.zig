@@ -3795,6 +3795,18 @@ pub fn readData(self: *App, vm: *flux.Vm, handle: data_file.DataHandle) !flux.Va
     return scripts.calls.readData(scripts, &contents, held.source);
 }
 
+/// How much memory the scripts that ask hold, and how often it is
+/// collected: see `script.ScriptStats`. From Flux, `app.scriptStats()`;
+/// from Zig, `script.ScriptStats.of(app.scripts.?.vm)`.
+///
+/// ```
+/// const stats = app.scriptStats();
+/// print(f"{stats.bytes} bytes, {stats.live} alive, {stats.cycles} collections");
+/// ```
+pub fn scriptStats(_: *const App, vm: *flux.Vm) script.ScriptStats {
+    return .of(vm);
+}
+
 /// A plugin's settings: the struct its manifest's `settings` names, its
 /// `@export` fields given what the project file's `section` says, and its
 /// `@secret` ones what `.fluxion/secrets.json` keeps. From Flux,
@@ -5217,6 +5229,7 @@ pub const reflect_methods = .{
     .callDeferred = .{attr.Params{ .names = &.{ "vm", "function" } }},
     .readData = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.GivesErrors{} },
     .pluginSettings = .{ attr.Params{ .names = &.{ "vm", "section" } }, flux.GivesErrors{} },
+    .scriptStats = .{attr.Params{ .names = &.{"vm"} }},
     // Files of every kind
     .loadInBackground = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
     .loadProgress = .{attr.Params{ .names = &.{"path"} }},

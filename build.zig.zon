@@ -21,16 +21,16 @@
         // the 3D one that is not written yet, the 2D one, the interface -
         // goes through this and through nothing else.
         .fluxion_rhi = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-rhi#b72b27d8cbc7c8c90b59fbdc943f17d3d33baea1",
-            .hash = "fluxion_rhi-0.1.0--pvwDxhVEACf-YYWe-9zo6ymUk3TG4WsJjg5EItOBTrK",
+            .url = "git+https://github.com/kisstp2006/fluxion-rhi#037120fcc7a117e1d5cd317e3a4f1e8c684b57c9",
+            .hash = "fluxion_rhi-0.1.0--pvwDxhVEAADrSLkvu6voKkLsP7_VGigH2NsfSfcnecc",
         },
 
         // Windows, input and the event loop. A library may not depend on
         // this; an engine is exactly the thing that may, because opening the
         // window is its job.
         .fluxion_platform = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-platform#3d5b671d2166f893f14218e8163af0a5e33dae14",
-            .hash = "fluxion_platform-0.1.0-WsOjUSDaGgA8rrh0Pf8cDoJtMgYf-cez1WvI2v4LH_QV",
+            .url = "git+https://github.com/kisstp2006/fluxion-platform#5c8141c405b69c1b4de55678bc401fa18be5b02b",
+            .hash = "fluxion_platform-0.1.0-WsOjUfzbGgBteC8rQOhwBhDw2EzZrro56ghtzakDRqIA",
         },
 
         // The interface layer: the layout `.ui` systems declare into, and the
@@ -111,14 +111,14 @@
         // fluxion-reflect and fluxion-json are pinned where these are, so a
         // `reflect.Value` is one type across the two.
         .fluxion_script = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-script#370e5f84675d661aa31a6000eeaf002a4d013556",
-            .hash = "fluxion_script-0.1.0-rt2DKmMpFQBISATn3VfpOLO_leAS8OSC5GrqoTR4Hzgt",
+            .url = "git+https://github.com/kisstp2006/fluxion-script#e24cb1cab5b7e68a3e3c564bd16a010405f5ca19",
+            .hash = "fluxion_script-0.1.0-rt2DKttFFQAHsMj_5D-JFyihlopXo59FzUwc59RkgHnG",
         },
         // Web requests: a script's `web` global, each request on a thread of
         // its own and its answer handed over once a frame.
         .fluxion_net = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-net#ace415b4bd123f3bce6650d94ec813b2644419b1",
-            .hash = "fluxion_net-0.1.0-VdxHa6m4AABaKhxyLYi_X3_YjbW2g96mWIqF7t00OGMZ",
+            .url = "git+https://github.com/kisstp2006/fluxion-net#a42b639c0a00cc6fc16402ce297b724466b4d8e3",
+            .hash = "fluxion_net-0.1.0-VdxHa6O7AADxza51vBhNs0OAdetvmZolsJH1yDxvtZWK",
         },
 
         // Generational handles: what the asset tables hand out, and what a
@@ -134,8 +134,8 @@
         // compiled by Zig. Its fluxion-id is pinned where this one is, so a
         // clip's handle is one type.
         .fluxion_audio = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-audio#94bc326134eeacfcd2f52272899b1393252735ad",
-            .hash = "fluxion_audio-0.1.0-uP5dN-4lBwDki0SIwH9bU08dHsdLP-NvnUD-3u4v06Dw",
+            .url = "git+https://github.com/kisstp2006/fluxion-audio#3e98e0f24e4bd3a8062fe105c2498e0a2cdb6abd",
+            .hash = "fluxion_audio-0.1.0-uP5dN1omBwDjTAp6dBy4cjvqdjPMpx1KLK0G1bGRZw6n",
         },
 
         // Packs: a shipped game's files in one, sealed and signed if it

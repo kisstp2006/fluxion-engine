@@ -1639,6 +1639,47 @@ test "a script connects to and awaits the engine's signals: a component's, a tim
     try testing.expectEqual(@as(usize, 1), app.scripts.?.bridges.items.len);
 }
 
+test "a script asks how much its scripts hold: lists made and dropped every frame are collected as they go" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("shapes.flux",
+        \\var peak = 0;
+        \\var cycles = 0;
+        \\var live = 0;
+        \\var asked = false;
+        \\
+        \\struct Shapes {
+        \\    fn update(self, dt: float) {
+        \\        var shapes: [[vec2]] = [];
+        \\        for (0..200) |i| {
+        \\            const x = float(i);
+        \\            shapes.push([vec2(x, 1), vec2(x, 2), vec2(x + 1, 2), vec2(x + 1, 1)]);
+        \\        }
+        \\        const stats = app.scriptStats();
+        \\        if (stats.bytes > peak) peak = stats.bytes;
+        \\        cycles = stats.cycles;
+        \\        live = stats.live;
+        \\        asked = stats.objects > 0 and stats.threshold > 0;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(file)});
+
+    for (0..300) |_| _ = try app.step();
+
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expect(global(app, file, "asked").asBool());
+    // Every frame drops some 200 lists of four: counted, they are collected
+    // many times over, and what the scripts hold stays near one frame's.
+    try testing.expect(global(app, file, "cycles").asInt() > 20);
+    try testing.expect(global(app, file, "peak").asInt() < 4 * 1024 * 1024);
+    try testing.expect(global(app, file, "live").asInt() < 2000);
+    // From Zig, the same numbers: at least as many collections, since the
+    // frame went on after the script asked.
+    const stats = script.ScriptStats.of(app.scripts.?.vm);
+    try testing.expect(stats.cycles >= @as(u64, @intCast(global(app, file, "cycles").asInt())));
+}
+
 test "a script writes dates in the game's culture, counts with them, reads ISO 8601, and runs a clock of its own" {
     const app = try scripted(.{});
     defer app.destroy();

@@ -862,6 +862,11 @@ if (!app.input.focused) app.setPaused(true);
   whole second (`time.frames_per_second`; `time.fps()` is the last frame's
   alone), `app.frameCount()` and `app.elapsed()`, the game's seconds since it
   began.
+- **How much the scripts hold**: `app.scriptStats()` gives `bytes` (the
+  objects, and their lists' and maps' storage), `objects`, `cycles`
+  (collections finished), `live` (what the last one left) and `threshold`
+  (where the next starts). `live` rising frame after frame is a leak;
+  `bytes` rising only between collections is not.
 - **Slow motion is `app.setTimeScale(0.5)`**, `timeScale()` to read it:
   every frame's time and every fixed step's is multiplied by it, and a hit
   that holds the world still for a moment is `setTimeScale(0)` and back. It
