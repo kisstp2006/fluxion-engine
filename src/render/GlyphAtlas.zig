@@ -107,11 +107,12 @@ pub fn init(gpa: Allocator, width: u32, height: u32) Allocator.Error!Atlas {
     };
 }
 
-/// The last `generation` handed out, in the whole program.
-var generations: std.atomic.Value(u64) = .init(0);
+/// The last `generation` handed out, in the whole program: a word, which
+/// every target has atomics for.
+var generations: std.atomic.Value(usize) = .init(0);
 
 fn nextGeneration() u64 {
-    return generations.fetchAdd(1, .monotonic) + 1;
+    return @as(u64, generations.fetchAdd(1, .monotonic)) + 1;
 }
 
 pub fn deinit(self: *Atlas) void {

@@ -37,6 +37,8 @@ pub fn openAutoloads(app: *App) !void {
     const settings = app.project.settings orelse return;
     try plugins.openAutoloads(app);
     for (settings.application.autoload) |path| {
+        // A row added to the list and never given a file.
+        if (path.len == 0) continue;
         autoload(app, path, std.fs.path.stem(path)) catch |err| {
             log.err("the autoload {s} did not open: {t}", .{ path, err });
             return err;

@@ -248,6 +248,9 @@ pub fn loadSettings(self: *Project, diagnostics: ?*json.Diagnostics) (ReadError 
 fn absoluteDirectory(gpa: Allocator, io: std.Io, path: []const u8) InitError![]u8 {
     var dir = try std.Io.Dir.cwd().openDir(io, path, .{});
     defer dir.close(io);
+    // WASI has no real paths to ask for: a browser's files are one tree,
+    // from `/`, and a path is what it says from there.
+    if (builtin.os.tag == .wasi) return std.fs.path.resolvePosix(gpa, &.{ "/", path });
     var buffer: [std.fs.max_path_bytes]u8 = undefined;
     const len = try dir.realPath(io, &buffer);
     return gpa.dupe(u8, buffer[0..len]);

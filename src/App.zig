@@ -213,6 +213,8 @@ started: bool = false,
 frames_left: ?u32,
 /// The program's command line: `Options.arguments`. Borrowed.
 arguments: []const []const u8 = &.{},
+/// The page's address, as `name=value`: `Options.page`. Borrowed.
+page: []const []const u8 = &.{},
 
 // The world, its systems, and what they say to each other: `core/`.
 /// Everything in the game.
@@ -681,6 +683,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .close_pressed = false,
         .frames_left = options.frames,
         .arguments = options.arguments,
+        .page = options.page,
         .started = false,
     };
     errdefer self.world.deinit();
@@ -932,6 +935,10 @@ pub fn startup(self: *App) anyerror!void {
 /// another. Public for a game that drives its own loop.
 pub fn step(self: *App) anyerror!bool {
     if (!self.running) return false;
+    // A page calls this once an animation frame, and nothing on its thread
+    // may wait: a frame held to fewer a second is one that comes too soon,
+    // and is passed over.
+    if (on_a_page and !self.frameIsDue()) return true;
 
     // The old edges go first, then this frame's events. The resize flag is an
     // edge too.
@@ -1005,8 +1012,18 @@ fn readWindows(self: *App) !bool {
 }
 
 fn waitForNextFrame(self: *App, minimized: bool) !void {
+    if (on_a_page) return;
     const target_fps: f32 = if (minimized) fps_while_minimized else self.frameCap() orelse return;
     try self.time.sleepUntilNextFrame(target_fps);
+}
+
+/// Whether the program runs in a browser, the page calling `step`.
+const on_a_page = builtin.cpu.arch.isWasm();
+
+/// On a page: whether this animation frame is one to run, by the frame cap.
+fn frameIsDue(self: *App) bool {
+    const target_fps = self.frameCap() orelse return true;
+    return self.time.frameIsDue(target_fps);
 }
 
 /// The frames a second this frame is held to: `max_fps`, and
@@ -4260,8 +4277,10 @@ pub fn commandArgument(self: *const App, name: []const u8) ?[]const u8 {
 /// `game.html?level=3`. Null for one not given, and always where the game
 /// is no page.
 pub fn pageParameter(self: *const App, name: []const u8) ?[]const u8 {
-    _ = self;
-    _ = name;
+    for (self.page) |given| {
+        const equals = std.mem.indexOfScalar(u8, given, '=') orelse continue;
+        if (std.mem.eql(u8, given[0..equals], name)) return given[equals + 1 ..];
+    }
     return null;
 }
 

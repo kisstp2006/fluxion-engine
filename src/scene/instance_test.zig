@@ -238,11 +238,14 @@ test "a project opens with its autoloads, named after their files, and then its 
     try folder.put("main.json", "{ \"fluxion_scene\": 3, \"entities\": [ { \"name\": \"Menu\", \"Transform2D\": {} } ] }");
     try folder.put("music.json", "{ \"fluxion_scene\": 3, \"entities\": [ { \"name\": \"Player\", \"Transform2D\": {} } ] }");
     try folder.put("state.flux", "struct State { }");
-    try Project.writeSettings(testing.allocator, testing.io, root, .{ .application = .{
-        .name = "Opened",
-        .main_scene = "res://main.json",
-        .autoload = &.{ "res://music.json", "res://state.flux" },
-    } });
+    try Project.writeSettings(testing.allocator, testing.io, root, .{
+        .application = .{
+            .name = "Opened",
+            .main_scene = "res://main.json",
+            // A row given no file is passed over.
+            .autoload = &.{ "res://music.json", "", "res://state.flux" },
+        },
+    });
 
     const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root, .open_project = true });
     defer app.destroy();

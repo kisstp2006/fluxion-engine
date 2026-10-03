@@ -189,6 +189,10 @@ pub const Options = struct {
     /// The program's command line, its own name first: what
     /// `commandArgument` reads. Borrowed, for as long as the app lives.
     arguments: []const []const u8 = &.{},
+    /// What the address of the page the game runs in gives, as `name=value`:
+    /// what `pageParameter` reads. A browser's runtime hands it over; there
+    /// is none anywhere else. Borrowed, for as long as the app lives.
+    page: []const []const u8 = &.{},
 
     /// The pack a shipped game is: `res://`, `uid://` and the project file
     /// are read out of it instead of `root`. The App owns it from `create`

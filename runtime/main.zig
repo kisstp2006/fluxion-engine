@@ -17,6 +17,11 @@
 //! game --frames 300 --capture shot.png
 //! ```
 //!
+//! In a browser it is a WebAssembly module the page drives: `init` once,
+//! `frame` once an animation frame until it answers false, then `deinit`.
+//! Its command line and the page's address come in as WASI's arguments and
+//! environment: see the web template's `fluxion.js`.
+//!
 //! This file is under the BSD 1-Clause licence, and so is the program built
 //! from it: a game shipped with it owes nobody a notice for it. The engine
 //! and the libraries built into it are under their own - the export writes
@@ -31,6 +36,7 @@ const shipped = fx.shipped;
 
 const log = std.log.scoped(.game);
 const android = builtin.abi.isAndroid();
+const web = builtin.cpu.arch.isWasm();
 
 pub const std_options: std.Options = .{ .logFn = logFn };
 
@@ -66,10 +72,82 @@ fn fluxionMain() callconv(.c) void {
 
 comptime {
     if (android) @export(&fluxionMain, .{ .name = "fluxionMain" });
+    if (web) {
+        @export(&page.init, .{ .name = "init" });
+        @export(&page.frame, .{ .name = "frame" });
+        @export(&page.deinit, .{ .name = "deinit" });
+    }
 }
+
+/// What a page calls: the game made, a frame of it, and the game let go of.
+const page = struct {
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    var app: ?*App = null;
+
+    // The C library's: the decoders' memory comes from it too.
+    const gpa = std.heap.c_allocator;
+
+    fn init() callconv(.c) bool {
+        const arguments = wasiStrings(.args) catch return false;
+        const address = wasiStrings(.environ) catch return false;
+        const flags = App.parseKnownFlags(Flags, arguments) catch |err| blk: {
+            log.warn("the command line was passed over: {t}", .{err});
+            break :blk Flags{};
+        };
+        app = start(gpa, threaded.io(), flags, arguments, address) catch return false;
+        return true;
+    }
+
+    fn frame() callconv(.c) bool {
+        const game = app orelse return false;
+        return game.step() catch |err| {
+            tell(game, err);
+            return false;
+        };
+    }
+
+    fn deinit() callconv(.c) void {
+        const game = app orelse return;
+        game.stop() catch |err| tell(game, err);
+        journal.close();
+        game.destroy();
+        app = null;
+    }
+
+    /// WASI's arguments or environment, for as long as the program runs.
+    fn wasiStrings(comptime which: enum { args, environ }) ![]const []const u8 {
+        const wasi = std.os.wasi;
+        var count: usize = 0;
+        var size: usize = 0;
+        const sizes = if (which == .args) wasi.args_sizes_get(&count, &size) else wasi.environ_sizes_get(&count, &size);
+        if (sizes != .SUCCESS) return error.Unexpected;
+        const pointers = try gpa.alloc([*:0]u8, count);
+        const bytes = try gpa.alloc(u8, size);
+        const got = if (which == .args) wasi.args_get(pointers.ptr, bytes.ptr) else wasi.environ_get(pointers.ptr, bytes.ptr);
+        if (got != .SUCCESS) return error.Unexpected;
+        const strings = try gpa.alloc([]const u8, count);
+        for (strings, pointers) |*string, pointer| string.* = std.mem.span(pointer);
+        return strings;
+    }
+};
 
 /// The game, until it ends. What goes wrong is logged.
 fn run(gpa: std.mem.Allocator, io: std.Io, flags: Flags, arguments: []const []const u8) !void {
+    const app = try start(gpa, io, flags, arguments, &.{});
+    defer {
+        journal.close();
+        app.destroy();
+    }
+    while (app.step() catch |err| return failed(app, err)) {}
+    if (flags.app.capture) |path| {
+        if (app.saveCapture(path)) |_| log.info("wrote {s}", .{path}) else |err| log.err("{s} was not written: {t}", .{ path, err });
+    }
+    app.stop() catch |err| return failed(app, err);
+}
+
+/// The game made and started: its pack opened, its project, its scripts and
+/// its first scene. `address` is the page's, as `name=value`, in a browser.
+fn start(gpa: std.mem.Allocator, io: std.Io, flags: Flags, arguments: []const []const u8, address: []const []const u8) !*App {
     // A project's folder when one is named, and no pack is: a game looked at
     // without exporting it.
     const pack: ?fx.vfs.Pack = if (flags.app.root != null and flags.pack == null) null else pack: {
@@ -83,19 +161,22 @@ fn run(gpa: std.mem.Allocator, io: std.Io, flags: Flags, arguments: []const []co
     };
 
     var options = flags.app.apply(.{});
-    // Android has OpenGL ES and Vulkan, and the engine draws with Vulkan.
+    // Android has OpenGL ES and Vulkan, and the engine draws with Vulkan. A
+    // page has WebGL, whatever renderer the project says.
     if (android and flags.app.backend == null) options.backend = .vulkan;
+    if (web and flags.app.backend == null) options.backend = .webgl;
     options.io = io;
     options.pack = pack;
     options.open_project = true;
     options.arguments = arguments;
+    options.page = address;
     const app = App.create(gpa, options) catch |err| {
         log.err("the game did not start: {t}", .{err});
         return err;
     };
-    defer app.destroy();
+    errdefer app.destroy();
     journal.open(app);
-    defer journal.close();
+    errdefer journal.close();
 
     // A label with no font of its own is drawn in the first font loaded.
     _ = app.assets.loadSystemFont(.{ .label = "default font" }) catch |err| log.warn("the system's font did not open: {t}", .{err});
@@ -103,16 +184,17 @@ fn run(gpa: std.mem.Allocator, io: std.Io, flags: Flags, arguments: []const []co
     app.useControlNodes() catch |err| return failed(app, err);
 
     app.startup() catch |err| return failed(app, err);
-    while (app.step() catch |err| return failed(app, err)) {}
-    if (flags.app.capture) |path| {
-        if (app.saveCapture(path)) |_| log.info("wrote {s}", .{path}) else |err| log.err("{s} was not written: {t}", .{ path, err });
-    }
-    app.stop() catch |err| return failed(app, err);
+    return app;
 }
 
 fn failed(app: *App, err: anyerror) anyerror {
-    if (app.schedule.failed) |failure| log.err("{f}", .{failure}) else log.err("the game stopped: {t}", .{err});
+    tell(app, err);
     return err;
+}
+
+/// What stopped the game, in the log.
+fn tell(app: *App, err: anyerror) void {
+    if (app.schedule.failed) |failure| log.err("{f}", .{failure}) else log.err("the game stopped: {t}", .{err});
 }
 
 /// The log's copy in the player's folder, once the game knows where that

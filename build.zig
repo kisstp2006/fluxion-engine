@@ -5,105 +5,20 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-
-    const ecs = b.dependency("fluxion_ecs", .{ .target = target, .optimize = optimize });
-    const rhi = b.dependency("fluxion_rhi", .{ .target = target, .optimize = optimize });
-    const platform = b.dependency("fluxion_platform", .{ .target = target, .optimize = optimize });
-    const image = b.dependency("fluxion_image", .{ .target = target, .optimize = optimize });
-    const typeface = b.dependency("fluxion_font", .{ .target = target, .optimize = optimize });
-    const shader = b.dependency("fluxion_shader", .{ .target = target, .optimize = optimize });
-    const math = b.dependency("fluxion_math", .{ .target = target, .optimize = optimize });
-    const id = b.dependency("fluxion_id", .{ .target = target, .optimize = optimize });
-    // Without its renderer, which is built below from its source with this
-    // package's rhi and shader.
-    const debugdraw = b.dependency("fluxion_debugdraw", .{ .target = target, .optimize = optimize, .renderer = false });
-    const ui = b.dependency("fluxion_ui", .{ .target = target, .optimize = optimize });
-    const json = b.dependency("fluxion_json", .{ .target = target, .optimize = optimize });
-    const physics = b.dependency("fluxion_physics", .{ .target = target, .optimize = optimize });
-    const reflect = b.dependency("fluxion_reflect", .{ .target = target, .optimize = optimize });
-    const script = b.dependency("fluxion_script", .{ .target = target, .optimize = optimize });
-    const audio = b.dependency("fluxion_audio", .{ .target = target, .optimize = optimize });
-    const vfs = b.dependency("fluxion_vfs", .{ .target = target, .optimize = optimize });
-    const net = b.dependency("fluxion_net", .{ .target = target, .optimize = optimize });
-
-    // The two renderers below are built from their packages' source with this
-    // package's rhi, font and shader, so that a `Device` stays one type:
-    // fluxion-ui and fluxion-debugdraw pin their own, at commits of their
-    // choosing, which need not be this package's.
-    const ui_rhi = b.createModule(.{
-        .root_source_file = ui.path("src/render/rhi.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "fluxion_ui", .module = ui.module("fluxion_ui") },
-            .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
-            .{ .name = "fluxion_font", .module = typeface.module("fluxion_font") },
-            .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
-        },
-    });
-    const debugdraw_rhi = b.createModule(.{
-        .root_source_file = debugdraw.path("src/render/rhi.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "fluxion_debugdraw", .module = debugdraw.module("fluxion_debugdraw") },
-            .{ .name = "fluxion_math", .module = math.module("fluxion_math") },
-            .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
-            .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
-        },
-    });
-
-    // Nothing here is lazy, and that is the difference between an engine and
-    // the libraries under it. A library keeps its window, its file reading
-    // and its renderer behind `lazy` so a consumer never downloads what it
-    // does not use; an engine uses all of it by definition, and a game that
-    // depends on this wants every one of them.
-    const mod = b.addModule("fluxion_engine", .{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "fluxion_ecs", .module = ecs.module("fluxion_ecs") },
-            .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
-            .{ .name = "fluxion_platform", .module = platform.module("fluxion_platform") },
-            .{ .name = "fluxion_image", .module = image.module("fluxion_image") },
-            .{ .name = "fluxion_font", .module = typeface.module("fluxion_font") },
-            .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
-            .{ .name = "fluxion_math", .module = math.module("fluxion_math") },
-            .{ .name = "fluxion_id", .module = id.module("fluxion_id") },
-            .{ .name = "fluxion_debugdraw", .module = debugdraw.module("fluxion_debugdraw") },
-            .{ .name = "fluxion_debugdraw_rhi", .module = debugdraw_rhi },
-            .{ .name = "fluxion_ui", .module = ui.module("fluxion_ui") },
-            .{ .name = "fluxion_ui_rhi", .module = ui_rhi },
-            .{ .name = "fluxion_json", .module = json.module("fluxion_json") },
-            .{ .name = "fluxion_physics", .module = physics.module("fluxion_physics") },
-            .{ .name = "fluxion_reflect", .module = reflect.module("fluxion_reflect") },
-            .{ .name = "fluxion_script", .module = script.module("fluxion_script") },
-            .{ .name = "fluxion_audio", .module = audio.module("fluxion_audio") },
-            .{ .name = "fluxion_vfs", .module = vfs.module("fluxion_vfs") },
-            .{ .name = "fluxion_net", .module = net.module("fluxion_net") },
-        },
-    });
-
-    // What the doc comments say of the types' members, for the scripts'
-    // compiler to show: see tools/member_docs.zig.
-    const member_docs = b.addExecutable(.{
-        .name = "member_docs",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tools/member_docs.zig"),
-            .target = b.graph.host,
-        }),
-    });
-    const write_docs = b.addRunArtifact(member_docs);
-    const docs_zig = write_docs.addOutputFileArg("member_docs.zig");
-    addSources(b, write_docs);
-    mod.addAnonymousImport("member_docs", .{ .root_source_file = docs_zig });
-
-    // The engine's version, said in one place - `build.zig.zon` - for a
-    // plugin's manifest to be checked against.
-    const engine_options = b.addOptions();
-    engine_options.addOption([]const u8, "version", @import("build.zig.zon").version);
-    mod.addImport("engine_options", engine_options.createModule());
+    const e = engine(b, target, optimize, true);
+    const mod = e.mod;
+    const ecs = e.ecs;
+    const rhi = e.rhi;
+    const platform = e.platform;
+    const image = e.image;
+    const typeface = e.typeface;
+    const debugdraw = e.debugdraw;
+    const ui = e.ui;
+    const physics = e.physics;
+    const script = e.script;
+    const audio = e.audio;
+    const vfs = e.vfs;
+    const net = e.net;
 
     // zig build test
     //
@@ -120,28 +35,30 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run the engine test suite");
     test_step.dependOn(&run_tests.step);
 
-    // The program a game is shipped as: see runtime/main.zig. On Android it
-    // is the library the platform's activity loads, the APK's libmain.so.
-    // A release build on Windows opens a window and no console; the export
-    // can still turn a game's into one with a console.
-    const runtime_mod = b.createModule(.{
-        .root_source_file = b.path("runtime/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        // A game as it ships carries no debug information: a debug build
-        // is the one to find a fault with.
-        .strip = optimize == .ReleaseFast or optimize == .ReleaseSmall,
-        .imports = &.{.{ .name = "fluxion_engine", .module = mod }},
-    });
+    const ndk = b.option([]const u8, "android-ndk", "The Android NDK, for a build for Android (default: ANDROID_NDK_HOME, then the newest in the Android SDK's ndk folder)");
+    const program = runtime(b, e, target, optimize, ndk);
     const android = target.result.abi.isAndroid();
-    const runtime = if (android)
-        b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = runtime_mod })
-    else
-        b.addExecutable(.{ .name = "fluxion-runtime", .root_module = runtime_mod });
-    if (android) useAndroidNdk(b, runtime, b.option([]const u8, "android-ndk", "The Android NDK, for a build for Android (default: ANDROID_NDK_HOME, then the newest in the Android SDK's ndk folder)"));
-    if (target.result.os.tag == .windows and optimize != .Debug) runtime.subsystem = .windows;
-    b.installArtifact(runtime);
-    test_step.dependOn(&runtime.step);
+    const web = target.result.cpu.arch.isWasm();
+    b.installArtifact(program);
+    test_step.dependOn(&program.step);
+    // And for a browser, whatever the target: a change that breaks the page's
+    // build is found where the change is made.
+    if (!web) {
+        const browser = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+        test_step.dependOn(&runtime(b, engine(b, browser, .ReleaseSmall, false), browser, .ReleaseSmall, null).step);
+    }
+
+    // What a page needs around the runtime's module, a folder the export
+    // copies beside it: runtime/web - the page, fluxion.js, the font - and
+    // the libraries' glues, at the commits built in here (the WebGL one the
+    // rhi's).
+    const page_files = b.addWriteFiles();
+    _ = page_files.addCopyDirectory(b.path("runtime/web"), "", .{});
+    _ = page_files.addCopyFile(platform.namedLazyPath("fluxion-platform.js"), "fluxion-platform.js");
+    _ = page_files.addCopyFile(rhi.builder.dependency("fluxion_webgl", .{ .target = target, .optimize = optimize }).namedLazyPath("glue"), "fluxion-webgl.js");
+    _ = page_files.addCopyFile(audio.namedLazyPath("fluxion-audio.js"), "fluxion-audio.js");
+    _ = page_files.addCopyFile(net.namedLazyPath("fluxion-net.js"), "fluxion-net.js");
+    b.addNamedLazyPath("web", page_files.getDirectory());
 
     // The notices the libraries built into the runtime ask a program made
     // from them to carry - what an export writes beside a game as
@@ -199,12 +116,14 @@ pub fn build(b: *std.Build) void {
     };
 
     const example_step = b.step("examples", "Build every example");
-    // An Android program is the runtime's library: none of these is one.
-    if (!android) for (examples) |example| {
+    // An Android program is the runtime's library, and a page's its module:
+    // none of these is one.
+    if (!android and !web) for (examples) |example| {
         const exe_mod = b.createModule(.{
             .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example.name})),
             .target = target,
             .optimize = optimize,
+            .single_threaded = e.single_threaded,
             .imports = &.{
                 .{ .name = "fluxion_engine", .module = mod },
             },
@@ -224,6 +143,184 @@ pub fn build(b: *std.Build) void {
         if (b.args) |args| run.addArgs(args);
         b.step(example.step, example.about).dependOn(&run.step);
     };
+}
+
+/// The engine's module for `target`, and the packages it is made of. The
+/// build's own target's is the one a dependant imports (`exported`); another
+/// is for a check - the browser's, built by the tests.
+fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, exported: bool) Engine {
+    // A browser runs the program on the page's one thread: built without
+    // threads, it has no atomics to ask for (wasm32 without them has none).
+    const single_threaded: ?bool = if (target.result.cpu.arch.isWasm()) true else null;
+
+    const ecs = b.dependency("fluxion_ecs", .{ .target = target, .optimize = optimize });
+    const rhi = b.dependency("fluxion_rhi", .{ .target = target, .optimize = optimize });
+    const platform = b.dependency("fluxion_platform", .{ .target = target, .optimize = optimize });
+    const image = b.dependency("fluxion_image", .{ .target = target, .optimize = optimize });
+    const typeface = b.dependency("fluxion_font", .{ .target = target, .optimize = optimize });
+    const shader = b.dependency("fluxion_shader", .{ .target = target, .optimize = optimize });
+    const math = b.dependency("fluxion_math", .{ .target = target, .optimize = optimize });
+    const id = b.dependency("fluxion_id", .{ .target = target, .optimize = optimize });
+    // Without its renderer, which is built below from its source with this
+    // package's rhi and shader.
+    const debugdraw = b.dependency("fluxion_debugdraw", .{ .target = target, .optimize = optimize, .renderer = false });
+    const ui = b.dependency("fluxion_ui", .{ .target = target, .optimize = optimize });
+    const json = b.dependency("fluxion_json", .{ .target = target, .optimize = optimize });
+    const physics = b.dependency("fluxion_physics", .{ .target = target, .optimize = optimize });
+    const reflect = b.dependency("fluxion_reflect", .{ .target = target, .optimize = optimize });
+    const script = b.dependency("fluxion_script", .{ .target = target, .optimize = optimize });
+    const audio = b.dependency("fluxion_audio", .{ .target = target, .optimize = optimize });
+    const vfs = b.dependency("fluxion_vfs", .{ .target = target, .optimize = optimize });
+    const net = b.dependency("fluxion_net", .{ .target = target, .optimize = optimize });
+
+    // The two renderers below are built from their packages' source with this
+    // package's rhi, font and shader, so that a `Device` stays one type:
+    // fluxion-ui and fluxion-debugdraw pin their own, at commits of their
+    // choosing, which need not be this package's.
+    const ui_rhi = b.createModule(.{
+        .root_source_file = ui.path("src/render/rhi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fluxion_ui", .module = ui.module("fluxion_ui") },
+            .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
+            .{ .name = "fluxion_font", .module = typeface.module("fluxion_font") },
+            .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
+        },
+    });
+    const debugdraw_rhi = b.createModule(.{
+        .root_source_file = debugdraw.path("src/render/rhi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "fluxion_debugdraw", .module = debugdraw.module("fluxion_debugdraw") },
+            .{ .name = "fluxion_math", .module = math.module("fluxion_math") },
+            .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
+            .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
+        },
+    });
+
+    // Nothing here is lazy, and that is the difference between an engine and
+    // the libraries under it. A library keeps its window, its file reading
+    // and its renderer behind `lazy` so a consumer never downloads what it
+    // does not use; an engine uses all of it by definition, and a game that
+    // depends on this wants every one of them.
+    const mod_options: std.Build.Module.CreateOptions = .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .single_threaded = single_threaded,
+        .imports = &.{
+            .{ .name = "fluxion_ecs", .module = ecs.module("fluxion_ecs") },
+            .{ .name = "fluxion_rhi", .module = rhi.module("fluxion_rhi") },
+            .{ .name = "fluxion_platform", .module = platform.module("fluxion_platform") },
+            .{ .name = "fluxion_image", .module = image.module("fluxion_image") },
+            .{ .name = "fluxion_font", .module = typeface.module("fluxion_font") },
+            .{ .name = "fluxion_shader", .module = shader.module("fluxion_shader") },
+            .{ .name = "fluxion_math", .module = math.module("fluxion_math") },
+            .{ .name = "fluxion_id", .module = id.module("fluxion_id") },
+            .{ .name = "fluxion_debugdraw", .module = debugdraw.module("fluxion_debugdraw") },
+            .{ .name = "fluxion_debugdraw_rhi", .module = debugdraw_rhi },
+            .{ .name = "fluxion_ui", .module = ui.module("fluxion_ui") },
+            .{ .name = "fluxion_ui_rhi", .module = ui_rhi },
+            .{ .name = "fluxion_json", .module = json.module("fluxion_json") },
+            .{ .name = "fluxion_physics", .module = physics.module("fluxion_physics") },
+            .{ .name = "fluxion_reflect", .module = reflect.module("fluxion_reflect") },
+            .{ .name = "fluxion_script", .module = script.module("fluxion_script") },
+            .{ .name = "fluxion_audio", .module = audio.module("fluxion_audio") },
+            .{ .name = "fluxion_vfs", .module = vfs.module("fluxion_vfs") },
+            .{ .name = "fluxion_net", .module = net.module("fluxion_net") },
+        },
+    };
+    const mod = if (exported) b.addModule("fluxion_engine", mod_options) else b.createModule(mod_options);
+
+    // What the doc comments say of the types' members, for the scripts'
+    // compiler to show: see tools/member_docs.zig.
+    const member_docs = b.addExecutable(.{
+        .name = "member_docs",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/member_docs.zig"),
+            .target = b.graph.host,
+        }),
+    });
+    const write_docs = b.addRunArtifact(member_docs);
+    const docs_zig = write_docs.addOutputFileArg("member_docs.zig");
+    addSources(b, write_docs);
+    mod.addAnonymousImport("member_docs", .{ .root_source_file = docs_zig });
+
+    // The engine's version, said in one place - `build.zig.zon` - for a
+    // plugin's manifest to be checked against.
+    const engine_options = b.addOptions();
+    engine_options.addOption([]const u8, "version", @import("build.zig.zon").version);
+    mod.addImport("engine_options", engine_options.createModule());
+
+    return .{
+        .mod = mod,
+        .ecs = ecs,
+        .rhi = rhi,
+        .platform = platform,
+        .image = image,
+        .typeface = typeface,
+        .debugdraw = debugdraw,
+        .ui = ui,
+        .physics = physics,
+        .script = script,
+        .audio = audio,
+        .vfs = vfs,
+        .net = net,
+        .single_threaded = single_threaded,
+    };
+}
+
+const Engine = struct {
+    mod: *std.Build.Module,
+    ecs: *std.Build.Dependency,
+    rhi: *std.Build.Dependency,
+    platform: *std.Build.Dependency,
+    image: *std.Build.Dependency,
+    typeface: *std.Build.Dependency,
+    debugdraw: *std.Build.Dependency,
+    ui: *std.Build.Dependency,
+    physics: *std.Build.Dependency,
+    script: *std.Build.Dependency,
+    audio: *std.Build.Dependency,
+    vfs: *std.Build.Dependency,
+    net: *std.Build.Dependency,
+    single_threaded: ?bool,
+};
+
+/// The program a game is shipped as, from `mod`: see runtime/main.zig. On
+/// Android it is the library the platform's activity loads, the APK's
+/// libmain.so; in a browser, the page's module. A release build on Windows
+/// opens a window and no console; the export can still turn a game's into
+/// one with a console.
+fn runtime(b: *std.Build, e: Engine, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ndk: ?[]const u8) *std.Build.Step.Compile {
+    const runtime_mod = b.createModule(.{
+        .root_source_file = b.path("runtime/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .single_threaded = e.single_threaded,
+        // A game as it ships carries no debug information: a debug build
+        // is the one to find a fault with.
+        .strip = optimize == .ReleaseFast or optimize == .ReleaseSmall,
+        .imports = &.{.{ .name = "fluxion_engine", .module = e.mod }},
+    });
+    const android = target.result.abi.isAndroid();
+    const program = if (android)
+        b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = runtime_mod })
+    else
+        b.addExecutable(.{ .name = "fluxion-runtime", .root_module = runtime_mod });
+    if (android) useAndroidNdk(b, program, ndk);
+    if (target.result.os.tag == .windows and optimize != .Debug) program.subsystem = .windows;
+    if (target.result.cpu.arch.isWasm()) {
+        // A page's module, for wasm32-wasi: no `main` - the page calls
+        // `init`, `frame` and `deinit` - its exports kept, and a reactor,
+        // whose C library `_initialize` sets up before the first call.
+        program.entry = .disabled;
+        program.rdynamic = true;
+        program.wasi_exec_model = .reactor;
+    }
+    return program;
 }
 
 /// The lowest Android the runtime is for: 10. The platform's activity is

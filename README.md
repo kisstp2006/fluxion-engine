@@ -2405,9 +2405,10 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   editor - but its backends are newer, slower, and less proven, and the log
   says so when one opens (`Backend.experimental`).
 - **A renderer with nothing to draw with here opens nothing**: a `modern`
-  project in a browser or on macOS stops with `error.RendererNotBuilt` and
-  says to choose `compatibility`, rather than being drawn with something it
-  will not look like.
+  project on macOS stops with `error.RendererNotBuilt` and says to choose
+  `compatibility`, rather than being drawn with something it will not look
+  like. A shipped game is the runtime's to open, though: in a browser it asks
+  for WebGL 2 whatever the project says, as on Android it asks for Vulkan.
 - **`--backend` wins over the project** - `gl`, `d3d11`, `d3d12`, `vulkan` -
   and nothing else is tried: one game can be checked on every backend of its
   renderer, and one outside it is allowed, and said in the log.
@@ -2428,6 +2429,7 @@ const app = try fx.App.create(gpa, .{ .io = io, .pack = pack, .open_project = tr
 zig build                                          # zig-out/bin/fluxion-runtime
 zig build -Dtarget=x86_64-linux-gnu.2.31           # a Linux one, from any system
 zig build -Dtarget=aarch64-linux-android           # zig-out/lib/libmain.so, with the Android NDK
+zig build -Dtarget=wasm32-wasi -Doptimize=ReleaseSmall   # zig-out/bin/fluxion-runtime.wasm, a page's module
 ```
 
 - **A shipped game is a pack**: its files in one, from fluxion-vfs, its
@@ -2448,6 +2450,26 @@ zig build -Dtarget=aarch64-linux-android           # zig-out/lib/libmain.so, wit
   information. On Android it is `libmain.so`, the library the platform's
   activity loads; the NDK is `-Dandroid-ndk`, `ANDROID_NDK_HOME`, or the
   newest in the Android SDK, and the lowest Android is 10 (API 29).
+- **In a browser the runtime is a module the page drives**: built for
+  `wasm32-wasi`, it exports `init`, `frame` - called once an animation frame
+  until it answers false - and `deinit`. Its command line and the page's
+  address come in as WASI's arguments and environment, and its files are the
+  page's: the pack at `/game.fxpack` (`--pack`), the font at
+  `/fonts/ui.ttf`, and the player's folder under `/user`, which the browser
+  keeps (see fluxion-platform's `web.js`). It runs on the page's one thread:
+  no worker threads, a background load done a piece a frame, and a frame cap
+  that passes over the animation frames that come too soon instead of
+  sleeping. Sound is fluxion-audio's mixer in an AudioWorklet, which a
+  browser starts at the player's first press; a web request is the page's
+  `fetch`.
+- **`runtime/web` is what goes round the module**: `index.html`, the page an
+  export fills in; `fluxion.js`, which downloads the module, the pack and the
+  font with a bar, and runs the module with the libraries' glues; and Noto
+  Sans with its licence (SIL OFL 1.1), the font a game writes with when its
+  theme names none. The build hands the folder on, with the glues of the
+  libraries at the commits built in, as the named path `web`; the tests build
+  the module for a browser too, so a change that breaks it is found where it
+  is made.
 - **`fx.shipped` says where the pack is**, for the runtime and for an
   export that puts it there.
 - **A launcher's word.** The runtime passes over the flags it does not know
@@ -3519,7 +3541,10 @@ Here, and checked by the tests:
   `commandArgument`; `program://` for what a launcher left beside it.
 - The web: requests on threads of their own, answered once a frame, HTTPS
   with the system's certificates, a URL sent as it is written, downloads into
-  the player's files; a script awaits each, and catches what failed.
+  the player's files; a script awaits each, and catches what failed. In a
+  browser, the page's `fetch` answers them.
+- A game in a browser: the runtime as a page's module, a frame a call, its
+  pack, font and player's files the page's, its sound an AudioWorklet.
 - Plugins: folders under `res://addons/` with a manifest, turned on in the
   project, started after what they require, their singletons and settings
   sections, `@secret` values kept out of the project file, and only what a

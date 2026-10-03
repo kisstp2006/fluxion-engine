@@ -231,6 +231,16 @@ test "a script awaits the web: an answer, its text, a header and its JSON; a for
     try testing.expectEqualStrings("NotSecure", f.text("why"));
 }
 
+test "a page's word: what its address gives, by name" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .page = &.{ "level=3", "gjapi_username=Ann", "quiet=", "odd" } });
+    defer app.destroy();
+    try testing.expectEqualStrings("3", app.pageParameter("level").?);
+    try testing.expectEqualStrings("Ann", app.pageParameter("gjapi_username").?);
+    try testing.expectEqualStrings("", app.pageParameter("quiet").?);
+    try testing.expect(app.pageParameter("odd") == null);
+    try testing.expect(app.pageParameter("missing") == null);
+}
+
 test "a launcher's word: the command line, the files beside the program, the focus and the end" {
     var f: Fixture = undefined;
     try f.init();

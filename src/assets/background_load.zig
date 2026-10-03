@@ -202,6 +202,8 @@ pub const Load = struct {
 
     /// Wait for the thread, if it has not finished.
     pub fn join(self: *Load) void {
+        // Not even a thread's type where there are none (a browser's).
+        if (comptime !threaded) return;
         if (self.thread) |thread| thread.join();
         self.thread = null;
     }
@@ -275,8 +277,9 @@ pub const Loads = struct {
 /// not read by its ending.
 pub fn start(app: *App, path: []const u8) !void {
     if (app.io == null) return error.NoIo;
-    // Memory any thread can ask for, since the load's thread does.
-    const gpa = std.heap.smp_allocator;
+    // Memory any thread can ask for, since the load's thread does - the
+    // app's own where there is no other thread.
+    const gpa = if (threaded) std.heap.smp_allocator else app.gpa;
     const source = try app.project.canonical(gpa, path);
     errdefer gpa.free(source);
     const kind = kindOf(source) orelse return error.NotAnAsset;

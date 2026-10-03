@@ -174,6 +174,29 @@ pub fn sleepUntilNextFrame(self: *Time, target_fps: f32) std.Io.Cancelable!void 
     }
 }
 
+/// For a loop that may not wait - a page's, called once an animation frame:
+/// whether a frame held to `target_fps` is due now, moving the deadline on
+/// when it is. A quarter of a frame early is due, since the page's frames
+/// come when the display's do, not when this one's deadline is.
+pub fn frameIsDue(self: *Time, target_fps: f32) bool {
+    if (target_fps <= 0) return true;
+    const io = switch (self.source) {
+        .clock => |io| io,
+        .fixed => return true,
+    };
+    return self.dueAt(.now(io, .awake), target_fps);
+}
+
+fn dueAt(self: *Time, now: std.Io.Timestamp, target_fps: f32) bool {
+    const period: i96 = @intFromFloat(std.time.ns_per_s / target_fps);
+    if (now.durationTo(self.next_frame).nanoseconds > @divTrunc(period, 4)) return false;
+    // The next a period after this one was due, keeping the beat - or after
+    // now, for one that fell a whole period behind.
+    self.next_frame = self.next_frame.addDuration(.fromNanoseconds(period));
+    if (self.next_frame.durationTo(now).nanoseconds > 0) self.next_frame = now.addDuration(.fromNanoseconds(period));
+    return true;
+}
+
 fn advanceFrameDeadline(self: *Time, now: std.Io.Timestamp, target_fps: f32) bool {
     self.next_frame = self.next_frame.addDuration(.fromNanoseconds(@intFromFloat(std.time.ns_per_s / target_fps)));
     const late_by = self.next_frame.durationTo(now).nanoseconds;
@@ -272,6 +295,20 @@ test "a late frame is caught up with, and a stall starts the schedule again" {
 
     try std.testing.expect(!time.advanceFrameDeadline(.fromNanoseconds(2000 * ms), 100));
     try std.testing.expectEqual(2000 * ms, time.next_frame.nanoseconds);
+}
+
+test "on a page, a frame held to 30 a second runs every other one of 60" {
+    var time: Time = .init(.{ .fixed = 0 });
+    const ms = std.time.ns_per_ms;
+    var ran: u32 = 0;
+    // A display's frames, a sixtieth of a second apart, a little late or early.
+    for (0..60) |i| {
+        const jitter: i96 = if (i % 3 == 0) ms else -ms;
+        if (time.dueAt(.fromNanoseconds(1000 * ms + @as(i96, @intCast(i)) * 16_667_000 + jitter), 30)) ran += 1;
+    }
+    try std.testing.expectEqual(@as(u32, 30), ran);
+    // No cap, and every frame runs.
+    try std.testing.expect(time.frameIsDue(0));
 }
 
 test "a fixed clock, or a cap of zero, never sleeps" {

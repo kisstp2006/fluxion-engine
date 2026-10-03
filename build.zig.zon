@@ -13,8 +13,8 @@
         // The world, and everything in it. An entity is a thing in the scene,
         // with no inheritance and no virtual call.
         .fluxion_ecs = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-ecs#428a05a0799a257c52455df031918fdbf234fad0",
-            .hash = "fluxion_ecs-0.1.0-YgvFeBkQAgDtQksXV9YleCjUaYm1HddX7S9Oowj2LWhP",
+            .url = "git+https://github.com/kisstp2006/fluxion-ecs#75be1b6aed2a14fedf1bb381686290355adfeb5e",
+            .hash = "fluxion_ecs-0.1.0-YgvFeCsRAgBAbPuuYbZ82QGguKlGoN1WiNGCAGIQULat",
         },
 
         // One way to draw, on whichever API the machine has. Every layer -
@@ -29,8 +29,8 @@
         // this; an engine is exactly the thing that may, because opening the
         // window is its job.
         .fluxion_platform = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-platform#7f6990aef6d5c2a3f56bfb76582e6e55563da7c5",
-            .hash = "fluxion_platform-0.1.0-WsOjUZdGGQBbA31UoS_op4pisjc8pza_GUuOx3xKy8y0",
+            .url = "git+https://github.com/kisstp2006/fluxion-platform#80b6b3e7066693546596b127f077b8eceecd7bf0",
+            .hash = "fluxion_platform-0.1.0-WsOjUR_UGQDgB8xrrUhtHRVWqGrTwQogh-vcZ60H7j9V",
         },
 
         // The interface layer: the layout `.ui` systems declare into, and the
@@ -95,8 +95,8 @@
         // queries: `fluxion-physics` pins `fluxion-jobs` where `fluxion-ecs`
         // does, so the two share one `Jobs`.
         .fluxion_physics = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-physics#764bcc0ff36f48f3ca6ace8c16a6d6890366538b",
-            .hash = "fluxion_physics-0.1.0-dovcrqU9CACijwbA2xjLhL7M-TaTy4oV1DikEo3pRhbJ",
+            .url = "git+https://github.com/kisstp2006/fluxion-physics#1af38ea4402833f0a5a40781d8a9cbc145547c99",
+            .hash = "fluxion_physics-0.1.0-dovcrkI-CAA0f67bAIUbCQ5MA5VSBnNfJunUVyXCFgeP",
         },
 
         // The components and the engine's calls, described at run time: what
@@ -111,14 +111,14 @@
         // fluxion-reflect and fluxion-json are pinned where these are, so a
         // `reflect.Value` is one type across the two.
         .fluxion_script = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-script#05cc48c79a2d99bdfdf58ee7106e99b87d5f23b7",
-            .hash = "fluxion_script-0.1.0-rt2DKvIoFQCBoSTpi1H7S42aB9pZAlrQ6_7Ce95gV4bZ",
+            .url = "git+https://github.com/kisstp2006/fluxion-script#07e6a1dd22258c6a8ae6e7c26fa1c8c9367c47bc",
+            .hash = "fluxion_script-0.1.0-rt2DKmMpFQDPdjjiVVErZj7EwxriKI5av_gM5xJhbGMt",
         },
         // Web requests: a script's `web` global, each request on a thread of
         // its own and its answer handed over once a frame.
         .fluxion_net = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-net#11c12b002f9a4a3379ce434fc54378678fed6589",
-            .hash = "fluxion_net-0.1.0-VdxHa7GEAACHCcA1rVNM29oWqEjapk5lnCKRrWveWWnY",
+            .url = "git+https://github.com/kisstp2006/fluxion-net#ace415b4bd123f3bce6650d94ec813b2644419b1",
+            .hash = "fluxion_net-0.1.0-VdxHa6m4AABaKhxyLYi_X3_YjbW2g96mWIqF7t00OGMZ",
         },
 
         // Generational handles: what the asset tables hand out, and what a
@@ -134,8 +134,8 @@
         // compiled by Zig. Its fluxion-id is pinned where this one is, so a
         // clip's handle is one type.
         .fluxion_audio = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-audio#76a68d94af5270db01172b6544e047365efa1533",
-            .hash = "fluxion_audio-0.1.0-uP5dNwWuBwBs78OqhZsX0OA7tGzvNRZmA6a2QsqH9mej",
+            .url = "git+https://github.com/kisstp2006/fluxion-audio#50926350cba12cb98c3eda22edbbeef8ded616bb",
+            .hash = "fluxion_audio-0.1.0-uP5dNz0fBwDVjnb65xRDf0dngRie7PCE9_m9M2ClNEk3",
         },
 
         // Packs: a shipped game's files in one, sealed and signed if it
