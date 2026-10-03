@@ -1212,6 +1212,42 @@ try app.callGroup("enemies", "alert");
   app.find("ship"), true)`, `app.findPath(self.entity, "../Door")`,
   `app.callGroup("lights", "flicker")`.
 
+### 🧊 Where a thing is in 3D
+
+```zig
+var lamp: fx.Transform3D = .at(0, 2.5, -4);
+lamp.setRotationDegrees(.init(-30, 0, 0));       // tipped down
+const held = try app.world.spawnWith(.{ lamp, fx.Parent.of(room) });
+try app.lookAt3D(held, .init(0, 0, 0), .unit_y);  // -z towards the middle
+const where = app.globalPosition3D(held).?;
+```
+
+- **`Transform3D` is the 3D twin of `Transform2D`**: `position` and `scale`
+  as `Vec3`s and `rotation` as a `Rotation` - the four numbers of a quaternion,
+  laid out as a component's fields must be (`Rotation.of(q)`, `rotation.quat()`)
+  - with the same `inherit_rotation`, `inherit_scale` and `interpolate`. The
+  axes are right-handed, `+y` up, and a thing faces its own `-z`, as a camera
+  and a glTF model do.
+- **It hangs in the one tree.** Its numbers are in the space of the 3D
+  transform above it; a parent with none - a 2D one, a timer - places nothing,
+  so a 3D entity under a 2D one is a root of its own world.
+- **The same calls, ending in `3D`**: `worldTransform3D`,
+  `setWorldTransform3D`, `globalPosition3D`, `globalRotation3D`,
+  `globalScale3D` and their `set` twins, `globalTranslate3D`, `toLocal3D`,
+  `toGlobal3D`, `globalForward3D`, `globalRight3D`, `globalUp3D` and
+  `lookAt3D(entity, point, up)`. On the component: `translate`,
+  `translateLocal` (along its own axes), `rotateX`, `rotateY`, `rotateZ`,
+  `rotateAbout(axis, radians)`, `rotateLocal`, `lookAt`, `forward`, `back`,
+  `right`, `up`, `rotationDegrees` and `setRotationDegrees` (pitch, yaw and
+  roll, applied roll first, then pitch, then yaw).
+- **From a script** the rotation is a `quat`, and `rotation_degrees` the same
+  turn as a `vec3`: `t.position.y += 1.0`, `t.rotation_degrees.y += 90.0`,
+  `t.rotation = t.rotation * quat(vec3(0, 1, 0), 0.1)`,
+  `self.entity.lookAt3D(target)`. A tween and an animation track move a
+  `Vec3` and a rotation too - `"Transform3D.position"`,
+  `"Transform3D.rotation"` along the shortest arc - and an `.anim` file
+  writes a `Vec3` as three numbers and a rotation as `{"x", "y", "z", "w"}`.
+
 ## 🎨 The 2D layer
 
 One quad in a vertex buffer and a second buffer stepping once per instance

@@ -2,7 +2,9 @@
 
 //! Where a thing really is, once its parent has had its say.
 //!
-//! A `Transform2D` is local: in its `Parent`'s space. Nothing is cached - a
+//! A `Transform2D` - or a `Transform3D` - is local: in its `Parent`'s space.
+//! The two are walked the same way, each through parents of its own kind.
+//! Nothing is cached - a
 //! parented entity's world transform is worked out where it is wanted, by
 //! walking up to a root - so there is no second component to move every
 //! transform into another archetype. Each link is interpolated in its own
@@ -21,9 +23,12 @@ const components = @import("components.zig");
 
 const Allocator = std.mem.Allocator;
 const Transform2D = components.Transform2D;
+const Transform3D = @import("transform3d.zig").Transform3D;
 const Parent = components.Parent;
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;
+const Vec3 = math.Vec3;
+const Quat = math.Quat;
 
 /// What an entity hangs from, `.none` for a root.
 pub fn parentOf(world: *const ecs.World, entity: Entity) Entity {
@@ -64,11 +69,26 @@ pub const Snapshot = struct {
     }
 };
 
-/// Every entity that asked to be drawn between steps, and where it was.
-pub const Snapshots = std.AutoHashMapUnmanaged(Entity, Snapshot);
+/// Where a transform of type `T` was before the last fixed step.
+pub fn SnapshotOf(comptime T: type) type {
+    return if (T == Transform2D) Snapshot else T.Snapshot;
+}
+
+/// Every entity with a transform of type `T` that asked to be drawn
+/// between steps, and where it was.
+pub fn SnapshotsOf(comptime T: type) type {
+    return std.AutoHashMapUnmanaged(Entity, SnapshotOf(T));
+}
+
+pub const Snapshots = SnapshotsOf(Transform2D);
+pub const Snapshots3D = SnapshotsOf(Transform3D);
 
 /// One transform, blended against its snapshot if it asked for that.
 pub fn stepped(snapshots: *const Snapshots, entity: Entity, local: Transform2D, alpha: f32) Transform2D {
+    return steppedAs(Transform2D, snapshots, entity, local, alpha);
+}
+
+pub fn steppedAs(comptime T: type, snapshots: *const SnapshotsOf(T), entity: Entity, local: T, alpha: f32) T {
     if (!local.interpolate) return local;
     const previous = snapshots.get(entity) orelse return local;
     return previous.blend(local, alpha);
@@ -88,16 +108,29 @@ pub fn resolve(
     local: Transform2D,
     alpha: f32,
 ) ?Transform2D {
+    return resolveAs(Transform2D, world, snapshots, entity, local, alpha);
+}
+
+/// `resolve` for a transform of either kind: the chain goes up through
+/// parents with a transform of the same kind.
+pub fn resolveAs(
+    comptime T: type,
+    world: *ecs.World,
+    snapshots: *const SnapshotsOf(T),
+    entity: Entity,
+    local: T,
+    alpha: f32,
+) ?T {
     var above = parentOf(world, entity);
-    if (above.isNone()) return stepped(snapshots, entity, local, alpha);
+    if (above.isNone()) return steppedAs(T, snapshots, entity, local, alpha);
 
     // Nearest first. A fixed array, so nothing allocates inside a frame.
-    var chain: [Transform2D.max_depth]Transform2D = undefined;
-    chain[0] = stepped(snapshots, entity, local, alpha);
+    var chain: [T.max_depth]T = undefined;
+    chain[0] = steppedAs(T, snapshots, entity, local, alpha);
     var depth: usize = 1;
 
     while (!above.isNone()) {
-        const parent_local = world.get(above, Transform2D) orelse {
+        const parent_local = world.get(above, T) orelse {
             // Dead: the chain is broken. See `tree.despawnOrphans`.
             if (!world.isAlive(above)) return null;
             // Alive with no transform: the chain stops here.
@@ -105,7 +138,7 @@ pub fn resolve(
         };
 
         if (depth == chain.len) return null;
-        chain[depth] = stepped(snapshots, above, parent_local.*, alpha);
+        chain[depth] = steppedAs(T, snapshots, above, parent_local.*, alpha);
         depth += 1;
         above = parentOf(world, above);
     }
@@ -115,7 +148,7 @@ pub fn resolve(
     var at = depth - 1;
     while (at > 0) {
         at -= 1;
-        placed = Transform2D.compose(placed, chain[at]);
+        placed = T.compose(placed, chain[at]);
     }
     return placed;
 }
@@ -344,6 +377,143 @@ pub fn snapshot(gpa: Allocator, world: *ecs.World, snapshots: *Snapshots) !void 
     }
 }
 
+// -------------------------------------------------------------------------
+// In 3D
+// -------------------------------------------------------------------------
+
+/// `resolve`, for a `Transform3D`.
+pub fn resolve3D(
+    world: *ecs.World,
+    snapshots: *const Snapshots3D,
+    entity: Entity,
+    local: Transform3D,
+    alpha: f32,
+) ?Transform3D {
+    return resolveAs(Transform3D, world, snapshots, entity, local, alpha);
+}
+
+/// `resolve3D`, for an entity whose transform the caller has not got.
+pub fn resolveEntity3D(world: *ecs.World, snapshots: *const Snapshots3D, entity: Entity, alpha: f32) ?Transform3D {
+    const local = world.get(entity, Transform3D) orelse return null;
+    return resolve3D(world, snapshots, entity, local.*, alpha);
+}
+
+const still3d: Snapshots3D = .empty;
+
+/// Where an entity really is in 3D, with every parent above it applied:
+/// `worldTransform`, for a `Transform3D`.
+pub fn worldTransform3D(world: *ecs.World, entity: Entity) ?Transform3D {
+    return resolveEntity3D(world, &still3d, entity, 1);
+}
+
+/// Put an entity where `placed` says in the 3D world, and keep its parent:
+/// `setWorldTransform`, for a `Transform3D`.
+pub fn setWorldTransform3D(world: *ecs.World, entity: Entity, placed: Transform3D) PlaceError!void {
+    const above = try parentPlace3D(world, entity);
+    const own = world.get(entity, Transform3D) orelse return error.NoTransform;
+    own.position = above.unapply(placed.position);
+    own.rotation = if (own.inherit_rotation) .of(above.rotation.quat().conj().mul(placed.rotation.quat()).norm()) else placed.rotation;
+    own.scale = if (own.inherit_scale) .init(
+        placed.scale.x / nonZero(above.scale.x),
+        placed.scale.y / nonZero(above.scale.y),
+        placed.scale.z / nonZero(above.scale.z),
+    ) else placed.scale;
+}
+
+fn parentPlace3D(world: *ecs.World, entity: Entity) PlaceError!Transform3D {
+    const above = parentOf(world, entity);
+    if (above.isNone()) return .{};
+    if (world.get(above, Transform3D) == null and world.isAlive(above)) return .{};
+    return worldTransform3D(world, above) orelse error.Unplaced;
+}
+
+fn placeOf3D(world: *ecs.World, entity: Entity) PlaceError!Transform3D {
+    if (!world.has(entity, Transform3D)) return error.NoTransform;
+    return worldTransform3D(world, entity) orelse error.Unplaced;
+}
+
+/// Where an entity is in the 3D world.
+pub fn globalPosition3D(world: *ecs.World, entity: Entity) ?Vec3 {
+    const placed = worldTransform3D(world, entity) orelse return null;
+    return placed.position;
+}
+
+pub fn setGlobalPosition3D(world: *ecs.World, entity: Entity, position: Vec3) PlaceError!void {
+    var placed = try placeOf3D(world, entity);
+    placed.position = position;
+    try setWorldTransform3D(world, entity, placed);
+}
+
+/// Which way an entity faces in the 3D world.
+pub fn globalRotation3D(world: *ecs.World, entity: Entity) ?Quat {
+    const placed = worldTransform3D(world, entity) orelse return null;
+    return placed.rotation.quat();
+}
+
+pub fn setGlobalRotation3D(world: *ecs.World, entity: Entity, rotation: Quat) PlaceError!void {
+    var placed = try placeOf3D(world, entity);
+    placed.rotation = .of(rotation);
+    try setWorldTransform3D(world, entity, placed);
+}
+
+/// How big an entity is in the 3D world.
+pub fn globalScale3D(world: *ecs.World, entity: Entity) ?Vec3 {
+    const placed = worldTransform3D(world, entity) orelse return null;
+    return placed.scale;
+}
+
+pub fn setGlobalScale3D(world: *ecs.World, entity: Entity, scale: Vec3) PlaceError!void {
+    var placed = try placeOf3D(world, entity);
+    placed.scale = scale;
+    try setWorldTransform3D(world, entity, placed);
+}
+
+/// Move an entity by `offset` in the 3D world.
+pub fn globalTranslate3D(world: *ecs.World, entity: Entity, offset: Vec3) PlaceError!void {
+    const placed = try placeOf3D(world, entity);
+    try setGlobalPosition3D(world, entity, placed.position.add(offset));
+}
+
+/// A point in the 3D world, in an entity's own space.
+pub fn toLocal3D(world: *ecs.World, entity: Entity, global_point: Vec3) ?Vec3 {
+    const placed = worldTransform3D(world, entity) orelse return null;
+    return placed.unapply(global_point);
+}
+
+/// A point in an entity's own space, in the 3D world.
+pub fn toGlobal3D(world: *ecs.World, entity: Entity, local_point: Vec3) ?Vec3 {
+    const placed = worldTransform3D(world, entity) orelse return null;
+    return placed.apply(local_point);
+}
+
+/// Which way one of an entity's own directions points in the 3D world,
+/// scaled to a length of one: its `-z` is where it faces.
+pub fn globalDirection3D(world: *ecs.World, entity: Entity, local_direction: Vec3) ?Vec3 {
+    const placed = worldTransform3D(world, entity) orelse return null;
+    return placed.rotation.quat().rotate(local_direction).tryNorm() orelse local_direction;
+}
+
+/// Turn an entity so that its `-z` faces a point in the 3D world, with its
+/// `+y` as near `up` as it can be.
+pub fn lookAt3D(world: *ecs.World, entity: Entity, target: Vec3, up: Vec3) PlaceError!void {
+    var placed = try placeOf3D(world, entity);
+    placed.lookAt(target, up);
+    try setWorldTransform3D(world, entity, placed);
+}
+
+/// Remember where every interpolating 3D transform is, before a step moves
+/// it: `snapshot`, in 3D.
+pub fn snapshot3D(gpa: Allocator, world: *ecs.World, snapshots: *Snapshots3D) !void {
+    snapshots.clearRetainingCapacity();
+    var it = try ecs.Query(.{Transform3D}).over(world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(Transform3D), chunk.entities) |current, entity| {
+            if (!current.interpolate) continue;
+            try snapshots.put(gpa, entity, .of(current));
+        }
+    }
+}
+
 test "an unparented transform is already the world one" {
     var world: ecs.World = .init(testing.allocator);
     defer world.deinit();
@@ -462,4 +632,52 @@ test "a transform that did not ask is not interpolated" {
         @as(f32, 10),
         resolveEntity(&world, &snapshots, runner, 0.5).?.x,
     );
+}
+
+test "a 3D child is placed through its 3D parent, and placed back where asked" {
+    var world: ecs.World = .init(testing.allocator);
+    defer world.deinit();
+
+    var turned: Transform3D = .at(10, 0, 0);
+    turned.rotation = .of(Quat.fromAxisAngle(.unit_y, std.math.pi / 2.0));
+    const parent = try world.spawnWith(.{turned});
+    const child = try world.spawnWith(.{ Transform3D.at(0, 0, -2), Parent.of(parent) });
+
+    // A quarter turn about +y takes the child's -z offset to -x.
+    const at = globalPosition3D(&world, child).?;
+    try testing.expectApproxEqAbs(@as(f32, 8), at.x, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 0), at.z, 1e-5);
+
+    try setGlobalPosition3D(&world, child, .init(10, 5, 0));
+    const now = globalPosition3D(&world, child).?;
+    try testing.expectApproxEqAbs(@as(f32, 10), now.x, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 5), now.y, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 0), now.z, 1e-5);
+
+    // Facing a point in the world, whatever the parent's turn.
+    try lookAt3D(&world, child, .init(10, 5, -10), .unit_y);
+    const facing = globalDirection3D(&world, child, .init(0, 0, -1)).?;
+    try testing.expectApproxEqAbs(@as(f32, -1), facing.z, 1e-4);
+}
+
+test "a 3D transform under a 2D one, or under none, is its own root" {
+    var world: ecs.World = .init(testing.allocator);
+    defer world.deinit();
+    const flat = try world.spawnWith(.{Transform2D.at(100, 100)});
+    const solid = try world.spawnWith(.{ Transform3D.at(1, 2, 3), Parent.of(flat) });
+    const at = globalPosition3D(&world, solid).?;
+    try testing.expectEqual(@as(f32, 1), at.x);
+    try testing.expectEqual(@as(f32, 3), at.z);
+}
+
+test "a 3D entity is drawn between its last two steps" {
+    var world: ecs.World = .init(testing.allocator);
+    defer world.deinit();
+    var snapshots: Snapshots3D = .empty;
+    defer snapshots.deinit(testing.allocator);
+
+    const runner = try world.spawnWith(.{Transform3D.at(0, 0, 0).interpolated()});
+    try snapshot3D(testing.allocator, &world, &snapshots);
+    world.get(runner, Transform3D).?.position = .init(0, 0, 10);
+    try testing.expectApproxEqAbs(@as(f32, 5), resolveEntity3D(&world, &snapshots, runner, 0.5).?.position.z, 1e-5);
 }

@@ -44,6 +44,10 @@ pub const Collider2D = @import("../physics/physics_components.zig").Collider2D;
 pub const Area2D = @import("../physics/physics_components.zig").Area2D;
 pub const RayCast2D = @import("../physics/physics_components.zig").RayCast2D;
 
+/// Where a thing is in 3D. See `scene/transform3d.zig`.
+pub const Transform3D = @import("transform3d.zig").Transform3D;
+pub const Rotation = @import("transform3d.zig").Rotation;
+
 /// Re-exported because a transform names the entity it hangs from.
 pub const Entity = ecs.Entity;
 

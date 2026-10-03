@@ -280,6 +280,7 @@ fn freshStep(app: *App) anyerror!void {
     app.debug_steps.advance(app.time.fixed_delta);
     app.debug_under_steps.advance(app.time.fixed_delta);
     try hierarchy.snapshot(app.gpa, &app.world, &app.snapshots);
+    try hierarchy.snapshot3D(app.gpa, &app.world, &app.snapshots3d);
 }
 
 fn fixedTimers(app: *App) anyerror!void {

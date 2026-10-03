@@ -24,6 +24,7 @@ const input_event = @import("../input/input_event.zig");
 const InputEvent = input_event.InputEvent;
 const datetime = @import("../time/datetime.zig");
 const Transform2D = @import("../scene/components.zig").Transform2D;
+const Transform3D = @import("../scene/components.zig").Transform3D;
 const Entity = ecs.Entity;
 
 const AssetKey = @import("asset_refs.zig").AssetKey;
@@ -128,6 +129,7 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
             if (component_texts.attributeOf(entry.type, name) != null) return try vm.string(self.app.textNamed(source, entry.name, name));
             // A transform's place and scale as vectors: `t.position`.
             if (entry.type.same(reflect.typeOf(Transform2D))) return transformVector(self, source, name);
+            if (entry.type.same(reflect.typeOf(Transform3D))) return turnInDegrees(self, source, name);
             // A material's numbers: `material.strength`.
             if (entry.type.same(reflect.typeOf(Material))) if (try shaderParamOf(self, source, name)) |value| return value;
             for (entry.signals) |decl| {
@@ -168,6 +170,7 @@ fn hostSetMember(vm: *flux.Vm, handle: flux.Value, name: []const u8, value: flux
         if (!entry.type.same(h.value.type)) continue;
         if (entry.type.same(reflect.typeOf(Material))) return setShaderParamOf(self, source, name, value);
         if (entry.type.same(reflect.typeOf(Transform2D))) return setTransformVector(self, source, name, value);
+        if (entry.type.same(reflect.typeOf(Transform3D))) return setTurnInDegrees(self, source, name, value);
         if (component_texts.attributeOf(entry.type, name) == null) return false;
         if (value.tag != .string) return vm.fail("{s}.{s} is text, not {s}", .{ entry.name, name, typeName(value) });
         self.app.setTextNamed(source, entry.name, name, value.as(flux.object.String).bytes()) catch |err| switch (err) {
@@ -186,6 +189,24 @@ fn transformVector(self: *Scripts, entity: Entity, name: []const u8) ?flux.Value
     if (std.mem.eql(u8, name, "position")) return .vec2(held.x, held.y);
     if (std.mem.eql(u8, name, "scale")) return .vec2(held.scale_x, held.scale_y);
     return null;
+}
+
+/// A 3D transform's turn as pitch, yaw and roll in degrees:
+/// `t.rotation_degrees.y += 90`. Null for any other name.
+fn turnInDegrees(self: *Scripts, entity: Entity, name: []const u8) ?flux.Value {
+    if (!std.mem.eql(u8, name, "rotation_degrees")) return null;
+    const held = self.app.world.get(entity, Transform3D) orelse return null;
+    const degrees = held.rotationDegrees();
+    return .vec3(degrees.x, degrees.y, degrees.z);
+}
+
+fn setTurnInDegrees(self: *Scripts, entity: Entity, name: []const u8, value: flux.Value) flux.Vm.Error!bool {
+    if (!std.mem.eql(u8, name, "rotation_degrees")) return false;
+    if (value.tag != .vec3) return self.vm.fail("Transform3D.rotation_degrees is a vec3, not {s}", .{typeName(value)});
+    const held = self.app.world.get(entity, Transform3D) orelse return false;
+    const degrees = value.asVec3();
+    held.setRotationDegrees(.init(degrees[0], degrees[1], degrees[2]));
+    return true;
 }
 
 fn setTransformVector(self: *Scripts, entity: Entity, name: []const u8, value: flux.Value) flux.Vm.Error!bool {
@@ -343,6 +364,8 @@ pub fn scriptValueOf(vm: *flux.Vm, value: property.Value) flux.Vm.Error!flux.Val
     return switch (value) {
         .number => |n| .float(n),
         .vec2 => |xy| .vec2(xy[0], xy[1]),
+        .vec3 => |xyz| .vec3(xyz[0], xyz[1], xyz[2]),
+        .quat => |q| try vm.newQuat(q),
         .color => |rgba| try vm.newColor(rgba),
         .flag => |on| .boolean(on),
         .name => |*held| try vm.string(std.mem.sliceTo(held, 0)),
@@ -355,9 +378,11 @@ fn animatedFromScript(vm: *flux.Vm, into: reflect.Value, value: flux.Value) flux
         .float => .{ .number = value.asFloat() },
         .bool => .{ .flag = value.asBool() },
         .vec2 => .{ .vec2 = value.asVec2() },
+        .vec3 => .{ .vec3 = value.asVec3() },
+        .quat => .{ .quat = value.as(flux.object.Quat).xyzw },
         .color => .{ .color = value.as(flux.object.Color).rgba },
         .string => .nameOf(value.as(flux.object.String).bytes()),
-        else => return vm.fail("a property moves to a number, a vec2, a color, true or false, or a name, not {s}", .{typeName(value)}),
+        else => return vm.fail("a property moves to a number, a vec2, a vec3, a quat, a color, true or false, or a name, not {s}", .{typeName(value)}),
     };
     const place = into.as(property.Value) orelse return vm.fail("this value can only be read", .{});
     place.* = given;
@@ -443,6 +468,7 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given, whose: Whose) Allocator.E
     try vm.declareOpen(reflect.typeOf(Material));
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "position", .type = .vec2, .writable = true, .doc = "`x` and `y` as one vector: `t.position += velocity * delta`." });
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "scale", .type = .vec2, .writable = true, .doc = "`scale_x` and `scale_y` as one vector." });
+    try vm.declareMember(.{ .of = reflect.typeOf(Transform3D), .name = "rotation_degrees", .type = .vec3, .writable = true, .doc = "The turn as pitch, yaw and roll in degrees: `t.rotation_degrees.y += 90.0`. `rotation` is the same turn as a `quat`." });
     for (ClockRef.signal_names) |name| try vm.declareMember(.{ .of = reflect.typeOf(ClockRef), .name = name, .type = .signal });
     for (WebResponse.fields) |f| try vm.declareMember(.{ .of = reflect.typeOf(WebResponse), .name = f.name, .type = f.type, .doc = f.doc });
     try vm.declareMember(.{ .of = reflect.typeOf(App), .name = "focus_changed", .type = .signal, .doc = "Said when the game comes to the front or goes behind another program, with whether it is in front now: `app.focus_changed.connect(fn(front: bool) { ... })`." });

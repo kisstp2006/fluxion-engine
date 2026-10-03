@@ -276,6 +276,8 @@ inherited: Inherited = .{},
 /// Where each interpolating transform was before the last fixed step: the
 /// engine's own bookkeeping, beside the world. See `Transform2D.interpolate`.
 snapshots: hierarchy.Snapshots = .empty,
+/// The same for every interpolating `Transform3D`.
+snapshots3d: hierarchy.Snapshots3D = .empty,
 /// Every instance of a scene in the world, by its root. See
 /// `scene/instances.zig`.
 instances: scene_instances.Instances = .{},
@@ -526,6 +528,7 @@ const entity_tables = .{
 /// The engine's own components: what every scene can hold from the start.
 pub const engine_components = .{
     components.Transform2D,
+    components.Transform3D,
     components.Sprite,
     components.Text2D,
     components.Camera2D,
@@ -659,6 +662,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         else
             .{ .fixed = options.fixed_delta orelse Resolved.default_fixed_delta }),
         .snapshots = .empty,
+        .snapshots3d = .empty,
         .names = .{},
         .uuids = .init(options.io),
         .random_source = undefined,
@@ -842,6 +846,7 @@ pub fn destroy(self: *App) void {
     self.schedule.deinit(gpa);
     self.states.deinit(gpa);
     self.snapshots.deinit(gpa);
+    self.snapshots3d.deinit(gpa);
     self.names.deinit(gpa);
     self.tree.deinit(gpa);
     self.groups.deinit(gpa);
@@ -1568,6 +1573,7 @@ pub fn clearWorld(self: *App) void {
     self.world = .init(self.gpa);
     self.swept_at = null;
     self.snapshots.clearRetainingCapacity();
+    self.snapshots3d.clearRetainingCapacity();
     // Last, in the new world: each script's `exit` finds its entity gone.
     if (self.scripts) |scripts| scripts.calls.clear(scripts);
 }
@@ -1831,6 +1837,94 @@ pub fn rotate(self: *App, entity: ecs.Entity, radians: f32) PlaceError!void {
 /// Multiply an entity's scale by `ratio`.
 pub fn applyScale(self: *App, entity: ecs.Entity, ratio: math.Vec2) PlaceError!void {
     return hierarchy.applyScale(&self.world, entity, ratio);
+}
+
+// -------------------------------------------------------------------------
+// Where things are in 3D
+// -------------------------------------------------------------------------
+//
+// The same calls for a `Transform3D`, each ending in `3D`. See
+// `scene/hierarchy.zig` and `scene/transform3d.zig`.
+
+/// Where an entity really is in 3D, with every parent above it applied.
+/// Null when it has no `Transform3D`, or when something it hangs from was
+/// despawned this frame.
+pub fn worldTransform3D(self: *App, entity: ecs.Entity) ?components.Transform3D {
+    return hierarchy.worldTransform3D(&self.world, entity);
+}
+
+/// Where an entity is drawn in 3D this frame, blended between fixed steps
+/// where it `interpolate`s.
+pub fn drawnTransform3D(self: *App, entity: ecs.Entity) ?components.Transform3D {
+    return hierarchy.resolveEntity3D(&self.world, &self.snapshots3d, entity, self.time.alpha());
+}
+
+/// Put an entity where `placed` says in the 3D world, and keep its parent.
+pub fn setWorldTransform3D(self: *App, entity: ecs.Entity, placed: components.Transform3D) PlaceError!void {
+    return hierarchy.setWorldTransform3D(&self.world, entity, placed);
+}
+
+/// Where an entity is in the 3D world.
+pub fn globalPosition3D(self: *App, entity: ecs.Entity) ?math.Vec3 {
+    return hierarchy.globalPosition3D(&self.world, entity);
+}
+
+pub fn setGlobalPosition3D(self: *App, entity: ecs.Entity, position: math.Vec3) PlaceError!void {
+    return hierarchy.setGlobalPosition3D(&self.world, entity, position);
+}
+
+/// Which way an entity faces in the 3D world.
+pub fn globalRotation3D(self: *App, entity: ecs.Entity) ?math.Quat {
+    return hierarchy.globalRotation3D(&self.world, entity);
+}
+
+pub fn setGlobalRotation3D(self: *App, entity: ecs.Entity, rotation: math.Quat) PlaceError!void {
+    return hierarchy.setGlobalRotation3D(&self.world, entity, rotation);
+}
+
+/// How big an entity is in the 3D world.
+pub fn globalScale3D(self: *App, entity: ecs.Entity) ?math.Vec3 {
+    return hierarchy.globalScale3D(&self.world, entity);
+}
+
+pub fn setGlobalScale3D(self: *App, entity: ecs.Entity, scale: math.Vec3) PlaceError!void {
+    return hierarchy.setGlobalScale3D(&self.world, entity, scale);
+}
+
+/// Move an entity by `offset` in the 3D world.
+pub fn globalTranslate3D(self: *App, entity: ecs.Entity, offset: math.Vec3) PlaceError!void {
+    return hierarchy.globalTranslate3D(&self.world, entity, offset);
+}
+
+/// A point in the 3D world, in an entity's own space.
+pub fn toLocal3D(self: *App, entity: ecs.Entity, global_point: math.Vec3) ?math.Vec3 {
+    return hierarchy.toLocal3D(&self.world, entity, global_point);
+}
+
+/// A point in an entity's own space, in the 3D world.
+pub fn toGlobal3D(self: *App, entity: ecs.Entity, local_point: math.Vec3) ?math.Vec3 {
+    return hierarchy.toGlobal3D(&self.world, entity, local_point);
+}
+
+/// Where an entity faces in the 3D world: its own `-z`, of length one.
+pub fn globalForward3D(self: *App, entity: ecs.Entity) ?math.Vec3 {
+    return hierarchy.globalDirection3D(&self.world, entity, .init(0, 0, -1));
+}
+
+/// Its own `+x` in the 3D world.
+pub fn globalRight3D(self: *App, entity: ecs.Entity) ?math.Vec3 {
+    return hierarchy.globalDirection3D(&self.world, entity, .unit_x);
+}
+
+/// Its own `+y` in the 3D world.
+pub fn globalUp3D(self: *App, entity: ecs.Entity) ?math.Vec3 {
+    return hierarchy.globalDirection3D(&self.world, entity, .unit_y);
+}
+
+/// Turn an entity so that its `-z` faces a point in the 3D world, its `+y`
+/// as near `up` as it can be.
+pub fn lookAt3D(self: *App, entity: ecs.Entity, point: math.Vec3, up: math.Vec3) PlaceError!void {
+    return hierarchy.lookAt3D(&self.world, entity, point, up);
 }
 
 // -------------------------------------------------------------------------
@@ -5047,6 +5141,22 @@ pub const reflect_methods = .{
     .moveLocalY = .{attr.Params{ .names = &.{ "entity", "delta", "scaled" } }},
     .rotate = .{attr.Params{ .names = &.{ "entity", "radians" } }},
     .applyScale = .{attr.Params{ .names = &.{ "entity", "ratio" } }},
+    // Where things are in 3D
+    .worldTransform3D = .{attr.Params{ .names = &.{"entity"} }},
+    .setWorldTransform3D = .{attr.Params{ .names = &.{ "entity", "transform" } }},
+    .globalPosition3D = .{attr.Params{ .names = &.{"entity"} }},
+    .setGlobalPosition3D = .{attr.Params{ .names = &.{ "entity", "position" } }},
+    .globalRotation3D = .{attr.Params{ .names = &.{"entity"} }},
+    .setGlobalRotation3D = .{attr.Params{ .names = &.{ "entity", "rotation" } }},
+    .globalScale3D = .{attr.Params{ .names = &.{"entity"} }},
+    .setGlobalScale3D = .{attr.Params{ .names = &.{ "entity", "scale" } }},
+    .globalTranslate3D = .{attr.Params{ .names = &.{ "entity", "offset" } }},
+    .toLocal3D = .{attr.Params{ .names = &.{ "entity", "point" } }},
+    .toGlobal3D = .{attr.Params{ .names = &.{ "entity", "point" } }},
+    .globalForward3D = .{attr.Params{ .names = &.{"entity"} }},
+    .globalRight3D = .{attr.Params{ .names = &.{"entity"} }},
+    .globalUp3D = .{attr.Params{ .names = &.{"entity"} }},
+    .lookAt3D = .{ attr.Params{ .names = &.{ "entity", "point", "up" } }, attr.defaults(.{math.Vec3.unit_y}) },
     // Names and UUIDs
     .setName = .{attr.Params{ .names = &.{ "entity", "name" } }},
     .setFreeName = .{attr.Params{ .names = &.{ "entity", "name" } }},

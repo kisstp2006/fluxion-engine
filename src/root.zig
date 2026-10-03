@@ -171,6 +171,8 @@ pub const text = struct {
 
 /// Where a thing is, how big, and which way round.
 pub const Transform2D = components.Transform2D;
+pub const Transform3D = components.Transform3D;
+pub const Rotation = components.Rotation;
 pub const Parent = components.Parent;
 
 /// A picture drawn at a transform.

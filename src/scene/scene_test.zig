@@ -130,6 +130,32 @@ test "a UI label keeps its words through a scene round trip, however long" {
     try testing.expectEqualStrings("Name", copy.textOf(line, LineEdit, "placeholder_text"));
 }
 
+test "a 3D transform keeps its place, turn and size through a scene round trip" {
+    const source = try headless();
+    defer source.destroy();
+    var placed: components.Transform3D = .at(1, 2, 3);
+    placed.setRotationDegrees(.init(10, 45, 0));
+    placed.scale = .init(2, 2, 2);
+    const box = try source.world.spawnWith(.{placed});
+    try source.setName(box, "box");
+    const moved = try source.world.spawnWith(.{components.Transform3D.at(0, 0, -1)});
+    try source.setName(moved, "nothing turned");
+
+    const text = try write(source, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    // What is the default is left out: no rotation for the second.
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "\"rotation\""));
+
+    const copy = try headless();
+    defer copy.destroy();
+    _ = try read(copy, text, .{});
+    const back = copy.world.get(copy.find("box").?, components.Transform3D).?;
+    try testing.expectEqual(placed.position, back.position);
+    try testing.expectEqual(placed.rotation, back.rotation);
+    try testing.expectEqual(@as(f32, 2), back.scale.z);
+    try testing.expectEqual(@as(f32, -1), copy.world.get(copy.find("nothing turned").?, components.Transform3D).?.position.z);
+}
+
 test "a map writes its tiles with itself, and its chunks are not in the scene" {
     const source = try headless();
     defer source.destroy();

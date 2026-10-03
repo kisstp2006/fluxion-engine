@@ -19,7 +19,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 53), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 54), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);
@@ -30,6 +30,8 @@ test "every engine component is described under the name a scene gives it" {
     try testing.expect(drawn.field("tint").?.type == app.types.find("Color").?);
     try testing.expect(app.types.find("Text2D").?.attribute(attr.Text) != null);
     try testing.expect(app.types.find("DebugViews").?.field("colliders") != null);
+    // A 3D transform keeps its turn as a `Rotation`, four numbers.
+    try testing.expect(app.types.find("Transform3D").?.field("rotation").?.type.field("w") != null);
 
     // Described, and left out until asked for: see `types`.
     try testing.expect(reflect.typeOf(App).method("setWindowTitle") != null);

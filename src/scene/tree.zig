@@ -255,6 +255,10 @@ pub fn setParent(app: *App, entity: Entity, parent: Entity, keep_global: bool) P
         hierarchy.worldTransform(world, entity) orelse return error.Unplaced
     else
         null;
+    const was3d = if (keep_global and world.has(entity, components.Transform3D))
+        hierarchy.worldTransform3D(world, entity) orelse return error.Unplaced
+    else
+        null;
     if (parent.isNone()) {
         try world.remove(entity, components.Parent);
     } else {
@@ -271,6 +275,7 @@ pub fn setParent(app: *App, entity: Entity, parent: Entity, keep_global: bool) P
         try app.names.setFree(app.gpa, world, entity, held);
     }
     if (was) |placed| try hierarchy.setWorldTransform(world, entity, placed);
+    if (was3d) |placed| try hierarchy.setWorldTransform3D(world, entity, placed);
 }
 
 /// Despawn an entity and everything that hangs from it, now rather than at

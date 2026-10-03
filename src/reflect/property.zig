@@ -18,7 +18,8 @@
 //! `Transform2D.scale_x,scale_y`, `Control.offset_left,offset_top`.
 //!
 //! **What moves**: a number - any float or integer, an integer rounded -, a
-//! `Vec2`, a `Color`, and a `bool`, which does not go between two values
+//! `Vec2`, a `Vec3`, a `Quat` - along the shortest arc -, a `Color`, and a
+//! `bool`, which does not go between two values
 //! but jumps from one to the other at the end. So does a name kept in a
 //! `[N]u8` - an animated sprite's `animation` -, cut to fit the field.
 
@@ -32,11 +33,15 @@ const ecs = @import("fluxion_ecs");
 const App = @import("../App.zig");
 const Color = @import("../math/color.zig").Color;
 const fixed_text = @import("fixed_text.zig");
+const Rotation = @import("../scene/transform3d.zig").Rotation;
 
 /// What a property holds, as a tween and a track move it.
 pub const Value = union(enum) {
     number: f64,
     vec2: [2]f32,
+    vec3: [3]f32,
+    /// A rotation: x, y, z and w.
+    quat: [4]f32,
     color: [4]f32,
     flag: bool,
     /// Text in a `[N]u8`, padded with zeros: see `nameOf` and `text`.
@@ -74,6 +79,12 @@ pub const Value = union(enum) {
         return switch (a) {
             .number => |from| .{ .number = from + (b.number - from) * t },
             .vec2 => |from| .{ .vec2 = .{ from[0] + (b.vec2[0] - from[0]) * t, from[1] + (b.vec2[1] - from[1]) * t } },
+            .vec3 => |from| blk: {
+                var out: [3]f32 = undefined;
+                for (&out, from, b.vec3) |*into, x, y| into.* = x + (y - x) * t;
+                break :blk .{ .vec3 = out };
+            },
+            .quat => |from| .{ .quat = quatArray(math.Quat.slerp(quatOf(from), quatOf(b.quat), t)) },
             .color => |from| blk: {
                 var out: [4]f32 = undefined;
                 for (&out, from, b.color) |*into, x, y| into.* = x + (y - x) * t;
@@ -89,6 +100,9 @@ pub const Value = union(enum) {
         return switch (a) {
             .number => |x| .{ .number = x + b.number },
             .vec2 => |x| .{ .vec2 = .{ x[0] + b.vec2[0], x[1] + b.vec2[1] } },
+            .vec3 => |x| .{ .vec3 = .{ x[0] + b.vec3[0], x[1] + b.vec3[1], x[2] + b.vec3[2] } },
+            // A turn by: `b` on top of where `a` faces.
+            .quat => |x| .{ .quat = quatArray(quatOf(b.quat).mul(quatOf(x)).norm()) },
             .color => |x| .{ .color = .{ x[0] + b.color[0], x[1] + b.color[1], x[2] + b.color[2], x[3] + b.color[3] } },
             .flag, .name => b,
         };
@@ -119,6 +133,14 @@ pub const Value = union(enum) {
 
 pub const Kind = std.meta.Tag(Value);
 
+fn quatOf(xyzw: [4]f32) math.Quat {
+    return .init(xyzw[0], xyzw[1], xyzw[2], xyzw[3]);
+}
+
+fn quatArray(q: math.Quat) [4]f32 {
+    return .{ q.x, q.y, q.z, q.w };
+}
+
 pub const Error = error{
     /// No `Component.` before the path.
     NoComponent,
@@ -140,7 +162,7 @@ const Leaf = struct {
     len: usize = 0,
 };
 
-const Scalar = enum { f32, f64, i8, i16, i32, i64, u8, u16, u32, u64, bool, vec2, color, name };
+const Scalar = enum { f32, f64, i8, i16, i32, i64, u8, u16, u32, u64, bool, vec2, vec3, quat, color, name };
 
 pub const Property = struct {
     /// The component, by its place among `app.scene_components`.
@@ -170,6 +192,8 @@ pub const Property = struct {
         const leaf = try leafAt(owner, rest);
         const kind: Kind = switch (leaf.scalar) {
             .vec2 => .vec2,
+            .vec3 => .vec3,
+            .quat => .quat,
             .color => .color,
             .bool => .flag,
             .name => .name,
@@ -191,6 +215,8 @@ pub const Property = struct {
         return switch (leaf.scalar) {
             .bool => .{ .flag = @as(*const bool, @ptrCast(at)).* },
             .vec2 => .{ .vec2 = @as(*align(1) const [2]f32, @ptrCast(at)).* },
+            .vec3 => .{ .vec3 = @as(*align(1) const [3]f32, @ptrCast(at)).* },
+            .quat => .{ .quat = @as(*align(1) const [4]f32, @ptrCast(at)).* },
             .color => .{ .color = @as(*align(1) const [4]f32, @ptrCast(at)).* },
             .name => Value.nameOf(std.mem.sliceTo(at[0..leaf.len], 0)),
             else => .{ .number = numberAt(at, leaf.scalar) },
@@ -213,6 +239,8 @@ pub const Property = struct {
         switch (leaf.scalar) {
             .bool => @as(*bool, @ptrCast(at)).* = given.flag,
             .vec2 => @as(*align(1) [2]f32, @ptrCast(at)).* = given.vec2,
+            .vec3 => @as(*align(1) [3]f32, @ptrCast(at)).* = given.vec3,
+            .quat => @as(*align(1) [4]f32, @ptrCast(at)).* = given.quat,
             .color => @as(*align(1) [4]f32, @ptrCast(at)).* = given.color,
             .name => {
                 const into = at[0..leaf.len];
@@ -251,6 +279,8 @@ fn leafAt(owner: *const reflect.Type, path: []const u8) Error!Leaf {
 
 fn scalarOf(kind: *const reflect.Type) Error!Scalar {
     if (kind.is(math.Vec2)) return .vec2;
+    if (kind.is(math.Vec3)) return .vec3;
+    if (kind.is(math.Quat) or kind.is(Rotation)) return .quat;
     if (kind.is(Color)) return .color;
     return switch (kind.kind) {
         .array => if (kind.isString()) .name else error.NotAnimatable,
@@ -276,7 +306,7 @@ fn scalarOf(kind: *const reflect.Type) Error!Scalar {
 
 fn isNumber(scalar: Scalar) bool {
     return switch (scalar) {
-        .bool, .vec2, .color, .name => false,
+        .bool, .vec2, .vec3, .quat, .color, .name => false,
         else => true,
     };
 }
@@ -286,7 +316,7 @@ fn numberAt(at: [*]u8, scalar: Scalar) f64 {
         .f32 => @as(*align(1) const f32, @ptrCast(at)).*,
         .f64 => @as(*align(1) const f64, @ptrCast(at)).*,
         inline .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => |which| @floatFromInt(@as(*align(1) const IntOf(which), @ptrCast(at)).*),
-        .bool, .vec2, .color, .name => 0,
+        .bool, .vec2, .vec3, .quat, .color, .name => 0,
     };
 }
 
@@ -300,7 +330,7 @@ fn setNumber(at: [*]u8, scalar: Scalar, value: f64) void {
             const kept = std.math.clamp(rounded, @as(f64, @floatFromInt(std.math.minInt(T))), @as(f64, @floatFromInt(std.math.maxInt(T))));
             @as(*align(1) T, @ptrCast(at)).* = @intFromFloat(kept);
         },
-        .bool, .vec2, .color, .name => {},
+        .bool, .vec2, .vec3, .quat, .color, .name => {},
     }
 }
 

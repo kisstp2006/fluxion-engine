@@ -2553,6 +2553,57 @@ test "a script moves a property with a tween" {
     try testing.expectEqual(@as(f32, 30), app.world.get(mover, Transform2D).?.y);
 }
 
+test "a script moves and turns a 3D transform: fields, degrees, quats, the world's place, and tweens" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("drone.flux",
+        \\const math = @import("math");
+        \\var degrees = vec3(0, 0, 0);
+        \\var ahead = vec3(0, 0, 0);
+        \\var placed = vec3(0, 0, 0);
+        \\var turn = 0.0;
+        \\struct Drone {
+        \\    fn ready(self) {
+        \\        const t = self.entity.get(Transform3D);
+        \\        t.position = vec3(1, 2, 3);
+        \\        t.position.x += 1;
+        \\        t.rotation_degrees = vec3(0, 90, 0);
+        \\        degrees = t.rotation_degrees;
+        \\        ahead = t.forward();
+        \\        t.rotation = t.rotation * quat(vec3(0, 1, 0), math.pi / 2);
+        \\        turn = t.rotation.angle();
+        \\        const child = self.entity.spawnChild();
+        \\        child.add(Transform3D).position = vec3(0, 0, -1);
+        \\        placed = child.globalPosition3D() orelse vec3(0, 0, 0);
+        \\        self.entity.lookAt3D(vec3(2, 2, -10));
+        \\        const tw = self.entity.tween();
+        \\        tw.tweenProperty(self.entity, "Transform3D.scale", vec3(2, 2, 2), 0.5);
+        \\        tw.tweenProperty(self.entity, "Transform3D.rotation", quat(), 0.5);
+        \\    }
+        \\}
+    );
+    const drone = try app.world.spawnWith(.{ components.Transform3D{}, Script.of(file) });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+
+    const near = std.testing.expectApproxEqAbs;
+    const degrees = global(app, file, "degrees").asVec3();
+    try near(@as(f32, 90), degrees[1], 1e-3);
+    // Yawed a quarter turn left, it faces -x.
+    try near(@as(f32, -1), global(app, file, "ahead").asVec3()[0], 1e-5);
+    try near(@as(f32, std.math.pi), @as(f32, @floatCast(global(app, file, "turn").asFloat())), 1e-4);
+    // Turned half round, the child's -z offset is +z of the drone.
+    const placed = global(app, file, "placed").asVec3();
+    try near(@as(f32, 2), placed[0], 1e-5);
+    try near(@as(f32, 4), placed[2], 1e-5);
+    // Then it looked down -z, and the tweens grew it and turned it back.
+    for (0..8) |_| _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    const held = app.world.get(drone, components.Transform3D).?;
+    try near(@as(f32, 2), held.scale.y, 1e-5);
+    try near(@as(f32, 1), @abs(held.rotation.w), 1e-4);
+}
+
 test "a script draws when its entity is first drawn and when it asks again, points and all" {
     const app = try scripted(.{});
     defer app.destroy();

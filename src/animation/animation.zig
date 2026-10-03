@@ -296,7 +296,8 @@ pub fn read(gpa: Allocator, into: *Library, text: []const u8) ReadError!void {
 }
 
 /// A key's value as a file writes it. A string is a colour when it reads
-/// as one, `"#ff8800"`, and a name otherwise.
+/// as one, `"#ff8800"`, and a name otherwise; two numbers are a `Vec2`,
+/// three a `Vec3`, four a colour, and `{"x", "y", "z", "w"}` a rotation.
 pub fn valueOf(given: json.Value) ?Value {
     switch (given) {
         .int => |n| return .{ .number = @floatFromInt(n) },
@@ -309,10 +310,16 @@ pub fn valueOf(given: json.Value) ?Value {
         .array => {
             const items = given.items();
             var numbers: [4]f32 = undefined;
-            if (items.len != 2 and items.len != 4) return null;
+            if (items.len < 2 or items.len > 4) return null;
             for (items, 0..) |item, at| numbers[at] = @floatCast(item.asFloat(f64) orelse return null);
             if (items.len == 2) return .{ .vec2 = .{ numbers[0], numbers[1] } };
+            if (items.len == 3) return .{ .vec3 = .{ numbers[0], numbers[1], numbers[2] } };
             return .{ .color = numbers };
+        },
+        .object => {
+            var xyzw: [4]f32 = undefined;
+            for (&xyzw, [_][]const u8{ "x", "y", "z", "w" }) |*into, name| into.* = @floatCast(given.get(name).asFloat(f64) orelse return null);
+            return .{ .quat = xyzw };
         },
         else => return null,
     }
@@ -323,6 +330,15 @@ fn writeValue(w: *json.Writer, value: Value) json.Writer.Error!void {
         .number => |n| try w.write(n),
         .flag => |on| try w.write(on),
         .vec2 => |xy| try w.write(xy),
+        .vec3 => |xyz| try w.write(xyz),
+        .quat => |q| {
+            try w.beginObject();
+            try w.field("x", q[0]);
+            try w.field("y", q[1]);
+            try w.field("z", q[2]);
+            try w.field("w", q[3]);
+            try w.endObject();
+        },
         .color => |rgba| try w.write(rgba),
         .name => try w.write(value.text()),
     }

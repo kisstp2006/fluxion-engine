@@ -111,8 +111,8 @@
         // fluxion-reflect and fluxion-json are pinned where these are, so a
         // `reflect.Value` is one type across the two.
         .fluxion_script = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-script#e24cb1cab5b7e68a3e3c564bd16a010405f5ca19",
-            .hash = "fluxion_script-0.1.0-rt2DKttFFQAHsMj_5D-JFyihlopXo59FzUwc59RkgHnG",
+            .url = "git+https://github.com/kisstp2006/fluxion-script#d1e6cfbfc03783e4a9e0f64050a729378acd7e56",
+            .hash = "fluxion_script-0.1.0-rt2DKgGBFQDz3SM-QwF9i2usOYXgrYTqmjwMIbuXU8Xa",
         },
         // Web requests: a script's `web` global, each request on a thread of
         // its own and its answer handed over once a frame.
