@@ -536,6 +536,55 @@ test "a script read again runs its new code in the instances it has, which keep 
     try testing.expect(!try app.reloadScript(.none));
 }
 
+test "every script under a folder is read again, the imported ones too, as an editor's plugin starts again" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDirPath(testing.io, "addons/kit");
+    try tmp.dir.createDirPath(testing.io, "addons/kitchen");
+
+    // As the editor reads them, running nothing, and as a plugin's VM does.
+    for ([_]bool{ false, true }) |run| {
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "addons/kit/kit.flux", .data = "fn level() { return 1; }" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "addons/kitchen/oven.flux", .data = "fn heat() { return 1; }" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "addons/kit/settings.flux", .data =
+            \\const kit = @import("kit.flux");
+            \\fn level() { return kit.level(); }
+            \\struct Settings {
+            \\    @export var name: string = "";
+            \\}
+        });
+        const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+        defer app.destroy();
+        try app.useScripts(.{ .run = run });
+        const settings = try app.loadScript("res://addons/kit/settings.flux");
+        const oven = try app.loadScript("res://addons/kitchen/oven.flux");
+        var fields: [8]flux.FieldInfo = undefined;
+        try testing.expectEqual(@as(usize, 1), app.structFields(settings, "", &fields).len);
+        const scripts = app.scripts.?;
+        try testing.expectEqual(@as(i64, 1), (try scripts.vm.callName(scripts.moduleOf(settings).?, "level", &.{})).asInt());
+
+        // A new export, and new code in the file it imports.
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "addons/kit/settings.flux", .data =
+            \\const kit = @import("kit.flux");
+            \\fn level() { return kit.level(); }
+            \\struct Settings {
+            \\    @export var name: string = "";
+            \\    @export var level: int = 3;
+            \\}
+        });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "addons/kit/kit.flux", .data = "fn level() { return 2; }" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "addons/kitchen/oven.flux", .data = "fn heat() { return 2; }" });
+        try app.reloadScriptsUnder("res://addons/kit");
+
+        try testing.expectEqual(@as(usize, 2), app.structFields(settings, "", &fields).len);
+        try testing.expectEqual(@as(i64, 2), (try scripts.vm.callName(scripts.moduleOf(settings).?, "level", &.{})).asInt());
+        // A folder that only begins the same is another's.
+        try testing.expectEqual(@as(i64, 1), (try scripts.vm.callName(scripts.moduleOf(oven).?, "heat", &.{})).asInt());
+    }
+}
+
 test "a script imports the file beside it, and calls another entity's script" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

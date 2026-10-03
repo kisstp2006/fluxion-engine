@@ -824,6 +824,57 @@ pub const Scripts = struct {
         return true;
     }
 
+    /// Every script under `folder` read again from its file - the table's,
+    /// and those only another imported, which the table does not hold - so
+    /// a host starting a part of its own again, an editor's plugin, runs and
+    /// shows what is on disk now. One that does not read or compile is said,
+    /// and left as it was.
+    pub fn readAgainUnder(self: *Scripts, folder: []const u8) Allocator.Error!void {
+        const app = self.app;
+        const gpa = app.gpa;
+        // The imported first, so a table's file compiled afresh below
+        // imports what is new. Gathered before any is read: reading can
+        // import more.
+        var imported: std.ArrayList(*flux.object.Module) = .empty;
+        defer imported.deinit(gpa);
+        var modules = self.vm.modules.iterator();
+        while (modules.next()) |entry| {
+            if (!isUnder(entry.key_ptr.*, folder) or self.isFilesModule(entry.value_ptr.*)) continue;
+            try imported.append(gpa, entry.value_ptr.*);
+        }
+        for (imported.items) |module| {
+            const name = module.name.bytes();
+            const text = app.project.readFileAlloc(gpa, name, .limited(file_limit)) catch |err| {
+                log.warn("{s} is not read again: {t}", .{ name, err });
+                continue;
+            };
+            defer gpa.free(text);
+            _ = self.vm.reload(module, text) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.CompileFailed => self.sayDiagnostics(name),
+                else => log.warn("{s} is not read again: {t}", .{ name, err }),
+            };
+        }
+
+        self.changed.clearRetainingCapacity();
+        var files = self.files.iterator();
+        while (files.next()) |entry| {
+            if (entry.value.on_disc and isUnder(entry.value.source, folder)) try self.changed.append(gpa, .fromId(entry.handle));
+        }
+        for (self.changed.items) |handle| {
+            _ = self.reload(handle) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => log.warn("{s} is not read again: {t}", .{ self.sourceOf(handle) orelse "a script", err }),
+            };
+        }
+    }
+
+    fn isFilesModule(self: *Scripts, module: *flux.object.Module) bool {
+        var it = self.files.iterator();
+        while (it.next()) |entry| if (entry.value.module == module) return true;
+        return false;
+    }
+
     /// Each file saved since it was read, read again: see `Options.watch`.
     /// One that does not read now - held by the program saving it - is
     /// tried again at the next look.
@@ -2232,6 +2283,12 @@ pub fn entityHandle(scripts: *Scripts, entity: Entity) flux.Vm.Error!flux.Value 
     try vm.hold(handle);
     scripts.handles.putAssumeCapacityNoClobber(entity, handle);
     return handle;
+}
+
+/// Whether `path` is inside `folder`, and not merely spelt as it begins.
+fn isUnder(path: []const u8, folder: []const u8) bool {
+    const bare = std.mem.trimEnd(u8, folder, "/");
+    return path.len > bare.len and std.mem.startsWith(u8, path, bare) and path[bare.len] == '/';
 }
 
 /// A component of an entity's, by both.

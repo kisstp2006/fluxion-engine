@@ -3715,6 +3715,14 @@ pub fn compiledScript(self: *App, handle: script.ScriptHandle, gpa: Allocator, o
     return scripts.saveCompiled(handle, gpa, options);
 }
 
+/// Every script of the game's under `folder` read again from its file, the
+/// ones only imported too: an editor's plugin started again, its settings
+/// shown as its files now say. See `Scripts.readAgainUnder`.
+pub fn reloadScriptsUnder(self: *App, folder: []const u8) Allocator.Error!void {
+    const scripts = self.scripts orelse return;
+    try scripts.readAgainUnder(folder);
+}
+
 /// The script read from `path`, if one was, spelt any way `Project` spells
 /// it.
 pub fn findScript(self: *App, path: []const u8) ?script.ScriptHandle {
