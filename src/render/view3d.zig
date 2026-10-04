@@ -135,9 +135,26 @@ pub const View3D = struct {
 
     /// The ray from the camera through `pixel`, measured from the picture's
     /// top left: what is under a click. It starts at the near plane.
+    ///
+    /// Worked out from the camera's own numbers rather than by undoing its
+    /// matrix, which a near plane close up and a far one far away leave
+    /// too few digits to undo.
     pub fn rayThrough(self: View3D, pixel: Vec2) math.Ray {
-        const inverse = self.matrix(cpu_clip).inverse() orelse return .init(self.position, self.forward());
-        return math.Ray.throughPixel(inverse, pixel, self.width, self.height, cpu_clip) orelse .init(self.position, self.forward());
+        const x = pixel.x / @max(self.width, 1) * 2 - 1;
+        const y = 1 - pixel.y / @max(self.height, 1) * 2;
+        const near = @max(self.near, 0.0001);
+        const half_height = switch (self.projection) {
+            .perspective => @tan(std.math.clamp(self.fov, 0.001, std.math.pi - 0.001) / 2),
+            .orthogonal => @max(self.size, 0.0001) / 2,
+        };
+        const half_width = half_height * self.aspect();
+        return switch (self.projection) {
+            .perspective => blk: {
+                const way: Vec3 = .init(x * half_width, y * half_height, -1);
+                break :blk .init(self.position.add(self.rotation.rotate(way.scale(near))), self.rotation.rotate(way));
+            },
+            .orthogonal => .init(self.position.add(self.rotation.rotate(.init(x * half_width, y * half_height, -near))), self.forward()),
+        };
     }
 
     /// Where `point` is on the picture, in pixels from its top left - or
@@ -248,4 +265,16 @@ test "the screen is seen through the current camera, or any, but never a render 
     try testing.expect(currentCamera(app).?.eql(second));
     try testing.expect(!app.world.get(first, Camera3D).?.current);
     try testing.expectError(error.NoCamera, makeCurrent(app, try app.world.spawn()));
+}
+
+test "a ray through a pixel is exact however near the near plane and however far the far one" {
+    var placed: Transform3D = .at(1, 2, 3);
+    placed.lookAt(.init(4, 0, -2), .unit_y);
+    const view: View3D = .of(.{ .near = 0.004, .far = 1000 }, placed, 640, 360);
+    const middle = view.rayThrough(.init(320, 180));
+    try testing.expect(middle.direction.approxEql(Vec3.init(4, 0, -2).sub(.init(1, 2, 3)).norm()));
+    // Where a point is on the picture, the ray through there goes through it.
+    const point: Vec3 = .init(3, 1, -1);
+    const ray = view.rayThrough(view.toScreen(point).?);
+    try testing.expectApproxEqAbs(@as(f32, 1), ray.direction.dot(point.sub(ray.origin).norm()), 1e-6);
 }
