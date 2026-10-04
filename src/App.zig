@@ -116,6 +116,10 @@ const particle_emitters = @import("render/particles.zig");
 const lights = @import("render/lights.zig");
 const shading = @import("render/shaders.zig");
 const view_textures = @import("render/view_textures.zig");
+const mesh_table = @import("render/mesh.zig");
+const components3d = @import("render/render3d_components.zig");
+const view3d = @import("render/view3d.zig");
+const rendering3d = @import("render/renderer3d.zig");
 const stretching = @import("render/stretch.zig");
 const DebugViews = @import("render/debug_views.zig");
 const View = @import("render/view.zig").View;
@@ -369,6 +373,11 @@ views: view_textures.Views = .{},
 drawings: drawing.Drawings = .{},
 /// Each `Particles2D`'s particles: see `render/particles.zig`.
 particles: particle_emitters.Particles = .{},
+/// Every mesh read or made, and the meshes primitives come to: see
+/// `render/mesh.zig` and `addMesh`.
+meshes: mesh_table.Meshes = .{},
+/// What draws the 3D world: see `render/renderer3d.zig`.
+renderer3d: rendering3d.Renderer3D,
 /// What the frame is cleared to.
 clear_color: Color,
 /// Whether the frame draws the world under the interface. An editor turns it
@@ -408,6 +417,13 @@ debug_under_steps: debugdraw.Canvas,
 /// What the last frame drew of `debug_under`; `debug_renderer.stats` is
 /// what it drew over the world.
 debug_under_stats: debugdraw_rhi.Stats = .{},
+/// Lines and shapes in the 3D world, for one frame unless their style says
+/// for how many seconds: drawn through the 3D camera after the meshes,
+/// hidden where a mesh is in front of them. An editor's grid and gizmos.
+debug_3d: debugdraw.Pen,
+debug_3d_frame: debugdraw.Canvas,
+/// Null where the device draws into no depth format, as the 3D layer is.
+debug_renderer_3d: ?debugdraw_rhi.Renderer = null,
 /// Whether anything `debug` holds is drawn - a game's own shapes and the
 /// views below. `Options.debug_key` flips it.
 debug_visible: bool = true,
@@ -534,6 +550,11 @@ pub const engine_components = .{
     components.Camera2D,
     components.RenderView,
     components.ViewTexture,
+    components3d.MeshInstance3D,
+    components3d.PrimitiveMesh3D,
+    components3d.Material3D,
+    components3d.Camera3D,
+    components3d.DirectionalLight3D,
     components.RigidBody2D,
     components.CharacterBody2D,
     components.Collider2D,
@@ -598,6 +619,7 @@ const described_types = .{
     sprite_animation.SpriteFramesHandle,
     sprite_animation.LoopMode,
     shading.ShaderHandle,
+    mesh_table.MeshHandle,
     character.Collision,
     geometry.Vec2i,
     geometry.Rect2,
@@ -636,8 +658,11 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .project = undefined,
         .assets = undefined,
         .sprites = undefined,
+        .renderer3d = undefined,
         .screen_texture = undefined,
         .debug = undefined,
+        .debug_3d = undefined,
+        .debug_3d_frame = .init(gpa),
         .debug_frame = .init(gpa),
         .debug_steps = .init(gpa),
         .debug_under = undefined,
@@ -815,6 +840,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 
     self.sprites = try .init(gpa, &self.device);
     errdefer self.sprites.deinit(gpa);
+    self.renderer3d = try .init(gpa, &self.device);
+    errdefer self.renderer3d.deinit(gpa);
     self.screen_texture = try .init(gpa, &self.device);
     errdefer self.screen_texture.deinit();
     self.sprites.texts = &self.texts;
@@ -828,8 +855,11 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
 
     self.debug_renderer = try .init(gpa, &self.device, .{});
     errdefer self.debug_renderer.deinit();
+    if (self.renderer3d.depth_format) |format| self.debug_renderer_3d = try .init(gpa, &self.device, .{ .depth_format = format });
+    errdefer if (self.debug_renderer_3d) |*held| held.deinit();
     self.debug = self.debug_frame.pen();
     self.debug_under = self.debug_under_frame.pen();
+    self.debug_3d = self.debug_3d_frame.pen();
 
     return self;
 }
@@ -884,6 +914,8 @@ pub fn destroy(self: *App) void {
     self.picking.deinit(gpa);
     self.physics.deinit();
     self.debug_renderer.deinit();
+    if (self.debug_renderer_3d) |*held| held.deinit();
+    self.debug_3d_frame.deinit();
     self.debug_steps.deinit();
     self.debug_frame.deinit();
     self.debug_under_steps.deinit();
@@ -893,6 +925,8 @@ pub fn destroy(self: *App) void {
     self.control_tree.deinit(gpa);
     self.ui.deinit();
     self.sprites.deinit(gpa);
+    self.renderer3d.deinit(gpa);
+    self.meshes.deinit(gpa, &self.device);
     self.screen_texture.deinit();
     self.shaders.deinit(gpa, &self.device);
     self.views.deinit(gpa);
@@ -1925,6 +1959,75 @@ pub fn globalUp3D(self: *App, entity: ecs.Entity) ?math.Vec3 {
 /// as near `up` as it can be.
 pub fn lookAt3D(self: *App, entity: ecs.Entity, point: math.Vec3, up: math.Vec3) PlaceError!void {
     return hierarchy.lookAt3D(&self.world, entity, point, up);
+}
+
+// -------------------------------------------------------------------------
+// 3D cameras
+// -------------------------------------------------------------------------
+//
+// See `render/view3d.zig`. A point on the screen is in the game area's
+// pixels from its top left, as the pointer is.
+
+/// The camera the screen is seen through in 3D: of the cameras that draw
+/// no picture of their own, the one that is `current`, or with none any.
+pub fn currentCamera3D(self: *App) ?ecs.Entity {
+    return view3d.currentCamera(self);
+}
+
+/// Make a camera the one the screen is seen through in 3D, and every other
+/// not. `error.NoCamera` for an entity with no `Camera3D`.
+pub fn makeCurrent3D(self: *App, camera: ecs.Entity) error{NoCamera}!void {
+    return view3d.makeCurrent(self, camera);
+}
+
+/// What a 3D camera sees at the game area's size, where it is drawn this
+/// frame: what the pointer is found in.
+pub fn cameraView3D(self: *App, camera: ecs.Entity) ?view3d.View3D {
+    return view3d.viewOf(self, camera, @floatFromInt(self.game_area.width), @floatFromInt(self.game_area.height));
+}
+
+/// `cameraView3D` of the current camera: null with none.
+pub fn currentView3D(self: *App) ?view3d.View3D {
+    return self.cameraView3D(self.currentCamera3D() orelse return null);
+}
+
+/// Where the ray from a camera through a point on the screen starts: on
+/// its near plane. With `projectRayNormal`, what is under a click.
+///
+/// ```zig
+/// const from = app.projectRayOrigin(camera, app.input.pointer).?;
+/// const way = app.projectRayNormal(camera, app.input.pointer).?;
+/// ```
+pub fn projectRayOrigin(self: *App, camera: ecs.Entity, screen_point: math.Vec2) ?math.Vec3 {
+    const view = self.cameraView3D(camera) orelse return null;
+    return view.rayThrough(screen_point).origin;
+}
+
+/// Which way the ray from a camera through a point on the screen goes,
+/// one long.
+pub fn projectRayNormal(self: *App, camera: ecs.Entity, screen_point: math.Vec2) ?math.Vec3 {
+    const view = self.cameraView3D(camera) orelse return null;
+    return view.rayThrough(screen_point).direction;
+}
+
+/// Where a point in the 3D world is on the screen through a camera: null
+/// when it is behind it, or there is no such camera.
+pub fn unprojectPosition(self: *App, camera: ecs.Entity, point: math.Vec3) ?math.Vec2 {
+    const view = self.cameraView3D(camera) orelse return null;
+    return view.toScreen(point);
+}
+
+/// Whether a point in the 3D world is behind a camera.
+pub fn isPositionBehind(self: *App, camera: ecs.Entity, point: math.Vec3) bool {
+    const view = self.cameraView3D(camera) orelse return false;
+    return view.isBehind(point);
+}
+
+/// The point on the screen `depth` in front of a camera: where to put
+/// something that is to follow the pointer at that distance.
+pub fn projectPosition(self: *App, camera: ecs.Entity, screen_point: math.Vec2, depth: f32) ?math.Vec3 {
+    const view = self.cameraView3D(camera) orelse return null;
+    return view.atDepth(screen_point, depth);
 }
 
 // -------------------------------------------------------------------------
@@ -3452,6 +3555,14 @@ pub fn drawWorldWithoutDebug(self: *App, into: rhi.Texture, view: View) !void {
     return layers.drawWorldWithoutDebug(self, into, view);
 }
 
+/// Draw the 3D world through `view` into `into` - a texture made with
+/// `.render_target = true` at the view's size - cleared to the background,
+/// with `debug_3d` over it: an editor's view of a 3D scene, through a camera
+/// of its own. `lighting.preview` lights a world with no light of its own.
+pub fn drawWorld3D(self: *App, into: rhi.Texture, view: view3d.View3D, lighting: rendering3d.Lighting) !void {
+    return layers.drawWorld3D(self, into, view, lighting);
+}
+
 /// Draw this frame's world-space debug lines over an editor preview: after
 /// `drawWorldWithoutDebug` and `drawControlPreview`.
 pub fn drawDebugOverlay(self: *App, into: rhi.Texture, view: View) !void {
@@ -3952,6 +4063,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .animation => self.animation_libraries.sourceOf(handle),
         .frames => self.sprite_frames.sourceOf(handle),
         .shader => self.shaders.sourceOf(handle),
+        .mesh => self.meshes.sourceOf(handle),
     };
 }
 
@@ -3972,6 +4084,7 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .animation => self.loadAnimations(path),
         .frames => self.loadSpriteFrames(path),
         .shader => self.loadShader(path),
+        .mesh => self.loadMesh(path),
     };
 }
 
@@ -3990,6 +4103,7 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .animation => self.findAnimations(path),
         .frames => self.findSpriteFrames(path),
         .shader => self.findShader(path),
+        .mesh => self.findMesh(path),
     };
 }
 
@@ -4245,6 +4359,50 @@ pub fn reloadShader(self: *App, handle: shading.ShaderHandle) !bool {
 /// not when it did not.
 pub fn shaderOf(self: *App, handle: shading.ShaderHandle) ?*const shading.Shader {
     return self.shaders.get(handle);
+}
+
+/// Keep a mesh made in code under `name`: what a `MeshInstance3D` draws by
+/// the handle. It is the app's from here; a name given before gets the new
+/// mesh and keeps its handle. See `render/mesh.zig`.
+pub fn addMesh(self: *App, name: []const u8, made: mesh_table.Mesh) !mesh_table.MeshHandle {
+    return self.meshes.add(self.gpa, &self.device, name, made);
+}
+
+/// Read a `.mesh` file, or find the one read from there already.
+pub fn loadMesh(self: *App, path: []const u8) !mesh_table.MeshHandle {
+    try self.finishLoad(path);
+    return self.meshes.load(self, path);
+}
+
+pub fn findMesh(self: *App, path: []const u8) ?mesh_table.MeshHandle {
+    return self.findSpelt(&self.meshes, path);
+}
+
+/// Read a mesh's file again. Says whether it had one.
+pub fn reloadMesh(self: *App, handle: mesh_table.MeshHandle) !bool {
+    return self.meshes.reload(self, handle);
+}
+
+/// A mesh's triangles, as they are kept.
+pub fn meshOf(self: *App, handle: mesh_table.MeshHandle) ?*const mesh_table.Mesh {
+    return self.meshes.get(handle);
+}
+
+/// Let a mesh go: what draws it draws nothing.
+pub fn unloadMesh(self: *App, handle: mesh_table.MeshHandle) void {
+    self.meshes.unload(self.gpa, &self.device, handle);
+}
+
+/// Write a mesh to a `.mesh` file, which `loadMesh` reads back. `res://` is
+/// taken, as everywhere.
+pub fn saveMesh(self: *App, handle: mesh_table.MeshHandle, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const held = self.meshes.get(handle) orelse return error.NoSuchMesh;
+    const bytes = try mesh_table.write(self.gpa, held.*);
+    defer self.gpa.free(bytes);
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes });
 }
 
 /// Read a sound's file - `.wav`, `.ogg` or `.mp3` - or find the one read
@@ -5157,6 +5315,14 @@ pub const reflect_methods = .{
     .globalRight3D = .{attr.Params{ .names = &.{"entity"} }},
     .globalUp3D = .{attr.Params{ .names = &.{"entity"} }},
     .lookAt3D = .{ attr.Params{ .names = &.{ "entity", "point", "up" } }, attr.defaults(.{math.Vec3.unit_y}) },
+    // 3D cameras
+    .currentCamera3D = .{},
+    .makeCurrent3D = .{ attr.Params{ .names = &.{"camera"} }, flux.GivesErrors{} },
+    .projectRayOrigin = .{attr.Params{ .names = &.{ "camera", "screen_point" } }},
+    .projectRayNormal = .{attr.Params{ .names = &.{ "camera", "screen_point" } }},
+    .projectPosition = .{attr.Params{ .names = &.{ "camera", "screen_point", "depth" } }},
+    .unprojectPosition = .{attr.Params{ .names = &.{ "camera", "point" } }},
+    .isPositionBehind = .{attr.Params{ .names = &.{ "camera", "point" } }},
     // Names and UUIDs
     .setName = .{attr.Params{ .names = &.{ "entity", "name" } }},
     .setFreeName = .{attr.Params{ .names = &.{ "entity", "name" } }},

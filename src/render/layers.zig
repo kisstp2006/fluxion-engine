@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! A frame drawn, layer by layer: the render views' pictures first, then
-//! the 2D world, the interface over it and `debug` over everything - into
-//! the window, a capture, or an editor's view of the world.
+//! the 3D world, the 2D world over it, the interface over that and `debug`
+//! over everything - into the window, a capture, or an editor's view of the
+//! world.
 //!
 //! A frame with a material in it that reads what is drawn under it is drawn
 //! into a texture of its own - a surface cannot be read - and put on the
@@ -17,6 +18,9 @@ const image = @import("fluxion_image");
 
 const App = @import("../App.zig");
 const cameras = @import("cameras.zig");
+const view3d = @import("view3d.zig");
+const View3D = view3d.View3D;
+const Lighting = @import("renderer3d.zig").Lighting;
 const view_textures = @import("view_textures.zig");
 const Material = @import("shaders.zig").Material;
 const GameArea = @import("stretch.zig").GameArea;
@@ -60,15 +64,20 @@ fn drawLayers(app: *App, into: rhi.RenderTarget, width: f32, height: f32) !void 
 }
 
 fn drawLayersInto(app: *App, into: rhi.RenderTarget, area: GameArea, width: f32, height: f32) !void {
-    // 1. The 3D layer, with a depth test, clearing the frame. Not written
-    //    yet; when it is, the 2D pass below stops clearing.
+    // 1. The 3D layer, through the current 3D camera when there is one,
+    //    with a depth test, clearing the frame: the 2D layer goes over it.
+    var clear: ?Color = app.clear_color;
+    if (app.world_on_screen) if (view3d.currentCamera(app)) |camera| if (view3d.viewOf(app, camera, width, height)) |seen| {
+        try draw3D(app, into, area.width, area.height, seen, clear, .{});
+        clear = null;
+    };
 
     // 2. The 2D layer: sprites and text, sorted back to front, blended, no
     //    depth - or, with the world off the screen, only the clearing.
     const view = cameras.viewAt(app, area, width, height);
     if (app.world_on_screen) {
-        const clear = try drawDebugUnder(app, into, view);
-        try app.sprites.draw(app.gpa, &app.world, &app.assets, &app.tile_sets, &app.snapshots, &app.inherited, into, view, clear, app.time.alpha());
+        const under = try drawDebugUnder(app, into, view, clear);
+        try app.sprites.draw(app.gpa, &app.world, &app.assets, &app.tile_sets, &app.snapshots, &app.inherited, into, view, under, app.time.alpha());
     } else try clearTarget(app, into);
 
     // 3. The interface, on top, loading what the 2D layer left - with its
@@ -125,8 +134,30 @@ pub fn drawWorld(app: *App, into: rhi.Texture, view: View) !void {
 pub fn drawWorldWithoutDebug(app: *App, into: rhi.Texture, view: View) !void {
     app.sprites.time = @floatCast(app.interface.seconds);
     try view_textures.drawAll(app);
-    const clear = try drawDebugUnder(app, .{ .texture = into }, view);
+    const clear = try drawDebugUnder(app, .{ .texture = into }, view, app.clear_color);
     try app.sprites.draw(app.gpa, &app.world, &app.assets, &app.tile_sets, &app.snapshots, &app.inherited, .{ .texture = into }, view, clear, app.time.alpha());
+}
+
+/// Draw the 3D world through `view` into `into` - a texture made with
+/// `.render_target = true` at the view's size - cleared to the background
+/// first, with `debug_3d` over it: an editor's view of a 3D scene, through
+/// a camera of its own. The 2D world is not drawn.
+pub fn drawWorld3D(app: *App, into: rhi.Texture, view: View3D, lighting: Lighting) !void {
+    try draw3D(app, .{ .texture = into }, @intFromFloat(@max(view.width, 1)), @intFromFloat(@max(view.height, 1)), view, app.clear_color, lighting);
+}
+
+/// The 3D world into a target `width` by `height`, and `debug_3d` over it,
+/// hidden behind what is in front of it.
+fn draw3D(app: *App, into: rhi.RenderTarget, width: u32, height: u32, view: View3D, clear: ?Color, lighting: Lighting) !void {
+    try app.renderer3d.draw(app, into, width, height, view, clear, lighting);
+    if (!app.debug_visible or app.debug_3d_frame.isEmpty()) return;
+    const renderer = if (app.debug_renderer_3d) |*held| held else return;
+    const depth = app.renderer3d.last_depth orelse return;
+    try renderer.draw(&.{&app.debug_3d_frame}, .{ .color = into, .depth = depth }, .{
+        .view_projection = view.matrix(app.device.clip()),
+        .width = view.width,
+        .height = view.height,
+    });
 }
 
 /// Draw this frame's world-space debug lines over an editor preview: after
@@ -142,17 +173,18 @@ pub fn drawnUpsideDown(app: *const App) bool {
     return app.device.caps().features.render_target_origin_bottom_left;
 }
 
-/// Clear `into` to the background and draw `debug_under` on it, for the
-/// sprites to go over: the colour the sprites should clear to, which is
-/// none once this has cleared. With nothing under the world - the usual
-/// case - no pass is made, and the sprites clear as they always did.
-fn drawDebugUnder(app: *App, into: rhi.RenderTarget, view: View) !?Color {
+/// Clear `into` to `clear` - the background, or nothing over a 3D layer
+/// - and draw `debug_under` on it, for the sprites to go over: the colour
+/// the sprites should clear to, which is none once this has cleared. With
+/// nothing under the world - the usual case - no pass is made, and the
+/// sprites clear as they always did.
+fn drawDebugUnder(app: *App, into: rhi.RenderTarget, view: View, clear: ?Color) !?Color {
     app.debug_under_stats = .{};
-    if (!app.debug_visible) return app.clear_color;
-    if (app.debug_under_frame.isEmpty() and app.debug_under_steps.isEmpty()) return app.clear_color;
+    if (!app.debug_visible) return clear;
+    if (app.debug_under_frame.isEmpty() and app.debug_under_steps.isEmpty()) return clear;
     try app.debug_renderer.draw(&.{ &app.debug_under_steps, &app.debug_under_frame }, .{
         .color = into,
-        .clear = app.clear_color.array(),
+        .clear = if (clear) |color| color.array() else null,
     }, .{
         .view_projection = view.matrix(app.device.clip()),
         .width = view.width,

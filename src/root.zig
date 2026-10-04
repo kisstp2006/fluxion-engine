@@ -162,6 +162,10 @@ pub const render = struct {
     pub const screen = @import("render/screen.zig");
     /// The light buffer the world is lit by.
     pub const lighting = @import("render/lighting.zig");
+    /// What draws the 3D world.
+    pub const renderer3d = @import("render/renderer3d.zig");
+    /// What a 3D camera sees, and where a pixel is in the 3D world.
+    pub const view3d = @import("render/view3d.zig");
 };
 
 /// Every glyph the game has drawn, in one texture.
@@ -189,6 +193,19 @@ pub const FontHandle = assets.FontHandle;
 
 /// What the 2D pass looks through.
 pub const Camera2D = components.Camera2D;
+
+/// Meshes: what a `MeshInstance3D` draws, and the shapes made from numbers.
+pub const mesh = @import("render/mesh.zig");
+pub const Mesh = mesh.Mesh;
+pub const MeshHandle = mesh.MeshHandle;
+/// The 3D layer's components: see `render/render3d_components.zig`.
+pub const MeshInstance3D = components.MeshInstance3D;
+pub const PrimitiveMesh3D = components.PrimitiveMesh3D;
+pub const Material3D = components.Material3D;
+pub const Camera3D = components.Camera3D;
+pub const DirectionalLight3D = components.DirectionalLight3D;
+/// What a 3D camera sees: what `App.drawWorld3D` draws the world through.
+pub const View3D = render.view3d.View3D;
 
 /// Something that falls, is pushed and bounces.
 pub const RigidBody2D = components.RigidBody2D;
@@ -515,6 +532,10 @@ test {
     _ = @import("render/label_layout_test.zig");
     _ = @import("render/particles_test.zig");
     _ = @import("render/render_test.zig");
+    _ = @import("render/render3d_test.zig");
+    _ = @import("render/mesh.zig");
+    _ = @import("render/view3d.zig");
+    _ = @import("render/renderer3d.zig");
     _ = @import("scene/hierarchy_test.zig");
     _ = @import("scene/inherited_test.zig");
     _ = @import("scene/instance_test.zig");

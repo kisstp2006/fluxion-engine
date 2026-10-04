@@ -18,11 +18,11 @@
         },
 
         // One way to draw, on whichever API the machine has. Every layer -
-        // the 3D one that is not written yet, the 2D one, the interface -
+        // the 3D one, the 2D one, the interface -
         // goes through this and through nothing else.
         .fluxion_rhi = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-rhi#037120fcc7a117e1d5cd317e3a4f1e8c684b57c9",
-            .hash = "fluxion_rhi-0.1.0--pvwDxhVEAADrSLkvu6voKkLsP7_VGigH2NsfSfcnecc",
+            .url = "git+https://github.com/kisstp2006/fluxion-rhi#b5368f652cffbcaa4c1f149f2e030ea1c4636bcc",
+            .hash = "fluxion_rhi-0.1.0--pvwD061EADRFQd4YDLFKPUJbEoBsvQoALY5IzV7zkB0",
         },
 
         // Windows, input and the event loop. A library may not depend on

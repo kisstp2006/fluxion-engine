@@ -206,6 +206,7 @@ fn freshFrame(app: *App) anyerror!void {
     app.inherited.forget();
     app.schedule.paused = app.paused;
     app.debug_frame.advance(app.time.delta);
+    app.debug_3d_frame.advance(app.time.delta);
     app.debug_under_frame.advance(app.time.delta);
 }
 
@@ -393,4 +394,6 @@ fn layOut(app: *App) anyerror!void {
 fn draw(app: *App) anyerror!void {
     if (app.windowMode() != .minimized and !app.input.surface_lost) try layers.render(app);
     for (app.tool_windows.items) |tool| try tool.render(app);
+    app.meshes.tick(app.gpa, &app.device);
+    app.renderer3d.tick();
 }

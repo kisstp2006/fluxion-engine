@@ -337,6 +337,9 @@ pub const LayerNames = struct {
     /// The 2D render layers, the same way: what an `Appearance` puts a
     /// branch on and a camera sees.
     render_2d: []const []const u8 = &.{},
+    /// The 3D render layers: what a `MeshInstance3D` is on and a
+    /// `Camera3D` sees.
+    render_3d: []const []const u8 = &.{},
 
     pub const max = 32;
 
@@ -354,6 +357,12 @@ pub const LayerNames = struct {
             attr.Range{ .min = 0, .max = max },
             attr.Doc{ .text = "A name for each 2D render layer, shown beside its toggle." },
         },
+        .render_3d = .{
+            attr.Label{ .text = "3D Render" },
+            attr.Layers{ .names = .render_3d },
+            attr.Range{ .min = 0, .max = max },
+            attr.Doc{ .text = "A name for each 3D render layer, shown beside its toggle." },
+        },
     };
 
     /// The name of the 2D physics layer numbered from 0, or `""`.
@@ -364,6 +373,11 @@ pub const LayerNames = struct {
     /// The name of the 2D render layer numbered from 0, or `""`.
     pub fn render2d(self: LayerNames, layer: usize) []const u8 {
         return if (layer < self.render_2d.len) self.render_2d[layer] else "";
+    }
+
+    /// The name of the 3D render layer numbered from 0, or `""`.
+    pub fn render3d(self: LayerNames, layer: usize) []const u8 {
+        return if (layer < self.render_3d.len) self.render_3d[layer] else "";
     }
 };
 

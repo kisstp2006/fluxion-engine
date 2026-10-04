@@ -77,6 +77,8 @@ pub const Layers = struct {
         physics_2d,
         /// `layer_names.render_2d`.
         render_2d,
+        /// `layer_names.render_3d`.
+        render_3d,
     };
 };
 

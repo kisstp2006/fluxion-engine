@@ -239,6 +239,7 @@ fn assetTypeName(comptime kind: AssetKind) [:0]const u8 {
         .animation => "AnimationLibrary",
         .frames => "SpriteFrames",
         .shader => "Shader",
+        .mesh => "Mesh",
     };
 }
 

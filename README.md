@@ -104,8 +104,9 @@ clears and the rest load what the one before them left, which is the whole of
 what layering costs - no extra textures, no compositing pass. What
 `app.debug` draws goes over all three, last.
 
-Today **the 2D layer and the interface are written**. The 3D pass has its
-place in `App.drawLayers` and nothing in it.
+The 3D layer is drawn through the current `Camera3D`, when there is one, and
+clears the frame; with none, the 2D layer clears it as it always has. See
+[The 3D layer](#-the-3d-layer).
 
 A frame something reads - a shader of a material's that reads what is drawn
 under it - or a game stretched to its window is drawn into a texture of its
@@ -1247,6 +1248,68 @@ const where = app.globalPosition3D(held).?;
   `Vec3` and a rotation too - `"Transform3D.position"`,
   `"Transform3D.rotation"` along the shortest arc - and an `.anim` file
   writes a `Vec3` as three numbers and a rotation as `{"x", "y", "z", "w"}`.
+
+## 🧊 The 3D layer
+
+```zig
+_ = try app.world.spawnWith(.{
+    fx.Transform3D.at(0, 0.5, 0),
+    fx.MeshInstance3D{},
+    fx.PrimitiveMesh3D{ .shape = .box },
+    fx.Material3D{ .albedo_color = .hex(0xCC3333) },
+});
+var sun: fx.Transform3D = .{};
+sun.lookAt(.init(-0.4, -1, -0.6), .unit_y);
+_ = try app.world.spawnWith(.{ sun, fx.DirectionalLight3D{} });
+var eye: fx.Transform3D = .at(0, 2, 5);
+eye.lookAt(.zero, .unit_y);
+_ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
+```
+
+- **A `MeshInstance3D` draws a mesh** where its `Transform3D` is: the one its
+  `mesh` names - a `.mesh` file, or a mesh made in code and kept with
+  `app.addMesh(name, mesh)` - or the one a `PrimitiveMesh3D` beside it makes
+  from a few numbers: a box, a sphere, a plane, a cylinder or a capsule.
+  `fx.mesh.box`, `sphere`, `plane`, `cylinder` and `capsule` make the same in
+  code, a primitive's mesh is made once for its numbers and shared, and
+  `app.saveMesh` and `app.loadMesh` write and read a `.mesh` file - the
+  vertices and the indices as they are held. A mesh's corners go
+  counter-clockwise seen from the side they face.
+- **A `Material3D` beside it says how it looks**: `albedo_color` times
+  `albedo_texture`, laid on with `uv_scale` and `uv_offset`; `transparency`
+  to lay it over what is behind it by its alpha; `cull` for which side of its
+  triangles is left out; `unshaded` for its colour as it is. With none it is
+  white and lit. `Appearance.visible` hides it and `Appearance.modulate`
+  tints it, as everything drawn.
+- **A `Camera3D` is what the screen is seen through**: from its transform,
+  down its `-z`, perspective with a `fov` or orthogonal with a `size`,
+  between `near` and `far`. Of the cameras that draw no picture of their
+  own, the one that is `current` - `app.makeCurrent3D(camera)` - or else any.
+  Its `cull_mask` and a mesh's `layers` say what it sees, by the project's
+  `layer_names.render_3d`.
+- **A `DirectionalLight3D` is the sun**, along its `-z`, with a `color` and
+  an `energy`; the first one found lights the world, over a little light
+  from everywhere.
+- **Where the pointer is in 3D**: `app.projectRayOrigin(camera, point)` and
+  `projectRayNormal` are the ray through a point on the screen,
+  `unprojectPosition(camera, point)` where a point of the world is on it,
+  `isPositionBehind`, and `projectPosition(camera, point, depth)` the point
+  that far in front. `app.cameraView3D(camera)` is all of it as a
+  `View3D`, which an editor makes for a camera of its own and hands to
+  `app.drawWorld3D`.
+- **A `RenderView` beside a `Camera3D`** draws the 3D world into its picture,
+  as one beside a `Camera2D` draws the 2D one.
+- **How it is drawn**: what the camera sees, its box tested against the
+  frustum; solid meshes grouped so every instance of a mesh with the same
+  picture and the same sides culled is one draw, nearest first, then the
+  see-through ones furthest first. Depth is a texture of the renderer's at
+  each size it draws at, in the most precise format the device draws into.
+  `app.renderer3d.drawn`, `draw_calls` and `culled` say what the last draw
+  did. The shader is the engine's, in fluxion-shader's language, so every
+  backend draws the same picture.
+- **`app.debug_3d` draws lines in the 3D world**, through its camera after
+  the meshes and hidden where a mesh is in front of them - unless their
+  style says `.depth = .always`.
 
 ## 🎨 The 2D layer
 
@@ -3505,6 +3568,9 @@ it by path.
 
 ## 👾 Examples
 
+<img src=".github/images/shapes.png" alt="shapes: a floor, a box, a sphere, a cylinder, a capsule and an unshaded box, a see-through pane in front, and words over it all">
+<sub><b>shapes</b> - <code>--frames 90 --capture</code> drew it, the same on Direct3D 11 and 12, Vulkan and OpenGL</sub>
+
 <table>
   <tr>
     <td width="50%"><img src=".github/images/pong.png" alt="pong: two bats, a ball, a dashed line down the middle and the score in small squares"></td>
@@ -3521,6 +3587,16 @@ zig build example-pong                      # Direct3D 11 on Windows, OpenGL els
 zig build example-pong -- --backend gl      # OpenGL on Windows too
 zig build example-pong -- --frames 420 --capture pong.png
 ```
+
+```bash
+zig build example-shapes
+zig build example-shapes -- --frames 90 --capture shapes.png
+```
+
+**`shapes`** is the 3D layer: a floor and the five shapes made from numbers,
+turning, lit by the sun, seen through a camera that goes slowly round them,
+with a see-through pane in front and a `Text2D` over it all. A click says
+which shape the ray through the pointer meets first.
 
 **`pong`** is two paddles, a ball, and a scoreboard made of the same sprites
 as everything else. It is there to be read as much as played: the game's own
@@ -3688,6 +3764,11 @@ Here, and checked by the tests:
   tiles, coloured or black, in the buffer's alpha; what is unshaded drawn
   over the lit world; the same picture on Direct3D 11 and 12, Vulkan and
   OpenGL.
+- The 3D layer: meshes made in code, from a primitive's numbers or read from
+  a `.mesh` file; a camera, perspective or orthogonal, current or drawing
+  into a render view; the sun; solid and see-through materials, both sides
+  or one; instances of a mesh in one draw, and what is off the frustum left
+  out; the same picture on Direct3D 11 and 12, Vulkan and OpenGL.
 - A game made at one size, fitted to any window as a canvas or a picture,
   keeping its shape or showing more, with the pointer in its pixels.
 - Tile maps: four-byte cells turned and flipped, in chunks found through an
@@ -3772,12 +3853,16 @@ In order, and the order is an argument rather than a wish list: each of these
 either unblocks the one after it or is the thing most missed by somebody
 trying to finish a game with what is here.
 
-### 1. The 3D pass
+### 1. Models from files
 
-Meshes, a depth attachment, a `Camera3D`, and the pass drawn before the 2D one
-into the same target. The place it goes is marked in `App.drawLayers`, and
-`fluxion-rhi` has had depth states, cull modes and depth attachments since
-before this package existed - the seam was cut for it deliberately.
+glTF 2.0 read as a scene of meshes, materials, cameras, lights, skins and
+animations, with `.fbx` and `.blend` turned into glTF by Blender, and a
+`Material3D` that is a file of its own.
+
+### 2. Light as it is
+
+Physically based shading, point and spot lights, an environment with fog,
+tone mapping and glow, shadows, and baked light maps.
 
 ## 💭 Not on the list yet
 

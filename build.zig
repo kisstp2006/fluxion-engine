@@ -116,6 +116,11 @@ pub fn build(b: *std.Build) void {
             .step = "example-crates",
             .about = "Rigid bodies: crates, a ramp, a ball on a rod, and a basket that counts",
         },
+        .{
+            .name = "shapes",
+            .step = "example-shapes",
+            .about = "The 3D layer: shapes made from numbers, a camera going round them, the sun",
+        },
     };
 
     const example_step = b.step("examples", "Build every example");

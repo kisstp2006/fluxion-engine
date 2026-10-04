@@ -26,6 +26,7 @@ const sprite_frames = @import("../animation/sprite_frames.zig");
 const scenes = @import("scene_table.zig");
 const script = @import("../script/script.zig");
 const shaders = @import("../render/shaders.zig");
+const mesh = @import("../render/mesh.zig");
 const theme = @import("../ui/theme.zig");
 const tileset = @import("../tiles/tileset.zig");
 
@@ -41,6 +42,7 @@ pub const AssetKind = enum {
     animation,
     frames,
     shader,
+    mesh,
 
     /// What a person calls one.
     pub fn label(self: AssetKind) []const u8 {
@@ -56,6 +58,7 @@ pub const AssetKind = enum {
             .animation => "animation library",
             .frames => "sprite frames",
             .shader => "shader",
+            .mesh => "mesh",
         };
     }
 
@@ -73,6 +76,7 @@ pub const AssetKind = enum {
             .animation => "Animations an AnimationPlayer plays",
             .frames => "Animations of pictures an AnimatedSprite2D plays",
             .shader => "What a Material draws with",
+            .mesh => "Triangles a MeshInstance3D draws",
         };
     }
 
@@ -90,6 +94,7 @@ pub const AssetKind = enum {
             .animation => "res://ui/menu.anim",
             .frames => "res://art/hero.frames",
             .shader => "res://shaders/crt.shader",
+            .mesh => "res://models/crate.mesh",
         };
     }
 
@@ -107,6 +112,7 @@ pub const AssetKind = enum {
             .animation => &.{animation.extension},
             .frames => &.{sprite_frames.extension},
             .shader => &.{shaders.extension},
+            .mesh => &.{mesh.extension},
         };
     }
 
@@ -138,6 +144,7 @@ pub const AssetKind = enum {
             .animation => animation.AnimationLibraryHandle,
             .frames => sprite_frames.SpriteFramesHandle,
             .shader => shaders.ShaderHandle,
+            .mesh => mesh.MeshHandle,
         };
     }
 
@@ -150,7 +157,7 @@ pub const AssetKind = enum {
     }
 
     /// Every kind a component can hold a file of: the ones with a handle.
-    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio, .animation, .frames, .shader };
+    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio, .animation, .frames, .shader, .mesh };
 };
 
 test "a file's kind is its ending's, whatever its case, and a scene's JSON is not said by its name" {

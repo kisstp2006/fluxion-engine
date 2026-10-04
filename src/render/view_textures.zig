@@ -30,6 +30,9 @@ const Assets = @import("../assets/assets.zig");
 const components = @import("../scene/components.zig");
 const hierarchy = @import("../scene/hierarchy.zig");
 const View = @import("view.zig").View;
+const View3D = @import("view3d.zig").View3D;
+const Camera3D = @import("render3d_components.zig").Camera3D;
+const Transform3D = @import("../scene/transform3d.zig").Transform3D;
 
 const Entity = ecs.Entity;
 const Transform2D = components.Transform2D;
@@ -80,7 +83,26 @@ pub const Views = struct {
 
 /// Draw what each active `RenderView` sees into its picture: before the
 /// screen, so what shows one shows this frame's. See `view_textures.zig`.
+/// One beside a `Camera3D` sees the 3D world through it.
 pub fn drawAll(app: *App) !void {
+    var it3d = try ecs.Query(.{ Transform3D, Camera3D, RenderView }).over(&app.world);
+    while (it3d.next()) |chunk| {
+        const places = chunk.slice(Transform3D);
+        const cameras = chunk.slice(Camera3D);
+        const views = chunk.slice(RenderView);
+        for (places, cameras, views, chunk.entities) |local, camera, view, entity| {
+            if (!view.active) continue;
+            const placed = hierarchy.resolve3D(&app.world, &app.snapshots3d, entity, local, app.time.alpha()) orelse continue;
+            const picture = try pictureOf(app, entity, view);
+            const gpu = (app.assets.get(picture) orelse continue).gpu;
+            const width = @max(view.width, 1);
+            const height = @max(view.height, 1);
+            var through: View3D = .of(camera, placed, @floatFromInt(width), @floatFromInt(height));
+            through.render_view = entity;
+            try app.renderer3d.draw(app, .{ .texture = gpu }, width, height, through, view.clear_color, .{});
+        }
+    }
+
     var it = try ecs.Query(.{ Transform2D, Camera2D, RenderView }).over(&app.world);
     while (it.next()) |chunk| {
         const places = chunk.slice(Transform2D);
