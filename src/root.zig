@@ -164,6 +164,10 @@ pub const render = struct {
     pub const lighting = @import("render/lighting.zig");
     /// What draws the 3D world.
     pub const renderer3d = @import("render/renderer3d.zig");
+    /// A `.shader3d` file: a mesh's surface, which the engine lights.
+    pub const shader3d = @import("render/shader3d.zig");
+    /// The 3D layer's light turned into a picture: glow, tone, smoothing.
+    pub const post3d = @import("render/post3d.zig");
     /// What a 3D camera sees, and where a pixel is in the 3D world.
     pub const view3d = @import("render/view3d.zig");
 };
@@ -213,6 +217,9 @@ pub const PrimitiveMesh3D = components.PrimitiveMesh3D;
 pub const Material3D = components.Material3D;
 pub const Camera3D = components.Camera3D;
 pub const DirectionalLight3D = components.DirectionalLight3D;
+pub const PointLight3D = components.PointLight3D;
+pub const SpotLight3D = components.SpotLight3D;
+pub const Environment = components.Environment;
 /// What a 3D camera sees: what `App.drawWorld3D` draws the world through.
 pub const View3D = render.view3d.View3D;
 
@@ -545,6 +552,8 @@ test {
     _ = @import("render/mesh.zig");
     _ = @import("render/view3d.zig");
     _ = @import("render/renderer3d.zig");
+    _ = @import("render/shader3d.zig");
+    _ = @import("render/post3d.zig");
     _ = @import("render/materials.zig");
     _ = @import("assets/gltf.zig");
     _ = @import("assets/models.zig");

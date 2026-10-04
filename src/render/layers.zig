@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 
 const ecs = @import("fluxion_ecs");
 const rhi = @import("fluxion_rhi");
+const debugdraw_rhi = @import("fluxion_debugdraw_rhi");
 const image = @import("fluxion_image");
 
 const App = @import("../App.zig");
@@ -68,7 +69,7 @@ fn drawLayersInto(app: *App, into: rhi.RenderTarget, area: GameArea, width: f32,
     //    with a depth test, clearing the frame: the 2D layer goes over it.
     var clear: ?Color = app.clear_color;
     if (app.world_on_screen) if (view3d.currentCamera(app)) |camera| if (view3d.viewOf(app, camera, width, height)) |seen| {
-        try draw3D(app, into, area.width, area.height, seen, clear, .{});
+        try draw3D(app, into, area.width, area.height, seen, clear, .{ .antialias = true });
         clear = null;
     };
 
@@ -147,17 +148,20 @@ pub fn drawWorld3D(app: *App, into: rhi.Texture, view: View3D, lighting: Lightin
 }
 
 /// The 3D world into a target `width` by `height`, and `debug_3d` over it,
-/// hidden behind what is in front of it.
+/// hidden behind what is in front of it - or over all of it, after a draw
+/// with several samples a pixel, whose depth cannot be drawn against.
 fn draw3D(app: *App, into: rhi.RenderTarget, width: u32, height: u32, view: View3D, clear: ?Color, lighting: Lighting) !void {
     try app.renderer3d.draw(app, into, width, height, view, clear, lighting);
     if (!app.debug_visible or app.debug_3d_frame.isEmpty()) return;
-    const renderer = if (app.debug_renderer_3d) |*held| held else return;
-    const depth = app.renderer3d.last_depth orelse return;
-    try renderer.draw(&.{&app.debug_3d_frame}, .{ .color = into, .depth = depth }, .{
+    const through: debugdraw_rhi.View = .{
         .view_projection = view.matrix(app.device.clip()),
         .width = view.width,
         .height = view.height,
-    });
+    };
+    if (app.renderer3d.last_depth) |depth| if (app.debug_renderer_3d) |*renderer| {
+        return renderer.draw(&.{&app.debug_3d_frame}, .{ .color = into, .depth = depth }, through);
+    };
+    try app.debug_renderer.draw(&.{&app.debug_3d_frame}, .{ .color = into }, through);
 }
 
 /// Draw this frame's world-space debug lines over an editor preview: after

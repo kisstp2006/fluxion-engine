@@ -453,7 +453,7 @@ pub fn compile(
 /// The compiler's messages, with a line of the engine's part said to be
 /// one: a file whose names clash with the engine's is told so, not sent to
 /// a line it never wrote.
-fn tellOfLines(said: []const u8, engine_line: usize, out: *std.Io.Writer) void {
+pub fn tellOfLines(said: []const u8, engine_line: usize, out: *std.Io.Writer) void {
     var lines = std.mem.splitScalar(u8, said, '\n');
     while (lines.next()) |line| {
         const at = headOf(line);

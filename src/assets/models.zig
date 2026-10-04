@@ -3,8 +3,8 @@
 //! A model file is a scene: `app.loadScene("res://models/robot.glb")` - or
 //! `app.instantiate` with it, or a scene that has one as an instance - gives
 //! the tree its nodes make, each a `Transform3D` with a `MeshInstance3D`, a
-//! `Camera3D` or a `DirectionalLight3D` as the node has, under a root named
-//! after the file.
+//! `Camera3D`, a `DirectionalLight3D`, a `PointLight3D` or a `SpotLight3D`
+//! as the node has, under a root named after the file.
 //!
 //! ```zig
 //! const robot = try app.loadScene("res://models/robot.glb");
@@ -202,7 +202,7 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
     defer gpa.free(nearest);
     @memset(nearest, false);
     for (model.materials) |material| {
-        for ([_]?gltf.TextureRef{ material.albedo, material.emission }) |held| if (held) |ref| {
+        for (material.pictures()) |held| if (held) |ref| {
             nearest[ref.image] = ref.nearest;
         };
     }
@@ -230,6 +230,9 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
         var look = material.look;
         if (material.albedo) |ref| look.albedo_texture = pictures[ref.image];
         if (material.emission) |ref| look.emission_texture = pictures[ref.image];
+        if (material.metallic_roughness) |ref| look.metallic_roughness_texture = pictures[ref.image];
+        if (material.normal) |ref| look.normal_texture = pictures[ref.image];
+        if (material.occlusion) |ref| look.occlusion_texture = pictures[ref.image];
         var name: [512]u8 = undefined;
         out.* = try app.materials.add(gpa, try std.fmt.bufPrint(&name, "{s}#material/{d}", .{ source, at }), look);
     }
@@ -356,19 +359,31 @@ const ModelScene = struct {
         }
         if (held.light) |l| {
             const light = model.lights[l];
+            try w.key(switch (light.kind) {
+                .directional => "DirectionalLight3D",
+                .point => "PointLight3D",
+                .spot => "SpotLight3D",
+            });
+            try w.beginObject();
+            try w.key("color");
+            try w.beginObject();
+            try w.field("r", light.color.r);
+            try w.field("g", light.color.g);
+            try w.field("b", light.color.b);
+            try w.field("a", @as(f32, 1));
+            try w.endObject();
             if (light.kind == .directional) {
-                try w.key("DirectionalLight3D");
-                try w.beginObject();
-                try w.key("color");
-                try w.beginObject();
-                try w.field("r", light.color.r);
-                try w.field("g", light.color.g);
-                try w.field("b", light.color.b);
-                try w.field("a", @as(f32, 1));
-                try w.endObject();
                 try w.field("energy", @min(light.intensity, 16));
-                try w.endObject();
-            } else log.info("{s}: the {t} light {s} is kept as a place: the engine draws only directional lights so far", .{ self.source, light.kind, held.name });
+            } else {
+                // A point's candela spread over the sphere round it: what
+                // a light of energy one is, next to it.
+                try w.field("energy", @min(light.intensity / (4 * std.math.pi), 16));
+                // glTF's endless reach, where it gives none, is far enough
+                // for a room.
+                try w.field("range", if (light.range > 0) light.range else 10);
+            }
+            if (light.kind == .spot) try w.field("angle", light.outer_cone);
+            try w.endObject();
         }
         try w.endObject();
         for (held.children) |child| try self.node(w, child, &uuid, placed);

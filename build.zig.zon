@@ -21,8 +21,8 @@
         // the 3D one, the 2D one, the interface -
         // goes through this and through nothing else.
         .fluxion_rhi = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-rhi#b5368f652cffbcaa4c1f149f2e030ea1c4636bcc",
-            .hash = "fluxion_rhi-0.1.0--pvwD061EADRFQd4YDLFKPUJbEoBsvQoALY5IzV7zkB0",
+            .url = "git+https://github.com/kisstp2006/fluxion-rhi#0ba9d0e200dbc1d8362a873004d4af740f1bd0bf",
+            .hash = "fluxion_rhi-0.1.0--pvwD4ofEQB64m0nJPi3SC_cvPL-uN1DsJlnlgVBdtgh",
         },
 
         // Windows, input and the event loop. A library may not depend on
@@ -50,8 +50,8 @@
         // Without this the same shader would be in this repository twice, in
         // two languages, drifting apart.
         .fluxion_shader = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-shader#881f930e8ce42470e7a1ebf2f2fe4f1ee31de22c",
-            .hash = "fluxion_shader-0.1.0-FqFMEr_2BwDkyRgbURZ7NmhleGbrBZb8X1jq7VMQ5nTz",
+            .url = "git+https://github.com/kisstp2006/fluxion-shader#4a83ba9c14223e675050309f3591d4853db0d283",
+            .hash = "fluxion_shader-0.1.0-FqFMEk0mCABnUhFkgCU7LBKw1iYhqYFwadFMBXl1TMVE",
         },
 
         // Projections and matrices, and the one type that knows OpenGL's

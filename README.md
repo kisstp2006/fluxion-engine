@@ -105,7 +105,10 @@ what layering costs - no extra textures, no compositing pass. What
 `app.debug` draws goes over all three, last.
 
 The 3D layer is drawn through the current `Camera3D`, when there is one, and
-clears the frame; with none, the 2D layer clears it as it always has. See
+clears the frame; with none, the 2D layer clears it as it always has. Its
+light is added up in a texture of its own first - brighter than white where
+it is - and turned into the frame's picture by a few passes over the whole of
+it: glow, tone, and smoothing where the project asks for it. See
 [The 3D layer](#-the-3d-layer).
 
 A frame something reads - a shader of a material's that reads what is drawn
@@ -1277,25 +1280,54 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   counter-clockwise seen from the side they face.
 - **A `Material3D` beside it says how it looks**: `albedo_color` times
   `albedo_texture`, laid on with `uv_scale` and `uv_offset`, times the mesh's
-  corner colours with `vertex_color`; `emission` times `emission_energy` -
-  and `emission_texture` - for the light it gives off; `transparency` to lay
-  it over what is behind it by its alpha, or to cut it where the alpha is
-  under `alpha_scissor_threshold`; `cull` for which side of its triangles is
-  left out; `unshaded` for its colour as it is. Without one, the
-  `MeshInstance3D`'s `material_override` - a material file - and then each
-  surface's own material: a mesh is surfaces, runs of its triangles each
-  with a material, as a model's are. With none it is white and lit.
-  `Appearance.visible` hides it and `Appearance.modulate` tints it, as
-  everything drawn.
+  corner colours with `vertex_color`; how much of it is `metallic` and how
+  rough it is - `roughness`, nought a mirror and one chalk - times the blue
+  and the green of `metallic_roughness_texture`; a `normal_texture` tilting
+  its surface by `normal_scale`, and an `occlusion_texture` darkening its
+  creases by `occlusion_strength`; `emission` times `emission_energy` - and
+  `emission_texture` - for the light it gives off; `transparency` to lay it
+  over what is behind it by its alpha, or to cut it where the alpha is under
+  `alpha_scissor_threshold`; `cull` for which side of its triangles is left
+  out; `unshaded` for its colour as it is; and a `shader` of its own - see
+  below. Without one, the `MeshInstance3D`'s `material_override` - a material
+  file - and then each surface's own material: a mesh is surfaces, runs of
+  its triangles each with a material, as a model's are. With none it is
+  white, rough and lit. `Appearance.visible` hides it and
+  `Appearance.modulate` tints it, as everything drawn.
+- **It is lit as a real surface is**, by how much of it is metal and how
+  rough it is - the model a glTF material is written for. Colours are made
+  linear as they are read, a picture's and a material's alike, and light adds
+  up as it does. A mesh's corners carry a tangent for its normal map: a
+  model's own, or worked out from its pictures' places.
 - **A `Camera3D` is what the screen is seen through**: from its transform,
   down its `-z`, perspective with a `fov` or orthogonal with a `size`,
   between `near` and `far`. Of the cameras that draw no picture of their
   own, the one that is `current` - `app.makeCurrent3D(camera)` - or else any.
   Its `cull_mask` and a mesh's `layers` say what it sees, by the project's
   `layer_names.render_3d`.
-- **A `DirectionalLight3D` is the sun**, along its `-z`, with a `color` and
-  an `energy`; the first one found lights the world, over a little light
-  from everywhere.
+- **The lights**: a `DirectionalLight3D` is a sun, along its `-z`; a
+  `PointLight3D` shines all round from where it is, as far as its `range`,
+  fading by `attenuation` - one is even, more falls off sooner; a
+  `SpotLight3D` the same in a cone down its `-z`, `angle` from the middle to
+  the edge, its light fading toward the edge by `angle_attenuation`. Each has
+  a `color` and an `energy`. Up to four suns light the world; the sixty-four
+  point and spot lights the camera sees, nearest first, are kept, and each
+  mesh is lit by the eight of them nearest it that reach it.
+- **An `Environment` is what is round it all** - the first one that is
+  visible: what is behind everything (`background`: the clear colour, or
+  `background_color`), the light from everywhere (`ambient_color` times
+  `ambient_energy`), fog (`fog`, its `fog_color` and `fog_density`, thicker
+  under `fog_height` by `fog_height_density` a unit), and how the light
+  becomes a picture: `exposure`, a `tonemap` - linear, Reinhard with its
+  `white`, filmic or ACES - and `glow`, the light brighter than
+  `glow_threshold` spread round it by `glow_intensity` and `glow_spread`.
+  With none, a little grey light from everywhere, and the light as it is.
+- **Smoothing is the project's**: `rendering.msaa_3d` draws the 3D layer
+  with two, four or eight samples a pixel - as many as the device has, up to
+  it - and `rendering.screen_space_aa` smooths the edges of the finished
+  picture, cheaper and softer. A device that draws into no half floats keeps
+  the light in a picture's bytes, and what is brighter than white is cut
+  off.
 - **Where the pointer is in 3D**: `app.projectRayOrigin(camera, point)` and
   `projectRayNormal` are the ray through a point on the screen,
   `unprojectPosition(camera, point)` where a point of the world is on it,
@@ -1307,15 +1339,46 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   as one beside a `Camera2D` draws the 2D one.
 - **How it is drawn**: what the camera sees, its box tested against the
   frustum; solid meshes grouped so every instance of a mesh with the same
-  picture and the same sides culled is one draw, nearest first, then the
-  see-through ones furthest first. Depth is a texture of the renderer's at
-  each size it draws at, in the most precise format the device draws into.
-  `app.renderer3d.drawn`, `draw_calls` and `culled` say what the last draw
-  did. The shader is the engine's, in fluxion-shader's language, so every
-  backend draws the same picture.
+  shader, pictures, material and sides culled is one draw, nearest first,
+  then the see-through ones furthest first. Depth is a texture of the
+  renderer's at each size it draws at, in the most precise format the device
+  draws into. `app.renderer3d.drawn`, `draw_calls`, `culled`, `lamps_kept`
+  and `samples` say what the last draw did. The shader is the engine's, in
+  fluxion-shader's language, so every backend draws the same picture.
 - **`app.debug_3d` draws lines in the 3D world**, through its camera after
   the meshes and hidden where a mesh is in front of them - unless their
-  style says `.depth = .always`.
+  style says `.depth = .always`, or the layer was drawn with several samples
+  a pixel, whose depth they cannot be tested against: then they are over it.
+
+### 🖌️ A surface's own shader
+
+```
+uniform Look : 3 {
+    float speed = 0.5;
+}
+
+fragment {
+    float wave = sin(WORLD_POSITION.y * 4.0 - TIME * speed) * 0.5 + 0.5;
+    ALBEDO = ALBEDO * wave;
+    ROUGHNESS = 0.3;
+}
+```
+
+- **A `.shader3d` file says what a surface is**, and the engine lights it:
+  its fragment stage starts with `ALBEDO`, `ALPHA`, `METALLIC`, `ROUGHNESS`,
+  `EMISSION`, `NORMAL_MAP` and `AO` as the material says - its colours,
+  numbers and pictures - and what it leaves them as is lit. It reads `UV`,
+  `COLOR`, `WORLD_POSITION`, `WORLD_NORMAL`, `CAMERA_POSITION`, `TIME` and
+  the material's pictures, and does not write `target`.
+- **Named by a `Material3D`'s `shader`**, read as a `.shader` file is -
+  `app.loadShader` - and given its own numbers as a 2D material's are: the
+  fields of its one block at slot 3 and what the file writes after each,
+  until `app.setShaderParam(entity, name, numbers)` gives the mesh's entity
+  its own, written in a scene as the material's `params`. One that does not
+  compile, or that the driver refuses, draws as the engine's own.
+- **An editor reads it as it is compiled**: `fx.shaders.edit.analyzeFile`
+  colours it, says what is wrong at its own lines, and completes and
+  explains the names above.
 
 ### 🗿 Models and materials
 
@@ -1329,16 +1392,17 @@ app.world.get(wall, fx.MeshInstance3D).?.material_override = brick;
 - **A model is a scene**: `loadScene`, `instantiate` and a scene's
   `"instance"` take a model file as they take a `.json` one, and give the
   tree its nodes make - each a `Transform3D`, with a `MeshInstance3D`, a
-  `Camera3D` or a `DirectionalLight3D` as the node has - under a root named
+  `Camera3D` or a light as the node has - under a root named
   after the file. Each node keeps its UUID from one read to the next, so a
   scene's changes to an instance of it hold.
 - **glTF 2.0 is read as it is**: `.glb`, or `.gltf` with its files beside it
-  or in it. Meshes - positions, normals (flat where it has none), UVs, corner
-  colours, strips and fans made triangles -, materials from their
-  `pbrMetallicRoughness` colour and picture, emission and its strength,
-  `alphaMode`, `doubleSided`, unlit and the picture's own transform;
-  pictures, PNG and JPEG, in the file or beside it; cameras; and the sun from
-  its lights.
+  or in it. Meshes - positions, normals (flat where it has none), tangents
+  (worked out where it has none), UVs, corner colours, strips and fans made
+  triangles -, materials from their `pbrMetallicRoughness` colour, metal and
+  roughness and their pictures, normal map, occlusion, emission and its
+  strength, `alphaMode`, `doubleSided`, unlit and the picture's own
+  transform; pictures, PNG and JPEG, in the file or beside it; cameras; and
+  its lights: suns, point lights and spot lights.
 - **FBX and Blender files are turned into glTF by Blender** - an editor's,
   when it brings them in - into the project's `.fluxion/imported/` folder,
   where a game reads them under their own names. One no editor has turned is
@@ -1353,8 +1417,9 @@ app.world.get(wall, fx.MeshInstance3D).?.material_override = brick;
   `MaterialHandle`: `loadMaterial`, `addMaterial` for one made in code,
   `materialOf` to change it - what draws with it draws the change -
   `saveMaterial` and `reloadMaterial`.
-- **A `.mesh` file holds surfaces too**, with corner colours: what
-  `saveMesh` writes now; one written before is read as it was.
+- **A `.mesh` file holds surfaces too**, with corner colours and tangents:
+  what `saveMesh` writes now; one written before is read as it was, its
+  tangents worked out.
 
 ## 🎨 The 2D layer
 
@@ -2532,8 +2597,9 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   [The window](#-the-window) - and its `vsync_mode`, how the game is fitted
   to it - `stretch_mode`, `stretch_aspect`, `stretch_scale`,
   `stretch_scale_mode` - and the least it may be dragged to, the
-  `clear_color` and the `default_texture_filter`, the `ticks_per_second` of
-  the fixed step and its `max_steps_per_frame`, `gui.scale`, the `icon` on
+  `clear_color`, the `default_texture_filter` and the 3D layer's `msaa_3d` and
+  `screen_space_aa`, the `ticks_per_second` of the fixed step and its
+  `max_steps_per_frame`, `gui.scale`, the `icon` on
   the window and the pointer's picture, `mouse_cursor` with its
   `mouse_cursor_hotspot`, the game's `version` for its menu
   (`gameVersion()`) and whether its close button closes (`quit_on_close`).

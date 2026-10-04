@@ -216,8 +216,33 @@ pub const Rendering = struct {
     /// How a texture is sampled when it does not say: nearest keeps pixel
     /// art's pixels square, linear smooths a painting.
     default_texture_filter: TextureFilter = .nearest,
+    /// How many samples a pixel the 3D layer is drawn with: smoother edges
+    /// for more work. Where the device has fewer, the most it has.
+    msaa_3d: Msaa = .disabled,
+    /// An edge smoother run over the finished 3D picture: cheaper than more
+    /// samples, and softer.
+    screen_space_aa: ScreenSpaceAa = .disabled,
 
     pub const TextureFilter = enum { nearest, linear };
+
+    pub const Msaa = enum {
+        disabled,
+        x2,
+        x4,
+        x8,
+
+        /// Samples a pixel.
+        pub fn samples(self: Msaa) u32 {
+            return switch (self) {
+                .disabled => 1,
+                .x2 => 2,
+                .x4 => 4,
+                .x8 => 8,
+            };
+        }
+    };
+
+    pub const ScreenSpaceAa = enum { disabled, fxaa };
 
     /// A Compatibility backend, or `auto` for the renderer's best on the
     /// system: Direct3D 11 on Windows, OpenGL elsewhere.
@@ -299,6 +324,8 @@ pub const Rendering = struct {
         .fall_back_to_compatibility = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "Where no Modern backend opens on a machine, draw with the Compatibility renderer instead." } },
         .clear_color = .{ attr.Advanced{}, attr.Doc{ .text = "What every frame is cleared to, under the world." } },
         .default_texture_filter = .{ attr.Restart{}, attr.Doc{ .text = "How a texture is sampled when it does not say: nearest for pixel art, linear for a painting." } },
+        .msaa_3d = .{ attr.Label{ .text = "MSAA 3D" }, attr.Doc{ .text = "How many samples a pixel the 3D layer is drawn with: smoother edges for more work. Where the device has fewer, the most it has." } },
+        .screen_space_aa = .{ attr.Label{ .text = "Screen space AA" }, attr.Doc{ .text = "An edge smoother run over the finished 3D picture: cheaper than more samples, and softer." } },
     };
 };
 

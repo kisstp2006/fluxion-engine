@@ -60,11 +60,18 @@ pub const TextureRef = struct {
 
 pub const Material = struct {
     name: []const u8,
-    /// What the material is, but its pictures, which are `albedo` and
-    /// `emission`.
+    /// What the material is, but its pictures, which are the rest.
     look: Material3D,
     albedo: ?TextureRef = null,
     emission: ?TextureRef = null,
+    metallic_roughness: ?TextureRef = null,
+    normal: ?TextureRef = null,
+    occlusion: ?TextureRef = null,
+
+    /// Every picture it names, for what goes through them all.
+    pub fn pictures(self: Material) [5]?TextureRef {
+        return .{ self.albedo, self.emission, self.metallic_roughness, self.normal, self.occlusion };
+    }
 };
 
 pub const Image = struct {
@@ -236,6 +243,7 @@ const PrimitiveDoc = struct {
         NORMAL: ?u32 = null,
         TEXCOORD_0: ?u32 = null,
         COLOR_0: ?u32 = null,
+        TANGENT: ?u32 = null,
     } = .{},
     indices: ?u32 = null,
     material: ?u32 = null,
@@ -273,7 +281,12 @@ const MaterialDoc = struct {
     pbrMetallicRoughness: struct {
         baseColorFactor: [4]f32 = .{ 1, 1, 1, 1 },
         baseColorTexture: ?TextureInfo = null,
+        metallicFactor: f32 = 1,
+        roughnessFactor: f32 = 1,
+        metallicRoughnessTexture: ?TextureInfo = null,
     } = .{},
+    normalTexture: ?struct { index: u32, texCoord: u32 = 0, scale: f32 = 1 } = null,
+    occlusionTexture: ?struct { index: u32, texCoord: u32 = 0, strength: f32 = 1 } = null,
     emissiveFactor: [3]f32 = .{ 0, 0, 0 },
     emissiveTexture: ?TextureInfo = null,
     alphaMode: []const u8 = "OPAQUE",
@@ -380,6 +393,9 @@ pub fn parse(gpa: Allocator, bytes: []const u8, fetch: ?Fetch) Error!Model {
         out.* = .{ .name = if (given.name.len > 0) given.name else try std.fmt.allocPrint(a, "Material {d}", .{at}), .look = try materialOf(&model, given) };
         if (given.pbrMetallicRoughness.baseColorTexture) |info| out.albedo = textureRef(&model, info);
         if (given.emissiveTexture) |info| out.emission = textureRef(&model, info);
+        if (given.pbrMetallicRoughness.metallicRoughnessTexture) |info| out.metallic_roughness = textureRef(&model, info);
+        if (given.normalTexture) |info| out.normal = textureRef(&model, .{ .index = info.index, .texCoord = info.texCoord });
+        if (given.occlusionTexture) |info| out.occlusion = textureRef(&model, .{ .index = info.index, .texCoord = info.texCoord });
     }
 
     model.meshes = try a.alloc(MeshData, doc.meshes.len);
@@ -478,9 +494,13 @@ fn materialOf(model: *Model, given: MaterialDoc) Allocator.Error!Material3D {
         // are white where a mesh gives none.
         .vertex_color = true,
         .emission = .{ .r = given.emissiveFactor[0], .g = given.emissiveFactor[1], .b = given.emissiveFactor[2], .a = 1 },
+        .metallic = pbr.metallicFactor,
+        .roughness = pbr.roughnessFactor,
         .cull = if (given.doubleSided) .disabled else .back,
         .unshaded = given.extensions.KHR_materials_unlit != null,
     };
+    if (given.normalTexture) |info| look.normal_scale = info.scale;
+    if (given.occlusionTexture) |info| look.occlusion_strength = info.strength;
     if (given.extensions.KHR_materials_emissive_strength) |strength| look.emission_energy = strength.emissiveStrength;
     if (std.mem.eql(u8, given.alphaMode, "BLEND")) {
         look.transparency = .alpha;
@@ -664,6 +684,7 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
         const normals: ?View = if (primitive.attributes.NORMAL) |n| try viewOf(model, n, "normals") else null;
         const uvs: ?View = if (primitive.attributes.TEXCOORD_0) |n| try viewOf(model, n, "coordinates") else null;
         const colors: ?View = if (primitive.attributes.COLOR_0) |n| try viewOf(model, n, "colours") else null;
+        const tangents: ?View = if (primitive.attributes.TANGENT) |n| try viewOf(model, n, "tangents") else null;
         try vertices.ensureUnusedCapacity(gpa, positions.count);
         for (0..positions.count) |i| {
             var v: mesh.Vertex = .{ .position = .{ positions.float(i, 0), positions.float(i, 1), positions.float(i, 2) }, .normal = .{ 0, 1, 0 } };
@@ -678,6 +699,9 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
                     const value: f32 = if (c < n.components) n.float(i, c) else 1;
                     v.color[c] = @intFromFloat(std.math.clamp(value, 0, 1) * 255 + 0.5);
                 }
+            };
+            if (tangents) |n| if (i < n.count and n.components == 4) {
+                v.tangent = .{ n.float(i, 0), n.float(i, 1), n.float(i, 2), if (n.float(i, 3) < 0) -1 else 1 };
             };
             vertices.appendAssumeCapacity(v);
         }
@@ -712,6 +736,9 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
         }
         for (indices.items[first..]) |index| if (index >= vertices.items.len) return error.BadModel;
         if (normals == null) try flatten(gpa, &vertices, &indices, base, first);
+        // Worked out where the file gives none, or the corners were made
+        // apart and lost what it gave.
+        if (tangents == null or normals == null) mesh.computeTangentsFrom(vertices.items, indices.items[first..], base);
         const count: u32 = @intCast(indices.items.len - first);
         if (count == 0) continue;
         try surfaces.append(gpa, .{ .first_index = first, .index_count = count });
@@ -791,8 +818,11 @@ test "a .gltf's triangle, its material, its nodes, a camera and a light are read
     try testing.expectEqual(@as(usize, 1), model.meshes.len);
     const tri = model.meshes[0];
     try testing.expectEqual(@as(usize, 3), tri.indices.len);
-    // No normals given: worked out flat, facing +z.
+    // No normals given: worked out flat, facing +z; no pictures' places
+    // either, so a tangent any way square to it.
     try testing.expectEqual([3]f32{ 0, 0, 1 }, tri.vertices[0].normal);
+    try testing.expectEqual(@as(f32, 0), tri.vertices[0].tangent[2]);
+    try testing.expectEqual(@as(f32, 1), @abs(tri.vertices[0].tangent[0]) + @abs(tri.vertices[0].tangent[1]));
     try testing.expectEqual(@as(?u32, 0), tri.materials[0]);
 
     const red = model.materials[0];
@@ -809,6 +839,33 @@ test "a .gltf's triangle, its material, its nodes, a camera and a light are read
     try testing.expectApproxEqAbs(@as(f32, 0.8), model.cameras[0].fov, 1e-6);
     try testing.expectEqual(Light.Kind.directional, model.lights[model.nodes[3].light.?].kind);
     try testing.expectEqual(@as(f32, 3), model.lights[0].intensity);
+}
+
+test "a material's metal, roughness, normal map and occlusion are read, each picture by its index" {
+    var model = try read(testing.allocator,
+        \\{ "asset": { "version": "2.0" },
+        \\  "materials": [{ "name": "Brass",
+        \\    "pbrMetallicRoughness": { "metallicFactor": 0.75, "roughnessFactor": 0.25, "metallicRoughnessTexture": { "index": 0 } },
+        \\    "normalTexture": { "index": 1, "scale": 0.5 },
+        \\    "occlusionTexture": { "index": 2, "strength": 0.8 } },
+        \\    { "name": "Plain" }],
+        \\  "textures": [{ "source": 0 }, { "source": 1 }, { "source": 2 }],
+        \\  "images": [{ "uri": "surface.png" }, { "uri": "normal.png" }, { "uri": "occlusion.png" }] }
+    , null);
+    defer model.deinit();
+    const brass = model.materials[0];
+    try testing.expectEqual(@as(f32, 0.75), brass.look.metallic);
+    try testing.expectEqual(@as(f32, 0.25), brass.look.roughness);
+    try testing.expectEqual(@as(f32, 0.5), brass.look.normal_scale);
+    try testing.expectEqual(@as(f32, 0.8), brass.look.occlusion_strength);
+    try testing.expectEqual(@as(u32, 0), brass.metallic_roughness.?.image);
+    try testing.expectEqual(@as(u32, 1), brass.normal.?.image);
+    try testing.expectEqual(@as(u32, 2), brass.occlusion.?.image);
+    // glTF's own first values: all metal, all rough.
+    const plain = model.materials[1];
+    try testing.expectEqual(@as(f32, 1), plain.look.metallic);
+    try testing.expectEqual(@as(f32, 1), plain.look.roughness);
+    try testing.expect(plain.normal == null);
 }
 
 test "a .glb's document and binary part are read, and a strip and a fan become triangles" {

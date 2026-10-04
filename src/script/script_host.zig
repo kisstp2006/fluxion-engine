@@ -18,7 +18,9 @@ const property = @import("../reflect/property.zig");
 const attr = @import("../reflect/attr.zig");
 const Project = @import("../project/Project.zig");
 const tileset = @import("../tiles/tileset.zig");
-const Material = @import("../render/shaders.zig").Material;
+const shaders = @import("../render/shaders.zig");
+const Material = shaders.Material;
+const Material3D = @import("../render/render3d_components.zig").Material3D;
 const Color = @import("../math/color.zig").Color;
 const input_event = @import("../input/input_event.zig");
 const InputEvent = input_event.InputEvent;
@@ -131,7 +133,8 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
             if (entry.type.same(reflect.typeOf(Transform2D))) return transformVector(self, source, name);
             if (entry.type.same(reflect.typeOf(Transform3D))) return turnInDegrees(self, source, name);
             // A material's numbers: `material.strength`.
-            if (entry.type.same(reflect.typeOf(Material))) if (try shaderParamOf(self, source, name)) |value| return value;
+            if (entry.type.same(reflect.typeOf(Material)) or entry.type.same(reflect.typeOf(Material3D)))
+                if (try shaderParamOf(self, source, name)) |value| return value;
             for (entry.signals) |decl| {
                 if (std.mem.eql(u8, decl.name, name)) return try self.bridgeOf(source, entry.name, decl.name, decl.args.fields().len);
             }
@@ -169,6 +172,8 @@ fn hostSetMember(vm: *flux.Vm, handle: flux.Value, name: []const u8, value: flux
     for (self.app.scene_components.entries.items) |*entry| {
         if (!entry.type.same(h.value.type)) continue;
         if (entry.type.same(reflect.typeOf(Material))) return setShaderParamOf(self, source, name, value);
+        // A 3D material's fields are its own; its shader's numbers beside them.
+        if (entry.type.same(reflect.typeOf(Material3D)) and self.app.shaderParamField(source, name) != null) return setShaderParamOf(self, source, name, value);
         if (entry.type.same(reflect.typeOf(Transform2D))) return setTransformVector(self, source, name, value);
         if (entry.type.same(reflect.typeOf(Transform3D))) return setTurnInDegrees(self, source, name, value);
         if (component_texts.attributeOf(entry.type, name) == null) return false;
@@ -246,10 +251,11 @@ fn shaderParamOf(self: *Scripts, entity: Entity, name: []const u8) flux.Vm.Error
 /// `material.glow = Color(1, 0.8, 0.3)`.
 fn setShaderParamOf(self: *Scripts, entity: Entity, name: []const u8, value: flux.Value) flux.Vm.Error!bool {
     const vm = self.vm;
-    const held = self.app.world.get(entity, Material) orelse return false;
+    const handle = shaders.shaderOfEntity(self.app, entity) orelse return false;
     // A shader that compiled says what it has; one that did not is given
     // what it is given.
-    if (self.app.shaders.compiledOf(held.shader) != null and self.app.shaderParamField(entity, name) == null) return false;
+    const works = if (self.app.shaders.get(handle)) |held| held.works() else false;
+    if (works and self.app.shaderParamField(entity, name) == null) return false;
     var numbers: [4]f32 = undefined;
     const given: []const f32 = switch (value.tag) {
         .int => blk: {

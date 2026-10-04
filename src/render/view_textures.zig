@@ -99,7 +99,7 @@ pub fn drawAll(app: *App) !void {
             const height = @max(view.height, 1);
             var through: View3D = .of(camera, placed, @floatFromInt(width), @floatFromInt(height));
             through.render_view = entity;
-            try app.renderer3d.draw(app, .{ .texture = gpu }, width, height, through, view.clear_color, .{});
+            try app.renderer3d.draw(app, .{ .texture = gpu }, width, height, through, view.clear_color, .{ .antialias = true });
         }
     }
 

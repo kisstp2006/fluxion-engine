@@ -11,7 +11,9 @@
 //!
 //! A `.shader` file is the fragment stage of fluxion-shader's language and
 //! what that reads; the engine writes the rest. See `render/material.zig` for
-//! what one says and the names it reads.
+//! what one says and the names it reads. A `.shader3d` file is a mesh's
+//! surface, which the engine lights - see `render/shader3d.zig` - and is
+//! named by a `Material3D` the same way, its numbers kept the same way.
 //!
 //! **A `Material` beside a `Sprite`, a `ColorRect` or a `TextureRect` draws
 //! it with the shader** instead of as a plain picture. The shader's own
@@ -46,14 +48,19 @@ const Saving = @import("../scene/scene_write.zig").Saving;
 const Loading = @import("../scene/scene_read.zig").Loading;
 
 pub const material = @import("material.zig");
+pub const shader3d = @import("shader3d.zig");
 /// What an editor asks about a `.shader` file being written.
 pub const edit = @import("shader_edit.zig");
+
+const Material3D = @import("render3d_components.zig").Material3D;
 
 const Entity = ecs.Entity;
 const log = std.log.scoped(.fluxion_engine);
 
 /// What a shader's file ends in.
 pub const extension = ".shader";
+/// What a 3D shader's file ends in.
+pub const extension_3d = shader3d.extension;
 
 /// A `.shader` file, the way a `TextureHandle` is a picture.
 pub const ShaderHandle = file_table.Handle("ShaderHandle");
@@ -80,8 +87,11 @@ pub const Shader = struct {
     on_disc: bool,
     /// The file's text.
     text: []u8 = &.{},
-    /// Null when it did not compile.
+    /// Null when it did not compile, or is a 3D shader's.
     compiled: ?material.Compiled = null,
+    /// What a `.shader3d` file compiled to; null when it did not, or is a
+    /// 2D one's.
+    compiled_3d: ?shader3d.Compiled = null,
     /// Why it did not, at the file's lines; empty when it did.
     problems: []u8 = &.{},
     /// Counts up each time it is given new text.
@@ -90,6 +100,8 @@ pub const Shader = struct {
     fn deinitContent(self: *Shader, gpa: Allocator, device: *rhi.Device) void {
         if (self.compiled) |*held| held.deinit(device);
         self.compiled = null;
+        if (self.compiled_3d) |*held| held.deinit(device);
+        self.compiled_3d = null;
         gpa.free(self.text);
         gpa.free(self.problems);
         self.text = &.{};
@@ -98,9 +110,24 @@ pub const Shader = struct {
 
     /// The fields a material fills: the file's own block's, or none.
     pub fn params(self: *const Shader) []const shader.Field {
-        const compiled = self.compiled orelse return &.{};
-        const block = compiled.params orelse return &.{};
-        return block.fields;
+        const block = if (self.compiled) |compiled|
+            compiled.params
+        else if (self.compiled_3d) |compiled|
+            compiled.params
+        else
+            return &.{};
+        return if (block) |held| held.fields else &.{};
+    }
+
+    /// Whether it is a mesh's surface - a `.shader3d` file - rather than
+    /// what a sprite is drawn with.
+    pub fn is3D(self: *const Shader) bool {
+        return is3DSource(self.source);
+    }
+
+    /// Whether it compiled.
+    pub fn works(self: *const Shader) bool {
+        return self.compiled != null or self.compiled_3d != null;
     }
 };
 
@@ -245,9 +272,11 @@ pub const Shaders = struct {
         const held = self.table.get(toId(handle)) orelse return error.NoSuchShader;
         var fresh: Shader = .{ .source = held.source, .on_disc = held.on_disc, .revision = held.revision +% 1 };
         try build(app, &fresh, text, .quiet);
-        if (fresh.compiled == null) {
+        if (!fresh.works()) {
             fresh.compiled = held.compiled;
             held.compiled = null;
+            fresh.compiled_3d = held.compiled_3d;
+            held.compiled_3d = null;
         }
         held.deinitContent(app.gpa, &app.device);
         held.* = fresh;
@@ -282,6 +311,13 @@ pub const Shaders = struct {
         return if (held.compiled) |*compiled| compiled else null;
     }
 
+    /// What a 3D shader compiled to - its pipelines are made as it is drawn
+    /// - or null for none, a 2D one, or one that did not compile.
+    pub fn compiled3DOf(self: *Shaders, handle: ShaderHandle) ?*shader3d.Compiled {
+        const held = self.table.get(toId(handle)) orelse return null;
+        return if (held.compiled_3d) |*compiled| compiled else null;
+    }
+
     pub fn sourceOf(self: *const Shaders, handle: ShaderHandle) ?[]const u8 {
         const held = self.get(handle) orelse return null;
         return held.source;
@@ -309,25 +345,38 @@ pub const Shaders = struct {
     }
 };
 
-/// Keep `text` and compile it: what fails is kept to be asked for, and
-/// said in the log unless `quiet`.
+/// Whether a shader read by this path or name is a 3D one's.
+pub fn is3DSource(source: []const u8) bool {
+    return std.ascii.endsWithIgnoreCase(source, extension_3d);
+}
+
+/// Keep `text` and compile it - for the 2D layer, or as a mesh's surface
+/// for a `.shader3d` - what fails is kept to be asked for, and said in the
+/// log unless `quiet`.
 fn build(app: *App, into: *Shader, text: []const u8, tell: enum { say, quiet }) !void {
     const gpa = app.gpa;
     into.text = try gpa.dupe(u8, text);
     errdefer gpa.free(into.text);
     var problems: std.Io.Writer.Allocating = .init(gpa);
     defer problems.deinit();
-    into.compiled = material.compile(gpa, &app.device, text, into.source, &problems.writer, &material.sprite_blends) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => blk: {
-            if (tell == .say) {
-                const placed = try withPlaces(gpa, into.source, problems.written());
-                defer gpa.free(placed);
-                log.warn("{s} did not compile:\n{s}", .{ into.source, placed });
-            }
-            break :blk null;
-        },
+    const failed = if (is3DSource(into.source)) blk: {
+        into.compiled_3d = shader3d.compile(gpa, &app.device, text, into.source, &problems.writer) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => break :blk true,
+        };
+        break :blk false;
+    } else blk: {
+        into.compiled = material.compile(gpa, &app.device, text, into.source, &problems.writer, &material.sprite_blends) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => break :blk true,
+        };
+        break :blk false;
     };
+    if (failed and tell == .say) {
+        const placed = try withPlaces(gpa, into.source, problems.written());
+        defer gpa.free(placed);
+        log.warn("{s} did not compile:\n{s}", .{ into.source, placed });
+    }
     into.problems = try gpa.dupe(u8, problems.written());
 }
 
@@ -453,11 +502,18 @@ pub const Params = struct {
 /// The field `name` of `entity`'s material's shader, or null for none: one
 /// its shader has not, or a shader that did not compile.
 pub fn paramField(app: *App, entity: Entity, name: []const u8) ?material.Field {
-    const held = app.world.get(entity, Material) orelse return null;
-    const drawn = app.shaders.get(held.shader) orelse return null;
+    const drawn = app.shaders.get(shaderOfEntity(app, entity) orelse return null) orelse return null;
     for (drawn.params()) |field| {
         if (std.mem.eql(u8, field.name, name)) return field;
     }
+    return null;
+}
+
+/// The shader an entity's numbers are given to: its `Material`'s, or its
+/// `Material3D`'s.
+pub fn shaderOfEntity(app: *App, entity: Entity) ?ShaderHandle {
+    if (app.world.get(entity, Material)) |held| return held.shader;
+    if (app.world.get(entity, Material3D)) |held| return held.shader;
     return null;
 }
 

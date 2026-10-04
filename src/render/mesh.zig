@@ -42,14 +42,88 @@ pub const extension = ".mesh";
 pub const MeshHandle = file_table.Handle("MeshHandle");
 
 /// One corner of a triangle: where it is, which way its surface faces,
-/// where on a picture it is, and the colour it holds - white for most, a
-/// model's painted shading for some.
+/// where on a picture it is, the colour it holds - white for most, a
+/// model's painted shading for some - and which way its pictures' `u` runs
+/// across the surface, for a normal map: `w` is one, or minus one where `v`
+/// runs the other way round.
 pub const Vertex = extern struct {
     position: [3]f32,
     normal: [3]f32,
     uv: [2]f32 = .{ 0, 0 },
     color: [4]u8 = .{ 255, 255, 255, 255 },
+    tangent: [4]f32 = no_tangent,
 };
+
+/// What a vertex's tangent is until one is worked out.
+pub const no_tangent: [4]f32 = .{ 1, 0, 0, 1 };
+
+/// Each vertex's tangent worked out from its triangles' positions and
+/// pictures' coordinates: what a normal map is read against. Where the
+/// coordinates say nothing - none, or all one point - any way square to the
+/// normal.
+pub fn computeTangents(vertices: []Vertex, indices: []const u32) void {
+    computeTangentsFrom(vertices, indices, 0);
+}
+
+/// `computeTangents` for the vertices from `base` on, which `indices` -
+/// into the whole of `vertices` - name: one part of a mesh being built.
+pub fn computeTangentsFrom(vertices: []Vertex, indices: []const u32, base: usize) void {
+    for (vertices[base..]) |*v| {
+        v.tangent = .{ 0, 0, 0, 0 };
+    }
+    // Each triangle's `u` and `v` directions, added to its corners'.
+    var at: usize = 0;
+    while (at + 3 <= indices.len) : (at += 3) {
+        const corners = [3]u32{ indices[at], indices[at + 1], indices[at + 2] };
+        const p0 = Vec3.fromArray(vertices[corners[0]].position);
+        const p1 = Vec3.fromArray(vertices[corners[1]].position);
+        const p2 = Vec3.fromArray(vertices[corners[2]].position);
+        const uv0 = vertices[corners[0]].uv;
+        const uv1 = vertices[corners[1]].uv;
+        const uv2 = vertices[corners[2]].uv;
+        const e1 = p1.sub(p0);
+        const e2 = p2.sub(p0);
+        const du1 = uv1[0] - uv0[0];
+        const dv1 = uv1[1] - uv0[1];
+        const du2 = uv2[0] - uv0[0];
+        const dv2 = uv2[1] - uv0[1];
+        const area = du1 * dv2 - du2 * dv1;
+        if (@abs(area) < 1e-12) continue;
+        const r = 1 / area;
+        const u_way = e1.scale(dv2).sub(e2.scale(dv1)).scale(r);
+        const v_way = e2.scale(du1).sub(e1.scale(du2)).scale(r);
+        for (corners) |c| {
+            const t = &vertices[c].tangent;
+            t[0] += u_way.x;
+            t[1] += u_way.y;
+            t[2] += u_way.z;
+            // The handedness, summed as a vote: `w` keeps it until the end.
+            const n = Vec3.fromArray(vertices[c].normal);
+            t[3] += if (n.cross(u_way).dot(v_way) < 0) -1 else 1;
+        }
+    }
+    for (vertices[base..]) |*v| {
+        const n = Vec3.fromArray(v.normal);
+        const summed: Vec3 = .init(v.tangent[0], v.tangent[1], v.tangent[2]);
+        // Square to the normal, as a normal map reads it.
+        const square = summed.sub(n.scale(n.dot(summed)));
+        const way = square.tryNorm() orelse anySquareTo(n);
+        v.tangent = .{ way.x, way.y, way.z, if (v.tangent[3] < 0) -1 else 1 };
+    }
+}
+
+/// A way square to `n`, for a vertex whose pictures say nothing of one.
+fn anySquareTo(n: Vec3) Vec3 {
+    const other: Vec3 = if (@abs(n.x) < 0.9) .unit_x else .unit_y;
+    return other.sub(n.scale(n.dot(other))).tryNorm() orelse .unit_x;
+}
+
+/// Whether every vertex still has the tangent it started with: one nothing
+/// has worked out.
+fn tangentsUnset(vertices: []const Vertex) bool {
+    for (vertices) |v| if (!std.meta.eql(v.tangent, no_tangent)) return false;
+    return true;
+}
 
 /// A run of a mesh's indices, drawn with a material of its own.
 pub const Surface = struct {
@@ -68,13 +142,15 @@ pub const Mesh = struct {
     /// The box the vertices are in.
     bounds: Aabb,
 
-    /// A mesh of one surface, of copies of `vertices` and `indices`.
-    /// `error.BadMesh` for an index past the vertices, or a count of
-    /// indices that is not whole triangles.
+    /// A mesh of one surface, of copies of `vertices` and `indices`, their
+    /// tangents worked out where none was given. `error.BadMesh` for an
+    /// index past the vertices, or a count of indices that is not whole
+    /// triangles.
     pub fn init(gpa: Allocator, vertices: []const Vertex, indices: []const u32) (Allocator.Error || error{BadMesh})!Mesh {
         try check(vertices.len, indices);
         const own_vertices = try gpa.dupe(Vertex, vertices);
         errdefer gpa.free(own_vertices);
+        if (tangentsUnset(own_vertices)) computeTangents(own_vertices, indices);
         const own_indices = try gpa.dupe(u32, indices);
         errdefer gpa.free(own_indices);
         return .{ .vertices = own_vertices, .indices = own_indices, .surfaces = try whole(gpa, indices.len), .bounds = boundsOf(vertices) };
@@ -188,6 +264,7 @@ const Builder = struct {
         errdefer self.gpa.free(vertices);
         const indices = try self.indices.toOwnedSlice(self.gpa);
         errdefer self.gpa.free(indices);
+        computeTangents(vertices, indices);
         return .{ .vertices = vertices, .indices = indices, .surfaces = try whole(self.gpa, indices.len), .bounds = boundsOf(vertices) };
     }
 };
@@ -345,21 +422,24 @@ pub fn capsule(gpa: Allocator, radius: f32, height: f32, rings: u32, segments: u
 // -------------------------------------------------------------------------
 
 /// What a `.mesh` file starts with, its version in the last two letters.
-/// A file of the first version - eight numbers a vertex, one surface - is
-/// still read.
-pub const magic = "FXMESH02";
+/// A file of an earlier version - eight numbers a vertex and one surface,
+/// or no tangents - is still read, its tangents worked out.
+pub const magic = "FXMESH03";
 const magic_v1 = "FXMESH01";
+const magic_v2 = "FXMESH02";
 
 const header_size = magic.len + 12 + 24;
 const header_size_v1 = magic.len + 8 + 24;
-const vertex_size = 8 * 4 + 4;
+const vertex_size_v2 = 8 * 4 + 4;
+const vertex_size = vertex_size_v2 + 4 * 4;
 
 /// A mesh as a `.mesh` file's bytes, owned by the caller: `magic`, the
 /// counts of vertices, of indices and of surfaces as `u32`s, the bounds'
-/// least and most corners as six `f32`s, then each vertex's eight `f32`s and
-/// four bytes of colour, each index as a `u32`, and each surface's first
-/// index and count as two `u32`s. Little-endian throughout. A surface's
-/// material is not written: what reads the file gives it one.
+/// least and most corners as six `f32`s, then each vertex's eight `f32`s,
+/// four bytes of colour and its tangent's four `f32`s, each index as a
+/// `u32`, and each surface's first index and count as two `u32`s.
+/// Little-endian throughout. A surface's material is not written: what
+/// reads the file gives it one.
 pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
     const size = header_size + mesh.vertices.len * vertex_size + mesh.indices.len * 4 + mesh.surfaces.len * 8;
     var out: std.ArrayList(u8) = try .initCapacity(gpa, size);
@@ -372,6 +452,7 @@ pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
     for (mesh.vertices) |v| {
         for (v.position ++ v.normal ++ v.uv) |number| appendInt(&out, @bitCast(number));
         out.appendSliceAssumeCapacity(&v.color);
+        for (v.tangent) |number| appendInt(&out, @bitCast(number));
     }
     for (mesh.indices) |index| appendInt(&out, index);
     for (mesh.surfaces) |surface| {
@@ -393,13 +474,14 @@ fn appendInt(out: *std.ArrayList(u8), value: u32) void {
 pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh})!Mesh {
     if (bytes.len < magic.len) return error.BadMesh;
     const first = std.mem.eql(u8, bytes[0..magic.len], magic_v1);
-    if (!first and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMesh;
+    const second = std.mem.eql(u8, bytes[0..magic.len], magic_v2);
+    if (!first and !second and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMesh;
     if (bytes.len < if (first) header_size_v1 else header_size) return error.BadMesh;
     var at: usize = magic.len;
     const vertex_count = takeInt(bytes, &at);
     const index_count = takeInt(bytes, &at);
     const surface_count: u32 = if (first) 1 else takeInt(bytes, &at);
-    const each: u64 = if (first) 8 * 4 else vertex_size;
+    const each: u64 = if (first) 8 * 4 else if (second) vertex_size_v2 else vertex_size;
     const header: u64 = if (first) header_size_v1 else header_size;
     const surfaces_size: u64 = if (first) 0 else @as(u64, surface_count) * 8;
     if (bytes.len != header + @as(u64, vertex_count) * each + @as(u64, index_count) * 4 + surfaces_size) return error.BadMesh;
@@ -414,6 +496,9 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
             v.color = bytes[at..][0..4].*;
             at += 4;
         }
+        if (!first and !second) for (&v.tangent) |*number| {
+            number.* = @bitCast(takeInt(bytes, &at));
+        };
     }
     const indices = try gpa.alloc(u32, index_count);
     errdefer gpa.free(indices);
@@ -423,6 +508,7 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     if (!first) for (surfaces) |*surface| {
         surface.* = .{ .first_index = takeInt(bytes, &at), .index_count = takeInt(bytes, &at) };
     };
+    if (first or second) computeTangents(vertices, indices);
     // Worked out again rather than trusted: a file edited by hand keeps
     // its picking and its culling right.
     return Mesh.adopt(vertices, indices, surfaces);
@@ -798,6 +884,35 @@ test "a mesh's file of the first version still reads, as one white surface" {
     try testing.expectEqual(@as(usize, 3), mesh.vertices.len);
     try testing.expectEqual([4]u8{ 255, 255, 255, 255 }, mesh.vertices[1].color);
     try testing.expectEqual(@as(u32, 3), mesh.surfaces[0].index_count);
+}
+
+test "a tangent runs along the pictures' first coordinate, square to the normal" {
+    // u runs up the triangle, v to the left: the tangent is up, and the
+    // bitangent the way the normal and the tangent say.
+    var tri = [_]Vertex{
+        .{ .position = .{ 0, 0, 0 }, .normal = .{ 0, 0, 1 }, .uv = .{ 0, 0 } },
+        .{ .position = .{ 0, 1, 0 }, .normal = .{ 0, 0, 1 }, .uv = .{ 1, 0 } },
+        .{ .position = .{ -1, 0, 0 }, .normal = .{ 0, 0, 1 }, .uv = .{ 0, 1 } },
+    };
+    computeTangents(&tri, &.{ 0, 1, 2 });
+    for (tri) |v| try testing.expectEqual([4]f32{ 0, 1, 0, 1 }, v.tangent);
+    // Mirrored pictures turn the bitangent round.
+    tri[2].uv = .{ 0, -1 };
+    computeTangents(&tri, &.{ 0, 1, 2 });
+    try testing.expectEqual(@as(f32, -1), tri[0].tangent[3]);
+
+    // Every shape's are whole, and square to its normals.
+    for ([_]Primitive.Shape{ .box, .plane, .sphere, .cylinder, .capsule }) |shape| {
+        var made = try (Primitive{ .shape = shape }).build(testing.allocator);
+        defer made.deinit(testing.allocator);
+        for (made.vertices) |v| {
+            const t: Vec3 = .init(v.tangent[0], v.tangent[1], v.tangent[2]);
+            const n: Vec3 = .init(v.normal[0], v.normal[1], v.normal[2]);
+            try testing.expectApproxEqAbs(@as(f32, 1), t.len(), 1e-3);
+            try testing.expectApproxEqAbs(@as(f32, 0), t.dot(n), 1e-3);
+            try testing.expectEqual(@as(f32, 1), @abs(v.tangent[3]));
+        }
+    }
 }
 
 test "a ray meets a mesh's nearest triangle" {

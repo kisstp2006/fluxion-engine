@@ -1,22 +1,36 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
-//! The 3D layer: every `MeshInstance3D` a camera sees, drawn with a depth
-//! test before the 2D world and the interface go over it.
+//! The 3D layer: every `MeshInstance3D` a camera sees, lit as real surfaces
+//! are, drawn with a depth test before the 2D world and the interface go
+//! over it.
 //!
 //! What is drawn is gathered each frame, surface by surface, left out where
 //! its mesh is off the camera's frustum, and sorted: solid surfaces grouped
 //! by how they are drawn - one draw for every instance of a surface with the
-//! same pictures and the same sides culled - then see-through ones back to
-//! front, after them. Each is lit by the first `DirectionalLight3D` and a
-//! little light from everywhere, and gives off its material's emission; a
-//! `Material3D` that is `unshaded` is its colour as it is.
+//! same shader, pictures, material and sides culled - then see-through ones
+//! back to front, after them.
+//!
+//! **Light.** A surface is lit by how much of it is metal and how rough it
+//! is - the model a glTF material is written for - by up to four
+//! `DirectionalLight3D`s, the eight `PointLight3D`s and `SpotLight3D`s
+//! nearest it that reach it, of the sixty-four the frame keeps (those the
+//! camera sees, nearest first), and the light from everywhere. Colours are
+//! made linear as they are read - a picture's, a material's - and light
+//! adds up as it does: brighter than white where it is.
+//!
+//! **The environment.** The first `Environment` that is visible says what
+//! is behind everything, the light from everywhere, the fog, and how the
+//! light becomes a picture: exposure, tone and glow - see `post3d.zig`.
+//! With none, a little grey light from everywhere, and the light as it is.
+//!
+//! **Smoothing.** With `Lighting.antialias`, the project's `msaa_3d` -
+//! several samples a pixel, as many as the device has up to it - and its
+//! `screen_space_aa`.
 //!
 //! A surface's material is, first found: a `Material3D` beside the
 //! `MeshInstance3D`, its `material_override`, the surface's own, or plain.
-//!
-//! The depth is a texture of the renderer's at each size it draws at. The
-//! shader is the engine's, in fluxion-shader's language: one source for
-//! every backend.
+//! A material that names a `.shader3d` is drawn with it: see
+//! `shader3d.zig`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -25,14 +39,17 @@ const Allocator = std.mem.Allocator;
 const ecs = @import("fluxion_ecs");
 const math = @import("fluxion_math");
 const rhi = @import("fluxion_rhi");
-const shader = @import("fluxion_shader");
 
 const App = @import("../App.zig");
+const Project = @import("../project/Project.zig");
 const Color = @import("../math/color.zig").Color;
 const hierarchy = @import("../scene/hierarchy.zig");
 const Transform3D = @import("../scene/transform3d.zig").Transform3D;
 const components3d = @import("render3d_components.zig");
 const mesh = @import("mesh.zig");
+const post3d = @import("post3d.zig");
+const shader3d = @import("shader3d.zig");
+const shaders = @import("shaders.zig");
 const View3D = @import("view3d.zig").View3D;
 
 const MeshInstance3D = components3d.MeshInstance3D;
@@ -40,38 +57,19 @@ const MaterialHandle = @import("materials.zig").MaterialHandle;
 const PrimitiveMesh3D = components3d.PrimitiveMesh3D;
 const Material3D = components3d.Material3D;
 const DirectionalLight3D = components3d.DirectionalLight3D;
+const PointLight3D = components3d.PointLight3D;
+const SpotLight3D = components3d.SpotLight3D;
+const Environment = components3d.Environment;
+
+const Frame = shader3d.Frame;
+const Look = shader3d.Look;
+const Lights = shader3d.Lights;
+const Instance = shader3d.Instance;
+const Way = shader3d.Way;
 
 const log = std.log.scoped(.fluxion_engine);
 
-/// What every draw of a frame tells the shader, as its `Frame` block says:
-/// `std140`, a hundred and twelve bytes.
-const Frame = extern struct {
-    view_projection: math.Mat4,
-    /// Toward the light, and nought in `w`; all nought for no light.
-    light_direction: [4]f32,
-    /// Its colour times its energy.
-    light_color: [4]f32,
-    ambient: [4]f32,
-};
-
-/// One mesh drawn: read by the shader per instance.
-const Instance = extern struct {
-    /// Its own space to the world's, column by column.
-    model: [4][4]f32,
-    /// Its normals to the world's: the model's inverse turned over, which
-    /// keeps them square to a surface its scale has stretched.
-    normal: [3][3]f32,
-    albedo: [4]f32,
-    /// The pictures' scale, then their offset.
-    uv: [4]f32,
-    /// One where it is unshaded, one where its corners' colours count, and
-    /// the alpha under which nothing is drawn.
-    look: [4]f32,
-    /// The light it gives off, its energy counted in.
-    emission: [4]f32,
-};
-
-/// The light from everywhere a lit mesh gets on top of its light's.
+/// The light from everywhere a world gets with no `Environment`.
 pub const ambient: Color = .{ .r = 0.25, .g = 0.25, .b = 0.25, .a = 1 };
 
 /// What lights a world that has no light of its own, where it is asked for:
@@ -81,107 +79,35 @@ pub const preview_light: struct { toward: math.Vec3, color: Color } = .{
     .color = .{ .r = 0.9, .g = 0.9, .b = 0.88, .a = 1 },
 };
 
-const source =
-    \\attribute vec3 VERTEX_POSITION : 0;
-    \\attribute vec3 VERTEX_NORMAL : 1;
-    \\attribute vec2 VERTEX_UV : 2;
-    \\attribute vec4 VERTEX_COLOR : 3;
-    \\attribute vec4 MODEL_0 : 4;
-    \\attribute vec4 MODEL_1 : 5;
-    \\attribute vec4 MODEL_2 : 6;
-    \\attribute vec4 MODEL_3 : 7;
-    \\attribute vec3 TURN_0 : 8;
-    \\attribute vec3 TURN_1 : 9;
-    \\attribute vec3 TURN_2 : 10;
-    \\attribute vec4 ALBEDO_COLOR : 11;
-    \\attribute vec4 UV_PLACE : 12;
-    \\attribute vec4 LOOK : 13;
-    \\attribute vec4 EMISSION_COLOR : 14;
-    \\
-    \\varying vec3 WORLD_NORMAL;
-    \\varying vec2 UV;
-    \\varying vec4 ALBEDO;
-    \\varying vec4 FEEL;
-    \\varying vec3 EMITTED;
-    \\
-    \\uniform Frame : 0 {
-    \\    mat4 VIEW_PROJECTION;
-    \\    vec4 LIGHT_DIRECTION;
-    \\    vec4 LIGHT_COLOR;
-    \\    vec4 AMBIENT;
-    \\}
-    \\
-    \\texture2d ALBEDO_TEXTURE : 0;
-    \\texture2d EMISSION_TEXTURE : 1;
-    \\
-    \\vertex {
-    \\    vec4 world = MODEL_0 * VERTEX_POSITION.x + MODEL_1 * VERTEX_POSITION.y + MODEL_2 * VERTEX_POSITION.z + MODEL_3;
-    \\    WORLD_NORMAL = TURN_0 * VERTEX_NORMAL.x + TURN_1 * VERTEX_NORMAL.y + TURN_2 * VERTEX_NORMAL.z;
-    \\    UV = VERTEX_UV * UV_PLACE.xy + UV_PLACE.zw;
-    \\    ALBEDO = ALBEDO_COLOR * mix(vec4(1.0), VERTEX_COLOR, LOOK.y);
-    \\    FEEL = LOOK;
-    \\    EMITTED = EMISSION_COLOR.rgb;
-    \\    position = VIEW_PROJECTION * world;
-    \\}
-    \\
-    \\fragment {
-    \\    vec4 albedo = sample(ALBEDO_TEXTURE, UV) * ALBEDO;
-    \\    if (albedo.a < FEEL.z) {
-    \\        discard;
-    \\    }
-    \\    float facing = max(dot(normalize(WORLD_NORMAL), LIGHT_DIRECTION.xyz), 0.0);
-    \\    vec3 lit = albedo.rgb * (AMBIENT.rgb + LIGHT_COLOR.rgb * facing);
-    \\    vec3 emitted = sample(EMISSION_TEXTURE, UV).rgb * EMITTED;
-    \\    target = vec4(mix(lit, albedo.rgb, FEEL.x) + emitted, albedo.a);
-    \\}
-;
-
-/// Which attributes are the mesh's own; the rest are per instance.
-fn bufferOf(name: []const u8) u32 {
-    return if (std.mem.startsWith(u8, name, "VERTEX_")) 0 else 1;
+/// A picture's colour, as light adds up.
+fn linear(c: Color) [4]f32 {
+    return .{ toLinear(c.r), toLinear(c.g), toLinear(c.b), c.a };
 }
 
-/// What an attribute is read as: its type's floats, but a vertex's colour,
-/// which is four bytes.
-fn vertexFormat(name: []const u8, ty: shader.Type) ?rhi.VertexFormat {
-    if (std.mem.eql(u8, name, "VERTEX_COLOR")) return .ubyte4_norm;
-    return switch (ty) {
-        .float => .float,
-        .vec2 => .float2,
-        .vec3 => .float3,
-        .vec4 => .float4,
-        else => null,
-    };
+fn toLinear(v: f32) f32 {
+    return std.math.pow(f32, @max(v, 0), 2.2);
 }
 
-/// How a surface is drawn, past its pictures: which sides, and whether laid
-/// over what is behind it. A surface cut by its alpha is solid: the shader
-/// leaves out what is under the threshold.
-const Way = struct {
-    cull: Material3D.Cull,
-    blend: bool,
+const no_params = std.math.maxInt(u32);
 
-    const count = 6;
-
-    fn index(self: Way) usize {
-        return @as(usize, @intFromEnum(self.cull)) * 2 + @intFromBool(self.blend);
-    }
-
-    fn of(at: usize) Way {
-        return .{ .cull = @enumFromInt(at / 2), .blend = at % 2 == 1 };
-    }
-};
+/// The flat normal map: what a material with none is read with.
+const flat_normal = [4]u8{ 128, 128, 255, 255 };
 
 /// What is drawn of one surface, before it is sorted.
 const Item = struct {
     way: u8,
     transparent: bool,
+    compiled: *shader3d.Compiled,
     gpu: mesh.Gpu,
     first_index: u32,
     index_count: u32,
-    texture: rhi.Texture,
+    /// Albedo, emission, metal and roughness, normal, occlusion.
+    textures: [5]rhi.Texture,
     sampler: rhi.Sampler,
-    emission: rhi.Texture,
+    /// Its material's numbers, among the frame's.
+    look: u32,
+    /// Its shader's own numbers, among the frame's, or `no_params`.
+    params: u32,
     /// How far in front of the camera its middle is.
     depth: f32,
     /// Where its `Instance` is in `gathered`.
@@ -192,38 +118,69 @@ const Item = struct {
     fn before(_: void, a: Item, b: Item) bool {
         if (a.transparent != b.transparent) return !a.transparent;
         if (a.transparent) return a.depth > b.depth;
-        if (a.way != b.way) return a.way < b.way;
-        const at = keyOf(a);
-        const bt = keyOf(b);
-        if (at != bt) return at < bt;
-        return a.depth < b.depth;
+        return switch (order(a, b)) {
+            .lt => true,
+            .gt => false,
+            .eq => a.depth < b.depth,
+        };
     }
 
-    fn keyOf(item: Item) u256 {
-        return @as(u256, item.texture.toInt()) << 192 | @as(u256, item.emission.toInt()) << 128 | @as(u256, item.gpu.vertices.toInt()) << 64 | item.first_index;
+    fn order(a: Item, b: Item) std.math.Order {
+        const keys_a = keysOf(a);
+        const keys_b = keysOf(b);
+        for (keys_a, keys_b) |x, y| {
+            if (x != y) return std.math.order(x, y);
+        }
+        return .eq;
+    }
+
+    fn keysOf(item: Item) [12]u64 {
+        return .{
+            item.way,                 @intFromPtr(item.compiled),              item.textures[0].toInt(),
+            item.textures[1].toInt(), item.textures[2].toInt(),                item.textures[3].toInt(),
+            item.textures[4].toInt(), item.sampler.toInt(),                    item.gpu.vertices.toInt(),
+            item.first_index,         @as(u64, item.look) << 32 | item.params, item.index_count,
+        };
     }
 
     /// Whether `b` is drawn in the same draw as `a`.
     fn joins(a: Item, b: Item) bool {
-        return a.way == b.way and a.first_index == b.first_index and a.index_count == b.index_count and
-            std.meta.eql(a.texture, b.texture) and std.meta.eql(a.sampler, b.sampler) and
-            std.meta.eql(a.emission, b.emission) and std.meta.eql(a.gpu, b.gpu);
+        return order(a, b) == .eq and std.meta.eql(a.gpu, b.gpu);
     }
 };
 
-/// A depth texture at one size.
-const Depth = struct {
-    width: u32,
-    height: u32,
-    texture: rhi.Texture,
-    /// The frame it was last drawn with, by `Renderer3D.clock`.
-    used: u64,
+/// A point or spot light the frame keeps.
+const Lamp = struct {
+    place: math.Vec3,
+    range: f32,
+    /// Its colour times its energy, linear.
+    color: [3]f32,
+    attenuation: f32,
+    /// The way it shines; nought for a point light.
+    aim: math.Vec3,
+    /// The cosine of the edge of its cone; -2 for a point light.
+    edge: f32,
+    cone: f32,
+    /// How far it is from the camera.
+    distance: f32,
+
+    fn nearer(_: void, a: Lamp, b: Lamp) bool {
+        return a.distance < b.distance;
+    }
+};
+
+const ParamBuffer = struct {
+    buffer: rhi.Buffer,
+    size: u32,
 };
 
 /// Lighting a draw asks for beyond the world's own.
 pub const Lighting = struct {
     /// Light a world that has no `DirectionalLight3D` with `preview_light`.
     preview: bool = false,
+    /// Smooth its edges as the project says: `msaa_3d` and
+    /// `screen_space_aa`. Off, one sample a pixel and nothing over it.
+    antialias: bool = false,
 };
 
 pub const Renderer3D = struct {
@@ -231,57 +188,82 @@ pub const Renderer3D = struct {
     /// Null where the device draws into no depth format, and nothing 3D is
     /// drawn.
     depth_format: ?rhi.Format,
-    module: ?shader.Module = null,
-    gpu: rhi.Shader = .none,
-    pipelines: [Way.count]rhi.Pipeline = @splat(.none),
+    /// The engine's own shader: a material with none of its own.
+    plain: ?shader3d.Compiled = null,
+    post: ?post3d.Post3D = null,
     frame: rhi.Buffer,
+    lights: rhi.Buffer,
     instances: rhi.Buffer,
     /// How many instances the buffer has room for. Grown, never shrunk.
     capacity: u32,
     white: rhi.Texture,
-    depths: std.ArrayList(Depth) = .empty,
-    /// The depth the last draw drew into, for what goes over it with a
-    /// depth test.
+    flat: rhi.Texture,
+    /// The depth the last draw drew into - one sample a pixel, at its size
+    /// - for what goes over it with a depth test; null after a draw with
+    /// several.
     last_depth: ?rhi.Texture = null,
-    clock: u64 = 0,
 
     gathered: std.ArrayList(Instance) = .empty,
     items: std.ArrayList(Item) = .empty,
     staging: std.ArrayList(Instance) = .empty,
+    lamps: std.ArrayList(Lamp) = .empty,
+    /// This draw's materials' numbers, one uniform buffer each - a buffer
+    /// is bound whole - kept from draw to draw.
+    looks: std.ArrayList(Look) = .empty,
+    look_found: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    look_buffers: std.ArrayList(rhi.Buffer) = .empty,
+    /// This draw's shaders' own numbers, the same way.
+    param_bytes: std.ArrayList(u8) = .empty,
+    param_sets: std.ArrayList(struct { start: u32, len: u32 }) = .empty,
+    param_found: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    param_buffers: std.ArrayList(ParamBuffer) = .empty,
 
     /// What the last draw drew: meshes, and the draws they took.
     drawn: u32 = 0,
     draw_calls: u32 = 0,
     /// The meshes it left out for being off the camera's frustum.
     culled: u32 = 0,
+    /// The point and spot lights it kept, and the samples a pixel it drew
+    /// with.
+    lamps_kept: u32 = 0,
+    samples: u32 = 1,
 
     const initial_capacity = 64;
 
     pub fn init(gpa: Allocator, device: *rhi.Device) !Renderer3D {
         const frame = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(Frame), .dynamic = true, .label = "3D frame" });
         errdefer device.destroyBuffer(frame);
+        const lights = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(Lights), .dynamic = true, .label = "3D lights" });
+        errdefer device.destroyBuffer(lights);
         const instances = try device.createBuffer(.{ .kind = .vertex, .size = initial_capacity * @sizeOf(Instance), .dynamic = true, .label = "3D instances" });
         errdefer device.destroyBuffer(instances);
         const white_texel = [4]u8{ 255, 255, 255, 255 };
-        const white = try device.createTexture(.{ .width = 1, .height = 1, .data = &white_texel, .label = "no albedo" });
+        const white = try device.createTexture(.{ .width = 1, .height = 1, .data = &white_texel, .label = "no picture" });
         errdefer device.destroyTexture(white);
+        const flat = try device.createTexture(.{ .width = 1, .height = 1, .data = &flat_normal, .label = "no normal map" });
+        errdefer device.destroyTexture(flat);
         var self: Renderer3D = .{
             .device = device,
             .depth_format = depthFormat(device),
             .frame = frame,
+            .lights = lights,
             .instances = instances,
             .capacity = initial_capacity,
             .white = white,
+            .flat = flat,
         };
-        if (self.depth_format == null) {
+        const depth_format = self.depth_format orelse {
             log.warn("the {t} backend draws into no depth format here: nothing 3D is drawn", .{device.info().backend});
             return self;
-        }
-        self.compile(gpa) catch |err| {
-            if (self.module) |*held| held.deinit();
-            self.module = null;
+        };
+        var problems: std.Io.Writer.Allocating = .init(gpa);
+        defer problems.deinit();
+        self.plain = shader3d.compile(gpa, device, shader3d.plain, "3D", &problems.writer) catch |err| {
+            log.err("the 3D shader: {s}", .{problems.written()});
             return err;
         };
+        errdefer self.plain.?.deinit(device);
+        self.post = try .init(gpa, device, depth_format);
         return self;
     }
 
@@ -293,172 +275,86 @@ pub const Renderer3D = struct {
         return null;
     }
 
-    fn compile(self: *Renderer3D, gpa: Allocator) !void {
-        const device = self.device;
-        var said: std.Io.Writer.Allocating = .init(gpa);
-        defer said.deinit();
-        self.module = shader.compile(gpa, source, &said.writer) catch |err| {
-            log.err("the 3D shader: {s}", .{said.written()});
-            return err;
-        };
-        const module = &self.module.?;
-        const frame_block = module.block("Frame").?;
-        inline for (.{ .{ "VIEW_PROJECTION", "view_projection" }, .{ "LIGHT_DIRECTION", "light_direction" }, .{ "LIGHT_COLOR", "light_color" }, .{ "AMBIENT", "ambient" } }) |pair| {
-            std.debug.assert(frame_block.offsetOf(pair[0]).? == @offsetOf(Frame, pair[1]));
-        }
-        std.debug.assert(frame_block.size == @sizeOf(Frame));
-
-        self.gpu = try device.createShader(.{
-            .glsl = .{ .vertex = module.glsl.vertex, .fragment = module.glsl.fragment },
-            .glsl_es = .{ .vertex = module.glsl_es.vertex, .fragment = module.glsl_es.fragment },
-            .hlsl = .{ .vertex = module.hlsl.vertex, .fragment = module.hlsl.fragment },
-            .spirv = .{ .vertex = module.spirv.vertex, .fragment = module.spirv.fragment },
-            .label = "3D",
-        });
-
-        var attributes: [16]rhi.VertexAttribute = undefined;
-        var strides: [2]u32 = @splat(0);
-        for (module.attributes, 0..) |a, i| {
-            const buffer = bufferOf(a.name);
-            const format = vertexFormat(a.name, a.ty).?;
-            attributes[i] = .{ .location = a.location, .format = format, .offset = strides[buffer], .buffer = buffer };
-            strides[buffer] += format.size();
-        }
-        std.debug.assert(strides[0] == @sizeOf(mesh.Vertex));
-        std.debug.assert(strides[1] == @sizeOf(Instance));
-
-        for (&self.pipelines, 0..) |*pipeline, at| {
-            const way: Way = .of(at);
-            const see_through = way.blend;
-            pipeline.* = try device.createPipeline(.{
-                .shader = self.gpu,
-                .attributes = attributes[0..module.attributes.len],
-                .buffers = &.{
-                    .{ .stride = strides[0] },
-                    .{ .stride = strides[1], .step = .instance },
-                },
-                .topology = .triangles,
-                .blend = if (see_through) .alpha else .solid,
-                // See-through meshes are tested against the solid ones and
-                // write no depth: one behind another still shows through.
-                .depth = .{ .test_enabled = true, .write = !see_through, .compare = .less },
-                .cull = switch (way.cull) {
-                    .back => .back,
-                    .front => .front,
-                    .disabled => .none,
-                },
-                .front_face = .ccw,
-                .depth_format = self.depth_format,
-                .uniform_blocks = (try module.uniformBlockNames()).?,
-                .textures = (try module.textureNames()).?,
-                .label = "3D",
-            });
-        }
-    }
-
     pub fn deinit(self: *Renderer3D, gpa: Allocator) void {
-        for (self.pipelines) |pipeline| if (!pipeline.isNone()) self.device.destroyPipeline(pipeline);
-        if (!self.gpu.isNone()) self.device.destroyShader(self.gpu);
-        if (self.module) |*held| held.deinit();
-        for (self.depths.items) |depth| self.device.destroyTexture(depth.texture);
-        self.depths.deinit(gpa);
-        self.device.destroyBuffer(self.frame);
-        self.device.destroyBuffer(self.instances);
-        self.device.destroyTexture(self.white);
+        const device = self.device;
+        if (self.post) |*held| held.deinit(gpa);
+        if (self.plain) |*held| held.deinit(device);
+        for (self.look_buffers.items) |buffer| device.destroyBuffer(buffer);
+        self.look_buffers.deinit(gpa);
+        for (self.param_buffers.items) |held| device.destroyBuffer(held.buffer);
+        self.param_buffers.deinit(gpa);
+        device.destroyBuffer(self.frame);
+        device.destroyBuffer(self.lights);
+        device.destroyBuffer(self.instances);
+        device.destroyTexture(self.white);
+        device.destroyTexture(self.flat);
         self.gathered.deinit(gpa);
         self.items.deinit(gpa);
         self.staging.deinit(gpa);
+        self.lamps.deinit(gpa);
+        self.looks.deinit(gpa);
+        self.look_found.deinit(gpa);
+        self.param_bytes.deinit(gpa);
+        self.param_sets.deinit(gpa);
+        self.param_found.deinit(gpa);
         self.* = undefined;
     }
 
-    /// The depth texture at a size, made the first time it is drawn at.
-    fn depthAt(self: *Renderer3D, gpa: Allocator, width: u32, height: u32) !rhi.Texture {
-        for (self.depths.items) |*depth| {
-            if (depth.width == width and depth.height == height) {
-                depth.used = self.clock;
-                return depth.texture;
-            }
-        }
-        const texture = try self.device.createTexture(.{
-            .width = width,
-            .height = height,
-            .format = self.depth_format.?,
-            .usage = .{ .sampled = false, .render_target = true },
-            .label = "3D depth",
-        });
-        errdefer self.device.destroyTexture(texture);
-        try self.depths.append(gpa, .{ .width = width, .height = height, .texture = texture, .used = self.clock });
-        return texture;
-    }
-
-    /// One more frame: a depth texture no draw has used for a few is let
-    /// go - a window dragged bigger leaves every size it passed through.
+    /// One more frame: targets no draw has used for a few are let go - a
+    /// window dragged bigger leaves every size it passed through.
     pub fn tick(self: *Renderer3D) void {
-        self.clock += 1;
-        var at: usize = 0;
-        while (at < self.depths.items.len) {
-            const depth = self.depths.items[at];
-            if (depth.used + 3 < self.clock) {
-                if (self.last_depth) |last| if (std.meta.eql(last, depth.texture)) {
-                    self.last_depth = null;
-                };
-                self.device.destroyTexture(depth.texture);
-                _ = self.depths.swapRemove(at);
-            } else at += 1;
-        }
+        self.last_depth = null;
+        if (self.post) |*held| held.tick();
     }
 
     /// Draw the 3D world through `view` into `into`, which is `width` by
-    /// `height` pixels: cleared to `clear` first, or drawn over as it is
-    /// with null.
+    /// `height` pixels: in place of what is there, behind it all `clear` -
+    /// or the environment's background - or over it as it is with null.
     pub fn draw(self: *Renderer3D, app: *App, into: rhi.RenderTarget, width: u32, height: u32, view: View3D, clear: ?Color, lighting: Lighting) !void {
         self.drawn = 0;
         self.draw_calls = 0;
         self.culled = 0;
+        self.lamps_kept = 0;
         if (width == 0 or height == 0) return;
         const gpa = app.gpa;
         const device = self.device;
         const clip = device.clip();
         const view_projection = view.matrix(clip);
 
-        if (self.depth_format == null) {
+        const depth_format = self.depth_format orelse {
             if (clear) |color| try clearOnly(device, into, color);
             return;
-        }
+        };
+        const post = &self.post.?;
+        const environment = environmentOf(app);
+        var background = clear;
+        if (environment) |held| if (clear != null and held.background == .color) {
+            background = held.background_color;
+        };
 
-        try self.gather(app, view, view_projection, clip);
+        const frustum: math.Frustum = .fromViewProjection(view_projection, clip);
+        try self.gatherLamps(app, view, frustum);
+        try self.gather(app, view, frustum);
         std.mem.sort(Item, self.items.items, {}, Item.before);
         self.staging.clearRetainingCapacity();
         try self.staging.ensureTotalCapacity(gpa, self.items.items.len);
         for (self.items.items) |item| self.staging.appendAssumeCapacity(self.gathered.items[item.instance]);
         try self.upload(gpa);
+        try self.uploadFrame(app, view, view_projection, environment, lighting);
 
-        var frame: Frame = .{
-            .view_projection = view_projection,
-            .light_direction = @splat(0),
-            .light_color = @splat(0),
-            .ambient = ambient.array(),
-        };
-        if (lightOf(app)) |light| {
-            frame.light_direction = .{ light.toward.x, light.toward.y, light.toward.z, 0 };
-            frame.light_color = light.color;
-        } else if (lighting.preview) {
-            const toward = preview_light.toward.norm();
-            frame.light_direction = .{ toward.x, toward.y, toward.z, 0 };
-            frame.light_color = preview_light.color.array();
-        }
-        try device.updateBuffer(self.frame, 0, std.mem.asBytes(&frame));
-
-        const depth = try self.depthAt(gpa, width, height);
-        self.last_depth = depth;
+        const rendering: Project.Rendering = if (app.project.settings) |held| held.rendering else .{};
+        const samples = if (lighting.antialias) post.samplesFor(rendering.msaa_3d.samples()) else 1;
+        self.samples = samples;
+        const targets = try post.targetsAt(gpa, width, height, samples);
         const list = device.begin();
         try list.beginPass(.{
             .color = .{
-                .target = into,
-                .load = if (clear != null) .clear else .load,
-                .clear_color = if (clear) |color| color.array() else .{ 0, 0, 0, 1 },
+                .target = .{ .texture = targets.drawnInto() },
+                .load = .clear,
+                .clear_color = if (background) |color| linear(color) else .{ 0, 0, 0, 0 },
+                .resolve = if (targets.multisampled != null) .{ .texture = targets.light } else null,
             },
-            .depth = .{ .texture = depth },
+            .depth = .{ .texture = targets.depth },
         });
         try list.setViewport(.{ .width = @floatFromInt(width), .height = @floatFromInt(height) });
         const items = self.items.items;
@@ -466,11 +362,21 @@ pub const Renderer3D = struct {
         while (start < items.len) {
             var end = start + 1;
             while (end < items.len and Item.joins(items[start], items[end])) end += 1;
-            const first = items[start];
-            try list.setPipeline(self.pipelines[first.way]);
+            var first = items[start];
+            // A shader whose pipeline the device refuses is drawn as the
+            // engine's own, and is not asked again.
+            const pipeline = first.compiled.pipelineOf(device, post.light_format, depth_format, samples, .of(first.way)) catch |err| blk: {
+                const plain = &self.plain.?;
+                if (first.compiled == plain) return err;
+                first.params = no_params;
+                break :blk try plain.pipelineOf(device, post.light_format, depth_format, samples, .of(first.way));
+            };
+            try list.setPipeline(pipeline);
             try list.setUniformBuffer(0, self.frame);
-            try list.setTexture(0, first.texture, first.sampler);
-            try list.setTexture(1, first.emission, first.sampler);
+            try list.setUniformBuffer(1, self.look_buffers.items[first.look]);
+            try list.setUniformBuffer(2, self.lights);
+            if (first.params != no_params) try list.setUniformBuffer(shader3d.params_slot, self.param_buffers.items[first.params].buffer);
+            for (first.textures, 0..) |texture, slot| try list.setTexture(@intCast(slot), texture, first.sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
             try list.setIndexBuffer(first.gpu.indices, .u32);
@@ -481,17 +387,131 @@ pub const Renderer3D = struct {
         try list.endPass();
         try device.submit();
         self.drawn = @intCast(items.len);
+
+        try post.finish(gpa, targets, into, .of(environment, lighting.antialias and rendering.screen_space_aa == .fxaa), clear == null);
+        self.last_depth = if (samples == 1) targets.depth else null;
+    }
+
+    /// The frame's numbers: the camera, the suns, the light from
+    /// everywhere and the fog - and every lamp kept.
+    fn uploadFrame(self: *Renderer3D, app: *App, view: View3D, view_projection: math.Mat4, environment: ?Environment, lighting: Lighting) !void {
+        const forward = view.forward();
+        var frame: Frame = .{
+            .view_projection = view_projection,
+            .camera_position = .{ view.position.x, view.position.y, view.position.z, 1 },
+            .camera_forward = .{ forward.x, forward.y, forward.z, if (view.projection == .orthogonal) 1 else 0 },
+            .sun_directions = @splat(@splat(0)),
+            .sun_colors = @splat(@splat(0)),
+            .ambient = .{ ambient.r, ambient.g, ambient.b, 1 },
+            .fog_color = @splat(0),
+            .fog_height = @splat(0),
+            .time = @floatCast(app.interface.seconds),
+        };
+        const suns = sunsOf(app, &frame);
+        if (suns == 0 and lighting.preview) {
+            const toward = preview_light.toward.norm();
+            frame.sun_directions[0] = .{ toward.x, toward.y, toward.z, 0 };
+            frame.sun_colors[0] = linear(preview_light.color);
+        }
+        if (environment) |held| {
+            const sky = linear(held.ambient_color);
+            frame.ambient = .{ sky[0] * held.ambient_energy, sky[1] * held.ambient_energy, sky[2] * held.ambient_energy, 1 };
+            if (held.fog) {
+                const fog = linear(held.fog_color);
+                frame.fog_color = .{ fog[0], fog[1], fog[2], @max(held.fog_density, 0) };
+                frame.fog_height = .{ held.fog_height, @max(held.fog_height_density, 0), 1, 0 };
+            }
+        }
+        try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&frame));
+
+        var lights: Lights = .{ .places = @splat(@splat(0)), .colors = @splat(@splat(0)), .aims = @splat(@splat(0)), .cones = @splat(@splat(0)) };
+        for (self.lamps.items, 0..) |lamp, at| {
+            lights.places[at] = .{ lamp.place.x, lamp.place.y, lamp.place.z, lamp.range };
+            lights.colors[at] = .{ lamp.color[0], lamp.color[1], lamp.color[2], lamp.attenuation };
+            lights.aims[at] = .{ lamp.aim.x, lamp.aim.y, lamp.aim.z, lamp.edge };
+            lights.cones[at] = .{ lamp.cone, 0, 0, 0 };
+        }
+        try self.device.updateBuffer(self.lights, 0, std.mem.asBytes(&lights));
+    }
+
+    /// The point and spot lights the camera sees some of, nearest first,
+    /// up to `shader3d.most_lamps`.
+    fn gatherLamps(self: *Renderer3D, app: *App, view: View3D, frustum: math.Frustum) !void {
+        const gpa = app.gpa;
+        self.lamps.clearRetainingCapacity();
+        {
+            var it = try ecs.Query(.{ Transform3D, PointLight3D }).over(&app.world);
+            while (it.next()) |chunk| {
+                for (chunk.slice(PointLight3D), chunk.entities) |light, entity| {
+                    const placed = placedLight(app, entity) orelse continue;
+                    try self.keepLamp(gpa, view, frustum, lampOf(placed.position, light.color, light.energy, light.range, light.attenuation));
+                }
+            }
+        }
+        {
+            var it = try ecs.Query(.{ Transform3D, SpotLight3D }).over(&app.world);
+            while (it.next()) |chunk| {
+                for (chunk.slice(SpotLight3D), chunk.entities) |light, entity| {
+                    const placed = placedLight(app, entity) orelse continue;
+                    var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
+                    lamp.aim = placed.forward().tryNorm() orelse continue;
+                    lamp.edge = @cos(std.math.clamp(light.angle, 0, std.math.degreesToRadians(89.9)));
+                    lamp.cone = @max(light.angle_attenuation, 0.01);
+                    try self.keepLamp(gpa, view, frustum, lamp);
+                }
+            }
+        }
+        std.mem.sort(Lamp, self.lamps.items, {}, Lamp.nearer);
+        if (self.lamps.items.len > shader3d.most_lamps) self.lamps.shrinkRetainingCapacity(shader3d.most_lamps);
+        self.lamps_kept = @intCast(self.lamps.items.len);
+    }
+
+    fn keepLamp(self: *Renderer3D, gpa: Allocator, view: View3D, frustum: math.Frustum, lamp: Lamp) !void {
+        if (lamp.color[0] + lamp.color[1] + lamp.color[2] <= 0) return;
+        if (frustum.testSphere(.init(lamp.place, lamp.range)) == .outside) return;
+        var kept = lamp;
+        kept.distance = lamp.place.sub(view.position).len();
+        try self.lamps.append(gpa, kept);
+    }
+
+    /// The lamps a mesh within `bounds` is lit by: the nearest that reach
+    /// it, up to `shader3d.lamps_per_mesh`, by their place in the frame's.
+    fn lampsFor(self: *const Renderer3D, bounds: math.Aabb) [2][4]f32 {
+        var which: [shader3d.lamps_per_mesh]u32 = undefined;
+        var near: [shader3d.lamps_per_mesh]f32 = undefined;
+        var count: usize = 0;
+        for (self.lamps.items, 0..) |lamp, at| {
+            const d = distanceSquared(bounds, lamp.place);
+            if (d >= lamp.range * lamp.range) continue;
+            if (count == which.len and d >= near[count - 1]) continue;
+            var slot = @min(count, which.len - 1);
+            while (slot > 0 and near[slot - 1] > d) : (slot -= 1) {
+                near[slot] = near[slot - 1];
+                which[slot] = which[slot - 1];
+            }
+            near[slot] = d;
+            which[slot] = @intCast(at);
+            count = @min(count + 1, which.len);
+        }
+        var out: [2][4]f32 = @splat(@splat(-1));
+        for (which[0..count], 0..) |at, slot| out[slot / 4][slot % 4] = @floatFromInt(at);
+        return out;
     }
 
     /// What every surface of every mesh the camera sees is drawn as,
     /// unsorted.
-    fn gather(self: *Renderer3D, app: *App, view: View3D, view_projection: math.Mat4, clip: math.Clip) !void {
+    fn gather(self: *Renderer3D, app: *App, view: View3D, frustum: math.Frustum) !void {
         const gpa = app.gpa;
         self.gathered.clearRetainingCapacity();
         self.items.clearRetainingCapacity();
-        const frustum: math.Frustum = .fromViewProjection(view_projection, clip);
+        self.looks.clearRetainingCapacity();
+        self.look_found.clearRetainingCapacity();
+        self.param_bytes.clearRetainingCapacity();
+        self.param_sets.clearRetainingCapacity();
+        self.param_found.clearRetainingCapacity();
         const alpha = app.time.alpha();
         const forward = view.forward();
+        const plain = &self.plain.?;
 
         var it = try ecs.Query(.{ Transform3D, MeshInstance3D }).over(&app.world);
         while (it.next()) |chunk| {
@@ -516,46 +536,39 @@ pub const Renderer3D = struct {
                 const turn = model.normalMatrix() orelse math.Mat3.identity;
                 const depth = bounds.center().sub(view.position).dot(forward);
                 const own = app.world.get(entity, Material3D);
+                const at: u32 = @intCast(self.gathered.items.len);
+                try self.gathered.append(gpa, .{
+                    .model = .{ model.cols[0].array(), model.cols[1].array(), model.cols[2].array(), model.cols[3].array() },
+                    .normal = .{ turn.cols[0].array(), turn.cols[1].array(), turn.cols[2].array() },
+                    .tint = linear(looks.tint(.white)),
+                    .lights = self.lampsFor(bounds),
+                });
                 for (kept.mesh.surfaces) |surface| {
                     if (surface.index_count == 0) continue;
                     const look = materialOf(app, own, instance.material_override, surface.material);
-                    var texture = self.white;
+                    var compiled = if (look.shader.isNone()) plain else app.shaders.compiled3DOf(look.shader) orelse plain;
+                    if (compiled.refused) compiled = plain;
                     var sampler = app.assets.samplerFor(.linear, .repeat);
-                    if (!look.albedo_texture.isNone()) if (app.assets.get(look.albedo_texture)) |held| {
-                        texture = held.gpu;
-                        sampler = app.assets.samplerFor(held.filter, .repeat);
-                    };
-                    var emission = self.white;
-                    if (!look.emission_texture.isNone()) if (app.assets.get(look.emission_texture)) |held| {
-                        emission = held.gpu;
-                    };
-                    const tint = looks.tint(look.albedo_color);
-                    const glow = look.emission;
-                    const at: u32 = @intCast(self.gathered.items.len);
-                    try self.gathered.append(gpa, .{
-                        .model = .{ model.cols[0].array(), model.cols[1].array(), model.cols[2].array(), model.cols[3].array() },
-                        .normal = .{ turn.cols[0].array(), turn.cols[1].array(), turn.cols[2].array() },
-                        .albedo = tint.array(),
-                        .uv = .{ look.uv_scale.x, look.uv_scale.y, look.uv_offset.x, look.uv_offset.y },
-                        .look = .{
-                            if (look.unshaded) 1 else 0,
-                            if (look.vertex_color) 1 else 0,
-                            if (look.transparency == .scissor) look.alpha_scissor_threshold else 0,
-                            0,
-                        },
-                        .emission = .{ glow.r * look.emission_energy, glow.g * look.emission_energy, glow.b * look.emission_energy, 0 },
-                    });
+                    var textures: [5]rhi.Texture = .{ self.white, self.white, self.white, self.flat, self.white };
+                    for ([_]@TypeOf(look.albedo_texture){ look.albedo_texture, look.emission_texture, look.metallic_roughness_texture, look.normal_texture, look.occlusion_texture }, 0..) |handle, slot| {
+                        if (handle.isNone()) continue;
+                        const held = app.assets.get(handle) orelse continue;
+                        textures[slot] = held.gpu;
+                        if (slot == 0) sampler = app.assets.samplerFor(held.filter, .repeat);
+                    }
                     const blend = look.transparency == .alpha;
                     const way: Way = .{ .cull = look.cull, .blend = blend };
                     try self.items.append(gpa, .{
                         .way = @intCast(way.index()),
                         .transparent = blend,
+                        .compiled = compiled,
                         .gpu = gpu,
                         .first_index = surface.first_index,
                         .index_count = surface.index_count,
-                        .texture = texture,
+                        .textures = textures,
                         .sampler = sampler,
-                        .emission = emission,
+                        .look = try self.lookIndex(gpa, lookOf(look, !look.normal_texture.isNone() or compiled.writes_normal_map)),
+                        .params = try self.paramSetOf(app, compiled, entity),
                         .depth = depth,
                         .instance = at,
                     });
@@ -564,22 +577,131 @@ pub const Renderer3D = struct {
         }
     }
 
-    /// The sorted instances into the buffer, grown to hold them.
+    /// Which of this draw's materials' numbers `look` is: one made for it,
+    /// or the same one another gave.
+    fn lookIndex(self: *Renderer3D, gpa: Allocator, look: Look) !u32 {
+        const bytes = std.mem.asBytes(&look);
+        const found = try self.look_found.getOrPut(gpa, std.hash.Wyhash.hash(0, bytes));
+        if (found.found_existing and std.mem.eql(u8, std.mem.asBytes(&self.looks.items[found.value_ptr.*]), bytes)) return found.value_ptr.*;
+        const at: u32 = @intCast(self.looks.items.len);
+        try self.looks.append(gpa, look);
+        if (!found.found_existing) found.value_ptr.* = at;
+        return at;
+    }
+
+    /// Which of this draw's sets of numbers `entity` gives `compiled`'s
+    /// own block, or `no_params` for a shader with none.
+    fn paramSetOf(self: *Renderer3D, app: *App, compiled: *const shader3d.Compiled, entity: ecs.Entity) !u32 {
+        const gpa = app.gpa;
+        const block = compiled.params orelse return no_params;
+        const start: u32 = @intCast(self.param_bytes.items.len);
+        try self.param_bytes.resize(gpa, start + block.size);
+        const bytes = self.param_bytes.items[start..];
+        shaders.pack(block, app.shader_params.of(entity), bytes);
+        const found = try self.param_found.getOrPut(gpa, std.hash.Wyhash.hash(block.size, bytes));
+        if (found.found_existing) {
+            const set = self.param_sets.items[found.value_ptr.*];
+            if (set.len == block.size and std.mem.eql(u8, self.param_bytes.items[set.start..][0..set.len], bytes)) {
+                self.param_bytes.shrinkRetainingCapacity(start);
+                return found.value_ptr.*;
+            }
+        }
+        const at: u32 = @intCast(self.param_sets.items.len);
+        try self.param_sets.append(gpa, .{ .start = start, .len = block.size });
+        if (!found.found_existing) found.value_ptr.* = at;
+        return at;
+    }
+
+    /// The sorted instances into the buffer, grown to hold them, and each
+    /// set of numbers into a uniform buffer of its own.
     fn upload(self: *Renderer3D, gpa: Allocator) !void {
-        _ = gpa;
+        const device = self.device;
         const count: u32 = @intCast(self.staging.items.len);
-        if (count == 0) return;
         if (count > self.capacity) {
             var room = self.capacity;
             while (room < count) room *= 2;
-            const grown = try self.device.createBuffer(.{ .kind = .vertex, .size = room * @sizeOf(Instance), .dynamic = true, .label = "3D instances" });
-            self.device.destroyBuffer(self.instances);
+            const grown = try device.createBuffer(.{ .kind = .vertex, .size = room * @sizeOf(Instance), .dynamic = true, .label = "3D instances" });
+            device.destroyBuffer(self.instances);
             self.instances = grown;
             self.capacity = room;
         }
-        try self.device.updateBuffer(self.instances, 0, std.mem.sliceAsBytes(self.staging.items));
+        if (count > 0) try device.updateBuffer(self.instances, 0, std.mem.sliceAsBytes(self.staging.items));
+
+        for (self.looks.items, 0..) |*look, at| {
+            if (at == self.look_buffers.items.len) {
+                const buffer = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(Look), .dynamic = true, .label = "3D material" });
+                errdefer device.destroyBuffer(buffer);
+                try self.look_buffers.append(gpa, buffer);
+            }
+            try device.updateBuffer(self.look_buffers.items[at], 0, std.mem.asBytes(look));
+        }
+        for (self.param_sets.items, 0..) |set, at| {
+            if (at == self.param_buffers.items.len) try self.param_buffers.append(gpa, .{ .buffer = .none, .size = 0 });
+            const held = &self.param_buffers.items[at];
+            if (held.size < set.len) {
+                if (held.size > 0) device.destroyBuffer(held.buffer);
+                held.* = .{ .buffer = .none, .size = 0 };
+                held.buffer = try device.createBuffer(.{ .kind = .uniform, .size = set.len, .dynamic = true, .label = "3D shader numbers" });
+                held.size = set.len;
+            }
+            try device.updateBuffer(held.buffer, 0, self.param_bytes.items[set.start..][0..set.len]);
+        }
     }
 };
+
+/// A material's numbers as the shader reads them.
+fn lookOf(look: Material3D, normal_map: bool) Look {
+    const glow = linear(look.emission);
+    const energy = look.emission_energy;
+    return .{
+        .albedo_color = linear(look.albedo_color),
+        .emission_color = .{ glow[0] * energy, glow[1] * energy, glow[2] * energy, 0 },
+        .uv_place = .{ look.uv_scale.x, look.uv_scale.y, look.uv_offset.x, look.uv_offset.y },
+        .surface = .{
+            std.math.clamp(look.metallic, 0, 1),
+            std.math.clamp(look.roughness, 0, 1),
+            look.normal_scale,
+            if (look.occlusion_texture.isNone()) 0 else std.math.clamp(look.occlusion_strength, 0, 1),
+        },
+        .feel = .{
+            if (look.unshaded) 1 else 0,
+            if (look.vertex_color) 1 else 0,
+            if (look.transparency == .scissor) look.alpha_scissor_threshold else 0,
+            if (normal_map) 1 else 0,
+        },
+        .facing = .{ if (look.cull == .back) 0 else 1, 0, 0, 0 },
+    };
+}
+
+/// A lamp, from what a point or spot light says.
+fn lampOf(place: math.Vec3, color: Color, energy: f32, range: f32, attenuation: f32) Lamp {
+    const c = linear(color);
+    const e = @max(energy, 0);
+    return .{
+        .place = place,
+        .range = @max(range, 0.001),
+        .color = .{ c[0] * e, c[1] * e, c[2] * e },
+        .attenuation = @max(attenuation, 0.01),
+        .aim = .zero,
+        .edge = -2,
+        .cone = 1,
+        .distance = 0,
+    };
+}
+
+/// Where a light is, when it is visible.
+fn placedLight(app: *App, entity: ecs.Entity) ?Transform3D {
+    if (!app.inherited.of(app.gpa, &app.world, entity).visible) return null;
+    return app.drawnTransform3D(entity);
+}
+
+/// How far a point is from a box, squared: nought inside it.
+fn distanceSquared(box: math.Aabb, p: math.Vec3) f32 {
+    const dx = @max(box.min.x - p.x, 0, p.x - box.max.x);
+    const dy = @max(box.min.y - p.y, 0, p.y - box.max.y);
+    const dz = @max(box.min.z - p.z, 0, p.z - box.max.z);
+    return dx * dx + dy * dy + dz * dz;
+}
 
 /// What a surface is drawn with: the `Material3D` beside its mesh's
 /// instance, the instance's override, the surface's own, or plain.
@@ -590,16 +712,33 @@ fn materialOf(app: *App, own: ?*const Material3D, override: MaterialHandle, surf
     return .{};
 }
 
-/// The first `DirectionalLight3D`'s way toward it and its colour.
-fn lightOf(app: *App) ?struct { toward: math.Vec3, color: [4]f32 } {
-    var it = ecs.Query(.{ Transform3D, DirectionalLight3D }).over(&app.world) catch return null;
+/// Each visible `DirectionalLight3D` into the frame, up to
+/// `shader3d.most_suns`: how many.
+fn sunsOf(app: *App, frame: *Frame) usize {
+    var count: usize = 0;
+    var it = ecs.Query(.{ Transform3D, DirectionalLight3D }).over(&app.world) catch return 0;
     while (it.next()) |chunk| {
         for (chunk.slice(DirectionalLight3D), chunk.entities) |light, entity| {
-            if (!app.inherited.of(app.gpa, &app.world, entity).visible) continue;
-            const placed = app.drawnTransform3D(entity) orelse continue;
+            if (count == shader3d.most_suns) return count;
+            const placed = placedLight(app, entity) orelse continue;
             const toward = placed.back().tryNorm() orelse continue;
-            const color = light.color;
-            return .{ .toward = toward, .color = .{ color.r * light.energy, color.g * light.energy, color.b * light.energy, 1 } };
+            const c = linear(light.color);
+            const e = @max(light.energy, 0);
+            frame.sun_directions[count] = .{ toward.x, toward.y, toward.z, 0 };
+            frame.sun_colors[count] = .{ c[0] * e, c[1] * e, c[2] * e, 1 };
+            count += 1;
+        }
+    }
+    return count;
+}
+
+/// The first visible `Environment`, if there is one.
+pub fn environmentOf(app: *App) ?Environment {
+    var it = ecs.Query(.{Environment}).over(&app.world) catch return null;
+    while (it.next()) |chunk| {
+        for (chunk.slice(Environment), chunk.entities) |held, entity| {
+            if (!app.inherited.of(app.gpa, &app.world, entity).visible) continue;
+            return held;
         }
     }
     return null;
@@ -613,9 +752,31 @@ fn clearOnly(device: *rhi.Device, into: rhi.RenderTarget, color: Color) !void {
     try device.submit();
 }
 
-test "an instance and the frame are laid out as the shader reads them" {
-    try testing.expectEqual(@as(usize, 112), @sizeOf(Frame));
-    try testing.expectEqual(@as(usize, 164), @sizeOf(Instance));
-    try testing.expectEqual(@as(usize, 36), @sizeOf(mesh.Vertex));
-    for (0..Way.count) |at| try testing.expectEqual(at, Way.of(at).index());
+test "a mesh is lit by the nearest lamps that reach it, nearest first, and no more than it can hold" {
+    var renderer: Renderer3D = undefined;
+    renderer.lamps = .empty;
+    defer renderer.lamps.deinit(testing.allocator);
+    const box: math.Aabb = .{ .min = .init(-1, -1, -1), .max = .init(1, 1, 1) };
+    for (0..12) |i| {
+        var lamp = lampOf(.init(@floatFromInt(2 + i), 0, 0), .white, 1, 20, 1);
+        if (i == 3) lamp.range = 0.5; // too short to reach
+        try renderer.lamps.append(testing.allocator, lamp);
+    }
+    const chosen = renderer.lampsFor(box);
+    try testing.expectEqual([4]f32{ 0, 1, 2, 4 }, chosen[0]);
+    try testing.expectEqual([4]f32{ 5, 6, 7, 8 }, chosen[1]);
+    const far: math.Aabb = .{ .min = .init(100, 0, 0), .max = .init(101, 1, 1) };
+    try testing.expectEqual([4]f32{ -1, -1, -1, -1 }, renderer.lampsFor(far)[0]);
+    try testing.expectEqual(@as(f32, 0), distanceSquared(box, .zero));
+    try testing.expectEqual(@as(f32, 4), distanceSquared(box, .init(3, 0, 0)));
+}
+
+test "a material's numbers are linear, as light adds up" {
+    const look = lookOf(.{ .albedo_color = .{ .r = 0.5, .g = 1, .b = 0, .a = 0.5 }, .emission = .white, .emission_energy = 2, .cull = .disabled }, false);
+    try testing.expectApproxEqAbs(@as(f32, 0.2176), look.albedo_color[0], 0.001);
+    try testing.expectEqual(@as(f32, 0.5), look.albedo_color[3]);
+    try testing.expectEqual(@as(f32, 2), look.emission_color[0]);
+    try testing.expectEqual(@as(f32, 1), look.facing[0]);
+    // No occlusion picture, so none of it is read.
+    try testing.expectEqual(@as(f32, 0), look.surface[3]);
 }

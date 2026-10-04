@@ -2,8 +2,11 @@
 
 //! The components the 3D layer draws from: `MeshInstance3D` and what gives
 //! it a mesh and a look - `PrimitiveMesh3D`, `Material3D` - the `Camera3D`
-//! it is seen through and the `DirectionalLight3D` it is lit by. Each is
-//! beside a `Transform3D`, which says where it is. See `render/renderer3d.zig`.
+//! it is seen through, the lights it is lit by - `DirectionalLight3D`,
+//! `PointLight3D`, `SpotLight3D` - and the `Environment` round it all: the
+//! light from everywhere, fog, and how the light is turned into a picture.
+//! Each but the environment is beside a `Transform3D`, which says where it
+//! is. See `render/renderer3d.zig`.
 //!
 //! ```zig
 //! _ = try app.world.spawnWith(.{
@@ -26,6 +29,7 @@ const attr = @import("../reflect/attr.zig");
 const Color = @import("../math/color.zig").Color;
 const mesh = @import("mesh.zig");
 const MaterialHandle = @import("materials.zig").MaterialHandle;
+const shaders = @import("shaders.zig");
 
 /// A mesh drawn where its `Transform3D` is: the one `mesh` names, or the
 /// shape a `PrimitiveMesh3D` beside it says. How each of its surfaces looks
@@ -95,6 +99,10 @@ pub const PrimitiveMesh3D = extern struct {
 /// lit or not, see-through or not, and which of its sides are drawn. Beside
 /// a `MeshInstance3D`, how all of it looks; as a `.mat3d` file, what a
 /// surface or a `material_override` names - see `render/materials.zig`.
+///
+/// Light falls on it as on a real surface: how much of it is metal, and how
+/// rough it is, say how sharp what it reflects is and of what colour.
+/// Colours are written as a picture shows them, and lit as light adds up.
 pub const Material3D = extern struct {
     /// Multiplied into the picture; its alpha is how see-through it is,
     /// with `transparency` on.
@@ -104,6 +112,23 @@ pub const Material3D = extern struct {
     /// The colours the mesh's corners hold - a model's painted shading -
     /// multiplied in too.
     vertex_color: bool = false,
+    /// How much of it is metal: nought for wood, stone, plastic and skin,
+    /// one for metal, which reflects in its own colour.
+    metallic: f32 = 0,
+    /// How rough it is: nought is a mirror, one is chalk.
+    roughness: f32 = 1,
+    /// Times `metallic` in its blue and `roughness` in its green, as a glTF
+    /// model's are.
+    metallic_roughness_texture: assets.TextureHandle = .none,
+    /// Which way its surface faces at each point, against the mesh's own: a
+    /// normal map, blue straight out, as a model's are drawn.
+    normal_texture: assets.TextureHandle = .none,
+    /// How strongly the normal map tilts the surface: nought is flat.
+    normal_scale: f32 = 1,
+    /// How much of the light from everywhere reaches each point, in its red:
+    /// the creases a model's maker darkened.
+    occlusion_texture: assets.TextureHandle = .none,
+    occlusion_strength: f32 = 1,
     /// How many times the pictures are laid across the mesh, and how far
     /// they are moved, in pictures.
     uv_scale: math.Vec2 = .one,
@@ -119,6 +144,13 @@ pub const Material3D = extern struct {
     cull: Cull = .back,
     /// Drawn as its colour, with no light: a sign that glows, a sky.
     unshaded: bool = false,
+    /// A `.shader3d` file that says what the surface is, from what this
+    /// says it is; none draws it as this says. Its numbers are the mesh's
+    /// entity's, as a 2D material's are: see `App.setShaderParam`.
+    shader: shaders.ShaderHandle = .none,
+
+    /// The numbers a shader is given, kept by the app, written with it.
+    pub const scene_beside = [_]@import("../scene/scene.zig").Beside{shaders.scene_params};
 
     pub const Transparency = enum(u8) {
         /// Solid, drawn front to back.
@@ -141,6 +173,13 @@ pub const Material3D = extern struct {
         .albedo_color = .{attr.Doc{ .text = "Multiplied into the picture; the alpha shows with transparency on" }},
         .albedo_texture = .{attr.Doc{ .text = "The picture laid over the mesh; none is white" }},
         .vertex_color = .{attr.Doc{ .text = "The colours the mesh's corners hold, multiplied in" }},
+        .metallic = .{ attr.Group{ .name = "Metal and roughness" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much of it is metal: nought for wood, stone and plastic, one for metal" } },
+        .roughness = .{ attr.Group{ .name = "Metal and roughness" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How rough it is: nought is a mirror, one is chalk" } },
+        .metallic_roughness_texture = .{ attr.Group{ .name = "Metal and roughness" }, attr.Doc{ .text = "Times metallic in its blue and roughness in its green" } },
+        .normal_texture = .{ attr.Group{ .name = "Normal map" }, attr.Doc{ .text = "Which way the surface faces at each point: a normal map" } },
+        .normal_scale = .{ attr.Group{ .name = "Normal map" }, attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How strongly the normal map tilts the surface" } },
+        .occlusion_texture = .{ attr.Group{ .name = "Occlusion" }, attr.Doc{ .text = "How much of the light from everywhere reaches each point, in its red" } },
+        .occlusion_strength = .{ attr.Group{ .name = "Occlusion" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much the occlusion picture darkens" } },
         .emission = .{attr.Doc{ .text = "Light it gives off whatever lights it" }},
         .emission_energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the light it gives off is" } },
         .emission_texture = .{attr.Doc{ .text = "Where on the mesh it gives off light, times the emission" }},
@@ -150,6 +189,7 @@ pub const Material3D = extern struct {
         .transparency = .{attr.Doc{ .text = "Whether it is laid over what is behind it by its alpha, or cut where that is low" }},
         .cull = .{attr.Doc{ .text = "Which side of its triangles is not drawn" }},
         .unshaded = .{attr.Doc{ .text = "Drawn as its colour, with no light" }},
+        .shader = .{attr.Doc{ .text = "A .shader3d file that says what the surface is; none draws it as these fields say" }},
     };
 
     pub fn colored(color: Color) Material3D {
@@ -197,7 +237,7 @@ pub const Camera3D = extern struct {
 };
 
 /// Light from far away, all one way - the sun: along its `Transform3D`'s
-/// `-z`. Only the first one found lights the world, for now.
+/// `-z`. The first four found light the world.
 pub const DirectionalLight3D = extern struct {
     color: Color = .white,
     /// How bright: one is the colour as it is.
@@ -207,5 +247,123 @@ pub const DirectionalLight3D = extern struct {
     pub const reflect_fields = .{
         .color = .{attr.Doc{ .text = "The light's colour" }},
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is" } },
+    };
+};
+
+/// Light from a point, every way: a bulb, a candle. It reaches `range` from
+/// where its `Transform3D` is, and fades on the way. A mesh is lit by the
+/// eight of these and of `SpotLight3D` nearest it that reach it.
+pub const PointLight3D = extern struct {
+    color: Color = .white,
+    /// How bright: one is the colour as it is, next to it.
+    energy: f32 = 1,
+    /// How far it reaches, in units: nothing further is lit by it.
+    range: f32 = 5,
+    /// How it fades toward `range`: one evenly, more sooner, less later.
+    attenuation: f32 = 1,
+
+    pub const reflect_name = "PointLight3D";
+    pub const reflect_fields = .{
+        .color = .{attr.Doc{ .text = "The light's colour" }},
+        .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is, next to it" } },
+        .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
+        .attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later" } },
+    };
+};
+
+/// Light from a point, in a cone: a torch, a stage light. It shines along
+/// its `Transform3D`'s `-z`, `angle` either side of it, and reaches `range`.
+pub const SpotLight3D = extern struct {
+    color: Color = .white,
+    energy: f32 = 1,
+    range: f32 = 5,
+    attenuation: f32 = 1,
+    /// From the middle of the cone to its edge, in radians.
+    angle: f32 = std.math.degreesToRadians(45.0),
+    /// How it fades toward the edge of the cone: one evenly, more sooner.
+    angle_attenuation: f32 = 1,
+
+    pub const reflect_name = "SpotLight3D";
+    pub const reflect_fields = .{
+        .color = .{attr.Doc{ .text = "The light's colour" }},
+        .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is, next to it" } },
+        .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
+        .attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later" } },
+        .angle = .{ attr.Angle{}, attr.Range{ .min = std.math.degreesToRadians(0.1), .max = std.math.degreesToRadians(89.9) }, attr.Doc{ .text = "From the middle of the cone to its edge" } },
+        .angle_attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward the edge of the cone: one evenly, more sooner" } },
+    };
+};
+
+/// What surrounds the 3D world: the colour behind it, the light that comes
+/// from everywhere, fog, glow round what is bright, and how the light
+/// worked out is turned into a picture. The first one found is the world's;
+/// with none, the project's clear colour is behind it, a little grey light
+/// comes from everywhere, and light is shown as it is.
+pub const Environment = extern struct {
+    background: Background = .clear_color,
+    background_color: Color = .{ .r = 0.3, .g = 0.3, .b = 0.3, .a = 1 },
+    /// Light from everywhere, times `ambient_energy`: what a shadow is lit
+    /// by.
+    ambient_color: Color = .white,
+    ambient_energy: f32 = 0.25,
+    /// How light brighter than white is brought into the picture.
+    tonemap: Tonemap = .linear,
+    /// Every light times this before it is toned: more is brighter.
+    exposure: f32 = 1,
+    /// The brightness that comes out white, with Reinhard and filmic.
+    white: f32 = 1,
+    /// Fog, thicker the further, and below `fog_height` the deeper.
+    fog: bool = false,
+    fog_color: Color = .{ .r = 0.6, .g = 0.65, .b = 0.72, .a = 1 },
+    /// How much of the way a unit of fog hides.
+    fog_density: f32 = 0.02,
+    /// Below this height the fog thickens, by `fog_height_density` a unit
+    /// down; nought for none.
+    fog_height: f32 = 0,
+    fog_height_density: f32 = 0,
+    /// Glow round what is brighter than `glow_threshold`, spread out and
+    /// added back, `glow_intensity` of it: bloom.
+    glow: bool = false,
+    glow_threshold: f32 = 1,
+    glow_intensity: f32 = 0.8,
+    /// How far it spreads: one is the whole of it, less keeps it close.
+    glow_spread: f32 = 1,
+
+    pub const Background = enum(u8) {
+        /// The project's clear colour.
+        clear_color,
+        /// `background_color`.
+        color,
+    };
+
+    pub const Tonemap = enum(u8) {
+        /// As it is, brighter than white cut off.
+        linear,
+        /// Bright light brought down gently, never quite white.
+        reinhard,
+        /// As film takes light: a soft toe and shoulder.
+        filmic,
+        /// The film industry's curve: rich and contrasting.
+        aces,
+    };
+
+    pub const reflect_name = "Environment";
+    pub const reflect_fields = .{
+        .background = .{attr.Doc{ .text = "What is behind the 3D world: the project's clear colour, or the colour below" }},
+        .background_color = .{attr.Doc{ .text = "Behind the 3D world, with the background at colour" }},
+        .ambient_color = .{ attr.Group{ .name = "Ambient light" }, attr.Doc{ .text = "Light from everywhere: what a shadow is lit by" } },
+        .ambient_energy = .{ attr.Group{ .name = "Ambient light" }, attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the light from everywhere is" } },
+        .tonemap = .{ attr.Group{ .name = "Tonemap" }, attr.Doc{ .text = "How light brighter than white is brought into the picture" } },
+        .exposure = .{ attr.Group{ .name = "Tonemap" }, attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "Every light times this before it is toned" } },
+        .white = .{ attr.Group{ .name = "Tonemap" }, attr.Range{ .min = 0.1, .max = 16 }, attr.Doc{ .text = "The brightness that comes out white, with Reinhard and filmic" } },
+        .fog = .{ attr.Group{ .name = "Fog" }, attr.Doc{ .text = "Fog, thicker the further, and below its height the deeper" } },
+        .fog_color = .{ attr.Group{ .name = "Fog" }, attr.Doc{ .text = "The fog's colour" } },
+        .fog_density = .{ attr.Group{ .name = "Fog" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much of the way a unit of fog hides" } },
+        .fog_height = .{ attr.Group{ .name = "Fog" }, attr.Doc{ .text = "Below this height the fog thickens" } },
+        .fog_height_density = .{ attr.Group{ .name = "Fog" }, attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How much thicker a unit further down: nought for no fog by height" } },
+        .glow = .{ attr.Group{ .name = "Glow" }, attr.Doc{ .text = "Glow round what is brighter than the threshold" } },
+        .glow_threshold = .{ attr.Group{ .name = "Glow" }, attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "Light brighter than this glows" } },
+        .glow_intensity = .{ attr.Group{ .name = "Glow" }, attr.Range{ .min = 0, .max = 8 }, attr.Doc{ .text = "How much of the glow is added back" } },
+        .glow_spread = .{ attr.Group{ .name = "Glow" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How far it spreads: one is the whole of it, less keeps it close" } },
     };
 };
