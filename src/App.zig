@@ -117,6 +117,8 @@ const lights = @import("render/lights.zig");
 const shading = @import("render/shaders.zig");
 const view_textures = @import("render/view_textures.zig");
 const mesh_table = @import("render/mesh.zig");
+const material_table = @import("render/materials.zig");
+const models = @import("assets/models.zig");
 const components3d = @import("render/render3d_components.zig");
 const view3d = @import("render/view3d.zig");
 const rendering3d = @import("render/renderer3d.zig");
@@ -376,6 +378,9 @@ particles: particle_emitters.Particles = .{},
 /// Every mesh read or made, and the meshes primitives come to: see
 /// `render/mesh.zig` and `addMesh`.
 meshes: mesh_table.Meshes = .{},
+/// Every `.mat3d` read or material made, and a model's: see
+/// `render/materials.zig` and `loadMaterial`.
+materials: material_table.Materials = .{},
 /// What draws the 3D world: see `render/renderer3d.zig`.
 renderer3d: rendering3d.Renderer3D,
 /// What the frame is cleared to.
@@ -620,6 +625,7 @@ const described_types = .{
     sprite_animation.LoopMode,
     shading.ShaderHandle,
     mesh_table.MeshHandle,
+    material_table.MaterialHandle,
     character.Collision,
     geometry.Vec2i,
     geometry.Rect2,
@@ -927,6 +933,7 @@ pub fn destroy(self: *App) void {
     self.sprites.deinit(gpa);
     self.renderer3d.deinit(gpa);
     self.meshes.deinit(gpa, &self.device);
+    self.materials.deinit(gpa);
     self.screen_texture.deinit();
     self.shaders.deinit(gpa, &self.device);
     self.views.deinit(gpa);
@@ -4064,6 +4071,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .frames => self.sprite_frames.sourceOf(handle),
         .shader => self.shaders.sourceOf(handle),
         .mesh => self.meshes.sourceOf(handle),
+        .material => self.materials.sourceOf(handle),
     };
 }
 
@@ -4085,6 +4093,7 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .frames => self.loadSpriteFrames(path),
         .shader => self.loadShader(path),
         .mesh => self.loadMesh(path),
+        .material => self.loadMaterial(path),
     };
 }
 
@@ -4104,6 +4113,7 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .frames => self.findSpriteFrames(path),
         .shader => self.findShader(path),
         .mesh => self.findMesh(path),
+        .material => self.findMaterial(path),
     };
 }
 
@@ -4158,6 +4168,26 @@ pub fn loadStatus(self: *App, path: []const u8) LoadStatus {
 /// is its error. Nothing when nothing is reading it.
 pub fn finishLoad(self: *App, path: []const u8) !void {
     return background_load.finish(self, path);
+}
+
+/// How far the background load of `path` has got - steps done of how many,
+/// the models a scene names counted in - and what it is on, in words in
+/// `buffer`: what a loading screen shows. Null while nothing is reading it.
+pub fn loadReport(self: *App, path: []const u8, buffer: []u8) ?background_load.Report {
+    return background_load.report(self, path, buffer);
+}
+
+/// Every background load at once: what a window says while files come in.
+pub fn loadsReport(self: *const App, buffer: []u8) background_load.Report {
+    return self.loads.report(buffer);
+}
+
+/// Read the model a part's name is of - `res://robot.glb` of
+/// `res://robot.glb#mesh/0` - if it is not read: what makes the part.
+/// Nothing for a name that is not a part's.
+pub fn loadModelOf(self: *App, path: []const u8) !void {
+    const base = models.baseOf(path) orelse return;
+    _ = try self.loadScene(base);
 }
 
 // -------------------------------------------------------------------------
@@ -4235,6 +4265,7 @@ pub fn themeSource(self: *App, handle: theme.ThemeHandle) ?[]const u8 {
 /// for, if it is not done - rather than read again.
 pub fn loadScene(self: *App, path: []const u8) !SceneHandle {
     try self.finishLoad(path);
+    if (models.isModel(path)) return models.load(self, path);
     return self.scenes.load(self, path);
 }
 
@@ -4258,6 +4289,11 @@ pub fn sceneSource(self: *App, handle: SceneHandle) ?[]const u8 {
 /// Read a scene's file again, for an editor that has just saved it: what is
 /// made of it next is what was saved. What was made of it already stays.
 pub fn reloadScene(self: *App, handle: SceneHandle) !bool {
+    const source = self.scenes.sourceOf(handle) orelse return false;
+    if (models.isModel(source)) {
+        try models.reload(self, source);
+        return true;
+    }
     return self.scenes.reload(self, handle);
 }
 
@@ -4371,7 +4407,55 @@ pub fn addMesh(self: *App, name: []const u8, made: mesh_table.Mesh) !mesh_table.
 /// Read a `.mesh` file, or find the one read from there already.
 pub fn loadMesh(self: *App, path: []const u8) !mesh_table.MeshHandle {
     try self.finishLoad(path);
+    try self.loadModelOf(path);
+    if (models.baseOf(path) != null) return self.findMesh(path) orelse error.FileNotFound;
     return self.meshes.load(self, path);
+}
+
+/// Read a `.mat3d` file, or find the one read from there already: what a
+/// mesh's surface and a `MeshInstance3D`'s `material_override` name. A
+/// model's material is found by its name - `res://robot.glb#material/0` -
+/// with the model read first. See `render/materials.zig`.
+pub fn loadMaterial(self: *App, path: []const u8) !material_table.MaterialHandle {
+    try self.loadModelOf(path);
+    if (models.baseOf(path) != null) return self.findMaterial(path) orelse error.FileNotFound;
+    return self.materials.load(self, path);
+}
+
+/// A material made in code, kept under `name`: a name given before gets
+/// the new one and keeps its handle.
+pub fn addMaterial(self: *App, name: []const u8, material: components3d.Material3D) !material_table.MaterialHandle {
+    return self.materials.add(self.gpa, name, material);
+}
+
+pub fn findMaterial(self: *App, path: []const u8) ?material_table.MaterialHandle {
+    return self.findSpelt(&self.materials, path);
+}
+
+/// Read a material's file again. Says whether it had one.
+pub fn reloadMaterial(self: *App, handle: material_table.MaterialHandle) !bool {
+    return self.materials.reload(self, handle);
+}
+
+/// A material, to read or to change: what draws with it draws the change
+/// from the next frame.
+pub fn materialOf(self: *App, handle: material_table.MaterialHandle) ?*components3d.Material3D {
+    return self.materials.get(handle);
+}
+
+pub fn unloadMaterial(self: *App, handle: material_table.MaterialHandle) void {
+    self.materials.unload(self.gpa, handle);
+}
+
+/// Write a material to a `.mat3d` file, which `loadMaterial` reads back.
+pub fn saveMaterial(self: *App, handle: material_table.MaterialHandle, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const held = self.materials.get(handle) orelse return error.NoSuchMaterial;
+    const bytes = try material_table.write(self, self.gpa, held.*);
+    defer self.gpa.free(bytes);
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes });
 }
 
 pub fn findMesh(self: *App, path: []const u8) ?mesh_table.MeshHandle {

@@ -3,12 +3,16 @@
 //! The 3D layer: every `MeshInstance3D` a camera sees, drawn with a depth
 //! test before the 2D world and the interface go over it.
 //!
-//! What is drawn is gathered each frame, left out where it is off the
-//! camera's frustum, and sorted: solid meshes grouped by how they are drawn
-//! - one draw for every instance of a mesh with the same picture and the
-//! same sides culled - then see-through ones back to front, after them. Each
-//! mesh is lit by the first `DirectionalLight3D` and a little light from
-//! everywhere; a `Material3D` that is `unshaded` is its colour as it is.
+//! What is drawn is gathered each frame, surface by surface, left out where
+//! its mesh is off the camera's frustum, and sorted: solid surfaces grouped
+//! by how they are drawn - one draw for every instance of a surface with the
+//! same pictures and the same sides culled - then see-through ones back to
+//! front, after them. Each is lit by the first `DirectionalLight3D` and a
+//! little light from everywhere, and gives off its material's emission; a
+//! `Material3D` that is `unshaded` is its colour as it is.
+//!
+//! A surface's material is, first found: a `Material3D` beside the
+//! `MeshInstance3D`, its `material_override`, the surface's own, or plain.
 //!
 //! The depth is a texture of the renderer's at each size it draws at. The
 //! shader is the engine's, in fluxion-shader's language: one source for
@@ -32,6 +36,7 @@ const mesh = @import("mesh.zig");
 const View3D = @import("view3d.zig").View3D;
 
 const MeshInstance3D = components3d.MeshInstance3D;
+const MaterialHandle = @import("materials.zig").MaterialHandle;
 const PrimitiveMesh3D = components3d.PrimitiveMesh3D;
 const Material3D = components3d.Material3D;
 const DirectionalLight3D = components3d.DirectionalLight3D;
@@ -57,10 +62,13 @@ const Instance = extern struct {
     /// keeps them square to a surface its scale has stretched.
     normal: [3][3]f32,
     albedo: [4]f32,
-    /// The picture's scale, then its offset.
+    /// The pictures' scale, then their offset.
     uv: [4]f32,
-    /// One where it is unshaded.
+    /// One where it is unshaded, one where its corners' colours count, and
+    /// the alpha under which nothing is drawn.
     look: [4]f32,
+    /// The light it gives off, its energy counted in.
+    emission: [4]f32,
 };
 
 /// The light from everywhere a lit mesh gets on top of its light's.
@@ -77,21 +85,24 @@ const source =
     \\attribute vec3 VERTEX_POSITION : 0;
     \\attribute vec3 VERTEX_NORMAL : 1;
     \\attribute vec2 VERTEX_UV : 2;
-    \\attribute vec4 MODEL_0 : 3;
-    \\attribute vec4 MODEL_1 : 4;
-    \\attribute vec4 MODEL_2 : 5;
-    \\attribute vec4 MODEL_3 : 6;
-    \\attribute vec3 TURN_0 : 7;
-    \\attribute vec3 TURN_1 : 8;
-    \\attribute vec3 TURN_2 : 9;
-    \\attribute vec4 ALBEDO_COLOR : 10;
-    \\attribute vec4 UV_PLACE : 11;
-    \\attribute vec4 LOOK : 12;
+    \\attribute vec4 VERTEX_COLOR : 3;
+    \\attribute vec4 MODEL_0 : 4;
+    \\attribute vec4 MODEL_1 : 5;
+    \\attribute vec4 MODEL_2 : 6;
+    \\attribute vec4 MODEL_3 : 7;
+    \\attribute vec3 TURN_0 : 8;
+    \\attribute vec3 TURN_1 : 9;
+    \\attribute vec3 TURN_2 : 10;
+    \\attribute vec4 ALBEDO_COLOR : 11;
+    \\attribute vec4 UV_PLACE : 12;
+    \\attribute vec4 LOOK : 13;
+    \\attribute vec4 EMISSION_COLOR : 14;
     \\
     \\varying vec3 WORLD_NORMAL;
     \\varying vec2 UV;
     \\varying vec4 ALBEDO;
-    \\varying float UNSHADED;
+    \\varying vec4 FEEL;
+    \\varying vec3 EMITTED;
     \\
     \\uniform Frame : 0 {
     \\    mat4 VIEW_PROJECTION;
@@ -101,21 +112,27 @@ const source =
     \\}
     \\
     \\texture2d ALBEDO_TEXTURE : 0;
+    \\texture2d EMISSION_TEXTURE : 1;
     \\
     \\vertex {
     \\    vec4 world = MODEL_0 * VERTEX_POSITION.x + MODEL_1 * VERTEX_POSITION.y + MODEL_2 * VERTEX_POSITION.z + MODEL_3;
     \\    WORLD_NORMAL = TURN_0 * VERTEX_NORMAL.x + TURN_1 * VERTEX_NORMAL.y + TURN_2 * VERTEX_NORMAL.z;
     \\    UV = VERTEX_UV * UV_PLACE.xy + UV_PLACE.zw;
-    \\    ALBEDO = ALBEDO_COLOR;
-    \\    UNSHADED = LOOK.x;
+    \\    ALBEDO = ALBEDO_COLOR * mix(vec4(1.0), VERTEX_COLOR, LOOK.y);
+    \\    FEEL = LOOK;
+    \\    EMITTED = EMISSION_COLOR.rgb;
     \\    position = VIEW_PROJECTION * world;
     \\}
     \\
     \\fragment {
     \\    vec4 albedo = sample(ALBEDO_TEXTURE, UV) * ALBEDO;
+    \\    if (albedo.a < FEEL.z) {
+    \\        discard;
+    \\    }
     \\    float facing = max(dot(normalize(WORLD_NORMAL), LIGHT_DIRECTION.xyz), 0.0);
     \\    vec3 lit = albedo.rgb * (AMBIENT.rgb + LIGHT_COLOR.rgb * facing);
-    \\    target = vec4(mix(lit, albedo.rgb, UNSHADED), albedo.a);
+    \\    vec3 emitted = sample(EMISSION_TEXTURE, UV).rgb * EMITTED;
+    \\    target = vec4(mix(lit, albedo.rgb, FEEL.x) + emitted, albedo.a);
     \\}
 ;
 
@@ -124,7 +141,10 @@ fn bufferOf(name: []const u8) u32 {
     return if (std.mem.startsWith(u8, name, "VERTEX_")) 0 else 1;
 }
 
-fn vertexFormat(ty: shader.Type) ?rhi.VertexFormat {
+/// What an attribute is read as: its type's floats, but a vertex's colour,
+/// which is four bytes.
+fn vertexFormat(name: []const u8, ty: shader.Type) ?rhi.VertexFormat {
+    if (std.mem.eql(u8, name, "VERTEX_COLOR")) return .ubyte4_norm;
     return switch (ty) {
         .float => .float,
         .vec2 => .float2,
@@ -134,30 +154,34 @@ fn vertexFormat(ty: shader.Type) ?rhi.VertexFormat {
     };
 }
 
-/// How a mesh is drawn, past its picture: which sides, and whether over
-/// what is behind it.
+/// How a surface is drawn, past its pictures: which sides, and whether laid
+/// over what is behind it. A surface cut by its alpha is solid: the shader
+/// leaves out what is under the threshold.
 const Way = struct {
     cull: Material3D.Cull,
-    transparency: Material3D.Transparency,
+    blend: bool,
 
     const count = 6;
 
     fn index(self: Way) usize {
-        return @as(usize, @intFromEnum(self.cull)) * 2 + @intFromEnum(self.transparency);
+        return @as(usize, @intFromEnum(self.cull)) * 2 + @intFromBool(self.blend);
     }
 
     fn of(at: usize) Way {
-        return .{ .cull = @enumFromInt(at / 2), .transparency = @enumFromInt(at % 2) };
+        return .{ .cull = @enumFromInt(at / 2), .blend = at % 2 == 1 };
     }
 };
 
-/// What is drawn of one mesh, before it is sorted.
+/// What is drawn of one surface, before it is sorted.
 const Item = struct {
     way: u8,
     transparent: bool,
     gpu: mesh.Gpu,
+    first_index: u32,
+    index_count: u32,
     texture: rhi.Texture,
     sampler: rhi.Sampler,
+    emission: rhi.Texture,
     /// How far in front of the camera its middle is.
     depth: f32,
     /// Where its `Instance` is in `gathered`.
@@ -175,13 +199,15 @@ const Item = struct {
         return a.depth < b.depth;
     }
 
-    fn keyOf(item: Item) u128 {
-        return @as(u128, item.texture.toInt()) << 64 | item.gpu.vertices.toInt();
+    fn keyOf(item: Item) u256 {
+        return @as(u256, item.texture.toInt()) << 192 | @as(u256, item.emission.toInt()) << 128 | @as(u256, item.gpu.vertices.toInt()) << 64 | item.first_index;
     }
 
     /// Whether `b` is drawn in the same draw as `a`.
     fn joins(a: Item, b: Item) bool {
-        return a.way == b.way and std.meta.eql(a.texture, b.texture) and std.meta.eql(a.sampler, b.sampler) and std.meta.eql(a.gpu, b.gpu);
+        return a.way == b.way and a.first_index == b.first_index and a.index_count == b.index_count and
+            std.meta.eql(a.texture, b.texture) and std.meta.eql(a.sampler, b.sampler) and
+            std.meta.eql(a.emission, b.emission) and std.meta.eql(a.gpu, b.gpu);
     }
 };
 
@@ -294,7 +320,7 @@ pub const Renderer3D = struct {
         var strides: [2]u32 = @splat(0);
         for (module.attributes, 0..) |a, i| {
             const buffer = bufferOf(a.name);
-            const format = vertexFormat(a.ty).?;
+            const format = vertexFormat(a.name, a.ty).?;
             attributes[i] = .{ .location = a.location, .format = format, .offset = strides[buffer], .buffer = buffer };
             strides[buffer] += format.size();
         }
@@ -303,7 +329,7 @@ pub const Renderer3D = struct {
 
         for (&self.pipelines, 0..) |*pipeline, at| {
             const way: Way = .of(at);
-            const see_through = way.transparency == .alpha;
+            const see_through = way.blend;
             pipeline.* = try device.createPipeline(.{
                 .shader = self.gpu,
                 .attributes = attributes[0..module.attributes.len],
@@ -444,10 +470,11 @@ pub const Renderer3D = struct {
             try list.setPipeline(self.pipelines[first.way]);
             try list.setUniformBuffer(0, self.frame);
             try list.setTexture(0, first.texture, first.sampler);
+            try list.setTexture(1, first.emission, first.sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
             try list.setIndexBuffer(first.gpu.indices, .u32);
-            try list.drawIndexed(.{ .index_count = first.gpu.index_count, .instance_count = @intCast(end - start) });
+            try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
             self.draw_calls += 1;
             start = end;
         }
@@ -456,7 +483,8 @@ pub const Renderer3D = struct {
         self.drawn = @intCast(items.len);
     }
 
-    /// What every mesh the camera sees is drawn as, unsorted.
+    /// What every surface of every mesh the camera sees is drawn as,
+    /// unsorted.
     fn gather(self: *Renderer3D, app: *App, view: View3D, view_projection: math.Mat4, clip: math.Clip) !void {
         const gpa = app.gpa;
         self.gathered.clearRetainingCapacity();
@@ -485,34 +513,53 @@ pub const Renderer3D = struct {
                 }
                 kept.used = app.meshes.clock;
                 const gpu = try kept.uploaded(self.device);
-
-                const look = app.world.get(entity, Material3D) orelse &Material3D{};
-                var texture = self.white;
-                var sampler = app.assets.samplerFor(.linear, .repeat);
-                if (!look.albedo_texture.isNone()) if (app.assets.get(look.albedo_texture)) |held| {
-                    texture = held.gpu;
-                    sampler = app.assets.samplerFor(held.filter, .repeat);
-                };
                 const turn = model.normalMatrix() orelse math.Mat3.identity;
-                const tint = looks.tint(look.albedo_color);
-                const at: u32 = @intCast(self.gathered.items.len);
-                try self.gathered.append(gpa, .{
-                    .model = .{ model.cols[0].array(), model.cols[1].array(), model.cols[2].array(), model.cols[3].array() },
-                    .normal = .{ turn.cols[0].array(), turn.cols[1].array(), turn.cols[2].array() },
-                    .albedo = tint.array(),
-                    .uv = .{ look.uv_scale.x, look.uv_scale.y, look.uv_offset.x, look.uv_offset.y },
-                    .look = .{ if (look.unshaded) 1 else 0, 0, 0, 0 },
-                });
-                const way: Way = .{ .cull = look.cull, .transparency = look.transparency };
-                try self.items.append(gpa, .{
-                    .way = @intCast(way.index()),
-                    .transparent = look.transparency == .alpha,
-                    .gpu = gpu,
-                    .texture = texture,
-                    .sampler = sampler,
-                    .depth = bounds.center().sub(view.position).dot(forward),
-                    .instance = at,
-                });
+                const depth = bounds.center().sub(view.position).dot(forward);
+                const own = app.world.get(entity, Material3D);
+                for (kept.mesh.surfaces) |surface| {
+                    if (surface.index_count == 0) continue;
+                    const look = materialOf(app, own, instance.material_override, surface.material);
+                    var texture = self.white;
+                    var sampler = app.assets.samplerFor(.linear, .repeat);
+                    if (!look.albedo_texture.isNone()) if (app.assets.get(look.albedo_texture)) |held| {
+                        texture = held.gpu;
+                        sampler = app.assets.samplerFor(held.filter, .repeat);
+                    };
+                    var emission = self.white;
+                    if (!look.emission_texture.isNone()) if (app.assets.get(look.emission_texture)) |held| {
+                        emission = held.gpu;
+                    };
+                    const tint = looks.tint(look.albedo_color);
+                    const glow = look.emission;
+                    const at: u32 = @intCast(self.gathered.items.len);
+                    try self.gathered.append(gpa, .{
+                        .model = .{ model.cols[0].array(), model.cols[1].array(), model.cols[2].array(), model.cols[3].array() },
+                        .normal = .{ turn.cols[0].array(), turn.cols[1].array(), turn.cols[2].array() },
+                        .albedo = tint.array(),
+                        .uv = .{ look.uv_scale.x, look.uv_scale.y, look.uv_offset.x, look.uv_offset.y },
+                        .look = .{
+                            if (look.unshaded) 1 else 0,
+                            if (look.vertex_color) 1 else 0,
+                            if (look.transparency == .scissor) look.alpha_scissor_threshold else 0,
+                            0,
+                        },
+                        .emission = .{ glow.r * look.emission_energy, glow.g * look.emission_energy, glow.b * look.emission_energy, 0 },
+                    });
+                    const blend = look.transparency == .alpha;
+                    const way: Way = .{ .cull = look.cull, .blend = blend };
+                    try self.items.append(gpa, .{
+                        .way = @intCast(way.index()),
+                        .transparent = blend,
+                        .gpu = gpu,
+                        .first_index = surface.first_index,
+                        .index_count = surface.index_count,
+                        .texture = texture,
+                        .sampler = sampler,
+                        .emission = emission,
+                        .depth = depth,
+                        .instance = at,
+                    });
+                }
             }
         }
     }
@@ -533,6 +580,15 @@ pub const Renderer3D = struct {
         try self.device.updateBuffer(self.instances, 0, std.mem.sliceAsBytes(self.staging.items));
     }
 };
+
+/// What a surface is drawn with: the `Material3D` beside its mesh's
+/// instance, the instance's override, the surface's own, or plain.
+fn materialOf(app: *App, own: ?*const Material3D, override: MaterialHandle, surface: MaterialHandle) Material3D {
+    if (own) |held| return held.*;
+    if (!override.isNone()) if (app.materials.get(override)) |held| return held.*;
+    if (!surface.isNone()) if (app.materials.get(surface)) |held| return held.*;
+    return .{};
+}
 
 /// The first `DirectionalLight3D`'s way toward it and its colour.
 fn lightOf(app: *App) ?struct { toward: math.Vec3, color: [4]f32 } {
@@ -559,7 +615,7 @@ fn clearOnly(device: *rhi.Device, into: rhi.RenderTarget, color: Color) !void {
 
 test "an instance and the frame are laid out as the shader reads them" {
     try testing.expectEqual(@as(usize, 112), @sizeOf(Frame));
-    try testing.expectEqual(@as(usize, 148), @sizeOf(Instance));
-    try testing.expectEqual(@as(usize, 32), @sizeOf(mesh.Vertex));
+    try testing.expectEqual(@as(usize, 164), @sizeOf(Instance));
+    try testing.expectEqual(@as(usize, 36), @sizeOf(mesh.Vertex));
     for (0..Way.count) |at| try testing.expectEqual(at, Way.of(at).index());
 }

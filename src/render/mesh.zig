@@ -12,9 +12,11 @@
 //! ```
 //!
 //! A triangle's corners go counter-clockwise seen from the side it faces:
-//! the side a `Material3D`'s `cull` keeps. A `.mesh` file is the vertices and
-//! the indices as they are held, little-endian - see `write` - and what a
-//! model read from another format is kept as once it is read.
+//! the side a `Material3D`'s `cull` keeps. A mesh is one or more surfaces -
+//! runs of its triangles - each drawn with a material of its own: a model's
+//! mesh has one for each material it was made with. A `.mesh` file is the
+//! vertices, the indices and the surfaces as they are held, little-endian -
+//! see `write`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -27,6 +29,7 @@ const rhi = @import("fluxion_rhi");
 const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
 const file_table = @import("../assets/file_table.zig");
+const MaterialHandle = @import("materials.zig").MaterialHandle;
 
 const Vec3 = math.Vec3;
 const Vec2 = math.Vec2;
@@ -38,34 +41,64 @@ pub const extension = ".mesh";
 /// A mesh, the way a `TextureHandle` is a picture.
 pub const MeshHandle = file_table.Handle("MeshHandle");
 
-/// One corner of a triangle: where it is, which way its surface faces, and
-/// where on a picture it is.
+/// One corner of a triangle: where it is, which way its surface faces,
+/// where on a picture it is, and the colour it holds - white for most, a
+/// model's painted shading for some.
 pub const Vertex = extern struct {
     position: [3]f32,
     normal: [3]f32,
     uv: [2]f32 = .{ 0, 0 },
+    color: [4]u8 = .{ 255, 255, 255, 255 },
 };
 
-/// Triangles: every three indices one, each naming a vertex.
+/// A run of a mesh's indices, drawn with a material of its own.
+pub const Surface = struct {
+    first_index: u32,
+    index_count: u32,
+    /// None draws it plain, unless what draws the mesh says otherwise.
+    material: MaterialHandle = .none,
+};
+
+/// Triangles: every three indices one, each naming a vertex, in surfaces.
 pub const Mesh = struct {
     vertices: []Vertex,
     indices: []u32,
+    /// At least one, together every index once, in order.
+    surfaces: []Surface,
     /// The box the vertices are in.
     bounds: Aabb,
 
-    /// A mesh of copies of `vertices` and `indices`. `error.BadMesh` for an
-    /// index past the vertices, or a count of indices that is not whole
-    /// triangles.
+    /// A mesh of one surface, of copies of `vertices` and `indices`.
+    /// `error.BadMesh` for an index past the vertices, or a count of
+    /// indices that is not whole triangles.
     pub fn init(gpa: Allocator, vertices: []const Vertex, indices: []const u32) (Allocator.Error || error{BadMesh})!Mesh {
         try check(vertices.len, indices);
         const own_vertices = try gpa.dupe(Vertex, vertices);
         errdefer gpa.free(own_vertices);
-        return .{ .vertices = own_vertices, .indices = try gpa.dupe(u32, indices), .bounds = boundsOf(vertices) };
+        const own_indices = try gpa.dupe(u32, indices);
+        errdefer gpa.free(own_indices);
+        return .{ .vertices = own_vertices, .indices = own_indices, .surfaces = try whole(gpa, indices.len), .bounds = boundsOf(vertices) };
+    }
+
+    /// A mesh of what `vertices`, `indices` and `surfaces` hold, which are
+    /// its once it is made, and still the caller's when it is not.
+    /// `error.BadMesh` as `init` says, or for surfaces that are not every
+    /// index once, in order.
+    pub fn adopt(vertices: []Vertex, indices: []u32, surfaces: []Surface) error{BadMesh}!Mesh {
+        try check(vertices.len, indices);
+        var at: u32 = 0;
+        for (surfaces) |surface| {
+            if (surface.first_index != at or surface.index_count % 3 != 0) return error.BadMesh;
+            at += surface.index_count;
+        }
+        if (at != indices.len or surfaces.len == 0) return error.BadMesh;
+        return .{ .vertices = vertices, .indices = indices, .surfaces = surfaces, .bounds = boundsOf(vertices) };
     }
 
     pub fn deinit(self: *Mesh, gpa: Allocator) void {
         gpa.free(self.vertices);
         gpa.free(self.indices);
+        gpa.free(self.surfaces);
         self.* = undefined;
     }
 
@@ -89,6 +122,13 @@ pub const Mesh = struct {
         return nearest;
     }
 };
+
+/// One surface of every index.
+fn whole(gpa: Allocator, count: usize) Allocator.Error![]Surface {
+    const out = try gpa.alloc(Surface, 1);
+    out[0] = .{ .first_index = 0, .index_count = @intCast(count) };
+    return out;
+}
 
 fn check(vertex_count: usize, indices: []const u32) error{BadMesh}!void {
     if (indices.len % 3 != 0) return error.BadMesh;
@@ -147,7 +187,8 @@ const Builder = struct {
         const vertices = try self.vertices.toOwnedSlice(self.gpa);
         errdefer self.gpa.free(vertices);
         const indices = try self.indices.toOwnedSlice(self.gpa);
-        return .{ .vertices = vertices, .indices = indices, .bounds = boundsOf(vertices) };
+        errdefer self.gpa.free(indices);
+        return .{ .vertices = vertices, .indices = indices, .surfaces = try whole(self.gpa, indices.len), .bounds = boundsOf(vertices) };
     }
 };
 
@@ -304,26 +345,39 @@ pub fn capsule(gpa: Allocator, radius: f32, height: f32, rings: u32, segments: u
 // -------------------------------------------------------------------------
 
 /// What a `.mesh` file starts with, its version in the last two letters.
-pub const magic = "FXMESH01";
+/// A file of the first version - eight numbers a vertex, one surface - is
+/// still read.
+pub const magic = "FXMESH02";
+const magic_v1 = "FXMESH01";
 
-const header_size = magic.len + 8 + 24;
+const header_size = magic.len + 12 + 24;
+const header_size_v1 = magic.len + 8 + 24;
+const vertex_size = 8 * 4 + 4;
 
 /// A mesh as a `.mesh` file's bytes, owned by the caller: `magic`, the
-/// counts of vertices and of indices as `u32`s, the bounds' least and most
-/// corners as six `f32`s, then each vertex's eight `f32`s and each index
-/// as a `u32`. Little-endian throughout.
+/// counts of vertices, of indices and of surfaces as `u32`s, the bounds'
+/// least and most corners as six `f32`s, then each vertex's eight `f32`s and
+/// four bytes of colour, each index as a `u32`, and each surface's first
+/// index and count as two `u32`s. Little-endian throughout. A surface's
+/// material is not written: what reads the file gives it one.
 pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
-    const size = header_size + mesh.vertices.len * @sizeOf(Vertex) + mesh.indices.len * 4;
+    const size = header_size + mesh.vertices.len * vertex_size + mesh.indices.len * 4 + mesh.surfaces.len * 8;
     var out: std.ArrayList(u8) = try .initCapacity(gpa, size);
     errdefer out.deinit(gpa);
     out.appendSliceAssumeCapacity(magic);
     appendInt(&out, @intCast(mesh.vertices.len));
     appendInt(&out, @intCast(mesh.indices.len));
+    appendInt(&out, @intCast(mesh.surfaces.len));
     for (mesh.bounds.min.array() ++ mesh.bounds.max.array()) |number| appendInt(&out, @bitCast(number));
     for (mesh.vertices) |v| {
         for (v.position ++ v.normal ++ v.uv) |number| appendInt(&out, @bitCast(number));
+        out.appendSliceAssumeCapacity(&v.color);
     }
     for (mesh.indices) |index| appendInt(&out, index);
+    for (mesh.surfaces) |surface| {
+        appendInt(&out, surface.first_index);
+        appendInt(&out, surface.index_count);
+    }
     return out.toOwnedSlice(gpa);
 }
 
@@ -334,14 +388,21 @@ fn appendInt(out: *std.ArrayList(u8), value: u32) void {
 }
 
 /// A `.mesh` file's bytes as a mesh, the caller's. `error.BadMesh` for one
-/// that is not one, is cut short, or names a vertex it does not have.
+/// that is not one, is cut short, names a vertex it does not have, or has
+/// surfaces that are not its indices.
 pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh})!Mesh {
-    if (bytes.len < header_size or !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMesh;
+    if (bytes.len < magic.len) return error.BadMesh;
+    const first = std.mem.eql(u8, bytes[0..magic.len], magic_v1);
+    if (!first and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMesh;
+    if (bytes.len < if (first) header_size_v1 else header_size) return error.BadMesh;
     var at: usize = magic.len;
     const vertex_count = takeInt(bytes, &at);
     const index_count = takeInt(bytes, &at);
-    const expected = @as(u64, header_size) + @as(u64, vertex_count) * @sizeOf(Vertex) + @as(u64, index_count) * 4;
-    if (bytes.len != expected) return error.BadMesh;
+    const surface_count: u32 = if (first) 1 else takeInt(bytes, &at);
+    const each: u64 = if (first) 8 * 4 else vertex_size;
+    const header: u64 = if (first) header_size_v1 else header_size;
+    const surfaces_size: u64 = if (first) 0 else @as(u64, surface_count) * 8;
+    if (bytes.len != header + @as(u64, vertex_count) * each + @as(u64, index_count) * 4 + surfaces_size) return error.BadMesh;
     at += 24;
     const vertices = try gpa.alloc(Vertex, vertex_count);
     errdefer gpa.free(vertices);
@@ -349,14 +410,22 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
         var numbers: [8]f32 = undefined;
         for (&numbers) |*number| number.* = @bitCast(takeInt(bytes, &at));
         v.* = .{ .position = numbers[0..3].*, .normal = numbers[3..6].*, .uv = numbers[6..8].* };
+        if (!first) {
+            v.color = bytes[at..][0..4].*;
+            at += 4;
+        }
     }
     const indices = try gpa.alloc(u32, index_count);
     errdefer gpa.free(indices);
     for (indices) |*index| index.* = takeInt(bytes, &at);
-    try check(vertices.len, indices);
+    const surfaces = if (first) try whole(gpa, index_count) else try gpa.alloc(Surface, surface_count);
+    errdefer gpa.free(surfaces);
+    if (!first) for (surfaces) |*surface| {
+        surface.* = .{ .first_index = takeInt(bytes, &at), .index_count = takeInt(bytes, &at) };
+    };
     // Worked out again rather than trusted: a file edited by hand keeps
     // its picking and its culling right.
-    return .{ .vertices = vertices, .indices = indices, .bounds = boundsOf(vertices) };
+    return Mesh.adopt(vertices, indices, surfaces);
 }
 
 fn takeInt(bytes: []const u8, at: *usize) u32 {
@@ -701,14 +770,34 @@ test "a mesh's file reads back as it was written, and one that is not whole is r
     try testing.expectEqualSlices(u32, mesh.indices, back.indices);
     try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(mesh.vertices), std.mem.sliceAsBytes(back.vertices));
     try testing.expect(mesh.bounds.approxEql(back.bounds));
+    try testing.expectEqual(@as(usize, 1), back.surfaces.len);
+    try testing.expectEqual(@as(u32, 36), back.surfaces[0].index_count);
 
     try testing.expectError(error.BadMesh, read(testing.allocator, bytes[0 .. bytes.len - 1]));
     try testing.expectError(error.BadMesh, read(testing.allocator, "FXMESH99"));
-    // An index past the vertices.
+    // A surface that is not the indices.
     const broken = try testing.allocator.dupe(u8, bytes);
     defer testing.allocator.free(broken);
     std.mem.writeInt(u32, broken[broken.len - 4 ..][0..4], 99, .little);
     try testing.expectError(error.BadMesh, read(testing.allocator, broken));
+}
+
+test "a mesh's file of the first version still reads, as one white surface" {
+    // One triangle: eight numbers a vertex and no surfaces.
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(testing.allocator);
+    try bytes.appendSlice(testing.allocator, "FXMESH01");
+    const ints = [_]u32{ 3, 3 };
+    for (ints) |n| try bytes.appendSlice(testing.allocator, std.mem.asBytes(&n));
+    const numbers = [_]f32{ 0, 0, 0, 1, 1, 0 } ++ [_]f32{ 0, 0, 0, 0, 0, 1, 0, 0 } ++ [_]f32{ 1, 0, 0, 0, 0, 1, 1, 0 } ++ [_]f32{ 0, 1, 0, 0, 0, 1, 0, 1 };
+    for (numbers) |n| try bytes.appendSlice(testing.allocator, std.mem.asBytes(&n));
+    const indices = [_]u32{ 0, 1, 2 };
+    for (indices) |n| try bytes.appendSlice(testing.allocator, std.mem.asBytes(&n));
+    var mesh = try read(testing.allocator, bytes.items);
+    defer mesh.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), mesh.vertices.len);
+    try testing.expectEqual([4]u8{ 255, 255, 255, 255 }, mesh.vertices[1].color);
+    try testing.expectEqual(@as(u32, 3), mesh.surfaces[0].index_count);
 }
 
 test "a ray meets a mesh's nearest triangle" {

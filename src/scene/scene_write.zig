@@ -510,6 +510,26 @@ fn writeRaw(gpa: Allocator, w: *json.Writer, text: []const u8) json.Writer.Error
     };
 }
 
+/// One value of `T` - a component's fields - as JSON text of its own, the
+/// caller's: what `scene_read.readValueText` reads. A file it names is
+/// written by its path.
+pub fn writeValueText(app: *App, gpa: Allocator, comptime T: type, value: *const T) json.StringifyError![]u8 {
+    return json.stringify(gpa, ValueText(T){ .app = app, .value = value }, writeOptions(.{}));
+}
+
+fn ValueText(comptime T: type) type {
+    return struct {
+        app: *App,
+        value: *const T,
+
+        pub fn toJson(self: @This(), w: *json.Writer) json.Writer.Error!void {
+            var saving: Saving = .{ .app = self.app };
+            defer saving.deinit(self.app.gpa);
+            try writeComponent(&saving, w, T, self.value);
+        }
+    };
+}
+
 /// A component: an object of the fields that do not hold their defaults.
 pub fn writeComponent(saving: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
     if (@typeInfo(T) != .@"struct") return writeValue(saving, w, T, value);

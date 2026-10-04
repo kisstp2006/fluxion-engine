@@ -198,6 +198,15 @@ pub const Camera2D = components.Camera2D;
 pub const mesh = @import("render/mesh.zig");
 pub const Mesh = mesh.Mesh;
 pub const MeshHandle = mesh.MeshHandle;
+/// `.mat3d` files: a `Material3D` kept as a file, and a model's materials.
+pub const materials = @import("render/materials.zig");
+pub const MaterialHandle = materials.MaterialHandle;
+/// Models as scenes: glTF read by the engine, FBX and Blender files by way
+/// of an editor. See `assets/models.zig` and `assets/gltf.zig`.
+pub const models = @import("assets/models.zig");
+pub const gltf = @import("assets/gltf.zig");
+/// Files read on the loading threads: see `App.loadInBackground`.
+pub const background_load = @import("assets/background_load.zig");
 /// The 3D layer's components: see `render/render3d_components.zig`.
 pub const MeshInstance3D = components.MeshInstance3D;
 pub const PrimitiveMesh3D = components.PrimitiveMesh3D;
@@ -536,6 +545,10 @@ test {
     _ = @import("render/mesh.zig");
     _ = @import("render/view3d.zig");
     _ = @import("render/renderer3d.zig");
+    _ = @import("render/materials.zig");
+    _ = @import("assets/gltf.zig");
+    _ = @import("assets/models.zig");
+    _ = @import("assets/models_test.zig");
     _ = @import("scene/hierarchy_test.zig");
     _ = @import("scene/inherited_test.zig");
     _ = @import("scene/instance_test.zig");

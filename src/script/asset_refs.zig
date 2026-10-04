@@ -240,6 +240,7 @@ fn assetTypeName(comptime kind: AssetKind) [:0]const u8 {
         .frames => "SpriteFrames",
         .shader => "Shader",
         .mesh => "Mesh",
+        .material => "Material3DFile",
     };
 }
 

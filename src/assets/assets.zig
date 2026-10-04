@@ -443,7 +443,7 @@ pub fn findTexture(self: *Assets, path: []const u8) ?TextureHandle {
 /// Remember the UUID beside a project's file, for the scene that names it.
 /// A `.uid` file that does not read is said so, and the file loads without.
 fn learnUid(self: *Assets, source: []const u8) void {
-    if (!Project.isProjectPath(source)) return;
+    if (!Project.isProjectPath(source) or Project.isPart(source)) return;
     _ = self.project.uidOf(source) catch |err| {
         log.warn("the {s} file beside {s} does not read: {t}", .{ Project.uid_extension, source, err });
     };
@@ -455,7 +455,8 @@ fn learnUid(self: *Assets, source: []const u8) void {
 pub fn ensureUids(self: *Assets) !void {
     var textures = self.textures.iterator();
     while (textures.next()) |entry| {
-        if (Project.isProjectPath(entry.value.source)) _ = try self.project.ensureUid(entry.value.source);
+        const source = entry.value.source;
+        if (Project.isProjectPath(source) and !Project.isPart(source)) _ = try self.project.ensureUid(source);
     }
     var faces = self.fonts.iterator();
     while (faces.next()) |entry| {

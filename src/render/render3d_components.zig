@@ -25,15 +25,19 @@ const assets = @import("../assets/assets.zig");
 const attr = @import("../reflect/attr.zig");
 const Color = @import("../math/color.zig").Color;
 const mesh = @import("mesh.zig");
+const MaterialHandle = @import("materials.zig").MaterialHandle;
 
 /// A mesh drawn where its `Transform3D` is: the one `mesh` names, or the
-/// shape a `PrimitiveMesh3D` beside it says. A `Material3D` beside it says
-/// how it looks; without one it is plain white, lit. `Appearance.visible`
+/// shape a `PrimitiveMesh3D` beside it says. How each of its surfaces looks
+/// is, first found: a `Material3D` beside it, its `material_override`, the
+/// surface's own material, or plain white and lit. `Appearance.visible`
 /// hides it and `Appearance.modulate` tints it, as everything drawn.
 pub const MeshInstance3D = extern struct {
-    /// A `.mesh` file, or a mesh made in code: `App.addMesh`. A
-    /// `PrimitiveMesh3D` beside it is drawn in its place.
+    /// A `.mesh` file, a model's mesh, or a mesh made in code:
+    /// `App.addMesh`. A `PrimitiveMesh3D` beside it is drawn in its place.
     mesh: mesh.MeshHandle = .none,
+    /// A `.mat3d` every surface is drawn with, in place of its own.
+    material_override: MaterialHandle = .none,
     /// The render layers it is on: a camera whose `cull_mask` has none of
     /// them does not see it.
     layers: u32 = 1,
@@ -43,6 +47,7 @@ pub const MeshInstance3D = extern struct {
     pub const reflect_name = "MeshInstance3D";
     pub const reflect_fields = .{
         .mesh = .{attr.Doc{ .text = "The mesh drawn; a PrimitiveMesh3D beside it is drawn instead" }},
+        .material_override = .{attr.Doc{ .text = "A material every surface is drawn with, in place of its own" }},
         .layers = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it is on" } },
         .cast_shadow = .{attr.Doc{ .text = "Whether it throws a shadow" }},
     };
@@ -86,19 +91,31 @@ pub const PrimitiveMesh3D = extern struct {
     }
 };
 
-/// How a `MeshInstance3D` beside it looks: its colour and its picture, lit
-/// or not, and which of its sides are drawn.
+/// How a mesh looks: its colour and its picture, the light it gives off,
+/// lit or not, see-through or not, and which of its sides are drawn. Beside
+/// a `MeshInstance3D`, how all of it looks; as a `.mat3d` file, what a
+/// surface or a `material_override` names - see `render/materials.zig`.
 pub const Material3D = extern struct {
     /// Multiplied into the picture; its alpha is how see-through it is,
     /// with `transparency` on.
     albedo_color: Color = .white,
     /// Laid over the mesh by its corners' places on a picture. None is white.
     albedo_texture: assets.TextureHandle = .none,
-    /// How many times the picture is laid across the mesh, and how far it
-    /// is moved, in pictures.
+    /// The colours the mesh's corners hold - a model's painted shading -
+    /// multiplied in too.
+    vertex_color: bool = false,
+    /// How many times the pictures are laid across the mesh, and how far
+    /// they are moved, in pictures.
     uv_scale: math.Vec2 = .one,
     uv_offset: math.Vec2 = .zero,
+    /// Light it gives off whatever lights it, times `emission_energy`, and
+    /// times `emission_texture` where it has one: a screen, a lamp's bulb.
+    emission: Color = .black,
+    emission_energy: f32 = 1,
+    emission_texture: assets.TextureHandle = .none,
     transparency: Transparency = .disabled,
+    /// Under this alpha nothing is drawn, with `transparency` at `scissor`.
+    alpha_scissor_threshold: f32 = 0.5,
     cull: Cull = .back,
     /// Drawn as its colour, with no light: a sign that glows, a sky.
     unshaded: bool = false,
@@ -109,6 +126,9 @@ pub const Material3D = extern struct {
         /// Laid over what is behind it by its alpha, drawn back to front
         /// after everything solid.
         alpha,
+        /// Solid where its alpha reaches `alpha_scissor_threshold`, and not
+        /// there at all elsewhere: leaves, a fence.
+        scissor,
     };
 
     /// Which side of its triangles is left out: the back, which a closed
@@ -120,9 +140,14 @@ pub const Material3D = extern struct {
     pub const reflect_fields = .{
         .albedo_color = .{attr.Doc{ .text = "Multiplied into the picture; the alpha shows with transparency on" }},
         .albedo_texture = .{attr.Doc{ .text = "The picture laid over the mesh; none is white" }},
-        .uv_scale = .{attr.Doc{ .text = "How many times the picture is laid across" }},
-        .uv_offset = .{attr.Doc{ .text = "How far the picture is moved, in pictures" }},
-        .transparency = .{attr.Doc{ .text = "Whether it is laid over what is behind it by its alpha" }},
+        .vertex_color = .{attr.Doc{ .text = "The colours the mesh's corners hold, multiplied in" }},
+        .emission = .{attr.Doc{ .text = "Light it gives off whatever lights it" }},
+        .emission_energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the light it gives off is" } },
+        .emission_texture = .{attr.Doc{ .text = "Where on the mesh it gives off light, times the emission" }},
+        .alpha_scissor_threshold = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "Under this alpha nothing is drawn, with transparency at scissor" } },
+        .uv_scale = .{attr.Doc{ .text = "How many times the pictures are laid across" }},
+        .uv_offset = .{attr.Doc{ .text = "How far the pictures are moved, in pictures" }},
+        .transparency = .{attr.Doc{ .text = "Whether it is laid over what is behind it by its alpha, or cut where that is low" }},
         .cull = .{attr.Doc{ .text = "Which side of its triangles is not drawn" }},
         .unshaded = .{attr.Doc{ .text = "Drawn as its colour, with no light" }},
     };

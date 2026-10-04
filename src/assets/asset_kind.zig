@@ -27,6 +27,8 @@ const scenes = @import("scene_table.zig");
 const script = @import("../script/script.zig");
 const shaders = @import("../render/shaders.zig");
 const mesh = @import("../render/mesh.zig");
+const materials = @import("../render/materials.zig");
+const models = @import("models.zig");
 const theme = @import("../ui/theme.zig");
 const tileset = @import("../tiles/tileset.zig");
 
@@ -43,6 +45,7 @@ pub const AssetKind = enum {
     frames,
     shader,
     mesh,
+    material,
 
     /// What a person calls one.
     pub fn label(self: AssetKind) []const u8 {
@@ -59,6 +62,7 @@ pub const AssetKind = enum {
             .frames => "sprite frames",
             .shader => "shader",
             .mesh => "mesh",
+            .material => "material",
         };
     }
 
@@ -67,7 +71,7 @@ pub const AssetKind = enum {
         return switch (self) {
             .texture => "A PNG or a JPEG",
             .font => "A TrueType font",
-            .scene => "A scene",
+            .scene => "A scene, or a model: glTF, FBX or a Blender file",
             .script => "A Flux script",
             .tileset => "A tile set",
             .theme => "A theme",
@@ -77,6 +81,7 @@ pub const AssetKind = enum {
             .frames => "Animations of pictures an AnimatedSprite2D plays",
             .shader => "What a Material draws with",
             .mesh => "Triangles a MeshInstance3D draws",
+            .material => "How a 3D mesh looks",
         };
     }
 
@@ -95,6 +100,7 @@ pub const AssetKind = enum {
             .frames => "res://art/hero.frames",
             .shader => "res://shaders/crt.shader",
             .mesh => "res://models/crate.mesh",
+            .material => "res://materials/brick.mat3d",
         };
     }
 
@@ -103,7 +109,7 @@ pub const AssetKind = enum {
         return switch (self) {
             .texture => &.{ ".png", ".jpg", ".jpeg" },
             .font => &.{ ".ttf", ".otf", ".ttc" },
-            .scene => &.{ ".json", ".scene", ".cbor" },
+            .scene => &(.{ ".json", ".scene", ".cbor" } ++ models.extensions),
             .script => &.{".flux"},
             .tileset => &.{".tileset"},
             .theme => &.{".theme"},
@@ -113,6 +119,7 @@ pub const AssetKind = enum {
             .frames => &.{sprite_frames.extension},
             .shader => &.{shaders.extension},
             .mesh => &.{mesh.extension},
+            .material => &.{materials.extension},
         };
     }
 
@@ -145,6 +152,7 @@ pub const AssetKind = enum {
             .frames => sprite_frames.SpriteFramesHandle,
             .shader => shaders.ShaderHandle,
             .mesh => mesh.MeshHandle,
+            .material => materials.MaterialHandle,
         };
     }
 
@@ -157,7 +165,7 @@ pub const AssetKind = enum {
     }
 
     /// Every kind a component can hold a file of: the ones with a handle.
-    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio, .animation, .frames, .shader, .mesh };
+    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio, .animation, .frames, .shader, .mesh, .material };
 };
 
 test "a file's kind is its ending's, whatever its case, and a scene's JSON is not said by its name" {

@@ -1276,11 +1276,17 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   vertices and the indices as they are held. A mesh's corners go
   counter-clockwise seen from the side they face.
 - **A `Material3D` beside it says how it looks**: `albedo_color` times
-  `albedo_texture`, laid on with `uv_scale` and `uv_offset`; `transparency`
-  to lay it over what is behind it by its alpha; `cull` for which side of its
-  triangles is left out; `unshaded` for its colour as it is. With none it is
-  white and lit. `Appearance.visible` hides it and `Appearance.modulate`
-  tints it, as everything drawn.
+  `albedo_texture`, laid on with `uv_scale` and `uv_offset`, times the mesh's
+  corner colours with `vertex_color`; `emission` times `emission_energy` -
+  and `emission_texture` - for the light it gives off; `transparency` to lay
+  it over what is behind it by its alpha, or to cut it where the alpha is
+  under `alpha_scissor_threshold`; `cull` for which side of its triangles is
+  left out; `unshaded` for its colour as it is. Without one, the
+  `MeshInstance3D`'s `material_override` - a material file - and then each
+  surface's own material: a mesh is surfaces, runs of its triangles each
+  with a material, as a model's are. With none it is white and lit.
+  `Appearance.visible` hides it and `Appearance.modulate` tints it, as
+  everything drawn.
 - **A `Camera3D` is what the screen is seen through**: from its transform,
   down its `-z`, perspective with a `fov` or orthogonal with a `size`,
   between `near` and `far`. Of the cameras that draw no picture of their
@@ -1310,6 +1316,45 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
 - **`app.debug_3d` draws lines in the 3D world**, through its camera after
   the meshes and hidden where a mesh is in front of them - unless their
   style says `.depth = .always`.
+
+### 🗿 Models and materials
+
+```zig
+const robot = try app.loadScene("res://models/robot.glb");
+const one = try app.instantiate(robot, level);
+const brick = try app.loadMaterial("res://materials/brick.mat3d");
+app.world.get(wall, fx.MeshInstance3D).?.material_override = brick;
+```
+
+- **A model is a scene**: `loadScene`, `instantiate` and a scene's
+  `"instance"` take a model file as they take a `.json` one, and give the
+  tree its nodes make - each a `Transform3D`, with a `MeshInstance3D`, a
+  `Camera3D` or a `DirectionalLight3D` as the node has - under a root named
+  after the file. Each node keeps its UUID from one read to the next, so a
+  scene's changes to an instance of it hold.
+- **glTF 2.0 is read as it is**: `.glb`, or `.gltf` with its files beside it
+  or in it. Meshes - positions, normals (flat where it has none), UVs, corner
+  colours, strips and fans made triangles -, materials from their
+  `pbrMetallicRoughness` colour and picture, emission and its strength,
+  `alphaMode`, `doubleSided`, unlit and the picture's own transform;
+  pictures, PNG and JPEG, in the file or beside it; cameras; and the sun from
+  its lights.
+- **FBX and Blender files are turned into glTF by Blender** - an editor's,
+  when it brings them in - into the project's `.fluxion/imported/` folder,
+  where a game reads them under their own names. One no editor has turned is
+  `error.NotImported`.
+- **What a model is made of is named after it**: `res://models/robot.glb#mesh/0`,
+  `#material/2`, `#image/1`. A scene or a script names a part as it names any
+  file, and the model is read first; a part has no UUID of its own.
+- **`<model>.import` beside it says how it is brought in**: `{ "scale": 0.01 }`
+  for a model made in centimetres, the root that much smaller.
+- **A `.mat3d` is a `Material3D` of its own**, written as a scene writes the
+  component - only what is not as a material starts - and kept under a
+  `MaterialHandle`: `loadMaterial`, `addMaterial` for one made in code,
+  `materialOf` to change it - what draws with it draws the change -
+  `saveMaterial` and `reloadMaterial`.
+- **A `.mesh` file holds surfaces too**, with corner colours: what
+  `saveMesh` writes now; one written before is read as it was.
 
 ## 🎨 The 2D layer
 
@@ -2927,12 +2972,18 @@ app.reloadCurrentScene();                                              // the le
   after its file that a scene change leaves - and opens its
   `application.main_scene`.
 - **Any file can be read in the background**: `loadInBackground(path)`
-  reads it on a thread of its own - on a page, which has none, a piece a
-  frame. A picture is decoded there; a sound and a font are read there; a
-  scene is read with the pictures it names decoded and the sounds it names
-  read; the engine's other files are read there and understood when taken.
-  `loadProgress(path)` says how far it has got, from nought to one, and
-  `loadStatus(path)` whether it is `none`, `loading`, `done` or `failed`.
+  reads it on the engine's loading threads - one fewer than the machine has
+  cores, at most six; on a page, which has none, a few steps a frame. It is
+  read in steps, each on whichever thread is free: the file, and then what it
+  names, all at once - a scene's pictures decoded, its sounds read, the
+  models it names read with it, a model's pictures decoded and its meshes
+  made each on its own. The engine's other files are read there and
+  understood when taken. `loadProgress(path)` says how far it has got, from
+  nought to one, `loadStatus(path)` whether it is `none`, `loading`, `done`
+  or `failed`, and `loadReport(path, buffer)` the steps done of how many and
+  what it is on, in words - `models/robot.glb: decoding Skin` - which is
+  what a loading screen shows; `loadsReport` says the same of every load at
+  once.
   The next load of the same file - `loadScene`, `loadAsset`, `loadAudio`, a
   script's `changeScene` or a path given to a sprite - takes it once it is
   done, making what it read what it is, without a pause; asked sooner, it
@@ -3766,9 +3817,14 @@ Here, and checked by the tests:
   OpenGL.
 - The 3D layer: meshes made in code, from a primitive's numbers or read from
   a `.mesh` file; a camera, perspective or orthogonal, current or drawing
-  into a render view; the sun; solid and see-through materials, both sides
-  or one; instances of a mesh in one draw, and what is off the frustum left
-  out; the same picture on Direct3D 11 and 12, Vulkan and OpenGL.
+  into a render view; the sun; solid, see-through and cut-out materials,
+  glowing or unlit, both sides or one, in `.mat3d` files of their own;
+  instances of a mesh in one draw, and what is off the frustum left out; the
+  same picture on Direct3D 11 and 12, Vulkan and OpenGL.
+- Models: glTF read as a scene of meshes, materials, pictures, cameras and
+  the sun, its parts named after it; FBX and Blender files read as the glTF
+  an editor's Blender made of them; read in the background, a step on each
+  loading thread, with how far it has got.
 - A game made at one size, fitted to any window as a canvas or a picture,
   keeping its shape or showing more, with the pointer in its pixels.
 - Tile maps: four-byte cells turned and flipped, in chunks found through an
@@ -3853,16 +3909,15 @@ In order, and the order is an argument rather than a wish list: each of these
 either unblocks the one after it or is the thing most missed by somebody
 trying to finish a game with what is here.
 
-### 1. Models from files
-
-glTF 2.0 read as a scene of meshes, materials, cameras, lights, skins and
-animations, with `.fbx` and `.blend` turned into glTF by Blender, and a
-`Material3D` that is a file of its own.
-
-### 2. Light as it is
+### 1. Light as it is
 
 Physically based shading, point and spot lights, an environment with fog,
 tone mapping and glow, shadows, and baked light maps.
+
+### 2. Models that move
+
+A model's skins and animations: a skeleton drawn on the GPU, things hung from
+its bones, and its animations played and blended by the `AnimationPlayer`.
 
 ## 💭 Not on the list yet
 

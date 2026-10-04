@@ -756,8 +756,10 @@ pub const Loading = struct {
         if (loading.handles.get(seen)) |known| return @bitCast(known);
         const where, const info = try loading.file(path);
         // A picture read in the background is taken; what went wrong there
-        // is found again below.
+        // is found again below. A model's picture is made with the model.
         if (kind == .texture) loading.app.finishLoad(where) catch {};
+        if (kind == .texture) loading.app.loadModelOf(where) catch |err|
+            return loading.fail(err, "cannot read the model of \"{s}\": {t}", .{ where, err });
         const handle: H = switch (kind) {
             .texture => loading.app.assets.findTexture(where) orelse loading.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap }) catch |err|
                 return loading.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err }),
@@ -827,6 +829,19 @@ fn hang(app: *App, e: Entity, parent: Entity) !void {
     if (app.world.get(e, components.Parent)) |held| {
         held.* = .of(parent);
     } else try app.world.add(e, components.Parent.of(parent));
+}
+
+/// One value of `T` - a component's fields - from JSON text of its own: a
+/// file kept as a component is, a `.mat3d`. The files it names are read as a
+/// scene reads them; what it leaves out keeps what `out` held.
+pub fn readValueText(app: *App, comptime T: type, bytes: []const u8, out: *T, diagnostics: ?*json.Diagnostics) anyerror!void {
+    var arena: std.heap.ArenaAllocator = .init(app.gpa);
+    defer arena.deinit();
+    var reader: json.Reader = .init(app.gpa, bytes, readerOptions(.{ .diagnostics = diagnostics }));
+    defer reader.deinit();
+    const told: Told = .{};
+    var loading: Loading = .{ .app = app, .reader = &reader, .arena = arena.allocator(), .diagnostics = diagnostics, .told = &told };
+    try readComponent(&loading, T, out);
 }
 
 pub fn readComponent(loading: *Loading, comptime T: type, out: *T) anyerror!void {

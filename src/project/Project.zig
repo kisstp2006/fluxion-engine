@@ -279,6 +279,12 @@ pub fn isProjectPath(path: []const u8) bool {
     return std.mem.startsWith(u8, path, scheme) or std.mem.startsWith(u8, path, uid_scheme);
 }
 
+/// Whether a path names a part of a file rather than a file - a model's
+/// mesh, `res://robot.glb#mesh/0` - which has no UUID of its own.
+pub fn isPart(path: []const u8) bool {
+    return std.mem.indexOfScalar(u8, path, '#') != null;
+}
+
 /// Whether this is a project path that could name a file: a `res://` one
 /// that stays inside the root - see `tidy` - or a `uid://` one that holds a
 /// UUID. Asks nothing of the disc.
@@ -670,6 +676,7 @@ pub fn knownUid(self: *const Project, project_path: []const u8) ?Uuid {
 /// none.
 pub fn uidOf(self: *Project, project_path: []const u8) UidError!?Uuid {
     if (self.by_path.get(project_path)) |known| return known;
+    if (isPart(project_path)) return null;
     // A pack's table is every UUID it has.
     if (self.pack != null) return null;
     const io = self.io orelse return null;
