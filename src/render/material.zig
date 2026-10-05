@@ -11,7 +11,7 @@
 //!
 //! fragment {
 //!     vec4 picture = sample(TEXTURE, UV) * COLOR;
-//!     float line = step(0.5, fract(SCREEN_UV.y * 180.0));
+//!     float line = step(0.5, fract(VIEW_UV.y * 180.0));
 //!     target = mix(picture, picture * glow * line, strength);
 //! }
 //! ```
@@ -27,7 +27,8 @@
 //! | `UV` | Where in its picture the pixel is, nought to one. |
 //! | `COLOR` | The quad's colour: a sprite's tint, a control's. |
 //! | `TEXTURE` | Its picture: a sprite's, a texture rect's, white for a colour rect. |
-//! | `SCREEN_UV` | Where on the screen the pixel is, nought to one from the top left. |
+//! | `VIEW_UV` | Where on the displayed screen the pixel is, nought to one from the top left. |
+//! | `SCREEN_UV` | Where to sample `SCREEN_TEXTURE`; its vertical direction follows the render target. |
 //! | `SCREEN_TEXTURE` | What is drawn under it: the frame so far. |
 //! | `SCREEN_PIXEL_SIZE` | One pixel of the screen, in `SCREEN_UV`'s units. |
 //! | `TIME` | Seconds since the game started, as the interface's clock. |
@@ -191,6 +192,8 @@ const engine_head =
     \\varying vec4 COLOR;
     \\// Where on the screen this pixel is: from nought to one across and down.
     \\varying vec2 SCREEN_UV;
+    \\// Where on the displayed screen this pixel is, from its top left.
+    \\varying vec2 VIEW_UV;
     \\
     \\uniform Frame : 0 {
     \\    mat4 PROJECTION;
@@ -223,6 +226,7 @@ const engine_vertex =
     \\        vertex_clip.x / vertex_clip.w * 0.5 + 0.5,
     \\        vertex_clip.y / vertex_clip.w * 0.5 * SCREEN_FLIP + 0.5
     \\    );
+    \\    VIEW_UV = vec2(SCREEN_UV.x, 0.5 - (SCREEN_UV.y - 0.5) * SCREEN_FLIP);
     \\    position = vertex_clip;
     \\}
     \\
@@ -500,7 +504,7 @@ test "a file names what it reads, and only that is declared" {
         \\    float strength = 0.25;
         \\}
         \\fragment {
-        \\    target = mix(sample(SCREEN_TEXTURE, SCREEN_UV), COLOR, strength + TIME * 0.0);
+        \\    target = mix(sample(SCREEN_TEXTURE, SCREEN_UV), COLOR, strength + TIME * 0.0 + VIEW_UV.y * 0.0);
         \\}
     , "glow", &problems.writer, &sprite_blends);
     defer glowing.deinit(&device);
@@ -508,6 +512,7 @@ test "a file names what it reads, and only that is declared" {
     try testing.expectEqual(@as(?u32, null), glowing.texture_slot);
     try testing.expectEqual(@as(?u32, 0), glowing.screen_slot);
     try testing.expect(glowing.readsScreen());
+    try testing.expect(std.mem.indexOf(u8, glowing.module.glsl.vertex, "VIEW_UV = vec2(SCREEN_UV.x") != null);
     const look = glowing.params.?;
     try testing.expectEqualStrings("strength", look.fields[0].name);
     try testing.expectEqualSlices(f32, &.{0.25}, look.fields[0].default.?);

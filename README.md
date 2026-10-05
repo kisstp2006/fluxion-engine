@@ -1697,7 +1697,7 @@ uniform Crt : 1 {
 
 fragment {
     vec4 under = sample(SCREEN_TEXTURE, SCREEN_UV);
-    float scan = step(0.5, fract(SCREEN_UV.y * lines));
+    float scan = step(0.5, fract(VIEW_UV.y * lines));
     target = vec4(under.rgb * mix(1.0, scan, darkness), 1.0) * COLOR;
 }
 ```
@@ -1713,8 +1713,10 @@ try app.setShaderParam(screen, "darkness", &.{0.6});
   `fragment` block. The engine writes the rest after it - the vertex stage
   that places the quad, and what a material reads - so a line a message
   names is the file's own. It reads `UV`, `COLOR` and `TEXTURE` for its
-  picture, `SCREEN_UV`, `SCREEN_TEXTURE` and `SCREEN_PIXEL_SIZE` for what is
-  drawn under it, and `TIME`, the seconds since the game started.
+  picture, `VIEW_UV` for a top-left screen coordinate, `SCREEN_UV`,
+  `SCREEN_TEXTURE` and `SCREEN_PIXEL_SIZE` for what is drawn under it, and
+  `TIME`, the seconds since the game started. `SCREEN_UV` follows the render
+  target so that sampling `SCREEN_TEXTURE` is right-side up on every backend.
 - **A `Material` beside a `Sprite`, a `ColorRect` or a `TextureRect` draws
   it through the shader.** A colour rect's picture is white and its colour
   its own; a texture rect's is its texture. A control's box is left by the
