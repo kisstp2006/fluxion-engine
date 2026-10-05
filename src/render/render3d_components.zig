@@ -261,6 +261,12 @@ pub const PointLight3D = extern struct {
     range: f32 = 5,
     /// How it fades toward `range`: one evenly, more sooner, less later.
     attenuation: f32 = 1,
+    /// Whether it fades out as the camera moves away from it.
+    distance_fade: bool = false,
+    /// How far from the camera it starts to fade.
+    distance_fade_begin: f32 = 40,
+    /// How much further it takes to disappear.
+    distance_fade_length: f32 = 10,
 
     pub const reflect_name = "PointLight3D";
     pub const reflect_fields = .{
@@ -268,6 +274,9 @@ pub const PointLight3D = extern struct {
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is, next to it" } },
         .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
         .attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later" } },
+        .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
+        .distance_fade_begin = .{ attr.Group{ .name = "Distance fade" }, attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
+        .distance_fade_length = .{ attr.Group{ .name = "Distance fade" }, attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },
     };
 };
 
@@ -282,6 +291,9 @@ pub const SpotLight3D = extern struct {
     angle: f32 = std.math.degreesToRadians(45.0),
     /// How it fades toward the edge of the cone: one evenly, more sooner.
     angle_attenuation: f32 = 1,
+    distance_fade: bool = false,
+    distance_fade_begin: f32 = 40,
+    distance_fade_length: f32 = 10,
 
     pub const reflect_name = "SpotLight3D";
     pub const reflect_fields = .{
@@ -291,6 +303,9 @@ pub const SpotLight3D = extern struct {
         .attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later" } },
         .angle = .{ attr.Angle{}, attr.Range{ .min = std.math.degreesToRadians(0.1), .max = std.math.degreesToRadians(89.9) }, attr.Doc{ .text = "From the middle of the cone to its edge" } },
         .angle_attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward the edge of the cone: one evenly, more sooner" } },
+        .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
+        .distance_fade_begin = .{ attr.Group{ .name = "Distance fade" }, attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
+        .distance_fade_length = .{ attr.Group{ .name = "Distance fade" }, attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },
     };
 };
 

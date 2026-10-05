@@ -85,7 +85,8 @@ fn linear(c: Color) [4]f32 {
 }
 
 fn toLinear(v: f32) f32 {
-    return std.math.pow(f32, @max(v, 0), 2.2);
+    const x = @max(v, 0);
+    return if (x <= 0.04045) x / 12.92 else std.math.pow(f32, (x + 0.055) / 1.055, 2.4);
 }
 
 const no_params = std.math.maxInt(u32);
@@ -166,6 +167,18 @@ const Lamp = struct {
 
     fn nearer(_: void, a: Lamp, b: Lamp) bool {
         return a.distance < b.distance;
+    }
+};
+
+const DistanceFade = struct {
+    enabled: bool,
+    begin: f32,
+    length: f32,
+
+    fn amount(self: DistanceFade, distance: f32) f32 {
+        if (!self.enabled) return 1;
+        const begin = @max(self.begin, 0);
+        return 1 - std.math.clamp((distance - begin) / @max(self.length, 0.001), 0, 1);
     }
 };
 
@@ -444,7 +457,11 @@ pub const Renderer3D = struct {
             while (it.next()) |chunk| {
                 for (chunk.slice(PointLight3D), chunk.entities) |light, entity| {
                     const placed = placedLight(app, entity) orelse continue;
-                    try self.keepLamp(gpa, view, frustum, lampOf(placed.position, light.color, light.energy, light.range, light.attenuation));
+                    try self.keepLamp(gpa, view, frustum, lampOf(placed.position, light.color, light.energy, light.range, light.attenuation), .{
+                        .enabled = light.distance_fade,
+                        .begin = light.distance_fade_begin,
+                        .length = light.distance_fade_length,
+                    });
                 }
             }
         }
@@ -457,7 +474,11 @@ pub const Renderer3D = struct {
                     lamp.aim = placed.forward().tryNorm() orelse continue;
                     lamp.edge = @cos(std.math.clamp(light.angle, 0, std.math.degreesToRadians(89.9)));
                     lamp.cone = @max(light.angle_attenuation, 0.01);
-                    try self.keepLamp(gpa, view, frustum, lamp);
+                    try self.keepLamp(gpa, view, frustum, lamp, .{
+                        .enabled = light.distance_fade,
+                        .begin = light.distance_fade_begin,
+                        .length = light.distance_fade_length,
+                    });
                 }
             }
         }
@@ -466,11 +487,14 @@ pub const Renderer3D = struct {
         self.lamps_kept = @intCast(self.lamps.items.len);
     }
 
-    fn keepLamp(self: *Renderer3D, gpa: Allocator, view: View3D, frustum: math.Frustum, lamp: Lamp) !void {
+    fn keepLamp(self: *Renderer3D, gpa: Allocator, view: View3D, frustum: math.Frustum, lamp: Lamp, fade: DistanceFade) !void {
         if (lamp.color[0] + lamp.color[1] + lamp.color[2] <= 0) return;
         if (frustum.testSphere(.init(lamp.place, lamp.range)) == .outside) return;
         var kept = lamp;
         kept.distance = lamp.place.sub(view.position).len();
+        const amount = fade.amount(kept.distance);
+        if (amount <= 0) return;
+        for (&kept.color) |*channel| channel.* *= amount;
         try self.lamps.append(gpa, kept);
     }
 
@@ -773,10 +797,19 @@ test "a mesh is lit by the nearest lamps that reach it, nearest first, and no mo
 
 test "a material's numbers are linear, as light adds up" {
     const look = lookOf(.{ .albedo_color = .{ .r = 0.5, .g = 1, .b = 0, .a = 0.5 }, .emission = .white, .emission_energy = 2, .cull = .disabled }, false);
-    try testing.expectApproxEqAbs(@as(f32, 0.2176), look.albedo_color[0], 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.214041), look.albedo_color[0], 0.00001);
     try testing.expectEqual(@as(f32, 0.5), look.albedo_color[3]);
     try testing.expectEqual(@as(f32, 2), look.emission_color[0]);
     try testing.expectEqual(@as(f32, 1), look.facing[0]);
     // No occlusion picture, so none of it is read.
     try testing.expectEqual(@as(f32, 0), look.surface[3]);
+}
+
+test "a lamp fades smoothly to nothing with its distance from the camera" {
+    const fade: DistanceFade = .{ .enabled = true, .begin = 10, .length = 5 };
+    try testing.expectEqual(@as(f32, 1), fade.amount(5));
+    try testing.expectEqual(@as(f32, 1), fade.amount(10));
+    try testing.expectApproxEqAbs(@as(f32, 0.5), fade.amount(12.5), 0.0001);
+    try testing.expectEqual(@as(f32, 0), fade.amount(15));
+    try testing.expectEqual(@as(f32, 1), (DistanceFade{ .enabled = false, .begin = 0, .length = 0 }).amount(100));
 }

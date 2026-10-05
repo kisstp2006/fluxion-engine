@@ -95,6 +95,11 @@ pub const Color = extern struct {
         return .{ .r = r, .g = g, .b = b, .a = a };
     }
 
+    /// A colour whose channels are linear light, stored as sRGB.
+    pub fn fromLinear(r: f32, g: f32, b: f32, a: f32) Color {
+        return .{ .r = encode(r), .g = encode(g), .b = encode(b), .a = a };
+    }
+
     /// Lightness, chroma and hue, in OKLCH: even steps of hue look evenly
     /// spaced, and changing `l` alone does not change how colourful it looks.
     /// `l` is 0 to 1, `c` is about 0 to 0.4, `hue_degrees` goes round.
@@ -169,6 +174,14 @@ test "hex is the bytes divided down" {
     try testing.expectApproxEqAbs(@as(f32, 0.5019), c.g, 0.001);
     try testing.expectApproxEqAbs(@as(f32, 0), c.b, 0.001);
     try testing.expectEqual(@as(f32, 1), c.a);
+}
+
+test "linear light is stored with the sRGB transfer curve" {
+    const c = Color.fromLinear(0.0031308, 0.5, 1, 0.25);
+    try testing.expectApproxEqAbs(@as(f32, 0.04045), c.r, 0.00001);
+    try testing.expectApproxEqAbs(@as(f32, 0.735357), c.g, 0.00001);
+    try testing.expectApproxEqAbs(@as(f32, 1), c.b, 0.00001);
+    try testing.expectEqual(@as(f32, 0.25), c.a);
 }
 
 test "the alpha of hexa is the last byte, not the first" {

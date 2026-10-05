@@ -67,9 +67,12 @@ const bright_source = vertex_part ++
     \\fragment {
     \\    vec3 light = sample(SOURCE, UV).rgb;
     \\    vec3 seen = light * KNOBS.y;
-    \\    float brightest = max(seen.r, max(seen.g, seen.b));
-    \\    float kept = max(brightest - KNOBS.x, 0.0) / max(brightest, 0.0001);
-    \\    target = vec4(light * kept, 1.0);
+    \\    float brightness = dot(seen, vec3(0.2126, 0.7152, 0.0722));
+    \\    float kept = max(brightness - KNOBS.x, 0.0) / max(brightness, 0.0001);
+    \\    vec3 glow = light * kept;
+    \\    float peak = max(glow.r, max(glow.g, glow.b)) * KNOBS.y;
+    \\    glow = glow * min(1.0, 16.0 / max(peak, 16.0));
+    \\    target = vec4(glow, 1.0);
     \\}
 ;
 
@@ -113,6 +116,13 @@ const tone_source = vertex_part ++
     \\    return ((x * (0.15 * x + vec3(0.05)) + vec3(0.004)) / (x * (0.15 * x + vec3(0.5)) + vec3(0.06))) - vec3(0.02 / 0.3);
     \\}
     \\
+    \\vec3 toSrgb(vec3 light) {
+    \\    vec3 x = clamp(light, vec3(0.0), vec3(1.0));
+    \\    vec3 low = x * 12.92;
+    \\    vec3 high = 1.055 * pow(x, vec3(1.0 / 2.4)) - vec3(0.055);
+    \\    return mix(low, high, step(vec3(0.0031308), x));
+    \\}
+    \\
     \\fragment {
     \\    vec4 light = sample(SOURCE, UV);
     \\    vec3 seen = (light.rgb + sample(GLOW, UV).rgb * KNOBS.w) * KNOBS.x;
@@ -124,7 +134,7 @@ const tone_source = vertex_part ++
     \\    } else if (KNOBS.z > 0.5) {
     \\        toned = seen * (vec3(1.0) + seen / vec3(KNOBS.y * KNOBS.y)) / (vec3(1.0) + seen);
     \\    }
-    \\    target = vec4(pow(clamp(toned, 0.0, 1.0), vec3(1.0 / 2.2)), light.a);
+    \\    target = vec4(toSrgb(toned), light.a);
     \\}
 ;
 
@@ -167,8 +177,7 @@ const Stage = struct {
     module: ?shader.Module = null,
     gpu: rhi.Shader = .none,
     pipeline: rhi.Pipeline = .none,
-    /// The same, laid over what is there by its alpha: the tone pass of a
-    /// 3D layer drawn over a picture rather than cleared.
+    /// The same, laid over what is there by its alpha.
     over: rhi.Pipeline = .none,
 
     fn deinit(self: *Stage, device: *rhi.Device) void {
@@ -335,7 +344,7 @@ pub const Post3D = struct {
             .label = label,
         };
         stage.pipeline = try device.createPipeline(desc);
-        if (stage == &self.tone) {
+        if (stage == &self.tone or stage == &self.smooth) {
             desc.blend = .alpha;
             stage.over = try device.createPipeline(desc);
         }
@@ -436,7 +445,7 @@ pub const Post3D = struct {
             .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
             .knobs = .{ look.exposure, look.white, curve, if (look.glow) look.glow_intensity else 0 },
         });
-        if (smoothing) try self.pass(gpa, self.smooth.pipeline, into, width, height, if (over) .load else .dont_care, &.{targets.toned.?}, .{
+        if (smoothing) try self.pass(gpa, if (over) self.smooth.over else self.smooth.pipeline, into, width, height, if (over) .load else .dont_care, &.{targets.toned.?}, .{
             .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
             .knobs = @splat(0),
         });
@@ -556,4 +565,13 @@ test "a look is what an environment says, or light as it is without one" {
     try testing.expectEqual(@as(f32, 2), glowing.exposure);
     // No glow added where there is none to add.
     try testing.expect(!Look.of(.{ .glow = true, .glow_intensity = 0 }, false).glow);
+}
+
+test "tone and smoothing can both be laid over an existing picture" {
+    var device = try rhi.Device.init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+    var post = try Post3D.init(testing.allocator, &device, .depth32_float);
+    defer post.deinit(testing.allocator);
+    try testing.expect(!post.tone.over.isNone());
+    try testing.expect(!post.smooth.over.isNone());
 }

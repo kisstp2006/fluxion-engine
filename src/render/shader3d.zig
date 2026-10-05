@@ -220,7 +220,10 @@ const engine_part =
     \\
     \\// A picture's colour, as light adds up.
     \\vec3 toLinear(vec3 c) {
-    \\    return pow(max(c, vec3(0.0)), vec3(2.2));
+    \\    vec3 x = max(c, vec3(0.0));
+    \\    vec3 low = x / 12.92;
+    \\    vec3 high = pow((x + vec3(0.055)) / 1.055, vec3(2.4));
+    \\    return mix(low, high, step(vec3(0.04045), x));
     \\}
     \\
     \\// The light that leaves a surface toward the eye, of one that comes
@@ -304,7 +307,7 @@ const engine_part =
     \\    float far = length(p - CAMERA_POSITION.xyz);
     \\    float thick = FOG_COLOR.w + max(FOG_HEIGHT.x - p.y, 0.0) * FOG_HEIGHT.y;
     \\    float fog = (1.0 - exp(-thick * far)) * FOG_HEIGHT.z;
-    \\    return mix(color, FOG_COLOR.rgb, clamp(fog, 0.0, 1.0));
+    \\    return clamp(mix(color, FOG_COLOR.rgb, clamp(fog, 0.0, 1.0)), vec3(0.0), vec3(1024.0));
     \\}
     \\
     \\vertex {

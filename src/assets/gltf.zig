@@ -418,7 +418,7 @@ pub fn parse(gpa: Allocator, bytes: []const u8, fetch: ?Fetch) Error!Model {
     model.lights = try a.alloc(Light, light_docs.len);
     for (light_docs, model.lights) |given, *out| {
         const kind: Light.Kind = if (std.mem.eql(u8, given.type, "directional")) .directional else if (std.mem.eql(u8, given.type, "spot")) .spot else .point;
-        out.* = .{ .kind = kind, .color = .{ .r = given.color[0], .g = given.color[1], .b = given.color[2], .a = 1 }, .intensity = given.intensity, .range = given.range orelse 0 };
+        out.* = .{ .kind = kind, .color = Color.fromLinear(given.color[0], given.color[1], given.color[2], 1), .intensity = given.intensity, .range = given.range orelse 0 };
         if (given.spot) |cone| {
             out.inner_cone = cone.innerConeAngle;
             out.outer_cone = cone.outerConeAngle;
@@ -489,11 +489,11 @@ fn materialOf(model: *Model, given: MaterialDoc) Allocator.Error!Material3D {
     const pbr = given.pbrMetallicRoughness;
     const base = pbr.baseColorFactor;
     var look: Material3D = .{
-        .albedo_color = .{ .r = base[0], .g = base[1], .b = base[2], .a = base[3] },
+        .albedo_color = Color.fromLinear(base[0], base[1], base[2], base[3]),
         // A glTF material is always tinted by its corners' colours, which
         // are white where a mesh gives none.
         .vertex_color = true,
-        .emission = .{ .r = given.emissiveFactor[0], .g = given.emissiveFactor[1], .b = given.emissiveFactor[2], .a = 1 },
+        .emission = Color.fromLinear(given.emissiveFactor[0], given.emissiveFactor[1], given.emissiveFactor[2], 1),
         .metallic = pbr.metallicFactor,
         .roughness = pbr.roughnessFactor,
         .cull = if (given.doubleSided) .disabled else .back,
@@ -695,10 +695,14 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
                 v.uv = .{ n.float(i, 0), n.float(i, 1) };
             };
             if (colors) |n| if (i < n.count) {
-                for (0..4) |c| {
-                    const value: f32 = if (c < n.components) n.float(i, c) else 1;
-                    v.color[c] = @intFromFloat(std.math.clamp(value, 0, 1) * 255 + 0.5);
-                }
+                const linear = [4]f32{
+                    n.float(i, 0),
+                    if (n.components > 1) n.float(i, 1) else 1,
+                    if (n.components > 2) n.float(i, 2) else 1,
+                    if (n.components > 3) n.float(i, 3) else 1,
+                };
+                const encoded = Color.fromLinear(linear[0], linear[1], linear[2], linear[3]);
+                for (encoded.array(), 0..) |value, c| v.color[c] = @intFromFloat(std.math.clamp(value, 0, 1) * 255 + 0.5);
             };
             if (tangents) |n| if (i < n.count and n.components == 4) {
                 v.tangent = .{ n.float(i, 0), n.float(i, 1), n.float(i, 2), if (n.float(i, 3) < 0) -1 else 1 };
@@ -797,7 +801,7 @@ fn triangleGltf(gpa: Allocator, extra_nodes: []const u8) ![]u8 {
         \\  "scenes": [{{ "nodes": [0] }}],
         \\  "nodes": [{{ "name": "Holder", "translation": [1, 2, 3], "children": [1] }}, {{ "name": "Tri", "mesh": 0, "scale": [2, 2, 2] }}{s}],
         \\  "meshes": [{{ "name": "Triangle", "primitives": [{{ "attributes": {{ "POSITION": 0 }}, "indices": 1, "material": 0 }}] }}],
-        \\  "materials": [{{ "name": "Red", "pbrMetallicRoughness": {{ "baseColorFactor": [1, 0, 0, 1] }}, "alphaMode": "MASK", "alphaCutoff": 0.25, "doubleSided": true }}],
+        \\  "materials": [{{ "name": "Red", "pbrMetallicRoughness": {{ "baseColorFactor": [0.5, 0, 0, 1] }}, "alphaMode": "MASK", "alphaCutoff": 0.25, "doubleSided": true }}],
         \\  "accessors": [
         \\    {{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3" }},
         \\    {{ "bufferView": 1, "componentType": 5123, "count": 3, "type": "SCALAR" }}
@@ -826,7 +830,7 @@ test "a .gltf's triangle, its material, its nodes, a camera and a light are read
     try testing.expectEqual(@as(?u32, 0), tri.materials[0]);
 
     const red = model.materials[0];
-    try testing.expectEqual(@as(f32, 1), red.look.albedo_color.r);
+    try testing.expectApproxEqAbs(@as(f32, 0.735357), red.look.albedo_color.r, 0.00001);
     try testing.expectEqual(Material3D.Transparency.scissor, red.look.transparency);
     try testing.expectEqual(@as(f32, 0.25), red.look.alpha_scissor_threshold);
     try testing.expectEqual(Material3D.Cull.disabled, red.look.cull);
@@ -839,6 +843,7 @@ test "a .gltf's triangle, its material, its nodes, a camera and a light are read
     try testing.expectApproxEqAbs(@as(f32, 0.8), model.cameras[0].fov, 1e-6);
     try testing.expectEqual(Light.Kind.directional, model.lights[model.nodes[3].light.?].kind);
     try testing.expectEqual(@as(f32, 3), model.lights[0].intensity);
+    try testing.expectApproxEqAbs(@as(f32, 0.735357), model.lights[0].color.g, 0.00001);
 }
 
 test "a material's metal, roughness, normal map and occlusion are read, each picture by its index" {

@@ -204,9 +204,9 @@ test "the 3D components keep what they hold through a scene round trip" {
     try source.setName(pill, "pill");
     const sun = try source.world.spawnWith(.{ Transform3D{}, DirectionalLight3D{ .energy = 2 } });
     try source.setName(sun, "sun");
-    const lamp = try source.world.spawnWith(.{ Transform3D{}, PointLight3D{ .range = 3, .attenuation = 2 } });
+    const lamp = try source.world.spawnWith(.{ Transform3D{}, PointLight3D{ .range = 3, .attenuation = 2, .distance_fade = true, .distance_fade_begin = 8, .distance_fade_length = 4 } });
     try source.setName(lamp, "lamp");
-    const spot = try source.world.spawnWith(.{ Transform3D{}, SpotLight3D{ .angle = 0.5, .angle_attenuation = 3 } });
+    const spot = try source.world.spawnWith(.{ Transform3D{}, SpotLight3D{ .angle = 0.5, .angle_attenuation = 3, .distance_fade = true, .distance_fade_begin = 12, .distance_fade_length = 6 } });
     try source.setName(spot, "spot");
     const around = try source.world.spawnWith(.{Environment{ .background = .color, .tonemap = .aces, .fog = true, .fog_height = 2, .glow = true, .glow_threshold = 0.7 }});
     try source.setName(around, "around");
