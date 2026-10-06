@@ -134,8 +134,14 @@ async function main() {
   platform.files.put("/fonts/ui.ttf", font);
   // Where the platform looks for the system's emoji fonts.
   emoji.forEach((bytes, at) => platform.files.put(at === 0 ? "/fonts/emoji.ttf" : "/fonts/emoji-flags.ttf", bytes));
-  // The WebGL context first, on the canvas the platform's window is.
+  // The WebGL context first, on the canvas the platform's window is. The
+  // module has no getExtension, so the page switches on what the renderer
+  // then finds by trying: float colour targets - the 3D light brighter than
+  // white, which bloom is made of - and anisotropic filtering.
   const webgl = new Fluxion(canvas);
+  for (const name of ["EXT_color_buffer_float", "EXT_color_buffer_half_float", "EXT_texture_filter_anisotropic"]) {
+    webgl.gl.getExtension(name);
+  }
   await platform.instantiate(module, { with: [webgl, new Audio(), new Net()] });
 
   // `init` runs as `start` is called, before its first frame.
