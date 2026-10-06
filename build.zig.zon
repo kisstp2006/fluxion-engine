@@ -13,16 +13,16 @@
         // The world, and everything in it. An entity is a thing in the scene,
         // with no inheritance and no virtual call.
         .fluxion_ecs = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-ecs#75be1b6aed2a14fedf1bb381686290355adfeb5e",
-            .hash = "fluxion_ecs-0.1.0-YgvFeCsRAgBAbPuuYbZ82QGguKlGoN1WiNGCAGIQULat",
+            .url = "git+https://github.com/kisstp2006/fluxion-ecs#d1fa47a348938d6cc832fa95f0fd22c698162f5f",
+            .hash = "fluxion_ecs-0.1.0-YgvFeCsRAgBZdwkOqQ8NUSDPO-4yKrseeGGKcxJpeD1j",
         },
 
         // One way to draw, on whichever API the machine has. Every layer -
         // the 3D one, the 2D one, the interface -
         // goes through this and through nothing else.
         .fluxion_rhi = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-rhi#de22c8a68fedd92c8e9e1a64d8279a7e5dcf9a69",
-            .hash = "fluxion_rhi-0.1.0--pvwD_12EQDJK_lJY4Pj6sWx_9ql1EMieQHoND5DlLT0",
+            .url = "git+https://github.com/kisstp2006/fluxion-rhi#fbc011d6e5c6c1cd950182d7746ed8c48ca608c9",
+            .hash = "fluxion_rhi-0.1.0--pvwDyDPEQB9gmbU78qESpW0T_WMi0_paodQ0kB8W2_0",
         },
 
         // Windows, input and the event loop. A library may not depend on
@@ -50,8 +50,8 @@
         // Without this the same shader would be in this repository twice, in
         // two languages, drifting apart.
         .fluxion_shader = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-shader#d3bb6f5756fcf09d0857b16d85baaf24f761a6d4",
-            .hash = "fluxion_shader-0.1.0-FqFMEnxbCAB5yKlTG88wbTx6T61xz0KPxUua375yLFkp",
+            .url = "git+https://github.com/kisstp2006/fluxion-shader#7ca72477aaf61fe075e8c8ec487fdc1a07c83754",
+            .hash = "fluxion_shader-0.1.0-FqFMEv6YCAAkCt9CuC5fnmNVHpr25rvSIVf7EX__Ha3s",
         },
 
         // Projections and matrices, and the one type that knows OpenGL's
@@ -141,8 +141,8 @@
         // Packs: a shipped game's files in one, sealed and signed if it
         // asks, which `res://` is read out of.
         .fluxion_vfs = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-vfs#185e749d9e238f8460db1aeff57b5f884b2bb6eb",
-            .hash = "fluxion_vfs-0.1.0-L2GtldS6AwCPxotzolOY8cFvMvh90kx5m0t4jGS75VvD",
+            .url = "git+https://github.com/kisstp2006/fluxion-vfs#48475c5a4eb79445ad550c91c179503024bf9090",
+            .hash = "fluxion_vfs-0.1.0-L2GtldS6AwBgWetqp2RrM0bSb8NZ3O5en5Df6HCf_Fdc",
         },
     },
     .paths = .{

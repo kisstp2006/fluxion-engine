@@ -1317,6 +1317,31 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   a `color` and an `energy`. Up to four suns light the world; the sixty-four
   point and spot lights the camera sees, nearest first, are kept, and each
   mesh is lit by the eight of them nearest it that reach it.
+- **Shadows**: a light with `shadow` has what it lights cast one - every
+  mesh with `cast_shadow` (on unless turned off) that is not laid over what
+  is behind it. A sun's shadow reaches `shadow_max_distance` from the
+  camera and fades out before it, the view cut into `shadow_cascades`
+  pieces, nearest smallest, so near shadows stay sharp; a spot light's is
+  its cone; a point light's every way, a side of a cube at a time.
+  - **Keeping a surface from shadowing itself**: `shadow_bias` moves the
+    point looked up toward the light and `shadow_normal_bias` out along its
+    surface, both counted in the shadow's own texels there, so the same
+    numbers hold near and far.
+  - **Soft edges**: `shadow_blur` softens the edge, one being the filter's
+    own. A light's `size` - a sun's `angular_size` - softens a shadow the
+    further it falls from what casts it, as a real light's does.
+  - **The project's say**: `rendering.shadow_atlas_size` is the one picture
+    every shadow is drawn into, and `shadow_filter` how many times a shadow
+    is read for its edge, hard to soft. The atlas is tiled each frame, a
+    sun's cascades first and then the lamps lighting most of the picture;
+    one that does not fit gets a smaller tile, or casts none.
+  - **What casts** is drawn by its own surface's shader, depth alone, so
+    what its alpha cuts away - a material's or a `.shader3d`'s `ALPHA` - casts
+    no shadow either. `app.renderer3d.shadow_views`, `shadow_casters` and
+    `shadow_draws` say what the last draw drew into the atlas.
+- **A spot light's `cookie`** is a picture it shines through: its light takes
+  the picture's colours across the cone, the picture's top toward the
+  light's `+y`. Up to sixteen pictures are lit through in a frame.
 - **An `Environment` is what is round it all** - the first one that is
   visible: what is behind everything (`background`: the clear colour, or
   `background_color`), the light from everywhere (`ambient_color` times
@@ -3987,7 +4012,7 @@ trying to finish a game with what is here.
 ### 1. Light as it is
 
 Physically based shading, point and spot lights, an environment with fog,
-tone mapping and glow, shadows, and baked light maps.
+tone mapping and glow, and shadows are here. Baked light maps are next.
 
 ### 2. Models that move
 

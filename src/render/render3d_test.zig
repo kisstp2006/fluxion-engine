@@ -2,8 +2,8 @@
 
 //! The 3D layer through a whole app, headless: what a camera sees drawn,
 //! what it does not left out, meshes of one kind drawn together, a render
-//! view's own camera, meshes made in code and by their numbers, and the
-//! components through a scene.
+//! view's own camera, meshes made in code and by their numbers, what casts
+//! a shadow, and the components through a scene.
 
 const std = @import("std");
 const testing = std.testing;
@@ -122,6 +122,68 @@ test "the lamps the camera sees are kept, nearest first, and a mesh is lit by th
     try testing.expectEqual(@as(u32, 2), app.renderer3d.lamps_kept);
     try testing.expectEqual([4]f32{ 0, -1, -1, -1 }, app.renderer3d.gathered.items[0].lights[0]);
     try testing.expectEqual([4]f32{ -1, -1, -1, -1 }, app.renderer3d.gathered.items[0].lights[1]);
+}
+
+test "a light that casts a shadow draws what it sees into the atlas: a spot one view, a point light six, a sun its cascades" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    // Under the spot light, but casting none, and laid over what is behind
+    // it: neither is drawn into its view.
+    _ = try app.world.spawnWith(.{ Transform3D.at(0.6, 0.5, 0), MeshInstance3D{ .cast_shadow = false }, PrimitiveMesh3D{} });
+    const glass = try app.addMaterial("glass", .{ .transparency = .alpha });
+    _ = try app.world.spawnWith(.{ Transform3D.at(-0.6, 0.5, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .material = glass } });
+    // A light with none of its own takes no view.
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 2, 2), PointLight3D{ .range = 6 } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.renderer3d.shadow_views);
+    try testing.expect(app.renderer3d.atlas == null);
+
+    var above: Transform3D = .at(0, 4, 0);
+    above.lookAt(.zero, .unit_z);
+    _ = try app.world.spawnWith(.{ above, SpotLight3D{ .range = 10, .shadow = true } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.shadow_views);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.shadow_casters);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.shadow_draws);
+    try testing.expect(app.renderer3d.atlas != null);
+    // Of the frame's two lamps, the block gives one a view.
+    var shadowed: usize = 0;
+    for (app.renderer3d.plan.block.lamps[0..2]) |lamp| {
+        if (lamp[0] >= 0) shadowed += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), shadowed);
+
+    _ = try app.world.spawnWith(.{ Transform3D.at(3, 0.5, 0), PointLight3D{ .range = 5, .shadow = true } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1 + 6), app.renderer3d.shadow_views);
+
+    var sun: Transform3D = .at(0, 10, 0);
+    sun.lookAt(.init(1, 0, 0.5), .unit_y);
+    _ = try app.world.spawnWith(.{ sun, DirectionalLight3D{ .shadow = true, .shadow_cascades = .two } });
+    // Hidden, it casts nothing.
+    _ = try app.world.spawnWith(.{ sun, DirectionalLight3D{ .shadow = true }, Appearance{ .visible = false } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 2 + 1 + 6), app.renderer3d.shadow_views);
+    try testing.expectEqual(@as(f32, 2), app.renderer3d.plan.block.suns[0][1]);
+
+    // A few frames with no light that casts one, and the atlas is let go.
+    var it = try @import("fluxion_ecs").Query(.{SpotLight3D}).over(&app.world);
+    while (it.next()) |chunk| for (chunk.slice(SpotLight3D)) |*light| {
+        light.shadow = false;
+    };
+    var point = try @import("fluxion_ecs").Query(.{PointLight3D}).over(&app.world);
+    while (point.next()) |chunk| for (chunk.slice(PointLight3D)) |*light| {
+        light.shadow = false;
+    };
+    var suns = try @import("fluxion_ecs").Query(.{DirectionalLight3D}).over(&app.world);
+    while (suns.next()) |chunk| for (chunk.slice(DirectionalLight3D)) |*light| {
+        light.shadow = false;
+    };
+    for (0..5) |_| _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.renderer3d.shadow_views);
+    try testing.expect(app.renderer3d.atlas == null);
 }
 
 test "the first visible environment is the one drawn with" {

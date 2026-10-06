@@ -62,6 +62,7 @@ const shader = @import("fluxion_shader");
 
 const material = @import("material.zig");
 const mesh = @import("mesh.zig");
+const shadows3d = @import("shadows3d.zig");
 const Material3DData = @import("render3d_components.zig").Material3DData;
 
 const log = std.log.scoped(.fluxion_engine);
@@ -71,6 +72,15 @@ pub const extension = ".shader3d";
 
 /// The file's own numbers are the block at this slot.
 pub const params_slot = 3;
+/// Every shadow's numbers, `shadows3d.Shadows`, are the block at this slot,
+/// and the atlas is read at these two: compared with, and as it is.
+pub const shadows_slot = 4;
+pub const shadow_map_slot = 5;
+pub const shadow_depth_slot = 6;
+/// How many textures a 3D shader reads: the material's five, the shadow
+/// atlas twice, and the spot lights' cookies.
+pub const texture_count = 8;
+pub const cookie_slot = 7;
 
 /// The most suns a frame is lit by.
 pub const most_suns = 4;
@@ -96,6 +106,8 @@ pub const Frame = extern struct {
     /// The height under which it thickens, how much thicker a unit lower,
     /// and one where there is fog.
     fog_height: [4]f32,
+    /// The picture's width and height, in pixels.
+    screen: [4]f32,
     time: f32,
     _pad: [3]f32 = @splat(0),
 };
@@ -130,6 +142,12 @@ pub const Lights = extern struct {
     aims: [most_lamps][4]f32,
     /// How its light fades toward the edge of its cone.
     cones: [most_lamps][4]f32,
+    /// A spot light's up - its cookie's top - and how wide its cone is: the
+    /// tangent of half of it.
+    ups: [most_lamps][4]f32,
+    /// Where its cookie is in the cookie atlas: across and down from where,
+    /// and how far for the whole picture; nought across for none.
+    cookies: [most_lamps][4]f32,
 };
 
 /// One mesh drawn: read by the shader per instance.
@@ -186,6 +204,7 @@ const engine_part =
     \\    vec4 AMBIENT;
     \\    vec4 FOG_COLOR;
     \\    vec4 FOG_HEIGHT;
+    \\    vec4 SCREEN;
     \\    // Seconds since the game started.
     \\    float TIME;
     \\}
@@ -204,6 +223,20 @@ const engine_part =
     \\    vec4 LIGHT_COLORS[64];
     \\    vec4 LIGHT_AIMS[64];
     \\    vec4 LIGHT_CONES[64];
+    \\    vec4 LIGHT_UPS[64];
+    \\    vec4 LIGHT_COOKIES[64];
+    \\}
+    \\
+    \\uniform Shadows : 4 {
+    \\    mat4 SHADOW_MATRICES[128];
+    \\    vec4 SHADOW_RECTS[128];
+    \\    vec4 SHADOW_VIEWS[128];
+    \\    vec4 LAMP_SHADOWS[64];
+    \\    vec4 LAMP_SOFTNESS[64];
+    \\    vec4 SUN_SHADOWS[4];
+    \\    vec4 SUN_SPLITS[4];
+    \\    vec4 SUN_SOFTNESS[4];
+    \\    vec4 SHADOW_ATLAS;
     \\}
     \\
     \\// The material's picture.
@@ -216,6 +249,12 @@ const engine_part =
     \\texture2d NORMAL_TEXTURE : 3;
     \\// How much light from everywhere reaches the material, in its red.
     \\texture2d OCCLUSION_TEXTURE : 4;
+    \\// Every shadow's depth, compared with.
+    \\texture2d_shadow SHADOW_MAP : 5;
+    \\// The same, read as it is: how near its light what casts a shadow is.
+    \\texture2d SHADOW_DEPTH : 6;
+    \\// The spot lights' cookies.
+    \\texture2d COOKIE_ATLAS : 7;
     \\
     \\const float PI = 3.14159265;
     \\
@@ -252,13 +291,157 @@ const engine_part =
     \\    return (scattered + reflected * PI) * n_l;
     \\}
     \\
-    \\// One sun's light on a surface.
-    \\vec3 sun(int which, vec3 n, vec3 v, vec3 albedo, float metallic, float roughness) {
-    \\    return shine(n, v, SUN_DIRECTIONS[which].xyz, albedo, metallic, roughness) * SUN_COLORS[which].rgb;
+    \\// How far from its light a depth seen in a shadow view is: `info` is the
+    \\// view's near, far, texel and whether it is seen in perspective.
+    \\float shadowDistance(vec4 info, float depth) {
+    \\    if (info.w > 0.5) {
+    \\        return info.x * info.y / max(info.y - depth * (info.y - info.x), 0.000001);
+    \\    }
+    \\    return info.x + depth * (info.y - info.x);
+    \\}
+    \\
+    \\// The `i`th of `count` points spread evenly over a disc one across,
+    \\// turned by `turn`.
+    \\vec2 spiral(int i, int count, float turn) {
+    \\    float r = sqrt((float(i) + 0.5) / float(count));
+    \\    float a = float(i) * 2.39996323 + turn;
+    \\    return vec2(cos(a), sin(a)) * r;
+    \\}
+    \\
+    \\// How much a pixel's readings of a shadow are turned: by where on the
+    \\// screen `p` is, so neighbouring pixels read different points round it.
+    \\float pixelTurn(vec3 p) {
+    \\    vec4 onto = VIEW_PROJECTION * vec4(p, 1.0);
+    \\    vec2 pixel = floor((onto.xy / onto.w * 0.5 + vec2(0.5)) * SCREEN.xy);
+    \\    return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715)))) * 6.2831853;
+    \\}
+    \\
+    \\// How lit `p`, on a surface facing `ng`, is in shadow view `view` of a
+    \\// light that is `l` from it: one where nothing nearer the light stands
+    \\// between, nought where something does. `how` is the light's bias toward
+    \\// it and along the surface, in texels, its blur in texels, and its size;
+    \\// `turn` turns the readings, pixel by pixel.
+    \\float shadowOf(int view, vec3 p, vec3 ng, vec3 l, vec4 how, float turn) {
+    \\    vec4 info = SHADOW_VIEWS[view];
+    \\    mat4 m = SHADOW_MATRICES[view];
+    \\    vec4 seen = m * vec4(p, 1.0);
+    \\    float texel = info.z * mix(1.0, seen.w, info.w);
+    \\    vec3 side = ng;
+    \\    if (dot(ng, l) < 0.0) {
+    \\        side = -ng;
+    \\    }
+    \\    vec4 at = m * vec4(p + side * (how.y * texel) + l * (how.x * texel), 1.0);
+    \\    vec3 here = at.xyz / at.w;
+    \\    vec4 rect = SHADOW_RECTS[view];
+    \\    float one = SHADOW_ATLAS.x;
+    \\    float radius = how.z;
+    \\    int taps = int(SHADOW_ATLAS.y + 0.5);
+    \\    if (how.w > 0.0 && taps > 1) {
+    \\        // What casts it, found: the shadow spreads with how far it falls.
+    \\        float search = clamp(radius + how.w / texel, 2.0, 24.0);
+    \\        float blockers = 0.0;
+    \\        float found = 0.0;
+    \\        for (int i = 0; i < taps; i = i + 1) {
+    \\            vec2 tap = here.xy + spiral(i, taps, turn) * (search * one);
+    \\            float depth = sample_level(SHADOW_DEPTH, clamp(tap, rect.xy, rect.zw), 0.0).r;
+    \\            if (depth < here.z) {
+    \\                blockers = blockers + depth;
+    \\                found = found + 1.0;
+    \\            }
+    \\        }
+    \\        if (found < 0.5) {
+    \\            return 1.0;
+    \\        }
+    \\        float caster = shadowDistance(info, blockers / found);
+    \\        float receiver = shadowDistance(info, here.z);
+    \\        float spread = how.w * max(receiver - caster, 0.0) / mix(1.0, caster, info.w);
+    \\        radius = min(radius + spread / texel, 32.0);
+    \\    }
+    \\    if (taps <= 1 || radius <= 0.0) {
+    \\        return sample_compare(SHADOW_MAP, clamp(here.xy, rect.xy, rect.zw), here.z);
+    \\    }
+    \\    float amount = 0.0;
+    \\    for (int i = 0; i < taps; i = i + 1) {
+    \\        vec2 tap = here.xy + spiral(i, taps, turn) * (radius * one);
+    \\        amount = amount + sample_compare(SHADOW_MAP, clamp(tap, rect.xy, rect.zw), here.z);
+    \\    }
+    \\    return amount / float(taps);
+    \\}
+    \\
+    \\// How lit `p` is by sun `which`: its cascade for how far along the
+    \\// camera's view `p` is, fading out toward the end of its shadow.
+    \\float sunShadow(int which, vec3 p, vec3 ng, float turn) {
+    \\    vec4 s = SUN_SHADOWS[which];
+    \\    if (s.x < 0.0) {
+    \\        return 1.0;
+    \\    }
+    \\    vec4 soft = SUN_SOFTNESS[which];
+    \\    float d = dot(p - CAMERA_POSITION.xyz, CAMERA_FORWARD.xyz);
+    \\    if (d >= soft.w) {
+    \\        return 1.0;
+    \\    }
+    \\    vec4 splits = SUN_SPLITS[which];
+    \\    int cascade = 0;
+    \\    if (d > splits.x) {
+    \\        cascade = 1;
+    \\    }
+    \\    if (d > splits.y) {
+    \\        cascade = 2;
+    \\    }
+    \\    if (d > splits.z) {
+    \\        cascade = 3;
+    \\    }
+    \\    if (cascade >= int(s.y + 0.5)) {
+    \\        return 1.0;
+    \\    }
+    \\    float amount = shadowOf(int(s.x + 0.5) + cascade, p, ng, SUN_DIRECTIONS[which].xyz, vec4(s.z, s.w, soft.x, soft.y), turn);
+    \\    return mix(amount, 1.0, smoothstep(soft.z, soft.w, d));
+    \\}
+    \\
+    \\// How lit `p` is by lamp `at`, which is `l` from it: a point light's
+    \\// view is the side of it `p` is on.
+    \\float lampShadow(int at, vec3 p, vec3 ng, vec3 l, float turn) {
+    \\    vec4 s = LAMP_SHADOWS[at];
+    \\    if (s.x < 0.0) {
+    \\        return 1.0;
+    \\    }
+    \\    int view = int(s.x + 0.5);
+    \\    if (s.y > 1.5) {
+    \\        vec3 a = abs(l);
+    \\        if (a.x >= a.y && a.x >= a.z) {
+    \\            if (l.x > 0.0) {
+    \\                view = view + 1;
+    \\            }
+    \\        } else {
+    \\            if (a.y >= a.z) {
+    \\                view = view + 2;
+    \\                if (l.y > 0.0) {
+    \\                    view = view + 1;
+    \\                }
+    \\            } else {
+    \\                view = view + 4;
+    \\                if (l.z > 0.0) {
+    \\                    view = view + 1;
+    \\                }
+    \\            }
+    \\        }
+    \\    }
+    \\    vec4 soft = LAMP_SOFTNESS[at];
+    \\    return shadowOf(view, p, ng, l, vec4(s.z, s.w, soft.x, soft.y), turn);
+    \\}
+    \\
+    \\// One sun's light on a surface at `p`, which faces `ng` and is lit as
+    \\// though it faced `n`.
+    \\vec3 sun(int which, vec3 p, vec3 ng, vec3 n, vec3 v, vec3 albedo, float metallic, float roughness, float turn) {
+    \\    vec3 light = shine(n, v, SUN_DIRECTIONS[which].xyz, albedo, metallic, roughness) * SUN_COLORS[which].rgb;
+    \\    if (light.r + light.g + light.b <= 0.0) {
+    \\        return light;
+    \\    }
+    \\    return light * sunShadow(which, p, ng, turn);
     \\}
     \\
     \\// One lamp's light on a surface at `p`: none for -1.
-    \\vec3 lamp(float which, vec3 p, vec3 n, vec3 v, vec3 albedo, float metallic, float roughness) {
+    \\vec3 lamp(float which, vec3 p, vec3 ng, vec3 n, vec3 v, vec3 albedo, float metallic, float roughness, float turn) {
     \\    if (which < 0.0) {
     \\        return vec3(0.0);
     \\    }
@@ -276,8 +459,22 @@ const engine_part =
     \\    if (aim.w > -1.5) {
     \\        float t = clamp((dot(-l, aim.xyz) - aim.w) / max(1.0 - aim.w, 0.0001), 0.0, 1.0);
     \\        fade = fade * pow(t, LIGHT_CONES[at].x);
+    \\        vec4 cookie = LIGHT_COOKIES[at];
+    \\        if (cookie.z > 0.0) {
+    \\            // Where in its picture `p` is, the top toward its up.
+    \\            vec4 up = LIGHT_UPS[at];
+    \\            vec3 off = p - place.xyz;
+    \\            float along = max(dot(off, aim.xyz), 0.0001) * up.w;
+    \\            vec3 right = cross(aim.xyz, up.xyz);
+    \\            vec2 uv = clamp(vec2(0.5 + 0.5 * dot(off, right) / along, 0.5 - 0.5 * dot(off, up.xyz) / along), vec2(0.002), vec2(0.998));
+    \\            color = vec4(color.rgb * toLinear(sample_level(COOKIE_ATLAS, cookie.xy + uv * cookie.zw, 0.0).rgb), color.w);
+    \\        }
     \\    }
-    \\    return shine(n, v, l, albedo, metallic, roughness) * color.rgb * fade;
+    \\    vec3 light = shine(n, v, l, albedo, metallic, roughness) * color.rgb * fade;
+    \\    if (light.r + light.g + light.b <= 0.0) {
+    \\        return light;
+    \\    }
+    \\    return light * lampShadow(at, p, ng, l, turn);
     \\}
     \\
     \\// A surface lit: by the suns, its lamps and the light from everywhere,
@@ -285,7 +482,8 @@ const engine_part =
     \\vec3 lit(vec3 albedo, float metallic, float roughness, vec3 emission, vec3 normal_map, float ao,
     \\        vec3 p, vec3 normal, vec4 tangent, vec4 lamps_0, vec4 lamps_1) {
     \\    vec3 v = normalize(mix(CAMERA_POSITION.xyz - p, -CAMERA_FORWARD.xyz, CAMERA_FORWARD.w));
-    \\    vec3 n = normalize(normal);
+    \\    vec3 ng = normalize(normal);
+    \\    vec3 n = ng;
     \\    if (FACING.x > 0.5 && dot(n, v) < 0.0) {
     \\        n = -n;
     \\    }
@@ -296,12 +494,13 @@ const engine_part =
     \\        n = normalize(t * (tilt.x * SURFACE.z) + b * (tilt.y * SURFACE.z) + n * tilt.z);
     \\    }
     \\    float m = clamp(metallic, 0.0, 1.0);
-    \\    vec3 light = sun(0, n, v, albedo, m, roughness) + sun(1, n, v, albedo, m, roughness)
-    \\        + sun(2, n, v, albedo, m, roughness) + sun(3, n, v, albedo, m, roughness);
-    \\    light = light + lamp(lamps_0.x, p, n, v, albedo, m, roughness) + lamp(lamps_0.y, p, n, v, albedo, m, roughness)
-    \\        + lamp(lamps_0.z, p, n, v, albedo, m, roughness) + lamp(lamps_0.w, p, n, v, albedo, m, roughness);
-    \\    light = light + lamp(lamps_1.x, p, n, v, albedo, m, roughness) + lamp(lamps_1.y, p, n, v, albedo, m, roughness)
-    \\        + lamp(lamps_1.z, p, n, v, albedo, m, roughness) + lamp(lamps_1.w, p, n, v, albedo, m, roughness);
+    \\    float turn = pixelTurn(p);
+    \\    vec3 light = sun(0, p, ng, n, v, albedo, m, roughness, turn) + sun(1, p, ng, n, v, albedo, m, roughness, turn)
+    \\        + sun(2, p, ng, n, v, albedo, m, roughness, turn) + sun(3, p, ng, n, v, albedo, m, roughness, turn);
+    \\    light = light + lamp(lamps_0.x, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_0.y, p, ng, n, v, albedo, m, roughness, turn)
+    \\        + lamp(lamps_0.z, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_0.w, p, ng, n, v, albedo, m, roughness, turn);
+    \\    light = light + lamp(lamps_1.x, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.y, p, ng, n, v, albedo, m, roughness, turn)
+    \\        + lamp(lamps_1.z, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.w, p, ng, n, v, albedo, m, roughness, turn);
     \\    vec3 f0 = mix(vec3(0.04), albedo, m);
     \\    light = light + (albedo * (1.0 - m) + f0) * AMBIENT.rgb * ao;
     \\    vec3 color = mix(light, albedo, FEEL.x) + emission;
@@ -344,6 +543,14 @@ const epilogue = " if (ALPHA < FEEL.z) { discard; }" ++
     " target = vec4(lit(ALBEDO, METALLIC, ROUGHNESS, EMISSION, NORMAL_MAP, AO, WORLD_POSITION, WORLD_NORMAL, WORLD_TANGENT, LIGHT_LIST_0, LIGHT_LIST_1), ALPHA); ";
 
 pub const epilogue_len: u32 = epilogue.len;
+
+/// What a shadow caster's ends with: only what its alpha leaves out. It is
+/// compiled to give no colour at all.
+const caster_epilogue = " if (ALPHA < FEEL.z) { discard; } ";
+
+/// What a `.shader3d` file is compiled as: the surface lit, or what casts
+/// its shadow - the same surface, its depth alone.
+pub const Variant = enum { lit, caster };
 
 /// The engine's own: the surface as the material says.
 pub const plain =
@@ -399,6 +606,12 @@ pub const Whole = struct {
 /// its fragment stage written on the lines of its braces, and the engine's
 /// part after it. The caller owns `source`.
 pub fn whole(gpa: Allocator, text: []const u8) Allocator.Error!Whole {
+    return wholeAs(gpa, text, .lit);
+}
+
+/// `whole` for `variant`: a caster's stage ends by leaving out what its alpha
+/// does, and writes nothing.
+pub fn wholeAs(gpa: Allocator, text: []const u8, variant: Variant) Allocator.Error!Whole {
     var failure: shader.lex.Failure = undefined;
     const tokens = shader.lex.tokenize(gpa, text, &failure) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -453,7 +666,7 @@ pub fn whole(gpa: Allocator, text: []const u8) Allocator.Error!Whole {
         w.writeAll(text[0..start]) catch return error.OutOfMemory;
         w.writeAll(prologue) catch return error.OutOfMemory;
         w.writeAll(text[start..end]) catch return error.OutOfMemory;
-        w.writeAll(epilogue) catch return error.OutOfMemory;
+        w.writeAll(if (variant == .lit) epilogue else caster_epilogue) catch return error.OutOfMemory;
         w.writeAll(text[end..]) catch return error.OutOfMemory;
     } else w.writeAll(text) catch return error.OutOfMemory;
     w.writeAll("\n") catch return error.OutOfMemory;
@@ -506,11 +719,24 @@ pub const Compiled = struct {
     /// Whether the device refused a pipeline of it: then what names it is
     /// drawn as though it named none.
     refused: bool = false,
+    /// What casts its shadow: the same surface, drawn as depth alone.
+    caster: Caster,
+
+    /// The caster variant, and its pipelines by the side culled.
+    pub const Caster = struct {
+        module: shader.Module,
+        gpu: rhi.Shader,
+        pipelines: [3]rhi.Pipeline = @splat(.none),
+        refused: bool = false,
+    };
 
     pub fn deinit(self: *Compiled, device: *rhi.Device) void {
         for (self.pipelines) |row| for (row) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
+        for (self.caster.pipelines) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
         device.destroyShader(self.gpu);
+        device.destroyShader(self.caster.gpu);
         self.module.deinit();
+        self.caster.module.deinit();
         self.* = undefined;
     }
 
@@ -520,41 +746,16 @@ pub const Compiled = struct {
         const row = std.math.log2_int(u32, samples);
         const held = &self.pipelines[row][way.index()];
         if (!held.isNone()) return held.*;
-        const module = &self.module;
-        var attributes: [16]rhi.VertexAttribute = undefined;
-        var strides: [2]u32 = @splat(0);
-        for (module.attributes, 0..) |a, i| {
-            const buffer = bufferOf(a.name);
-            const format = vertexFormat(a.name, a.ty).?;
-            attributes[i] = .{ .location = a.location, .format = format, .offset = strides[buffer], .buffer = buffer };
-            strides[buffer] += format.size();
-        }
-        std.debug.assert(strides[0] == @sizeOf(mesh.Vertex));
-        std.debug.assert(strides[1] == @sizeOf(Instance));
         const see_through = way.blend;
-        held.* = device.createPipeline(.{
-            .shader = self.gpu,
-            .attributes = attributes[0..module.attributes.len],
-            .buffers = &.{
-                .{ .stride = strides[0] },
-                .{ .stride = strides[1], .step = .instance },
-            },
-            .topology = .triangles,
+        held.* = makePipeline(device, &self.module, self.gpu, .{
             .blend = if (see_through) .alpha else .solid,
             // See-through meshes are tested against the solid ones and
             // write no depth: one behind another still shows through.
             .depth = .{ .test_enabled = true, .write = !see_through, .compare = .less },
-            .cull = switch (way.cull) {
-                .back => .back,
-                .front => .front,
-                .disabled => .none,
-            },
-            .front_face = .ccw,
+            .cull = cullOf(way.cull),
             .color_format = color_format,
             .depth_format = depth_format,
             .samples = samples,
-            .uniform_blocks = (try module.uniformBlockNames()).?,
-            .textures = (try module.textureNames()).?,
             .label = "3D",
         }) catch |err| {
             self.refused = true;
@@ -563,7 +764,91 @@ pub const Compiled = struct {
         };
         return held.*;
     }
+
+    /// The pipeline what it draws casts a shadow with, into a `depth_format`
+    /// atlas: depth alone, pushed back by its slope, so a surface does not
+    /// shadow itself.
+    pub fn casterPipelineOf(self: *Compiled, device: *rhi.Device, depth_format: rhi.Format, cull: Material3DData.Cull) !rhi.Pipeline {
+        const held = &self.caster.pipelines[@intFromEnum(cull)];
+        if (!held.isNone()) return held.*;
+        held.* = makePipeline(device, &self.caster.module, self.caster.gpu, .{
+            .depth = .{ .test_enabled = true, .write = true, .compare = .less, .slope_bias = caster_slope_bias },
+            .cull = cullOf(cull),
+            .color_format = null,
+            .depth_format = depth_format,
+            .label = "3D shadow",
+        }) catch |err| {
+            self.caster.refused = true;
+            log.err("the graphics driver refused a 3D shader's shadow pipeline: {s}", .{device.diagnostics()});
+            return err;
+        };
+        return held.*;
+    }
 };
+
+/// How far what casts a shadow is pushed back, times its depth's slope.
+pub const caster_slope_bias = 1.5;
+
+/// What a 3D pipeline is drawn into, and how.
+const PipelineWay = struct {
+    blend: rhi.BlendState = .solid,
+    depth: rhi.DepthState,
+    cull: rhi.CullMode,
+    color_format: ?rhi.Format,
+    depth_format: rhi.Format,
+    samples: u32 = 1,
+    label: []const u8,
+};
+
+fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, way: PipelineWay) !rhi.Pipeline {
+    var attributes: [16]rhi.VertexAttribute = undefined;
+    var strides: [2]u32 = @splat(0);
+    for (module.attributes, 0..) |a, i| {
+        const buffer = bufferOf(a.name);
+        const format = vertexFormat(a.name, a.ty).?;
+        attributes[i] = .{ .location = a.location, .format = format, .offset = strides[buffer], .buffer = buffer };
+        strides[buffer] += format.size();
+    }
+    std.debug.assert(strides[0] == @sizeOf(mesh.Vertex));
+    std.debug.assert(strides[1] == @sizeOf(Instance));
+    return device.createPipeline(.{
+        .shader = gpu,
+        .attributes = attributes[0..module.attributes.len],
+        .buffers = &.{
+            .{ .stride = strides[0] },
+            .{ .stride = strides[1], .step = .instance },
+        },
+        .topology = .triangles,
+        .blend = way.blend,
+        .depth = way.depth,
+        .cull = way.cull,
+        .front_face = .ccw,
+        .color_format = way.color_format,
+        .depth_format = way.depth_format,
+        .samples = way.samples,
+        .uniform_blocks = try blockNames(module),
+        .textures = (try module.textureNames()).?,
+        .label = way.label,
+    });
+}
+
+/// Its blocks' names by slot: none at the file's own slot when it has no
+/// block there, which the device binds nothing to.
+fn blockNames(module: *shader.Module) ![]const [:0]const u8 {
+    const arena = module.arena.allocator();
+    const names = try arena.alloc([:0]const u8, shadows_slot + 1);
+    @memset(names, "");
+    for (module.blocks) |block| names[block.slot] = try arena.dupeZ(u8, block.name);
+    return names;
+}
+
+fn cullOf(cull: Material3DData.Cull) rhi.CullMode {
+    return switch (cull) {
+        .back => .back,
+        .front => .front,
+        .disabled => .none,
+    };
+}
 
 /// Which attributes are the mesh's own; the rest are per instance.
 fn bufferOf(name: []const u8) u32 {
@@ -588,7 +873,31 @@ fn vertexFormat(name: []const u8, ty: shader.Type) ?rhi.VertexFormat {
 /// `problems`, at the file's own lines, and is `error.ShaderFailed`.
 /// Its pipelines are made when it is first drawn.
 pub fn compile(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []const u8, problems: *std.Io.Writer) (error{ShaderFailed} || Allocator.Error || rhi.Error)!Compiled {
-    const built = try whole(gpa, text);
+    var lit = try compileAs(gpa, device, text, label, .lit, problems);
+    errdefer {
+        device.destroyShader(lit.gpu);
+        lit.module.deinit();
+    }
+    // The caster is the same file: what is wrong with it was said above.
+    const caster = try compileAs(gpa, device, text, label, .caster, problems);
+    return .{
+        .module = lit.module,
+        .gpu = lit.gpu,
+        .params = lit.params,
+        .writes_normal_map = lit.writes_normal_map,
+        .caster = .{ .module = caster.module, .gpu = caster.gpu },
+    };
+}
+
+const Variant3D = struct {
+    module: shader.Module,
+    gpu: rhi.Shader,
+    params: ?shader.Block,
+    writes_normal_map: bool,
+};
+
+fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []const u8, variant: Variant, problems: *std.Io.Writer) (error{ShaderFailed} || Allocator.Error || rhi.Error)!Variant3D {
+    const built = try wholeAs(gpa, text, variant);
     defer gpa.free(built.source);
     if (try built.trespassMessage(gpa, text)) |message| {
         defer gpa.free(message);
@@ -597,7 +906,7 @@ pub fn compile(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []c
     }
     var said: std.Io.Writer.Allocating = .init(gpa);
     defer said.deinit();
-    var module = shader.compile(gpa, built.source, &said.writer) catch |err| switch (err) {
+    var module = shader.compileWith(gpa, built.source, &said.writer, .{ .depth_only = variant == .caster }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.CompileFailed => {
             material.tellOfLines(said.written(), built.engine_line, problems);
@@ -609,14 +918,14 @@ pub fn compile(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []c
     // One block of its own, at its slot, and no textures but the engine's.
     var params: ?shader.Block = null;
     for (module.blocks) |block| {
-        if (block.slot < params_slot) continue;
+        if (block.slot < params_slot or block.slot == shadows_slot) continue;
         if (block.slot != params_slot or params != null) {
             problems.print("a 3D shader's own numbers are one uniform block, at slot {d}: `{s}` is at {d}\n", .{ params_slot, block.name, block.slot }) catch {};
             return error.ShaderFailed;
         }
         params = block;
     }
-    if (module.textures.len != 5) {
+    if (module.textures.len != texture_count) {
         problems.writeAll("a 3D shader reads the material's pictures; textures of its own are not here yet\n") catch {};
         return error.ShaderFailed;
     }
@@ -641,7 +950,8 @@ fn checkLayout(module: *const shader.Module) void {
     inline for (.{
         .{ "VIEW_PROJECTION", "view_projection" }, .{ "CAMERA_POSITION", "camera_position" }, .{ "CAMERA_FORWARD", "camera_forward" },
         .{ "SUN_DIRECTIONS", "sun_directions" },   .{ "SUN_COLORS", "sun_colors" },           .{ "AMBIENT", "ambient" },
-        .{ "FOG_COLOR", "fog_color" },             .{ "FOG_HEIGHT", "fog_height" },           .{ "TIME", "time" },
+        .{ "FOG_COLOR", "fog_color" },             .{ "FOG_HEIGHT", "fog_height" },           .{ "SCREEN", "screen" },
+        .{ "TIME", "time" },
     }) |pair| std.debug.assert(frame.offsetOf(pair[0]).? == @offsetOf(Frame, pair[1]));
     std.debug.assert(frame.size <= @sizeOf(Frame));
     const look = module.block("Material").?;
@@ -651,10 +961,18 @@ fn checkLayout(module: *const shader.Module) void {
     }) |pair| std.debug.assert(look.offsetOf(pair[0]).? == @offsetOf(Look, pair[1]));
     std.debug.assert(look.size == @sizeOf(Look));
     const lights = module.block("Lights").?;
-    inline for (.{ .{ "LIGHT_PLACES", "places" }, .{ "LIGHT_COLORS", "colors" }, .{ "LIGHT_AIMS", "aims" }, .{ "LIGHT_CONES", "cones" } }) |pair| {
+    inline for (.{ .{ "LIGHT_PLACES", "places" }, .{ "LIGHT_COLORS", "colors" }, .{ "LIGHT_AIMS", "aims" }, .{ "LIGHT_CONES", "cones" }, .{ "LIGHT_UPS", "ups" }, .{ "LIGHT_COOKIES", "cookies" } }) |pair| {
         std.debug.assert(lights.offsetOf(pair[0]).? == @offsetOf(Lights, pair[1]));
     }
     std.debug.assert(lights.size == @sizeOf(Lights));
+    const shadows = module.block("Shadows").?;
+    inline for (.{
+        .{ "SHADOW_MATRICES", "matrices" }, .{ "SHADOW_RECTS", "rects" },          .{ "SHADOW_VIEWS", "views" },
+        .{ "LAMP_SHADOWS", "lamps" },       .{ "LAMP_SOFTNESS", "lamp_softness" }, .{ "SUN_SHADOWS", "suns" },
+        .{ "SUN_SPLITS", "sun_splits" },    .{ "SUN_SOFTNESS", "sun_softness" },   .{ "SHADOW_ATLAS", "atlas" },
+    }) |pair| std.debug.assert(shadows.offsetOf(pair[0]).? == @offsetOf(shadows3d.Shadows, pair[1]));
+    std.debug.assert(shadows.size == @sizeOf(shadows3d.Shadows));
+    std.debug.assert(module.textures[shadow_map_slot].shadow and !module.textures[shadow_depth_slot].shadow);
 }
 
 // -------------------------------------------------------------------------
@@ -662,9 +980,11 @@ fn checkLayout(module: *const shader.Module) void {
 // -------------------------------------------------------------------------
 
 test "the blocks and an instance are laid out as the shader reads them" {
-    try testing.expectEqual(@as(usize, 288), @sizeOf(Frame));
+    try testing.expectEqual(@as(usize, 304), @sizeOf(Frame));
     try testing.expectEqual(@as(usize, 96), @sizeOf(Look));
-    try testing.expectEqual(@as(usize, 4096), @sizeOf(Lights));
+    try testing.expectEqual(@as(usize, 6144), @sizeOf(Lights));
+    // Under the sixteen kilobytes every device binds a block of.
+    try testing.expect(@sizeOf(shadows3d.Shadows) <= 16384);
     try testing.expectEqual(@as(usize, 148), @sizeOf(Instance));
     try testing.expectEqual(@as(usize, 52), @sizeOf(mesh.Vertex));
     for (0..Way.count) |at| try testing.expectEqual(at, Way.of(at).index());

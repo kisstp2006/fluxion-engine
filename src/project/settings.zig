@@ -222,8 +222,33 @@ pub const Rendering = struct {
     /// An edge smoother run over the finished 3D picture: cheaper than more
     /// samples, and softer.
     screen_space_aa: ScreenSpaceAa = .disabled,
+    /// How large the one picture every 3D shadow is drawn into is, a side:
+    /// larger is sharper, and more memory.
+    shadow_atlas_size: ShadowAtlasSize = .x4096,
+    /// How a shadow's edge is smoothed: hard reads the shadow once, soft
+    /// more times for a smoother edge.
+    shadow_filter: ShadowFilter = .soft_medium,
 
     pub const TextureFilter = enum { nearest, linear };
+
+    pub const ShadowAtlasSize = enum {
+        x1024,
+        x2048,
+        x4096,
+        x8192,
+
+        /// Pixels a side.
+        pub fn pixels(self: ShadowAtlasSize) u32 {
+            return switch (self) {
+                .x1024 => 1024,
+                .x2048 => 2048,
+                .x4096 => 4096,
+                .x8192 => 8192,
+            };
+        }
+    };
+
+    pub const ShadowFilter = enum { hard, soft_low, soft_medium, soft_high };
 
     pub const Msaa = enum {
         disabled,
@@ -326,6 +351,8 @@ pub const Rendering = struct {
         .default_texture_filter = .{ attr.Restart{}, attr.Doc{ .text = "How a texture is sampled when it does not say: nearest for pixel art, linear for a painting." } },
         .msaa_3d = .{ attr.Label{ .text = "MSAA 3D" }, attr.Doc{ .text = "How many samples a pixel the 3D layer is drawn with: smoother edges for more work. Where the device has fewer, the most it has." } },
         .screen_space_aa = .{ attr.Label{ .text = "Screen space AA" }, attr.Doc{ .text = "An edge smoother run over the finished 3D picture: cheaper than more samples, and softer." } },
+        .shadow_atlas_size = .{attr.Doc{ .text = "How large the one picture every 3D shadow is drawn into is, a side: larger is sharper, and more memory." }},
+        .shadow_filter = .{attr.Doc{ .text = "How a 3D shadow's edge is smoothed: hard reads the shadow once, soft more times for a smoother edge." }},
     };
 };
 

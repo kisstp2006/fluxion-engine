@@ -45,7 +45,7 @@ pub const MeshInstance3D = extern struct {
     /// The render layers it is on: a camera whose `cull_mask` has none of
     /// them does not see it.
     layers: u32 = 1,
-    /// Whether it throws a shadow, once lights do.
+    /// Whether it casts a shadow where a light that casts them reaches it.
     cast_shadow: bool = true,
 
     pub const reflect_name = "MeshInstance3D";
@@ -258,15 +258,50 @@ pub const Camera3D = extern struct {
 
 /// Light from far away, all one way - the sun: along its `Transform3D`'s
 /// `-z`. The first four found light the world.
+///
+/// With `shadow`, what it lights casts a shadow, up to `shadow_max_distance`
+/// from the camera, fading out before it. The view is cut into
+/// `shadow_cascades`, nearest smallest, so near shadows stay sharp.
 pub const DirectionalLight3D = extern struct {
     color: Color = .white,
     /// How bright: one is the colour as it is.
     energy: f32 = 1,
+    shadow: bool = false,
+    shadow_bias: f32 = 1,
+    shadow_normal_bias: f32 = 1.5,
+    shadow_blur: f32 = 1,
+    shadow_cascades: ShadowCascades = .four,
+    shadow_max_distance: f32 = 100,
+    /// How wide it looks across, in radians: a wider one's shadows soften
+    /// the further they fall from what casts them. The sun is about half a
+    /// degree; nought is a point.
+    angular_size: f32 = 0,
+
+    pub const ShadowCascades = enum(u8) {
+        one,
+        two,
+        four,
+
+        pub fn count(self: ShadowCascades) u32 {
+            return switch (self) {
+                .one => 1,
+                .two => 2,
+                .four => 4,
+            };
+        }
+    };
 
     pub const reflect_name = "DirectionalLight3D";
     pub const reflect_fields = .{
         .color = .{attr.Doc{ .text = "The light's colour" }},
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is" } },
+        .shadow = .{ attr.Group{ .name = "Shadow" }, attr.Doc{ .text = "Whether what it lights casts a shadow" } },
+        .shadow_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How far the point a shadow is looked up for is moved toward the light, in the shadow's texels: more keeps a surface from shadowing itself, and moves the shadow off what casts it" } },
+        .shadow_normal_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How far it is moved out along its surface, in the shadow's texels: what keeps a slope from shadowing itself" } },
+        .shadow_blur = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How soft the shadow's edge is: one is the project's shadow filter as it is, nought a hard edge" } },
+        .shadow_cascades = .{attr.Doc{ .text = "How many pieces the view is cut into for its shadow, nearest smallest: more keeps near shadows sharper" }},
+        .shadow_max_distance = .{ attr.Range{ .min = 0.1, .max = 100_000 }, attr.Doc{ .text = "How far from the camera there are shadows: they fade out before it" } },
+        .angular_size = .{ attr.Angle{}, attr.Range{ .min = 0, .max = std.math.degreesToRadians(10.0) }, attr.Doc{ .text = "How wide it looks across: a wider one's shadows soften the further they fall from what casts them" } },
     };
 };
 
@@ -287,6 +322,14 @@ pub const PointLight3D = extern struct {
     distance_fade_begin: f32 = 40,
     /// How much further it takes to disappear.
     distance_fade_length: f32 = 10,
+    /// Whether what it lights casts a shadow.
+    shadow: bool = false,
+    shadow_bias: f32 = 1,
+    shadow_normal_bias: f32 = 1.5,
+    shadow_blur: f32 = 1,
+    /// How big it is, in units: a bigger one's shadows soften the further
+    /// they fall from what casts them. Nought is a point.
+    size: f32 = 0,
 
     pub const reflect_name = "PointLight3D";
     pub const reflect_fields = .{
@@ -297,11 +340,18 @@ pub const PointLight3D = extern struct {
         .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
         .distance_fade_begin = .{ attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
         .distance_fade_length = .{ attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },
+        .shadow = .{ attr.Group{ .name = "Shadow" }, attr.Doc{ .text = "Whether what it lights casts a shadow" } },
+        .shadow_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How far the point a shadow is looked up for is moved toward the light, in the shadow's texels: more keeps a surface from shadowing itself, and moves the shadow off what casts it" } },
+        .shadow_normal_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How far it is moved out along its surface, in the shadow's texels: what keeps a slope from shadowing itself" } },
+        .shadow_blur = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How soft the shadow's edge is: one is the project's shadow filter as it is, nought a hard edge" } },
+        .size = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How big it is: a bigger one's shadows soften the further they fall from what casts them" } },
     };
 };
 
 /// Light from a point, in a cone: a torch, a stage light. It shines along
 /// its `Transform3D`'s `-z`, `angle` either side of it, and reaches `range`.
+/// With a `cookie`, it shines through that picture: its light takes the
+/// picture's colours across the cone, the picture's top toward its `+y`.
 pub const SpotLight3D = extern struct {
     color: Color = .white,
     energy: f32 = 1,
@@ -314,6 +364,12 @@ pub const SpotLight3D = extern struct {
     distance_fade: bool = false,
     distance_fade_begin: f32 = 40,
     distance_fade_length: f32 = 10,
+    shadow: bool = false,
+    shadow_bias: f32 = 1,
+    shadow_normal_bias: f32 = 1.5,
+    shadow_blur: f32 = 1,
+    size: f32 = 0,
+    cookie: assets.TextureHandle = .none,
 
     pub const reflect_name = "SpotLight3D";
     pub const reflect_fields = .{
@@ -326,6 +382,12 @@ pub const SpotLight3D = extern struct {
         .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
         .distance_fade_begin = .{ attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
         .distance_fade_length = .{ attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },
+        .shadow = .{ attr.Group{ .name = "Shadow" }, attr.Doc{ .text = "Whether what it lights casts a shadow" } },
+        .shadow_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How far the point a shadow is looked up for is moved toward the light, in the shadow's texels: more keeps a surface from shadowing itself, and moves the shadow off what casts it" } },
+        .shadow_normal_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How far it is moved out along its surface, in the shadow's texels: what keeps a slope from shadowing itself" } },
+        .shadow_blur = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How soft the shadow's edge is: one is the project's shadow filter as it is, nought a hard edge" } },
+        .size = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How big it is: a bigger one's shadows soften the further they fall from what casts them" } },
+        .cookie = .{ attr.Group{ .name = "Cookie" }, attr.Doc{ .text = "A picture it shines through: its light takes the picture's colours across its cone, the top toward its up" } },
     };
 };
 

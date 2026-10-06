@@ -18,6 +18,16 @@
 //! made linear as they are read - a picture's, a material's - and light
 //! adds up as it does: brighter than white where it is.
 //!
+//! **Shadows.** A light with `shadow` on has what it lights cast one: see
+//! `shadows3d.zig`. Before the world is drawn, what each such light sees of
+//! it is drawn into the shadow atlas - each mesh with `cast_shadow` whose
+//! box is in a light's view, drawn by its own shader's caster - and the
+//! world is then lit through it.
+//!
+//! **Cookies.** A spot light's `cookie` is drawn into a tile of the cookie
+//! atlas - sixteen pictures at most in a frame - the first frame it is
+//! needed, and the light takes its colours across its cone.
+//!
 //! **The environment.** The first `Environment` that is visible says what
 //! is behind everything, the light from everywhere, the fog, and how the
 //! light becomes a picture: exposure, tone and glow - see `post3d.zig`.
@@ -39,6 +49,7 @@ const Allocator = std.mem.Allocator;
 const ecs = @import("fluxion_ecs");
 const math = @import("fluxion_math");
 const rhi = @import("fluxion_rhi");
+const shader = @import("fluxion_shader");
 
 const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
@@ -50,6 +61,7 @@ const mesh = @import("mesh.zig");
 const post3d = @import("post3d.zig");
 const shader3d = @import("shader3d.zig");
 const shaders = @import("shaders.zig");
+const shadows3d = @import("shadows3d.zig");
 const UniformBlocks = @import("uniform_blocks.zig").UniformBlocks;
 const View3D = @import("view3d.zig").View3D;
 
@@ -166,10 +178,49 @@ const Lamp = struct {
     cone: f32,
     /// How far it is from the camera.
     distance: f32,
+    /// Half a spot light's cone, in radians.
+    angle: f32 = 0,
+    /// A spot light's up: its cookie's top.
+    up: math.Vec3 = .unit_y,
+    /// Its cookie's picture, and the tile of the cookie atlas it is in.
+    cookie: rhi.Texture = .none,
+    cookie_tile: u32 = 0,
+    /// Its shadow, where it casts one.
+    shadow: ?shadows3d.Settings = null,
 
     fn nearer(_: void, a: Lamp, b: Lamp) bool {
         return a.distance < b.distance;
     }
+};
+
+/// A sun the frame is lit by.
+const Sun = struct {
+    toward: math.Vec3,
+    /// Its colour times its energy, linear.
+    color: [4]f32,
+    /// Its shadow, where it casts one.
+    shadow: ?shadows3d.Sun = null,
+};
+
+/// A surface drawn into one view of the shadow atlas.
+const ShadowItem = struct {
+    view: u32,
+    item: Item,
+
+    fn before(_: void, a: ShadowItem, b: ShadowItem) bool {
+        if (a.view != b.view) return a.view < b.view;
+        return Item.order(a.item, b.item) == .lt;
+    }
+
+    fn joins(a: ShadowItem, b: ShadowItem) bool {
+        return a.view == b.view and Item.joins(a.item, b.item);
+    }
+};
+
+/// A surface that casts a shadow, and where its mesh is.
+const Caster = struct {
+    item: Item,
+    bounds: math.Aabb,
 };
 
 const DistanceFade = struct {
@@ -231,6 +282,38 @@ pub const Renderer3D = struct {
     look_offsets: std.ArrayList(u32) = .empty,
     param_offsets: std.ArrayList(u32) = .empty,
 
+    /// Every shadow's numbers, as the shader's `Shadows` block says.
+    shadows: rhi.Buffer,
+    /// The atlas the frame's shadows are drawn into, made the first time a
+    /// light casts one and let go a few frames after none does; its size.
+    atlas: ?rhi.Texture = null,
+    atlas_size: u32 = 0,
+    atlas_idle: u32 = 0,
+    /// What it is made as: null where the device reads no depth, and no
+    /// shadows are drawn.
+    atlas_format: ?rhi.Format,
+    /// Bound where the atlas is read when there is none: a depth of one.
+    no_shadow: rhi.Texture,
+    /// The atlas read by comparing, and as it is.
+    comparing: rhi.Sampler,
+    reading: rhi.Sampler,
+    plan: shadows3d.Plan = .{},
+    suns: std.ArrayList(Sun) = .empty,
+    shadow_lamps: std.ArrayList(shadows3d.Lamp) = .empty,
+    casters: std.ArrayList(Caster) = .empty,
+    shadow_items: std.ArrayList(ShadowItem) = .empty,
+    /// The spot lights' cookies, a tile each, made the first time a light
+    /// has one; what picture each tile holds, drawn again only when that
+    /// changes; and what draws one into its tile.
+    cookie_atlas: ?rhi.Texture = null,
+    cookie_tiles: [cookie_across * cookie_across]rhi.Texture = @splat(.none),
+    cookie_copy: ?CookieCopy = null,
+    /// Each view's `Frame`, in one buffer the shadow pass binds a part of.
+    shadow_frames: UniformBlocks = .{ .label = "3D shadow views" },
+    frame_offsets: std.ArrayList(u32) = .empty,
+    /// The frame's numbers, as the last draw wrote them.
+    frame_data: Frame = undefined,
+
     /// What the last draw drew: meshes, and the draws they took.
     drawn: u32 = 0,
     draw_calls: u32 = 0,
@@ -240,8 +323,18 @@ pub const Renderer3D = struct {
     /// with.
     lamps_kept: u32 = 0,
     samples: u32 = 1,
+    /// The views of the atlas the last draw drew, the surfaces drawn into
+    /// them, and the draws they took.
+    shadow_views: u32 = 0,
+    shadow_casters: u32 = 0,
+    shadow_draws: u32 = 0,
 
     const initial_capacity = 64;
+    /// Draws an atlas no light has needed is kept for.
+    const atlas_kept = 3;
+    /// How large a cookie's tile is, and how many there are across.
+    const cookie_size = 256;
+    const cookie_across = 4;
 
     pub fn init(gpa: Allocator, device: *rhi.Device) !Renderer3D {
         const frame = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(Frame), .dynamic = true, .label = "3D frame" });
@@ -255,6 +348,20 @@ pub const Renderer3D = struct {
         errdefer device.destroyTexture(white);
         const flat = try device.createTexture(.{ .width = 1, .height = 1, .data = &flat_normal, .label = "no normal map" });
         errdefer device.destroyTexture(flat);
+        const shadow_block = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(shadows3d.Shadows), .dynamic = true, .label = "3D shadows" });
+        errdefer device.destroyBuffer(shadow_block);
+        const atlas_format = atlasFormat(device);
+        const no_shadow = try noShadow(device, atlas_format, white);
+        errdefer if (no_shadow != white) device.destroyTexture(no_shadow);
+        const filtered = if (atlas_format) |format| device.caps().formatSupport(format).filterable else false;
+        const comparing = try device.createSampler(.{
+            .min_filter = if (filtered) .linear else .nearest,
+            .mag_filter = if (filtered) .linear else .nearest,
+            .compare = .less_equal,
+        });
+        errdefer device.destroySampler(comparing);
+        const reading = try device.createSampler(.nearest);
+        errdefer device.destroySampler(reading);
         var self: Renderer3D = .{
             .device = device,
             .depth_format = depthFormat(device),
@@ -264,7 +371,13 @@ pub const Renderer3D = struct {
             .capacity = initial_capacity,
             .white = white,
             .flat = flat,
+            .shadows = shadow_block,
+            .atlas_format = atlas_format,
+            .no_shadow = no_shadow,
+            .comparing = comparing,
+            .reading = reading,
         };
+        if (atlas_format == null) log.warn("the {t} backend reads no depth here: 3D lights cast no shadows", .{device.info().backend});
         const depth_format = self.depth_format orelse {
             log.warn("the {t} backend draws into no depth format here: nothing 3D is drawn", .{device.info().backend});
             return self;
@@ -278,6 +391,30 @@ pub const Renderer3D = struct {
         errdefer self.plain.?.deinit(device);
         self.post = try .init(gpa, device, depth_format);
         return self;
+    }
+
+    /// The most precise depth the device draws into and reads: what the
+    /// shadow atlas is made as.
+    fn atlasFormat(device: *rhi.Device) ?rhi.Format {
+        for ([_]rhi.Format{ .depth32_float, .depth24_stencil8, .depth16_unorm }) |format| {
+            const support = device.caps().formatSupport(format);
+            if (support.render_target and support.sampled) return format;
+        }
+        return null;
+    }
+
+    /// A depth texture of one texel, at one: what is read where there is no
+    /// atlas, by a shader that reads none of it. `white` where there is no
+    /// depth to read.
+    fn noShadow(device: *rhi.Device, format: ?rhi.Format, white: rhi.Texture) !rhi.Texture {
+        const depth = format orelse return white;
+        const texture = try device.createTexture(.{ .width = 1, .height = 1, .format = depth, .usage = .{ .sampled = true, .render_target = true }, .label = "no shadow" });
+        errdefer device.destroyTexture(texture);
+        const list = device.begin();
+        try list.beginPass(.{ .depth = .{ .texture = texture } });
+        try list.endPass();
+        try device.submit();
+        return texture;
     }
 
     /// The most precise depth the device draws into.
@@ -300,6 +437,20 @@ pub const Renderer3D = struct {
         device.destroyBuffer(self.instances);
         device.destroyTexture(self.white);
         device.destroyTexture(self.flat);
+        device.destroyBuffer(self.shadows);
+        if (self.atlas) |atlas| device.destroyTexture(atlas);
+        if (self.no_shadow != self.white) device.destroyTexture(self.no_shadow);
+        device.destroySampler(self.comparing);
+        device.destroySampler(self.reading);
+        self.plan.deinit(gpa);
+        self.suns.deinit(gpa);
+        self.shadow_lamps.deinit(gpa);
+        self.casters.deinit(gpa);
+        self.shadow_items.deinit(gpa);
+        self.shadow_frames.deinit(gpa, device);
+        self.frame_offsets.deinit(gpa);
+        if (self.cookie_atlas) |atlas| device.destroyTexture(atlas);
+        if (self.cookie_copy) |*copy| copy.deinit(device);
         self.gathered.deinit(gpa);
         self.items.deinit(gpa);
         self.staging.deinit(gpa);
@@ -317,6 +468,14 @@ pub const Renderer3D = struct {
     pub fn tick(self: *Renderer3D) void {
         self.last_depth = null;
         if (self.post) |*held| held.tick();
+        if (self.atlas) |atlas| {
+            self.atlas_idle += 1;
+            if (self.atlas_idle > atlas_kept) {
+                self.device.destroyTexture(atlas);
+                self.atlas = null;
+                self.atlas_size = 0;
+            }
+        }
     }
 
     /// Draw the 3D world through `view` into `into`, which is `width` by
@@ -327,6 +486,9 @@ pub const Renderer3D = struct {
         self.draw_calls = 0;
         self.culled = 0;
         self.lamps_kept = 0;
+        self.shadow_views = 0;
+        self.shadow_casters = 0;
+        self.shadow_draws = 0;
         if (width == 0 or height == 0) return;
         const gpa = app.gpa;
         const device = self.device;
@@ -345,16 +507,23 @@ pub const Renderer3D = struct {
         };
 
         const frustum: math.Frustum = .fromViewProjection(view_projection, clip);
+        const rendering: Project.Rendering = if (app.project.settings) |held| held.rendering else .{};
         try self.gatherLamps(app, view, frustum);
-        try self.gather(app, view, frustum);
+        try self.gatherSuns(app);
+        try self.planShadows(gpa, view, rendering);
+        try self.gather(app, view, frustum, self.plan.views.items.len > 0);
+        try self.gatherShadowItems(gpa);
         std.mem.sort(Item, self.items.items, {}, Item.before);
         self.staging.clearRetainingCapacity();
-        try self.staging.ensureTotalCapacity(gpa, self.items.items.len);
+        try self.staging.ensureTotalCapacity(gpa, self.items.items.len + self.shadow_items.items.len);
         for (self.items.items) |item| self.staging.appendAssumeCapacity(self.gathered.items[item.instance]);
+        for (self.shadow_items.items) |shadowed| self.staging.appendAssumeCapacity(self.gathered.items[shadowed.item.instance]);
         try self.upload(gpa);
+        try self.placeCookies(gpa);
         try self.uploadFrame(app, view, view_projection, environment, lighting);
+        try self.drawShadows(gpa);
+        const shadow_map = if (self.shadow_views > 0) self.atlas.? else self.no_shadow;
 
-        const rendering: Project.Rendering = if (app.project.settings) |held| held.rendering else .{};
         const samples = if (lighting.antialias) post.samplesFor(rendering.msaa_3d.samples()) else 1;
         self.samples = samples;
         const targets = try post.targetsAt(gpa, width, height, samples);
@@ -391,7 +560,11 @@ pub const Renderer3D = struct {
                 const set = self.param_sets.items[first.params];
                 try list.setUniformBufferRange(shader3d.params_slot, self.blocks.buffer.?, self.param_offsets.items[first.params], set.len);
             }
+            try list.setUniformBuffer(shader3d.shadows_slot, self.shadows);
             for (first.textures, 0..) |texture, slot| try list.setTexture(@intCast(slot), texture, first.sampler);
+            try list.setTexture(shader3d.shadow_map_slot, shadow_map, self.comparing);
+            try list.setTexture(shader3d.shadow_depth_slot, shadow_map, self.reading);
+            try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
             try list.setIndexBuffer(first.gpu.indices, .u32);
@@ -420,10 +593,14 @@ pub const Renderer3D = struct {
             .ambient = .{ ambient.r, ambient.g, ambient.b, 1 },
             .fog_color = @splat(0),
             .fog_height = @splat(0),
+            .screen = .{ view.width, view.height, 0, 0 },
             .time = @floatCast(app.interface.seconds),
         };
-        const suns = sunsOf(app, &frame);
-        if (suns == 0 and lighting.preview) {
+        for (self.suns.items, 0..) |sun, at| {
+            frame.sun_directions[at] = .{ sun.toward.x, sun.toward.y, sun.toward.z, 0 };
+            frame.sun_colors[at] = sun.color;
+        }
+        if (self.suns.items.len == 0 and lighting.preview) {
             const toward = preview_light.toward.norm();
             frame.sun_directions[0] = .{ toward.x, toward.y, toward.z, 0 };
             frame.sun_colors[0] = linear(preview_light.color);
@@ -438,13 +615,25 @@ pub const Renderer3D = struct {
             }
         }
         try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&frame));
+        self.frame_data = frame;
+        try self.device.updateBuffer(self.shadows, 0, std.mem.asBytes(&self.plan.block));
 
-        var lights: Lights = .{ .places = @splat(@splat(0)), .colors = @splat(@splat(0)), .aims = @splat(@splat(0)), .cones = @splat(@splat(0)) };
+        var lights: Lights = .{
+            .places = @splat(@splat(0)),
+            .colors = @splat(@splat(0)),
+            .aims = @splat(@splat(0)),
+            .cones = @splat(@splat(0)),
+            .ups = @splat(@splat(0)),
+            .cookies = @splat(@splat(0)),
+        };
+        const bottom_left = self.device.caps().features.render_target_origin_bottom_left;
         for (self.lamps.items, 0..) |lamp, at| {
             lights.places[at] = .{ lamp.place.x, lamp.place.y, lamp.place.z, lamp.range };
             lights.colors[at] = .{ lamp.color[0], lamp.color[1], lamp.color[2], lamp.attenuation };
             lights.aims[at] = .{ lamp.aim.x, lamp.aim.y, lamp.aim.z, lamp.edge };
             lights.cones[at] = .{ lamp.cone, 0, 0, 0 };
+            lights.ups[at] = .{ lamp.up.x, lamp.up.y, lamp.up.z, @tan(lamp.angle) };
+            if (!lamp.cookie.isNone()) lights.cookies[at] = cookieRect(lamp.cookie_tile, bottom_left);
         }
         try self.device.updateBuffer(self.lights, 0, std.mem.asBytes(&lights));
     }
@@ -459,7 +648,9 @@ pub const Renderer3D = struct {
             while (it.next()) |chunk| {
                 for (chunk.slice(PointLight3D), chunk.entities) |light, entity| {
                     const placed = placedLight(app, entity) orelse continue;
-                    try self.keepLamp(gpa, view, frustum, lampOf(placed.position, light.color, light.energy, light.range, light.attenuation), .{
+                    var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
+                    if (light.shadow) lamp.shadow = .{ .bias = light.shadow_bias, .normal_bias = light.shadow_normal_bias, .blur = light.shadow_blur, .size = @max(light.size, 0) };
+                    try self.keepLamp(gpa, view, frustum, lamp, .{
                         .enabled = light.distance_fade,
                         .begin = light.distance_fade_begin,
                         .length = light.distance_fade_length,
@@ -474,8 +665,14 @@ pub const Renderer3D = struct {
                     const placed = placedLight(app, entity) orelse continue;
                     var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
                     lamp.aim = placed.forward().tryNorm() orelse continue;
-                    lamp.edge = @cos(std.math.clamp(light.angle, 0, std.math.degreesToRadians(89.9)));
+                    lamp.angle = std.math.clamp(light.angle, 0, std.math.degreesToRadians(89.9));
+                    lamp.edge = @cos(lamp.angle);
+                    lamp.up = placed.up().tryNorm() orelse .unit_y;
+                    if (!light.cookie.isNone()) if (app.assets.get(light.cookie)) |held| {
+                        lamp.cookie = held.gpu;
+                    };
                     lamp.cone = @max(light.angle_attenuation, 0.01);
+                    if (light.shadow) lamp.shadow = .{ .bias = light.shadow_bias, .normal_bias = light.shadow_normal_bias, .blur = light.shadow_blur, .size = @max(light.size, 0) };
                     try self.keepLamp(gpa, view, frustum, lamp, .{
                         .enabled = light.distance_fade,
                         .begin = light.distance_fade_begin,
@@ -525,11 +722,13 @@ pub const Renderer3D = struct {
     }
 
     /// What every surface of every mesh the camera sees is drawn as,
-    /// unsorted.
-    fn gather(self: *Renderer3D, app: *App, view: View3D, frustum: math.Frustum) !void {
+    /// unsorted - and with `casting`, what every mesh that casts a shadow
+    /// casts it with.
+    fn gather(self: *Renderer3D, app: *App, view: View3D, frustum: math.Frustum, casting: bool) !void {
         const gpa = app.gpa;
         self.gathered.clearRetainingCapacity();
         self.items.clearRetainingCapacity();
+        self.casters.clearRetainingCapacity();
         self.looks.clearRetainingCapacity();
         self.look_found.clearRetainingCapacity();
         self.param_bytes.clearRetainingCapacity();
@@ -553,10 +752,10 @@ pub const Renderer3D = struct {
                 const placed = hierarchy.resolve3D(&app.world, &app.snapshots3d, entity, local, alpha) orelse continue;
                 const model = placed.matrix();
                 const bounds = kept.mesh.bounds.transformed(model);
-                if (frustum.testAabb(bounds) == .outside) {
-                    self.culled += 1;
-                    continue;
-                }
+                const seen = frustum.testAabb(bounds) != .outside;
+                const casts = casting and instance.cast_shadow;
+                if (!seen) self.culled += 1;
+                if (!seen and !casts) continue;
                 kept.used = app.meshes.clock;
                 const gpu = try kept.uploaded(self.device);
                 const turn = model.normalMatrix() orelse math.Mat3.identity;
@@ -567,7 +766,7 @@ pub const Renderer3D = struct {
                     .model = .{ model.cols[0].array(), model.cols[1].array(), model.cols[2].array(), model.cols[3].array() },
                     .normal = .{ turn.cols[0].array(), turn.cols[1].array(), turn.cols[2].array() },
                     .tint = linear(looks.tint(.white)),
-                    .lights = self.lampsFor(bounds),
+                    .lights = if (seen) self.lampsFor(bounds) else @splat(@splat(-1)),
                 });
                 for (kept.mesh.surfaces) |surface| {
                     if (surface.index_count == 0) continue;
@@ -585,7 +784,7 @@ pub const Renderer3D = struct {
                     }
                     const blend = look.transparency == .alpha;
                     const way: Way = .{ .cull = look.cull, .blend = blend };
-                    try self.items.append(gpa, .{
+                    const item: Item = .{
                         .way = @intCast(way.index()),
                         .transparent = blend,
                         .compiled = compiled,
@@ -598,10 +797,252 @@ pub const Renderer3D = struct {
                         .params = try self.paramSetOf(app, compiled, chosen, entity),
                         .depth = depth,
                         .instance = at,
-                    });
+                    };
+                    if (seen) try self.items.append(gpa, item);
+                    // What is laid over what is behind it casts no shadow.
+                    if (casts and !blend) try self.casters.append(gpa, .{ .item = item, .bounds = bounds });
                 }
             }
         }
+    }
+
+    /// Each visible `DirectionalLight3D`, up to `shader3d.most_suns`, and
+    /// what its shadow is where it casts one.
+    fn gatherSuns(self: *Renderer3D, app: *App) !void {
+        self.suns.clearRetainingCapacity();
+        var it = try ecs.Query(.{ Transform3D, DirectionalLight3D }).over(&app.world);
+        while (it.next()) |chunk| {
+            for (chunk.slice(DirectionalLight3D), chunk.entities) |light, entity| {
+                if (self.suns.items.len == shader3d.most_suns) return;
+                const placed = placedLight(app, entity) orelse continue;
+                const toward = placed.back().tryNorm() orelse continue;
+                const c = linear(light.color);
+                const e = @max(light.energy, 0);
+                const index: u32 = @intCast(self.suns.items.len);
+                try self.suns.append(app.gpa, .{
+                    .toward = toward,
+                    .color = .{ c[0] * e, c[1] * e, c[2] * e, 1 },
+                    .shadow = if (!light.shadow) null else .{
+                        .index = index,
+                        .toward = toward,
+                        .settings = .{
+                            .bias = light.shadow_bias,
+                            .normal_bias = light.shadow_normal_bias,
+                            .blur = light.shadow_blur,
+                            // How much wider its shadow gets a unit further from what casts it.
+                            .size = 2 * @tan(std.math.clamp(light.angular_size, 0, 1) / 2),
+                        },
+                        .cascades = light.shadow_cascades.count(),
+                        .max_distance = @max(light.shadow_max_distance, 0.1),
+                    },
+                });
+            }
+        }
+    }
+
+    /// The views of the atlas this draw's shadows take: the suns' and the
+    /// lamps' that cast one, those lighting more of the picture first.
+    fn planShadows(self: *Renderer3D, gpa: Allocator, view: View3D, rendering: Project.Rendering) !void {
+        self.plan.views.clearRetainingCapacity();
+        self.plan.block = .none();
+        const format = self.atlas_format orelse return;
+        var suns: [shader3d.most_suns]shadows3d.Sun = undefined;
+        var sun_count: usize = 0;
+        for (self.suns.items) |sun| if (sun.shadow) |shadow| {
+            suns[sun_count] = shadow;
+            sun_count += 1;
+        };
+        self.shadow_lamps.clearRetainingCapacity();
+        for (self.lamps.items, 0..) |lamp, at| {
+            const settings = lamp.shadow orelse continue;
+            try self.shadow_lamps.append(gpa, .{
+                .index = @intCast(at),
+                .place = lamp.place,
+                .range = lamp.range,
+                .spot = if (lamp.edge > -1.5) .{ .aim = lamp.aim, .angle = lamp.angle } else null,
+                .settings = settings,
+                .distance = lamp.distance,
+            });
+        }
+        if (sun_count == 0 and self.shadow_lamps.items.len == 0) return;
+        std.mem.sort(shadows3d.Lamp, self.shadow_lamps.items, {}, lightsMore);
+
+        const device = self.device;
+        const size = @min(rendering.shadow_atlas_size.pixels(), device.caps().limits.max_texture_2d);
+        if (self.atlas == null or self.atlas_size != size) {
+            if (self.atlas) |old| device.destroyTexture(old);
+            self.atlas = null;
+            self.atlas = try device.createTexture(.{ .width = size, .height = size, .format = format, .usage = .{ .sampled = true, .render_target = true }, .label = "shadow atlas" });
+            self.atlas_size = size;
+        }
+        self.atlas_idle = 0;
+        try shadows3d.plan(gpa, &self.plan, view, suns[0..sun_count], self.shadow_lamps.items, .{
+            .atlas = size,
+            .filter = switch (rendering.shadow_filter) {
+                .hard => .hard,
+                .soft_low => .soft_low,
+                .soft_medium => .soft_medium,
+                .soft_high => .soft_high,
+            },
+            .clip = device.clip(),
+            .bottom_left = device.caps().features.render_target_origin_bottom_left,
+        });
+    }
+
+    /// What each view of the atlas draws: the casters whose box is in it,
+    /// sorted by view and then by how they are drawn.
+    fn gatherShadowItems(self: *Renderer3D, gpa: Allocator) !void {
+        self.shadow_items.clearRetainingCapacity();
+        for (self.plan.views.items, 0..) |shadow_view, at| {
+            for (self.casters.items) |caster| {
+                if (shadow_view.reach) |reach| if (!reach.intersectsAabb(caster.bounds)) continue;
+                if (shadow_view.frustum.testAabb(caster.bounds) == .outside) continue;
+                try self.shadow_items.append(gpa, .{ .view = @intCast(at), .item = caster.item });
+            }
+        }
+        std.mem.sort(ShadowItem, self.shadow_items.items, {}, ShadowItem.before);
+        self.shadow_casters = @intCast(self.shadow_items.items.len);
+    }
+
+    /// Every view of the atlas drawn: what casts into it, depth alone, by
+    /// each surface's own shader's caster, in one pass.
+    fn drawShadows(self: *Renderer3D, gpa: Allocator) !void {
+        const views = self.plan.views.items;
+        if (views.len == 0) return;
+        const device = self.device;
+        const atlas = self.atlas.?;
+        const format = self.atlas_format.?;
+
+        // Each view's frame: the draw's, seen from its light.
+        self.shadow_frames.clear();
+        self.frame_offsets.clearRetainingCapacity();
+        for (views) |shadow_view| {
+            var frame = self.frame_data;
+            frame.view_projection = shadow_view.render;
+            try self.frame_offsets.append(gpa, try self.shadow_frames.place(gpa, device, std.mem.asBytes(&frame)));
+        }
+        try self.shadow_frames.upload(device);
+
+        const list = device.begin();
+        try list.beginPass(.{ .depth = .{ .texture = atlas, .clear_depth = 1 } });
+        const items = self.shadow_items.items;
+        const first_instance = self.items.items.len;
+        var start: usize = 0;
+        var current: ?u32 = null;
+        while (start < items.len) {
+            var end = start + 1;
+            while (end < items.len and ShadowItem.joins(items[start], items[end])) end += 1;
+            const shadowed = items[start];
+            if (current != shadowed.view) {
+                current = shadowed.view;
+                const tile = views[shadowed.view].tile;
+                try list.setViewport(.{ .x = @floatFromInt(tile.x), .y = @floatFromInt(tile.y), .width = @floatFromInt(tile.size), .height = @floatFromInt(tile.size) });
+                try list.setScissor(.{ .x = @intCast(tile.x), .y = @intCast(tile.y), .width = tile.size, .height = tile.size });
+            }
+            var first = shadowed.item;
+            const way = Way.of(first.way);
+            // A shader whose caster the device refuses casts as the engine's.
+            const pipeline = first.compiled.casterPipelineOf(device, format, way.cull) catch |err| blk: {
+                const plain = &self.plain.?;
+                if (first.compiled == plain) return err;
+                first.params = no_params;
+                break :blk try plain.casterPipelineOf(device, format, way.cull);
+            };
+            try list.setPipeline(pipeline);
+            try list.setUniformBufferRange(0, self.shadow_frames.buffer.?, self.frame_offsets.items[shadowed.view], @sizeOf(Frame));
+            try list.setUniformBufferRange(1, self.blocks.buffer.?, self.look_offsets.items[first.look], @sizeOf(Look));
+            try list.setUniformBuffer(2, self.lights);
+            if (first.params != no_params) {
+                const set = self.param_sets.items[first.params];
+                try list.setUniformBufferRange(shader3d.params_slot, self.blocks.buffer.?, self.param_offsets.items[first.params], set.len);
+            }
+            try list.setUniformBuffer(shader3d.shadows_slot, self.shadows);
+            for (first.textures, 0..) |texture, slot| try list.setTexture(@intCast(slot), texture, first.sampler);
+            try list.setTexture(shader3d.shadow_map_slot, self.no_shadow, self.comparing);
+            try list.setTexture(shader3d.shadow_depth_slot, self.no_shadow, self.reading);
+            try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
+            try list.setVertexBuffer(0, first.gpu.vertices, 0);
+            try list.setVertexBuffer(1, self.instances, @intCast((first_instance + start) * @sizeOf(Instance)));
+            try list.setIndexBuffer(first.gpu.indices, .u32);
+            try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
+            self.shadow_draws += 1;
+            start = end;
+        }
+        try list.endPass();
+        try device.submit();
+        self.shadow_views = @intCast(views.len);
+    }
+
+    /// Every kept lamp's cookie into a tile of the cookie atlas: the one that
+    /// holds its picture already, or one no lamp of this draw needs, into
+    /// which it is drawn.
+    fn placeCookies(self: *Renderer3D, gpa: Allocator) !void {
+        var wanted = false;
+        for (self.lamps.items) |lamp| wanted = wanted or !lamp.cookie.isNone();
+        if (!wanted) return;
+        const device = self.device;
+        var fresh = false;
+        if (self.cookie_atlas == null) {
+            self.cookie_atlas = try device.createTexture(.{
+                .width = cookie_size * cookie_across,
+                .height = cookie_size * cookie_across,
+                .usage = .{ .sampled = true, .render_target = true },
+                .label = "cookie atlas",
+            });
+            self.cookie_tiles = @splat(.none);
+            fresh = true;
+        }
+        if (self.cookie_copy == null) self.cookie_copy = try .init(gpa, device);
+
+        var used: [cookie_across * cookie_across]bool = @splat(false);
+        var drawn: [cookie_across * cookie_across]bool = @splat(false);
+        // Those already there first, so a new picture takes a tile no lamp keeps.
+        for (self.lamps.items) |*lamp| {
+            if (lamp.cookie.isNone()) continue;
+            for (self.cookie_tiles, 0..) |held, at| if (held == lamp.cookie) {
+                lamp.cookie_tile = @intCast(at);
+                used[at] = true;
+                break;
+            };
+        }
+        for (self.lamps.items) |*lamp| {
+            if (lamp.cookie.isNone() or self.cookie_tiles[lamp.cookie_tile] == lamp.cookie) continue;
+            const free = std.mem.indexOfScalar(bool, &used, false) orelse {
+                // More pictures than tiles: this one shines plain.
+                lamp.cookie = .none;
+                continue;
+            };
+            used[free] = true;
+            drawn[free] = true;
+            self.cookie_tiles[free] = lamp.cookie;
+            lamp.cookie_tile = @intCast(free);
+            // Another lamp with the same picture finds it there.
+            for (self.lamps.items) |*other| if (other.cookie == lamp.cookie) {
+                other.cookie_tile = @intCast(free);
+            };
+        }
+        if (std.mem.indexOfScalar(bool, &drawn, true) == null and !fresh) return;
+
+        const copy = &self.cookie_copy.?;
+        const list = device.begin();
+        try list.beginPass(.{ .color = .{ .target = .{ .texture = self.cookie_atlas.? }, .load = if (fresh) .clear else .load, .clear_color = .{ 1, 1, 1, 1 } } });
+        try list.setPipeline(copy.pipeline);
+        try list.setVertexBuffer(0, copy.corners, 0);
+        for (drawn, 0..) |draw_it, at| {
+            if (!draw_it) continue;
+            const x: f32 = @floatFromInt((at % cookie_across) * cookie_size);
+            const y: f32 = @floatFromInt((at / cookie_across) * cookie_size);
+            try list.setViewport(.{ .x = x, .y = y, .width = cookie_size, .height = cookie_size });
+            try list.setTexture(0, self.cookie_tiles[at], copy.sampler);
+            try list.draw(.{ .vertex_count = 4 });
+        }
+        try list.endPass();
+        try device.submit();
+    }
+
+    /// What the cookie atlas is read with: smoothly, kept inside it.
+    fn cookieSampler(self: *const Renderer3D) rhi.Sampler {
+        return if (self.cookie_copy) |copy| copy.sampler else self.reading;
     }
 
     /// Which of this draw's materials' numbers `look` is: one made for it,
@@ -662,6 +1103,78 @@ pub const Renderer3D = struct {
         for (self.looks.items) |*look| try self.look_offsets.append(gpa, try self.blocks.place(gpa, device, std.mem.asBytes(look)));
         for (self.param_sets.items) |set| try self.param_offsets.append(gpa, try self.blocks.place(gpa, device, self.param_bytes.items[set.start..][0..set.len]));
         try self.blocks.upload(device);
+    }
+};
+
+/// Where the cookie in `tile` is in the cookie atlas, as the shader reads
+/// it: across and down from where, and how far for the whole picture - up
+/// the atlas, for a device that stores what is drawn bottom row first.
+fn cookieRect(tile: u32, bottom_left: bool) [4]f32 {
+    const across: f32 = Renderer3D.cookie_across;
+    const u = @as(f32, @floatFromInt(tile % Renderer3D.cookie_across)) / across;
+    const v = @as(f32, @floatFromInt(tile / Renderer3D.cookie_across)) / across;
+    const s = 1 / across;
+    return if (bottom_left) .{ u, 1 - v, s, -s } else .{ u, v, s, s };
+}
+
+/// What draws a picture into a tile of the cookie atlas: a quad over the
+/// tile, the picture's top at the top.
+const CookieCopy = struct {
+    gpu: rhi.Shader,
+    pipeline: rhi.Pipeline,
+    corners: rhi.Buffer,
+    sampler: rhi.Sampler,
+
+    const source =
+        \\attribute vec2 corner : 0;
+        \\varying vec2 uv;
+        \\texture2d picture : 0;
+        \\vertex {
+        \\    uv = vec2(corner.x, 1.0 - corner.y);
+        \\    position = vec4(corner * 2.0 - 1.0, 0.0, 1.0);
+        \\}
+        \\fragment {
+        \\    target = sample(picture, uv);
+        \\}
+    ;
+
+    fn init(gpa: Allocator, device: *rhi.Device) !CookieCopy {
+        var said: std.Io.Writer.Allocating = .init(gpa);
+        defer said.deinit();
+        var module = shader.compile(gpa, source, &said.writer) catch |err| {
+            log.err("the cookie shader: {s}", .{said.written()});
+            return err;
+        };
+        defer module.deinit();
+        const gpu = try device.createShader(.{
+            .glsl = .{ .vertex = module.glsl.vertex, .fragment = module.glsl.fragment },
+            .glsl_es = .{ .vertex = module.glsl_es.vertex, .fragment = module.glsl_es.fragment },
+            .hlsl = .{ .vertex = module.hlsl.vertex, .fragment = module.hlsl.fragment },
+            .spirv = .{ .vertex = module.spirv.vertex, .fragment = module.spirv.fragment },
+            .label = "cookie",
+        });
+        errdefer device.destroyShader(gpu);
+        const pipeline = try device.createPipeline(.{
+            .shader = gpu,
+            .attributes = &.{.{ .location = 0, .format = .float2, .offset = 0 }},
+            .buffers = &.{.{ .stride = 8 }},
+            .topology = .triangle_strip,
+            .textures = &.{"picture"},
+            .label = "cookie",
+        });
+        errdefer device.destroyPipeline(pipeline);
+        const corners = [8]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
+        const buffer = try device.createBuffer(.{ .kind = .vertex, .size = @sizeOf(@TypeOf(corners)), .data = std.mem.asBytes(&corners), .label = "cookie quad" });
+        errdefer device.destroyBuffer(buffer);
+        const sampler = try device.createSampler(.{});
+        return .{ .gpu = gpu, .pipeline = pipeline, .corners = buffer, .sampler = sampler };
+    }
+
+    fn deinit(self: *CookieCopy, device: *rhi.Device) void {
+        device.destroySampler(self.sampler);
+        device.destroyBuffer(self.corners);
+        device.destroyPipeline(self.pipeline);
+        device.destroyShader(self.gpu);
     }
 };
 
@@ -726,24 +1239,10 @@ fn materialOf(app: *App, handle: MaterialHandle) Material3DData {
     return .{};
 }
 
-/// Each visible `DirectionalLight3D` into the frame, up to
-/// `shader3d.most_suns`: how many.
-fn sunsOf(app: *App, frame: *Frame) usize {
-    var count: usize = 0;
-    var it = ecs.Query(.{ Transform3D, DirectionalLight3D }).over(&app.world) catch return 0;
-    while (it.next()) |chunk| {
-        for (chunk.slice(DirectionalLight3D), chunk.entities) |light, entity| {
-            if (count == shader3d.most_suns) return count;
-            const placed = placedLight(app, entity) orelse continue;
-            const toward = placed.back().tryNorm() orelse continue;
-            const c = linear(light.color);
-            const e = @max(light.energy, 0);
-            frame.sun_directions[count] = .{ toward.x, toward.y, toward.z, 0 };
-            frame.sun_colors[count] = .{ c[0] * e, c[1] * e, c[2] * e, 1 };
-            count += 1;
-        }
-    }
-    return count;
+/// Whether lamp `a` lights more of the picture than `b`: nearer the camera
+/// for how far it reaches. Its shadow gets the larger tile.
+fn lightsMore(_: void, a: shadows3d.Lamp, b: shadows3d.Lamp) bool {
+    return a.range / @max(a.distance, 0.001) > b.range / @max(b.distance, 0.001);
 }
 
 /// The first visible `Environment`, if there is one.
