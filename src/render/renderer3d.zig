@@ -50,6 +50,7 @@ const mesh = @import("mesh.zig");
 const post3d = @import("post3d.zig");
 const shader3d = @import("shader3d.zig");
 const shaders = @import("shaders.zig");
+const UniformBlocks = @import("uniform_blocks.zig").UniformBlocks;
 const View3D = @import("view3d.zig").View3D;
 
 const MeshInstance3D = components3d.MeshInstance3D;
@@ -223,11 +224,8 @@ pub const Renderer3D = struct {
     param_bytes: std.ArrayList(u8) = .empty,
     param_sets: std.ArrayList(struct { start: u32, len: u32 }) = .empty,
     param_found: std.AutoHashMapUnmanaged(u64, u32) = .empty,
-    /// Both, in one buffer a draw binds a part of: each where the device
-    /// binds a block from, the materials' first. Grown, never shrunk.
-    blocks: ?rhi.Buffer = null,
-    blocks_size: u32 = 0,
-    block_bytes: std.ArrayList(u8) = .empty,
+    /// Both, in one buffer a draw binds a part of, the materials' first.
+    blocks: UniformBlocks = .{ .label = "3D materials" },
     /// Where each material's numbers are in `blocks`, and each set of a
     /// shader's.
     look_offsets: std.ArrayList(u32) = .empty,
@@ -294,8 +292,7 @@ pub const Renderer3D = struct {
         const device = self.device;
         if (self.post) |*held| held.deinit(gpa);
         if (self.plain) |*held| held.deinit(device);
-        if (self.blocks) |buffer| device.destroyBuffer(buffer);
-        self.block_bytes.deinit(gpa);
+        self.blocks.deinit(gpa, device);
         self.look_offsets.deinit(gpa);
         self.param_offsets.deinit(gpa);
         device.destroyBuffer(self.frame);
@@ -388,11 +385,11 @@ pub const Renderer3D = struct {
             };
             try list.setPipeline(pipeline);
             try list.setUniformBuffer(0, self.frame);
-            try list.setUniformBufferRange(1, self.blocks.?, self.look_offsets.items[first.look], @sizeOf(Look));
+            try list.setUniformBufferRange(1, self.blocks.buffer.?, self.look_offsets.items[first.look], @sizeOf(Look));
             try list.setUniformBuffer(2, self.lights);
             if (first.params != no_params) {
                 const set = self.param_sets.items[first.params];
-                try list.setUniformBufferRange(shader3d.params_slot, self.blocks.?, self.param_offsets.items[first.params], set.len);
+                try list.setUniformBufferRange(shader3d.params_slot, self.blocks.buffer.?, self.param_offsets.items[first.params], set.len);
             }
             for (first.textures, 0..) |texture, slot| try list.setTexture(@intCast(slot), texture, first.sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
@@ -659,33 +656,12 @@ pub const Renderer3D = struct {
         }
         if (count > 0) try device.updateBuffer(self.instances, 0, std.mem.sliceAsBytes(self.staging.items));
 
-        const alignment = device.caps().limits.uniform_offset_alignment;
-        self.block_bytes.clearRetainingCapacity();
+        self.blocks.clear();
         self.look_offsets.clearRetainingCapacity();
         self.param_offsets.clearRetainingCapacity();
-        for (self.looks.items) |*look| try self.look_offsets.append(gpa, try self.place(gpa, std.mem.asBytes(look), alignment));
-        for (self.param_sets.items) |set| try self.param_offsets.append(gpa, try self.place(gpa, self.param_bytes.items[set.start..][0..set.len], alignment));
-        const size: u32 = @intCast(self.block_bytes.items.len);
-        if (size == 0) return;
-        if (self.blocks_size < size) {
-            var room = @max(self.blocks_size, alignment * 64);
-            while (room < size) room *= 2;
-            const grown = try device.createBuffer(.{ .kind = .uniform, .size = room, .dynamic = true, .label = "3D materials" });
-            if (self.blocks) |old| device.destroyBuffer(old);
-            self.blocks = grown;
-            self.blocks_size = room;
-        }
-        try device.updateBuffer(self.blocks.?, 0, self.block_bytes.items);
-    }
-
-    /// `bytes` at the next place in `block_bytes` a block is bound from.
-    fn place(self: *Renderer3D, gpa: Allocator, bytes: []const u8, alignment: u32) !u32 {
-        const old = self.block_bytes.items.len;
-        const at: u32 = @intCast(std.mem.alignForward(usize, old, alignment));
-        try self.block_bytes.resize(gpa, at + bytes.len);
-        @memset(self.block_bytes.items[old..at], 0);
-        @memcpy(self.block_bytes.items[at..][0..bytes.len], bytes);
-        return at;
+        for (self.looks.items) |*look| try self.look_offsets.append(gpa, try self.blocks.place(gpa, device, std.mem.asBytes(look)));
+        for (self.param_sets.items) |set| try self.param_offsets.append(gpa, try self.blocks.place(gpa, device, self.param_bytes.items[set.start..][0..set.len]));
+        try self.blocks.upload(device);
     }
 };
 

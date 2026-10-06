@@ -35,6 +35,7 @@ const Resolved = @import("../scene/inherited.zig").Resolved;
 const tilemap = @import("../tiles/tilemap.zig");
 const tileset = @import("../tiles/tileset.zig");
 const Bounds = @import("view.zig").Bounds;
+const UniformBlocks = @import("uniform_blocks.zig").UniformBlocks;
 const View = @import("view.zig").View;
 
 const Transform2D = components.Transform2D;
@@ -290,12 +291,6 @@ const ParamSet = struct {
     len: u32,
 };
 
-/// A uniform buffer a set of numbers is put in, kept from frame to frame.
-const ParamBuffer = struct {
-    buffer: rhi.Buffer,
-    size: u32,
-};
-
 pub const Renderer = struct {
     device: *rhi.Device,
     /// What each `Text2D` says: the app's. Nothing is drawn of one without.
@@ -368,11 +363,12 @@ pub const Renderer = struct {
     staging: std.ArrayList(Instance) = .empty,
 
     /// This frame's sets of material numbers, their bytes one after
-    /// another, and the uniform buffers they are put in.
+    /// another; the buffer they are put in, and where each set is in it.
     param_sets: std.ArrayList(ParamSet) = .empty,
     param_bytes: std.ArrayList(u8) = .empty,
     param_found: std.AutoHashMapUnmanaged(u64, u32) = .empty,
-    param_buffers: std.ArrayList(ParamBuffer) = .empty,
+    blocks: UniformBlocks = .{ .label = "material numbers" },
+    param_offsets: std.ArrayList(u32) = .empty,
 
     /// How many draw calls the last frame took: the number of textures in use.
     draw_calls: u32 = 0,
@@ -457,8 +453,8 @@ pub const Renderer = struct {
         self.param_sets.deinit(gpa);
         self.param_bytes.deinit(gpa);
         self.param_found.deinit(gpa);
-        for (self.param_buffers.items) |held| self.device.destroyBuffer(held.buffer);
-        self.param_buffers.deinit(gpa);
+        self.blocks.deinit(gpa, self.device);
+        self.param_offsets.deinit(gpa);
         self.plain.deinit(self.device);
         self.multiplied.deinit(self.device);
         self.lighting.deinit(gpa);
@@ -645,28 +641,26 @@ pub const Renderer = struct {
         const hash = std.hash.Wyhash.hash(block.size, bytes);
         const found = try self.param_found.getOrPut(gpa, hash);
         if (found.found_existing) {
-            self.param_bytes.shrinkRetainingCapacity(start);
-            return found.value_ptr.*;
+            const set = self.param_sets.items[found.value_ptr.*];
+            if (set.len == block.size and std.mem.eql(u8, self.param_bytes.items[set.start..][0..set.len], bytes)) {
+                self.param_bytes.shrinkRetainingCapacity(start);
+                return found.value_ptr.*;
+            }
         }
         found.value_ptr.* = @intCast(self.param_sets.items.len);
         try self.param_sets.append(gpa, .{ .start = start, .len = block.size });
         return found.value_ptr.*;
     }
 
-    /// Put each set of numbers in a uniform buffer of its own: a buffer is
-    /// bound whole, with no offset.
+    /// Put the sets of numbers in one buffer, each where a block is bound
+    /// from, in one upload.
     fn uploadParams(self: *Renderer, gpa: Allocator) !void {
-        for (self.param_sets.items, 0..) |set, index| {
-            if (index == self.param_buffers.items.len) try self.param_buffers.append(gpa, .{ .buffer = .none, .size = 0 });
-            const held = &self.param_buffers.items[index];
-            if (held.size < set.len) {
-                if (held.size > 0) self.device.destroyBuffer(held.buffer);
-                held.* = .{ .size = 0, .buffer = .none };
-                held.buffer = try self.device.createBuffer(.{ .kind = .uniform, .size = set.len, .label = "material numbers" });
-                held.size = set.len;
-            }
-            try self.device.updateBuffer(held.buffer, 0, self.param_bytes.items[set.start..][0..set.len]);
+        self.blocks.clear();
+        self.param_offsets.clearRetainingCapacity();
+        for (self.param_sets.items) |set| {
+            try self.param_offsets.append(gpa, try self.blocks.place(gpa, self.device, self.param_bytes.items[set.start..][0..set.len]));
         }
+        try self.blocks.upload(self.device);
     }
 
     /// A pass into the frame's target, and what is bound in it: begun again
@@ -733,7 +727,8 @@ pub const Renderer = struct {
             try self.list.setVertexBuffer(0, r.quad, 0);
             try self.list.setUniformBuffer(0, r.frame);
             if (wanted.params != no_params and wanted.compiled.params != null) {
-                try self.list.setUniformBuffer(material.params_slot, r.param_buffers.items[wanted.params].buffer);
+                const set = r.param_sets.items[wanted.params];
+                try self.list.setUniformBufferRange(material.params_slot, r.blocks.buffer.?, r.param_offsets.items[wanted.params], set.len);
             }
         }
 

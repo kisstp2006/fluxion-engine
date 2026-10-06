@@ -32,6 +32,7 @@ const shader = @import("fluxion_shader");
 
 const material = @import("material.zig");
 const Environment = @import("render3d_components.zig").Environment;
+const UniformBlocks = @import("uniform_blocks.zig").UniformBlocks;
 
 const log = std.log.scoped(.fluxion_engine);
 
@@ -209,6 +210,8 @@ const Pass = struct {
     sources: [2]rhi.Texture,
     source_count: u8,
     knobs: Post,
+    /// Where its numbers are in the buffer, once they are written.
+    at: u32 = 0,
 };
 
 /// A pass's shader and the pipelines it is drawn with.
@@ -310,11 +313,8 @@ pub const Post3D = struct {
     /// This draw's passes, recorded into one list once their numbers are
     /// written.
     passes: std.ArrayList(Pass) = .empty,
-    /// Every pass's numbers, each where the device binds a block from, in
-    /// one buffer: grown, never shrunk.
-    knobs: ?rhi.Buffer = null,
-    knobs_size: u32 = 0,
-    knob_bytes: std.ArrayList(u8) = .empty,
+    /// Every pass's numbers, in one buffer a pass binds a part of.
+    blocks: UniformBlocks = .{ .label = "3D post" },
     clock: u64 = 0,
 
     pub fn init(gpa: Allocator, device: *rhi.Device, depth_format: rhi.Format) !Post3D {
@@ -348,9 +348,8 @@ pub const Post3D = struct {
         const device = self.device;
         for (self.targets.items) |*held| held.deinit(device);
         self.targets.deinit(gpa);
-        if (self.knobs) |buffer| device.destroyBuffer(buffer);
+        self.blocks.deinit(gpa, device);
         self.passes.deinit(gpa);
-        self.knob_bytes.deinit(gpa);
         for ([_]*Stage{ &self.bright, &self.down, &self.up, &self.tone, &self.smooth }) |stage| stage.deinit(device);
         device.destroySampler(self.sampler);
         device.destroyTexture(self.black);
@@ -591,27 +590,16 @@ pub const Post3D = struct {
         const device = self.device;
         const passes = self.passes.items;
         if (passes.len == 0) return;
-        const stride: u32 = @intCast(std.mem.alignForward(usize, @sizeOf(Post), device.caps().limits.uniform_offset_alignment));
-        const size: u32 = @intCast(passes.len * stride);
-        try self.knob_bytes.resize(gpa, size);
-        @memset(self.knob_bytes.items, 0);
-        for (passes, 0..) |held, at| @memcpy(self.knob_bytes.items[at * stride ..][0..@sizeOf(Post)], std.mem.asBytes(&held.knobs));
-        if (self.knobs_size < size) {
-            var room = @max(self.knobs_size, stride * 16);
-            while (room < size) room *= 2;
-            const grown = try device.createBuffer(.{ .kind = .uniform, .size = room, .dynamic = true, .label = "3D post" });
-            if (self.knobs) |old| device.destroyBuffer(old);
-            self.knobs = grown;
-            self.knobs_size = room;
-        }
-        const buffer = self.knobs.?;
-        try device.updateBuffer(buffer, 0, self.knob_bytes.items);
+        self.blocks.clear();
+        for (passes) |*held| held.at = try self.blocks.place(gpa, device, std.mem.asBytes(&held.knobs));
+        try self.blocks.upload(device);
+        const buffer = self.blocks.buffer.?;
         const list = device.begin();
-        for (passes, 0..) |held, at| {
+        for (passes) |held| {
             try list.beginPass(.{ .color = .{ .target = held.into, .load = held.load, .clear_color = .{ 0, 0, 0, 0 } } });
             try list.setViewport(.{ .width = @floatFromInt(held.width), .height = @floatFromInt(held.height) });
             try list.setPipeline(held.pipeline);
-            try list.setUniformBufferRange(0, buffer, @intCast(at * stride), @sizeOf(Post));
+            try list.setUniformBufferRange(0, buffer, held.at, @sizeOf(Post));
             for (held.sources[0..held.source_count], 0..) |source, slot| try list.setTexture(@intCast(slot), source, self.sampler);
             try list.setVertexBuffer(0, self.corners, 0);
             try list.draw(.{ .vertex_count = 3 });
