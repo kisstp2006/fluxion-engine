@@ -212,6 +212,8 @@ pub const MaterialHandle = materials.MaterialHandle;
 /// and `render/lightmap_uv.zig` for the UVs it is laid out by.
 pub const lightmaps = @import("render/lightmaps.zig");
 pub const LightmapHandle = lightmaps.LightmapHandle;
+/// A bake on its way: see `App.bakeLightmap`.
+pub const LightmapBake = @import("render/lightmap_bake.zig").LightmapBake;
 pub const lightmap_uv = @import("render/lightmap_uv.zig");
 /// Models as scenes: glTF read by the engine, FBX and Blender files by way
 /// of an editor. See `assets/models.zig` and `assets/gltf.zig`.

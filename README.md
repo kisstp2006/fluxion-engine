@@ -1360,6 +1360,34 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   `white`, filmic or ACES - and `glow`, the light brighter than
   `glow_threshold` spread round it by `glow_intensity` and `glow_spread`.
   With none, a little grey light from everywhere, and the light as it is.
+- **A `LightmapGI` bakes the light from everywhere**, once, and the world
+  is lit by it after: the sky's - the environment's ambient light - and
+  every light's bounced off what it lights, as many `bounces` as it says.
+  - On the meshes that never move - `MeshInstance3D.gi_mode` static, the
+    default - it is held in a lightmap: a picture of their lightmap UVs side
+    by side, `texels_per_unit` a unit across, up to `max_size`. A mesh drawn
+    from it gets that light in place of the ambient light.
+  - On the meshes that move - `gi_mode` dynamic - it is the light at a grid
+    of probes `probe_spacing` apart, mixed from the eight round each mesh;
+    `off` leaves a mesh out of it.
+  - A light's `bake` says what of it is baked: `indirect` - the default -
+    its light bounced; `all` its own light too, and it is not drawn over the
+    lightmap; `none` nothing.
+  - `app.bakeLightmap(gi, "res://office.lightmap")` gathers what the world
+    is now and traces it on threads of its own, `quality` rays a texel,
+    `denoise` smoothing the grain; `progress`, `cancel` and `finish`, which
+    writes the `.lightmap` and gives the `LightmapGI` it. A mesh is found
+    in it by its entity's UUID; one with no lightmap UVs is lit by the
+    probes, and the bake's `notes` say which. The same world bakes the same.
+  - The baker is a module of its own, built for speed whatever the engine
+    is built as.
+- **Lightmap UVs** are a second place on a picture for each vertex, where no
+  two triangles of the mesh overlap: `Vertex.uv2`, and how many texels across
+  its charts need - `Mesh.uv2_texels`. The shapes made from numbers have
+  them; a model brings its own second coordinates, or works them out as it
+  is read with `"lightmap_uvs": true` in its `.import` -
+  `fx.lightmap_uv.unwrap` cuts a mesh into charts that face nearly one way,
+  lays each flat and packs them with a gap.
 - **Smoothing is the project's**: `rendering.msaa_3d` draws the 3D layer
   with two, four or eight samples a pixel - as many as the device has, up to
   it - and `rendering.screen_space_aa` smooths the edges of the finished
@@ -1451,16 +1479,18 @@ app.world.get(wall, fx.Material3D).?.material = brick;
   `#material/2`, `#image/1`. A scene or a script names a part as it names any
   file, and the model is read first; a part has no UUID of its own.
 - **`<model>.import` beside it says how it is brought in**: `{ "scale": 0.01 }`
-  for a model made in centimetres, the root that much smaller.
+  for a model made in centimetres, the root that much smaller, and
+  `"lightmap_uvs": true` for lightmap UVs worked out for the meshes that
+  bring none.
 - **A `.mat3d` is a `Material3DData`**, written as a scene writes a
   component - only what is not as a material starts - with its shader's
   numbers under `params`, and kept under a `MaterialHandle`: `loadMaterial`,
   `addMaterial` for one made in code, `materialOf` to change it - what draws
   with it draws the change - `materialParam` and `setMaterialParam` for its
   shader's numbers, `saveMaterial` and `reloadMaterial`.
-- **A `.mesh` file holds surfaces too**, with corner colours and tangents:
-  what `saveMesh` writes now; one written before is read as it was, its
-  tangents worked out.
+- **A `.mesh` file holds surfaces too**, with corner colours, tangents and
+  lightmap UVs: what `saveMesh` writes now; one written before is read as it
+  was, its tangents worked out and its lightmap UVs none.
 
 ## 🎨 The 2D layer
 

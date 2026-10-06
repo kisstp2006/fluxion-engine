@@ -1090,8 +1090,9 @@ fn bakeProbes(gpa: Allocator, world: *const World, settings: Settings, control: 
     var counts: [3]u32 = undefined;
     var origin: [3]f32 = undefined;
     for (0..3) |a| {
-        counts[a] = @min(@as(u32, @intFromFloat(@floor(extent[a] / spacing))) + 1, most_across);
-        // In the middle of the box that way.
+        // One in the middle of each cell the box is cut into, so none is on
+        // a floor or a wall the box's edge is at.
+        counts[a] = std.math.clamp(@as(u32, @intFromFloat(@floor(extent[a] / spacing))), 1, most_across);
         const span = @as(f32, @floatFromInt(counts[a] - 1)) * spacing;
         origin[a] = lo[a] + (extent[a] - span) / 2;
     }

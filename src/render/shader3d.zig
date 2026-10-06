@@ -536,14 +536,31 @@ const engine_part =
     \\    return light * lampShadow(at, p, ng, l, turn);
     \\}
     \\
+    \\// How lit a surface facing `n` is by light whose mean over every way is
+    \\// `c.x` and which leans along `c.yzw`, as a probe holds it: the lean
+    \\// read as a lobe that is never below nought - a light from one way
+    \\// lights its side as that light does, and the far side not at all.
+    \\float leaning(vec4 c, vec3 n) {
+    \\    float mean = max(c.x, 0.0);
+    \\    vec3 lean = c.yzw * 0.5;
+    \\    float size = length(lean);
+    \\    if (mean <= 0.0 || size <= mean * 0.0001) {
+    \\        return mean;
+    \\    }
+    \\    float k = min(size / mean, 1.0);
+    \\    float q = max(0.5 * (1.0 + dot(lean / size, n)), 0.0);
+    \\    float p = 1.0 + 2.0 * k;
+    \\    float a = (1.0 - k) / (1.0 + k);
+    \\    return mean * (a + (1.0 - a) * (p + 1.0) * pow(q, p));
+    \\}
+    \\
     \\// The light from everywhere on a surface facing `n`: baked into the
     \\// lightmap, the probes' round a mesh that moves, or the environment's.
     \\vec3 indirect(vec3 n, vec4 at) {
     \\    if (at.w > 1.5) {
     \\        int i = int(at.z + 0.5) * 3;
-    \\        vec4 way = vec4(1.0, n.x, n.y, n.z);
-    \\        vec3 c = vec3(dot(PROBE_SAMPLES[i], way), dot(PROBE_SAMPLES[i + 1], way), dot(PROBE_SAMPLES[i + 2], way));
-    \\        return max(c, vec3(0.0)) * GI_ENERGY.x;
+    \\        vec3 c = vec3(leaning(PROBE_SAMPLES[i], n), leaning(PROBE_SAMPLES[i + 1], n), leaning(PROBE_SAMPLES[i + 2], n));
+    \\        return c * GI_ENERGY.x;
     \\    }
     \\    if (at.w > 0.5) {
     \\        return sample_level(LIGHTMAP, at.xy, 0.0).rgb * GI_ENERGY.x;
