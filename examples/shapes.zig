@@ -17,7 +17,9 @@
 //! entity's `Transform3D` is, the `PrimitiveMesh3D` beside it says which
 //! mesh - a box, a sphere, a plane, a cylinder or a capsule of its numbers,
 //! made once and shared by every shape with the same - and `Material3D`
-//! says its colour, whether it is lit, and which sides are drawn.
+//! names the material it is drawn with: its colour, whether it is lit, and
+//! which sides are drawn - one made in code here, with `app.addMaterial`, a
+//! `.mat3d` file in a project.
 //!
 //! **The camera is a `Camera3D`** on an entity like any other: turning it is
 //! writing its transform. What a click is on is the ray from the camera
@@ -52,7 +54,7 @@ fn spawn(app: *App) !void {
         Transform3D{ .position = .init(0, -0.5, 0) },
         fx.MeshInstance3D{},
         fx.PrimitiveMesh3D{ .shape = .plane, .size = .init(12, 1, 12) },
-        fx.Material3D{ .albedo_color = theme.floor, .uv_scale = .init(6, 6) },
+        fx.Material3D{ .material = try app.addMaterial("floor", .{ .albedo_color = theme.floor, .uv_scale = .init(6, 6) }) },
     });
     const shapes = [_]struct { shape: fx.PrimitiveMesh3D.Shape, x: f32, color: Color }{
         .{ .shape = .box, .x = -4, .color = .oklch(0.72, 0.14, 25) },
@@ -66,11 +68,13 @@ fn spawn(app: *App) !void {
         shape.height = 1.4;
         shape.radius = 0.6;
         shape.size = .init(1.1, 1.1, 1.1);
+        var name: [16]u8 = undefined;
+        const look = try app.addMaterial(try std.fmt.bufPrint(&name, "shape {d}", .{i}), .{ .albedo_color = made.color, .unshaded = i == 4 });
         _ = try app.world.spawnWith(.{
             Transform3D{ .position = .init(made.x, 0.3, 0) },
             fx.MeshInstance3D{},
             shape,
-            fx.Material3D{ .albedo_color = made.color, .unshaded = i == 4 },
+            fx.Material3D{ .material = look },
             Spin{ .speed = 0.4 + 0.2 * @as(f32, @floatFromInt(i)) },
         });
     }
@@ -81,7 +85,7 @@ fn spawn(app: *App) !void {
         pane,
         fx.MeshInstance3D{},
         fx.PrimitiveMesh3D{ .shape = .plane, .size = .init(3, 1, 1.6) },
-        fx.Material3D{ .albedo_color = .hexa(0x9FD3FF60), .transparency = .alpha, .cull = .disabled },
+        fx.Material3D{ .material = try app.addMaterial("pane", .{ .albedo_color = .hexa(0x9FD3FF60), .transparency = .alpha, .cull = .disabled }) },
     });
 
     var sun: Transform3D = .{};

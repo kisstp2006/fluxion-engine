@@ -79,7 +79,7 @@ pub const AssetKind = enum {
             .audio => "A WAV, Ogg Vorbis or MP3 file",
             .animation => "Animations an AnimationPlayer plays",
             .frames => "Animations of pictures an AnimatedSprite2D plays",
-            .shader => "What a Material or a Material3D draws with",
+            .shader => "What a Material or a 3D material draws with",
             .mesh => "Triangles a MeshInstance3D draws",
             .material => "How a 3D mesh looks",
         };

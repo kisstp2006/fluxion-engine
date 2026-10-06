@@ -4416,7 +4416,7 @@ pub fn loadMesh(self: *App, path: []const u8) !mesh_table.MeshHandle {
 }
 
 /// Read a `.mat3d` file, or find the one read from there already: what a
-/// mesh's surface and a `MeshInstance3D`'s `material_override` name. A
+/// `Material3D` and a mesh's surface name. A
 /// model's material is found by its name - `res://robot.glb#material/0` -
 /// with the model read first. See `render/materials.zig`.
 pub fn loadMaterial(self: *App, path: []const u8) !material_table.MaterialHandle {
@@ -4427,7 +4427,7 @@ pub fn loadMaterial(self: *App, path: []const u8) !material_table.MaterialHandle
 
 /// A material made in code, kept under `name`: a name given before gets
 /// the new one and keeps its handle.
-pub fn addMaterial(self: *App, name: []const u8, material: components3d.Material3D) !material_table.MaterialHandle {
+pub fn addMaterial(self: *App, name: []const u8, material: components3d.Material3DData) !material_table.MaterialHandle {
     return self.materials.add(self.gpa, name, material);
 }
 
@@ -4442,8 +4442,26 @@ pub fn reloadMaterial(self: *App, handle: material_table.MaterialHandle) !bool {
 
 /// A material, to read or to change: what draws with it draws the change
 /// from the next frame.
-pub fn materialOf(self: *App, handle: material_table.MaterialHandle) ?*components3d.Material3D {
+pub fn materialOf(self: *App, handle: material_table.MaterialHandle) ?*components3d.Material3DData {
     return self.materials.get(handle);
+}
+
+/// The numbers a material gives its shader's fields, as its file keeps them.
+pub fn materialParams(self: *App, handle: material_table.MaterialHandle) []const shading.Param {
+    return self.materials.params(handle);
+}
+
+/// What a material gives its shader's field `name`, or null when it gives
+/// what the shader's file says.
+pub fn materialParam(self: *App, handle: material_table.MaterialHandle, name: []const u8) ?[]const f32 {
+    return shading.paramIn(self.materials.params(handle), name);
+}
+
+/// Give a material's shader's field `name` `numbers` - at most sixteen - or,
+/// for none, what the shader's file says again: every mesh drawn with the
+/// material, but one whose entity gives its own. `saveMaterial` writes it.
+pub fn setMaterialParam(self: *App, handle: material_table.MaterialHandle, name: []const u8, numbers: []const f32) !void {
+    try self.materials.setParam(self.gpa, handle, name, numbers);
 }
 
 pub fn unloadMaterial(self: *App, handle: material_table.MaterialHandle) void {
@@ -4454,7 +4472,7 @@ pub fn unloadMaterial(self: *App, handle: material_table.MaterialHandle) void {
 pub fn saveMaterial(self: *App, handle: material_table.MaterialHandle, path: []const u8) !void {
     const io = self.io orelse return error.NoIo;
     const held = self.materials.get(handle) orelse return error.NoSuchMaterial;
-    const bytes = try material_table.write(self, self.gpa, held.*);
+    const bytes = try material_table.write(self, self.gpa, held.*, self.materials.params(handle));
     defer self.gpa.free(bytes);
     const file = try self.project.osPath(self.gpa, path);
     defer self.gpa.free(file);

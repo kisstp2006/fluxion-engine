@@ -10,13 +10,16 @@
 //!
 //! - **Glow**: what is brighter than the environment's threshold, taken
 //!   out at half the size, made smaller and smaller, and added back up the
-//!   way it came, each step spread a little: bloom.
+//!   way it came, each step spread a little: bloom. What the levels add up
+//!   to is divided by how many there are, so the glow is as strong whatever
+//!   the size of the picture.
 //! - **Tone**: the light times the exposure, with the glow added, brought
 //!   into what a screen shows - as it is, Reinhard, filmic or ACES - and
 //!   written as a picture's colours are.
 //! - **Smoothing**, where the project asks for it: an edge smoother over
 //!   the toned picture.
 //!
+//! The passes are one list, their numbers one buffer each binds a part of.
 //! The targets are kept by size, as depth is, and let go of once nothing
 //! has drawn at a size for a few frames.
 
@@ -61,41 +64,64 @@ const vertex_part =
     \\
 ;
 
-/// What is brighter than `KNOBS.x`, after the exposure in `KNOBS.y`.
+/// What is brighter than `KNOBS.x`, after the exposure in `KNOBS.y`: by
+/// its brightest channel, so a deep red or orange glows as a white of the
+/// same strength does, with a soft knee half the threshold wide so the glow
+/// does not start at an edge. No pixel glows brighter than sixteen, so one
+/// spark does not light the screen.
 const bright_source = vertex_part ++
     \\texture2d SOURCE : 0;
     \\fragment {
     \\    vec3 light = sample(SOURCE, UV).rgb;
     \\    vec3 seen = light * KNOBS.y;
-    \\    float brightness = dot(seen, vec3(0.2126, 0.7152, 0.0722));
-    \\    float kept = max(brightness - KNOBS.x, 0.0) / max(brightness, 0.0001);
+    \\    float brightest = max(seen.r, max(seen.g, seen.b));
+    \\    float knee = KNOBS.x * 0.5 + 0.0001;
+    \\    float soft = clamp(brightest - KNOBS.x + knee, 0.0, 2.0 * knee);
+    \\    soft = soft * soft / (4.0 * knee);
+    \\    float kept = max(soft, brightest - KNOBS.x) / max(brightest, 0.0001);
     \\    vec3 glow = light * kept;
     \\    float peak = max(glow.r, max(glow.g, glow.b)) * KNOBS.y;
-    \\    glow = glow * min(1.0, 16.0 / max(peak, 16.0));
-    \\    target = vec4(glow, 1.0);
+    \\    target = vec4(glow * (16.0 / max(peak, 16.0)), 1.0);
     \\}
 ;
 
-/// Half the size: four taps between the source's pixels.
+/// Half the size: thirteen taps over the four by four pixels under each,
+/// the middle ones counted most, which keeps a small bright thing from
+/// flickering as it moves.
 const down_source = vertex_part ++
     \\texture2d SOURCE : 0;
     \\fragment {
-    \\    vec2 reach = TEXEL.xy;
-    \\    vec3 sum = sample(SOURCE, UV + vec2(-reach.x, -reach.y)).rgb + sample(SOURCE, UV + vec2(reach.x, -reach.y)).rgb
-    \\        + sample(SOURCE, UV + vec2(-reach.x, reach.y)).rgb + sample(SOURCE, UV + reach).rgb;
-    \\    target = vec4(sum * 0.25, 1.0);
+    \\    vec2 t = TEXEL.xy;
+    \\    vec3 a = sample(SOURCE, UV + t * vec2(-2.0, -2.0)).rgb;
+    \\    vec3 b = sample(SOURCE, UV + t * vec2(0.0, -2.0)).rgb;
+    \\    vec3 c = sample(SOURCE, UV + t * vec2(2.0, -2.0)).rgb;
+    \\    vec3 d = sample(SOURCE, UV + t * vec2(-2.0, 0.0)).rgb;
+    \\    vec3 e = sample(SOURCE, UV).rgb;
+    \\    vec3 f = sample(SOURCE, UV + t * vec2(2.0, 0.0)).rgb;
+    \\    vec3 g = sample(SOURCE, UV + t * vec2(-2.0, 2.0)).rgb;
+    \\    vec3 h = sample(SOURCE, UV + t * vec2(0.0, 2.0)).rgb;
+    \\    vec3 i = sample(SOURCE, UV + t * vec2(2.0, 2.0)).rgb;
+    \\    vec3 j = sample(SOURCE, UV + t * vec2(-1.0, -1.0)).rgb;
+    \\    vec3 k = sample(SOURCE, UV + t * vec2(1.0, -1.0)).rgb;
+    \\    vec3 l = sample(SOURCE, UV + t * vec2(-1.0, 1.0)).rgb;
+    \\    vec3 m = sample(SOURCE, UV + t * vec2(1.0, 1.0)).rgb;
+    \\    vec3 sum = e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125;
+    \\    target = vec4(sum, 1.0);
     \\}
 ;
 
-/// Twice the size, spread by `KNOBS.x` pixels, `KNOBS.y` of it, added to
-/// what is there.
+/// Twice the size: a three by three tent, `KNOBS.x` pixels of the smaller
+/// wide, times `KNOBS.y`, added to what is there.
 const up_source = vertex_part ++
     \\texture2d SOURCE : 0;
     \\fragment {
-    \\    vec2 reach = TEXEL.xy * KNOBS.x;
-    \\    vec3 sum = sample(SOURCE, UV + vec2(-reach.x, -reach.y)).rgb + sample(SOURCE, UV + vec2(reach.x, -reach.y)).rgb
-    \\        + sample(SOURCE, UV + vec2(-reach.x, reach.y)).rgb + sample(SOURCE, UV + reach).rgb;
-    \\    target = vec4(sum * 0.25 * KNOBS.y, 1.0);
+    \\    vec2 t = TEXEL.xy * KNOBS.x;
+    \\    vec3 sum = sample(SOURCE, UV + t * vec2(-1.0, -1.0)).rgb + sample(SOURCE, UV + t * vec2(1.0, -1.0)).rgb
+    \\        + sample(SOURCE, UV + t * vec2(-1.0, 1.0)).rgb + sample(SOURCE, UV + t).rgb
+    \\        + 2.0 * (sample(SOURCE, UV + t * vec2(0.0, -1.0)).rgb + sample(SOURCE, UV + t * vec2(-1.0, 0.0)).rgb
+    \\        + sample(SOURCE, UV + t * vec2(1.0, 0.0)).rgb + sample(SOURCE, UV + t * vec2(0.0, 1.0)).rgb)
+    \\        + 4.0 * sample(SOURCE, UV).rgb;
+    \\    target = vec4(sum * (KNOBS.y / 16.0), 1.0);
     \\}
 ;
 
@@ -171,6 +197,19 @@ const smooth_source = vertex_part ++
     \\    target = result;
     \\}
 ;
+
+/// One pass over the whole of a target, waiting for its numbers to be
+/// written with the rest.
+const Pass = struct {
+    pipeline: rhi.Pipeline,
+    into: rhi.RenderTarget,
+    width: u32,
+    height: u32,
+    load: rhi.LoadOp,
+    sources: [2]rhi.Texture,
+    source_count: u8,
+    knobs: Post,
+};
 
 /// A pass's shader and the pipelines it is drawn with.
 const Stage = struct {
@@ -268,9 +307,14 @@ pub const Post3D = struct {
     tone: Stage = .{},
     smooth: Stage = .{},
     targets: std.ArrayList(Targets) = .empty,
-    /// One uniform buffer a pass of a draw, used again by the next draw.
-    knobs: std.ArrayList(rhi.Buffer) = .empty,
-    knobs_used: usize = 0,
+    /// This draw's passes, recorded into one list once their numbers are
+    /// written.
+    passes: std.ArrayList(Pass) = .empty,
+    /// Every pass's numbers, each where the device binds a block from, in
+    /// one buffer: grown, never shrunk.
+    knobs: ?rhi.Buffer = null,
+    knobs_size: u32 = 0,
+    knob_bytes: std.ArrayList(u8) = .empty,
     clock: u64 = 0,
 
     pub fn init(gpa: Allocator, device: *rhi.Device, depth_format: rhi.Format) !Post3D {
@@ -304,8 +348,9 @@ pub const Post3D = struct {
         const device = self.device;
         for (self.targets.items) |*held| held.deinit(device);
         self.targets.deinit(gpa);
-        for (self.knobs.items) |buffer| device.destroyBuffer(buffer);
-        self.knobs.deinit(gpa);
+        if (self.knobs) |buffer| device.destroyBuffer(buffer);
+        self.passes.deinit(gpa);
+        self.knob_bytes.deinit(gpa);
         for ([_]*Stage{ &self.bright, &self.down, &self.up, &self.tone, &self.smooth }) |stage| stage.deinit(device);
         device.destroySampler(self.sampler);
         device.destroyTexture(self.black);
@@ -418,12 +463,12 @@ pub const Post3D = struct {
     /// holds by the light's alpha with `over`, or in place of it.
     pub fn finish(self: *Post3D, gpa: Allocator, targets: *Targets, into: rhi.RenderTarget, look: Look, over: bool) !void {
         const device = self.device;
-        self.knobs_used = 0;
+        self.passes.clearRetainingCapacity();
         const flip = material.screenFlip(device);
         const width = targets.width;
         const height = targets.height;
 
-        const glow = if (look.glow) try self.glowOf(gpa, targets, look, flip) else self.black;
+        const glow: Glow = if (look.glow) try self.glowOf(gpa, targets, look, flip) else .{ .texture = self.black, .weight = 1 };
 
         // Toned into the picture - or into a picture of its own first,
         // where it is smoothed after.
@@ -441,20 +486,24 @@ pub const Post3D = struct {
             .filmic => 2,
             .aces => 3,
         };
-        try self.pass(gpa, if (over and !smoothing) self.tone.over else self.tone.pipeline, tone_into, width, height, if (over and !smoothing) .load else .dont_care, &.{ targets.light, glow }, .{
+        try self.queue(gpa, if (over and !smoothing) self.tone.over else self.tone.pipeline, tone_into, width, height, if (over and !smoothing) .load else .dont_care, &.{ targets.light, glow.texture }, .{
             .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
-            .knobs = .{ look.exposure, look.white, curve, if (look.glow) look.glow_intensity else 0 },
+            .knobs = .{ look.exposure, look.white, curve, if (look.glow) look.glow_intensity / glow.weight else 0 },
         });
-        if (smoothing) try self.pass(gpa, if (over) self.smooth.over else self.smooth.pipeline, into, width, height, if (over) .load else .dont_care, &.{targets.toned.?}, .{
+        if (smoothing) try self.queue(gpa, if (over) self.smooth.over else self.smooth.pipeline, into, width, height, if (over) .load else .dont_care, &.{targets.toned.?}, .{
             .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
             .knobs = @splat(0),
         });
+        try self.run(gpa);
     }
+
+    /// The glow, and what its levels add up to: what it is divided by.
+    const Glow = struct { texture: rhi.Texture, weight: f32 };
 
     /// The glow of what is bright in `targets`: taken out at half the size,
     /// made smaller level by level, and added back up the way it came. The
-    /// half-size level, which holds all of it.
-    fn glowOf(self: *Post3D, gpa: Allocator, targets: *Targets, look: Look, flip: f32) !rhi.Texture {
+    /// half-size level, which holds all of it, and how many times over.
+    fn glowOf(self: *Post3D, gpa: Allocator, targets: *Targets, look: Look, flip: f32) !Glow {
         const device = self.device;
         if (targets.glow_levels == 0) {
             var w = @max(targets.width / 2, 1);
@@ -488,7 +537,7 @@ pub const Post3D = struct {
 
         // What is bright, at half the size.
         const first = sizeOf(targets, 0);
-        try self.pass(gpa, self.bright.pipeline, .{ .texture = targets.glow[0].? }, first[0], first[1], .dont_care, &.{targets.light}, .{
+        try self.queue(gpa, self.bright.pipeline, .{ .texture = targets.glow[0].? }, first[0], first[1], .dont_care, &.{targets.light}, .{
             .texel = .{ 1 / @as(f32, @floatFromInt(targets.width)), 1 / @as(f32, @floatFromInt(targets.height)), flip, 0 },
             .knobs = .{ look.glow_threshold, look.exposure, 0, 0 },
         });
@@ -497,48 +546,77 @@ pub const Post3D = struct {
         while (level < levels) : (level += 1) {
             const from = sizeOf(targets, level - 1);
             const size = sizeOf(targets, level);
-            try self.pass(gpa, self.down.pipeline, .{ .texture = targets.glow[level].? }, size[0], size[1], .dont_care, &.{targets.glow[level - 1].?}, .{
-                .texel = .{ 0.5 / @as(f32, @floatFromInt(from[0])), 0.5 / @as(f32, @floatFromInt(from[1])), flip, 0 },
+            try self.queue(gpa, self.down.pipeline, .{ .texture = targets.glow[level].? }, size[0], size[1], .dont_care, &.{targets.glow[level - 1].?}, .{
+                .texel = .{ 1 / @as(f32, @floatFromInt(from[0])), 1 / @as(f32, @floatFromInt(from[1])), flip, 0 },
                 .knobs = @splat(0),
             });
         }
         // Up: each level added to the one above it, spread a little; the
-        // further down, the less with a small spread.
+        // further down, the less with a small spread. A level counts as many
+        // times as the weights on its way up multiply to.
+        var weights: [most_glow_levels]f32 = @splat(1);
+        for (1..levels) |at| {
+            const reach: f32 = @as(f32, @floatFromInt(at)) / @as(f32, @floatFromInt(@max(levels - 1, 1)));
+            weights[at] = if (look.glow_spread >= reach) 1 else look.glow_spread / @max(reach, 0.0001);
+        }
+        var total: f32 = 1;
+        var carried: f32 = 1;
+        for (1..levels) |at| {
+            carried *= weights[at];
+            total += carried;
+        }
         level = levels;
         while (level > 1) {
             level -= 1;
             const from = sizeOf(targets, level);
             const size = sizeOf(targets, level - 1);
-            const reach: f32 = @as(f32, @floatFromInt(level)) / @as(f32, @floatFromInt(@max(levels - 1, 1)));
-            const weight = if (look.glow_spread >= reach) 1 else look.glow_spread / @max(reach, 0.0001);
-            try self.pass(gpa, self.up.pipeline, .{ .texture = targets.glow[level - 1].? }, size[0], size[1], .load, &.{targets.glow[level].?}, .{
+            try self.queue(gpa, self.up.pipeline, .{ .texture = targets.glow[level - 1].? }, size[0], size[1], .load, &.{targets.glow[level].?}, .{
                 .texel = .{ 1 / @as(f32, @floatFromInt(from[0])), 1 / @as(f32, @floatFromInt(from[1])), flip, 0 },
-                .knobs = .{ 1, weight, 0, 0 },
+                .knobs = .{ 1, weights[level], 0, 0 },
             });
         }
-        return targets.glow[0].?;
+        return .{ .texture = targets.glow[0].?, .weight = total };
     }
 
-    /// One pass over the whole of `into`, reading `sources`.
-    fn pass(self: *Post3D, gpa: Allocator, pipeline: rhi.Pipeline, into: rhi.RenderTarget, width: u32, height: u32, load: rhi.LoadOp, sources: []const rhi.Texture, knobs: Post) !void {
+    /// One pass over the whole of `into`, reading `sources`: kept for `run`.
+    fn queue(self: *Post3D, gpa: Allocator, pipeline: rhi.Pipeline, into: rhi.RenderTarget, width: u32, height: u32, load: rhi.LoadOp, sources: []const rhi.Texture, knobs: Post) !void {
+        var held: Pass = .{ .pipeline = pipeline, .into = into, .width = width, .height = height, .load = load, .sources = undefined, .source_count = @intCast(sources.len), .knobs = knobs };
+        @memcpy(held.sources[0..sources.len], sources);
+        try self.passes.append(gpa, held);
+    }
+
+    /// Every pass queued: their numbers into the buffer at once, each where
+    /// the device binds a block from, and the passes one list.
+    fn run(self: *Post3D, gpa: Allocator) !void {
         const device = self.device;
-        if (self.knobs_used == self.knobs.items.len) {
-            const buffer = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(Post), .dynamic = true, .label = "3D post" });
-            errdefer device.destroyBuffer(buffer);
-            try self.knobs.append(gpa, buffer);
+        const passes = self.passes.items;
+        if (passes.len == 0) return;
+        const stride: u32 = @intCast(std.mem.alignForward(usize, @sizeOf(Post), device.caps().limits.uniform_offset_alignment));
+        const size: u32 = @intCast(passes.len * stride);
+        try self.knob_bytes.resize(gpa, size);
+        @memset(self.knob_bytes.items, 0);
+        for (passes, 0..) |held, at| @memcpy(self.knob_bytes.items[at * stride ..][0..@sizeOf(Post)], std.mem.asBytes(&held.knobs));
+        if (self.knobs_size < size) {
+            var room = @max(self.knobs_size, stride * 16);
+            while (room < size) room *= 2;
+            const grown = try device.createBuffer(.{ .kind = .uniform, .size = room, .dynamic = true, .label = "3D post" });
+            if (self.knobs) |old| device.destroyBuffer(old);
+            self.knobs = grown;
+            self.knobs_size = room;
         }
-        const buffer = self.knobs.items[self.knobs_used];
-        self.knobs_used += 1;
-        try device.updateBuffer(buffer, 0, std.mem.asBytes(&knobs));
+        const buffer = self.knobs.?;
+        try device.updateBuffer(buffer, 0, self.knob_bytes.items);
         const list = device.begin();
-        try list.beginPass(.{ .color = .{ .target = into, .load = load, .clear_color = .{ 0, 0, 0, 0 } } });
-        try list.setViewport(.{ .width = @floatFromInt(width), .height = @floatFromInt(height) });
-        try list.setPipeline(pipeline);
-        try list.setUniformBuffer(0, buffer);
-        for (sources, 0..) |source, slot| try list.setTexture(@intCast(slot), source, self.sampler);
-        try list.setVertexBuffer(0, self.corners, 0);
-        try list.draw(.{ .vertex_count = 3 });
-        try list.endPass();
+        for (passes, 0..) |held, at| {
+            try list.beginPass(.{ .color = .{ .target = held.into, .load = held.load, .clear_color = .{ 0, 0, 0, 0 } } });
+            try list.setViewport(.{ .width = @floatFromInt(held.width), .height = @floatFromInt(held.height) });
+            try list.setPipeline(held.pipeline);
+            try list.setUniformBufferRange(0, buffer, @intCast(at * stride), @sizeOf(Post));
+            for (held.sources[0..held.source_count], 0..) |source, slot| try list.setTexture(@intCast(slot), source, self.sampler);
+            try list.setVertexBuffer(0, self.corners, 0);
+            try list.draw(.{ .vertex_count = 3 });
+            try list.endPass();
+        }
         try device.submit();
     }
 };

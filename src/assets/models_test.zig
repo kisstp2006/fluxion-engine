@@ -17,7 +17,7 @@ const materials = @import("../render/materials.zig");
 
 const Transform3D = components.Transform3D;
 const MeshInstance3D = components.MeshInstance3D;
-const Material3D = components.Material3D;
+const Material3DData = components.Material3DData;
 const Camera3D = components.Camera3D;
 const DirectionalLight3D = components.DirectionalLight3D;
 
@@ -122,7 +122,7 @@ test "a glTF model is a scene: its nodes an entity tree, its parts kept under it
     const surface = app.meshOf(mesh).?.surfaces[0];
     try testing.expect(surface.material.eql(app.findMaterial("res://models/tri.gltf#material/0").?));
     const look = app.materialOf(surface.material).?;
-    try testing.expectEqual(Material3D.Cull.disabled, look.cull);
+    try testing.expectEqual(Material3DData.Cull.disabled, look.cull);
     try testing.expect(look.albedo_texture.eql(app.assets.findTexture("res://models/tri.gltf#image/0").?));
 
     try testing.expectApproxEqAbs(@as(f32, 0.9), app.world.get(app.find("Eye").?, Camera3D).?.fov, 1e-6);
@@ -204,7 +204,7 @@ test "a model's import settings scale its root" {
     try testing.expect(app.globalPosition3D(app.find("Holder").?).?.approxEql(.init(0.5, 1, 1.5)));
 }
 
-test "a material is written to a file and read back, its picture by its path" {
+test "a material is written to a file and read back, its picture by its path and its shader's numbers with it" {
     var folder: Folder = undefined;
     try folder.init();
     defer folder.deinit();
@@ -212,17 +212,22 @@ test "a material is written to a file and read back, its picture by its path" {
     defer app.destroy();
     const red = try app.loadAsset(@import("assets.zig").TextureHandle, "res://models/red.png");
     const made = try app.addMaterial("brick", .{ .albedo_texture = red, .emission = .{ .r = 1, .g = 0.5, .b = 0, .a = 1 }, .emission_energy = 2, .transparency = .scissor, .cull = .front });
+    try app.setMaterialParam(made, "speed", &.{ 2, 3 });
+    try app.setMaterialParam(made, "glow", &.{1});
+    try app.setMaterialParam(made, "glow", &.{});
     try app.saveMaterial(made, "res://brick.mat3d");
     app.unloadMaterial(made);
     const back = try app.loadMaterial("res://brick.mat3d");
     const look = app.materialOf(back).?;
     try testing.expect(look.albedo_texture.eql(red));
     try testing.expectEqual(@as(f32, 2), look.emission_energy);
-    try testing.expectEqual(Material3D.Transparency.scissor, look.transparency);
-    try testing.expectEqual(Material3D.Cull.front, look.cull);
+    try testing.expectEqual(Material3DData.Transparency.scissor, look.transparency);
+    try testing.expectEqual(Material3DData.Cull.front, look.cull);
     // What it leaves out is what a material starts as.
     try testing.expectEqual(@as(f32, 0.5), look.alpha_scissor_threshold);
     try testing.expectEqualStrings("res://brick.mat3d", app.assetSource(back).?);
+    try testing.expectEqualSlices(f32, &.{ 2, 3 }, app.materialParam(back, "speed").?);
+    try testing.expect(app.materialParam(back, "glow") == null);
 }
 
 /// The red triangle as one GLB, its picture in its binary part.

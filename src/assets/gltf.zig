@@ -32,7 +32,7 @@ const math = @import("fluxion_math");
 
 const Color = @import("../math/color.zig").Color;
 const mesh = @import("../render/mesh.zig");
-const Material3D = @import("../render/render3d_components.zig").Material3D;
+const Material3D = @import("../render/render3d_components.zig").Material3DData;
 
 const Vec3 = math.Vec3;
 

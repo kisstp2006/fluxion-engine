@@ -202,7 +202,8 @@ pub const Camera2D = components.Camera2D;
 pub const mesh = @import("render/mesh.zig");
 pub const Mesh = mesh.Mesh;
 pub const MeshHandle = mesh.MeshHandle;
-/// `.mat3d` files: a `Material3D` kept as a file, and a model's materials.
+/// `.mat3d` files: a `Material3DData` kept as a file with its shader's
+/// numbers, and a model's materials.
 pub const materials = @import("render/materials.zig");
 pub const MaterialHandle = materials.MaterialHandle;
 /// Models as scenes: glTF read by the engine, FBX and Blender files by way
@@ -215,6 +216,7 @@ pub const background_load = @import("assets/background_load.zig");
 pub const MeshInstance3D = components.MeshInstance3D;
 pub const PrimitiveMesh3D = components.PrimitiveMesh3D;
 pub const Material3D = components.Material3D;
+pub const Material3DData = components.Material3DData;
 pub const Camera3D = components.Camera3D;
 pub const DirectionalLight3D = components.DirectionalLight3D;
 pub const PointLight3D = components.PointLight3D;

@@ -27,10 +27,10 @@
 //! several samples a pixel, as many as the device has up to it - and its
 //! `screen_space_aa`.
 //!
-//! A surface's material is, first found: a `Material3D` beside the
-//! `MeshInstance3D`, its `material_override`, the surface's own, or plain.
-//! A material that names a `.shader3d` is drawn with it: see
-//! `shader3d.zig`.
+//! A surface's material is, first found: the material of a `Material3D`
+//! beside the `MeshInstance3D`, the surface's own, or plain. A material
+//! that names a `.shader3d` is drawn with it - see `shader3d.zig` - given
+//! the numbers the material's file gives it, and over them the entity's.
 
 const std = @import("std");
 const testing = std.testing;
@@ -56,6 +56,7 @@ const MeshInstance3D = components3d.MeshInstance3D;
 const MaterialHandle = @import("materials.zig").MaterialHandle;
 const PrimitiveMesh3D = components3d.PrimitiveMesh3D;
 const Material3D = components3d.Material3D;
+const Material3DData = components3d.Material3DData;
 const DirectionalLight3D = components3d.DirectionalLight3D;
 const PointLight3D = components3d.PointLight3D;
 const SpotLight3D = components3d.SpotLight3D;
@@ -182,11 +183,6 @@ const DistanceFade = struct {
     }
 };
 
-const ParamBuffer = struct {
-    buffer: rhi.Buffer,
-    size: u32,
-};
-
 /// Lighting a draw asks for beyond the world's own.
 pub const Lighting = struct {
     /// Light a world that has no `DirectionalLight3D` with `preview_light`.
@@ -220,16 +216,22 @@ pub const Renderer3D = struct {
     items: std.ArrayList(Item) = .empty,
     staging: std.ArrayList(Instance) = .empty,
     lamps: std.ArrayList(Lamp) = .empty,
-    /// This draw's materials' numbers, one uniform buffer each - a buffer
-    /// is bound whole - kept from draw to draw.
+    /// This draw's materials' numbers, each once.
     looks: std.ArrayList(Look) = .empty,
     look_found: std.AutoHashMapUnmanaged(u64, u32) = .empty,
-    look_buffers: std.ArrayList(rhi.Buffer) = .empty,
-    /// This draw's shaders' own numbers, the same way.
+    /// This draw's shaders' own numbers, each set once.
     param_bytes: std.ArrayList(u8) = .empty,
     param_sets: std.ArrayList(struct { start: u32, len: u32 }) = .empty,
     param_found: std.AutoHashMapUnmanaged(u64, u32) = .empty,
-    param_buffers: std.ArrayList(ParamBuffer) = .empty,
+    /// Both, in one buffer a draw binds a part of: each where the device
+    /// binds a block from, the materials' first. Grown, never shrunk.
+    blocks: ?rhi.Buffer = null,
+    blocks_size: u32 = 0,
+    block_bytes: std.ArrayList(u8) = .empty,
+    /// Where each material's numbers are in `blocks`, and each set of a
+    /// shader's.
+    look_offsets: std.ArrayList(u32) = .empty,
+    param_offsets: std.ArrayList(u32) = .empty,
 
     /// What the last draw drew: meshes, and the draws they took.
     drawn: u32 = 0,
@@ -292,10 +294,10 @@ pub const Renderer3D = struct {
         const device = self.device;
         if (self.post) |*held| held.deinit(gpa);
         if (self.plain) |*held| held.deinit(device);
-        for (self.look_buffers.items) |buffer| device.destroyBuffer(buffer);
-        self.look_buffers.deinit(gpa);
-        for (self.param_buffers.items) |held| device.destroyBuffer(held.buffer);
-        self.param_buffers.deinit(gpa);
+        if (self.blocks) |buffer| device.destroyBuffer(buffer);
+        self.block_bytes.deinit(gpa);
+        self.look_offsets.deinit(gpa);
+        self.param_offsets.deinit(gpa);
         device.destroyBuffer(self.frame);
         device.destroyBuffer(self.lights);
         device.destroyBuffer(self.instances);
@@ -386,9 +388,12 @@ pub const Renderer3D = struct {
             };
             try list.setPipeline(pipeline);
             try list.setUniformBuffer(0, self.frame);
-            try list.setUniformBuffer(1, self.look_buffers.items[first.look]);
+            try list.setUniformBufferRange(1, self.blocks.?, self.look_offsets.items[first.look], @sizeOf(Look));
             try list.setUniformBuffer(2, self.lights);
-            if (first.params != no_params) try list.setUniformBuffer(shader3d.params_slot, self.param_buffers.items[first.params].buffer);
+            if (first.params != no_params) {
+                const set = self.param_sets.items[first.params];
+                try list.setUniformBufferRange(shader3d.params_slot, self.blocks.?, self.param_offsets.items[first.params], set.len);
+            }
             for (first.textures, 0..) |texture, slot| try list.setTexture(@intCast(slot), texture, first.sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
@@ -559,7 +564,7 @@ pub const Renderer3D = struct {
                 const gpu = try kept.uploaded(self.device);
                 const turn = model.normalMatrix() orelse math.Mat3.identity;
                 const depth = bounds.center().sub(view.position).dot(forward);
-                const own = app.world.get(entity, Material3D);
+                const own: MaterialHandle = if (app.world.get(entity, Material3D)) |held| held.material else .none;
                 const at: u32 = @intCast(self.gathered.items.len);
                 try self.gathered.append(gpa, .{
                     .model = .{ model.cols[0].array(), model.cols[1].array(), model.cols[2].array(), model.cols[3].array() },
@@ -569,7 +574,8 @@ pub const Renderer3D = struct {
                 });
                 for (kept.mesh.surfaces) |surface| {
                     if (surface.index_count == 0) continue;
-                    const look = materialOf(app, own, instance.material_override, surface.material);
+                    const chosen = if (!own.isNone() and app.materials.get(own) != null) own else surface.material;
+                    const look = materialOf(app, chosen);
                     var compiled = if (look.shader.isNone()) plain else app.shaders.compiled3DOf(look.shader) orelse plain;
                     if (compiled.refused) compiled = plain;
                     var sampler = app.assets.samplerFor(.linear, .repeat);
@@ -592,7 +598,7 @@ pub const Renderer3D = struct {
                         .textures = textures,
                         .sampler = sampler,
                         .look = try self.lookIndex(gpa, lookOf(look, !look.normal_texture.isNone() or compiled.writes_normal_map)),
-                        .params = try self.paramSetOf(app, compiled, entity),
+                        .params = try self.paramSetOf(app, compiled, chosen, entity),
                         .depth = depth,
                         .instance = at,
                     });
@@ -613,15 +619,16 @@ pub const Renderer3D = struct {
         return at;
     }
 
-    /// Which of this draw's sets of numbers `entity` gives `compiled`'s
-    /// own block, or `no_params` for a shader with none.
-    fn paramSetOf(self: *Renderer3D, app: *App, compiled: *const shader3d.Compiled, entity: ecs.Entity) !u32 {
+    /// Which of this draw's sets of numbers `compiled`'s own block is given -
+    /// the material's, and over them `entity`'s - or `no_params` for a
+    /// shader with none.
+    fn paramSetOf(self: *Renderer3D, app: *App, compiled: *const shader3d.Compiled, material: MaterialHandle, entity: ecs.Entity) !u32 {
         const gpa = app.gpa;
         const block = compiled.params orelse return no_params;
         const start: u32 = @intCast(self.param_bytes.items.len);
         try self.param_bytes.resize(gpa, start + block.size);
         const bytes = self.param_bytes.items[start..];
-        shaders.pack(block, app.shader_params.of(entity), bytes);
+        shaders.packLayers(block, &.{ app.materials.params(material), app.shader_params.of(entity) }, bytes);
         const found = try self.param_found.getOrPut(gpa, std.hash.Wyhash.hash(block.size, bytes));
         if (found.found_existing) {
             const set = self.param_sets.items[found.value_ptr.*];
@@ -636,8 +643,9 @@ pub const Renderer3D = struct {
         return at;
     }
 
-    /// The sorted instances into the buffer, grown to hold them, and each
-    /// set of numbers into a uniform buffer of its own.
+    /// The sorted instances into the buffer, grown to hold them, and every
+    /// material's and shader's numbers into one, each where the device binds
+    /// a block from.
     fn upload(self: *Renderer3D, gpa: Allocator) !void {
         const device = self.device;
         const count: u32 = @intCast(self.staging.items.len);
@@ -651,30 +659,38 @@ pub const Renderer3D = struct {
         }
         if (count > 0) try device.updateBuffer(self.instances, 0, std.mem.sliceAsBytes(self.staging.items));
 
-        for (self.looks.items, 0..) |*look, at| {
-            if (at == self.look_buffers.items.len) {
-                const buffer = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(Look), .dynamic = true, .label = "3D material" });
-                errdefer device.destroyBuffer(buffer);
-                try self.look_buffers.append(gpa, buffer);
-            }
-            try device.updateBuffer(self.look_buffers.items[at], 0, std.mem.asBytes(look));
+        const alignment = device.caps().limits.uniform_offset_alignment;
+        self.block_bytes.clearRetainingCapacity();
+        self.look_offsets.clearRetainingCapacity();
+        self.param_offsets.clearRetainingCapacity();
+        for (self.looks.items) |*look| try self.look_offsets.append(gpa, try self.place(gpa, std.mem.asBytes(look), alignment));
+        for (self.param_sets.items) |set| try self.param_offsets.append(gpa, try self.place(gpa, self.param_bytes.items[set.start..][0..set.len], alignment));
+        const size: u32 = @intCast(self.block_bytes.items.len);
+        if (size == 0) return;
+        if (self.blocks_size < size) {
+            var room = @max(self.blocks_size, alignment * 64);
+            while (room < size) room *= 2;
+            const grown = try device.createBuffer(.{ .kind = .uniform, .size = room, .dynamic = true, .label = "3D materials" });
+            if (self.blocks) |old| device.destroyBuffer(old);
+            self.blocks = grown;
+            self.blocks_size = room;
         }
-        for (self.param_sets.items, 0..) |set, at| {
-            if (at == self.param_buffers.items.len) try self.param_buffers.append(gpa, .{ .buffer = .none, .size = 0 });
-            const held = &self.param_buffers.items[at];
-            if (held.size < set.len) {
-                if (held.size > 0) device.destroyBuffer(held.buffer);
-                held.* = .{ .buffer = .none, .size = 0 };
-                held.buffer = try device.createBuffer(.{ .kind = .uniform, .size = set.len, .dynamic = true, .label = "3D shader numbers" });
-                held.size = set.len;
-            }
-            try device.updateBuffer(held.buffer, 0, self.param_bytes.items[set.start..][0..set.len]);
-        }
+        try device.updateBuffer(self.blocks.?, 0, self.block_bytes.items);
+    }
+
+    /// `bytes` at the next place in `block_bytes` a block is bound from.
+    fn place(self: *Renderer3D, gpa: Allocator, bytes: []const u8, alignment: u32) !u32 {
+        const old = self.block_bytes.items.len;
+        const at: u32 = @intCast(std.mem.alignForward(usize, old, alignment));
+        try self.block_bytes.resize(gpa, at + bytes.len);
+        @memset(self.block_bytes.items[old..at], 0);
+        @memcpy(self.block_bytes.items[at..][0..bytes.len], bytes);
+        return at;
     }
 };
 
 /// A material's numbers as the shader reads them.
-fn lookOf(look: Material3D, normal_map: bool) Look {
+fn lookOf(look: Material3DData, normal_map: bool) Look {
     const glow = linear(look.emission);
     const energy = look.emission_energy;
     return .{
@@ -729,10 +745,8 @@ fn distanceSquared(box: math.Aabb, p: math.Vec3) f32 {
 
 /// What a surface is drawn with: the `Material3D` beside its mesh's
 /// instance, the instance's override, the surface's own, or plain.
-fn materialOf(app: *App, own: ?*const Material3D, override: MaterialHandle, surface: MaterialHandle) Material3D {
-    if (own) |held| return held.*;
-    if (!override.isNone()) if (app.materials.get(override)) |held| return held.*;
-    if (!surface.isNone()) if (app.materials.get(surface)) |held| return held.*;
+fn materialOf(app: *App, handle: MaterialHandle) Material3DData {
+    if (!handle.isNone()) if (app.materials.get(handle)) |held| return held.*;
     return .{};
 }
 

@@ -1255,11 +1255,12 @@ const where = app.globalPosition3D(held).?;
 ## 🧊 The 3D layer
 
 ```zig
+const red = try app.addMaterial("red", .{ .albedo_color = .hex(0xCC3333) });
 _ = try app.world.spawnWith(.{
     fx.Transform3D.at(0, 0.5, 0),
     fx.MeshInstance3D{},
     fx.PrimitiveMesh3D{ .shape = .box },
-    fx.Material3D{ .albedo_color = .hex(0xCC3333) },
+    fx.Material3D{ .material = red },
 });
 var sun: fx.Transform3D = .{};
 sun.lookAt(.init(-0.4, -1, -0.6), .unit_y);
@@ -1278,7 +1279,14 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   `app.saveMesh` and `app.loadMesh` write and read a `.mesh` file - the
   vertices and the indices as they are held. A mesh's corners go
   counter-clockwise seen from the side they face.
-- **A `Material3D` beside it says how it looks**: `albedo_color` times
+- **A `Material3D` beside it names the material it is drawn with**: a
+  `.mat3d` file, or one made in code with `app.addMaterial`. It holds nothing
+  else - the material does, and what changes it changes every mesh drawn
+  with it. Without one, each surface is drawn with its own material: a mesh
+  is surfaces, runs of its triangles each with a material, as a model's are.
+  With none it is white, rough and lit. `Appearance.visible` hides it and
+  `Appearance.modulate` tints it, as everything drawn.
+- **A material - a `Material3DData` - says how it looks**: `albedo_color` times
   `albedo_texture`, laid on with `uv_scale` and `uv_offset`, times the mesh's
   corner colours with `vertex_color`; how much of it is `metallic` and how
   rough it is - `roughness`, nought a mirror and one chalk - times the blue
@@ -1289,11 +1297,7 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   over what is behind it by its alpha, or to cut it where the alpha is under
   `alpha_scissor_threshold`; `cull` for which side of its triangles is left
   out; `unshaded` for its colour as it is; and a `shader` of its own - see
-  below. Without one, the `MeshInstance3D`'s `material_override` - a material
-  file - and then each surface's own material: a mesh is surfaces, runs of
-  its triangles each with a material, as a model's are. With none it is
-  white, rough and lit. `Appearance.visible` hides it and
-  `Appearance.modulate` tints it, as everything drawn.
+  below.
 - **It is lit as a real surface is**, by how much of it is metal and how
   rough it is - the model a glTF material is written for. Colours are made
   linear as they are read, a picture's and a material's alike, and light adds
@@ -1370,12 +1374,14 @@ fragment {
   numbers and pictures - and what it leaves them as is lit. It reads `UV`,
   `COLOR`, `WORLD_POSITION`, `WORLD_NORMAL`, `CAMERA_POSITION`, `TIME` and
   the material's pictures, and does not write `target`.
-- **Named by a `Material3D`'s `shader`**, read as a `.shader` file is -
-  `app.loadShader` - and given its own numbers as a 2D material's are: the
-  fields of its one block at slot 3 and what the file writes after each,
-  until `app.setShaderParam(entity, name, numbers)` gives the mesh's entity
-  its own, written in a scene as the material's `params`. One that does not
-  compile, or that the driver refuses, draws as the engine's own.
+- **Named by a material's `shader`**, read as a `.shader` file is -
+  `app.loadShader` - and given the numbers of its one block at slot 3: what
+  the shader's file writes after each field, then what the material gives -
+  `app.setMaterialParam(material, name, numbers)`, written in its `.mat3d`
+  under `params` - and over that what an entity drawn with it gives -
+  `app.setShaderParam(entity, name, numbers)`, written in a scene as
+  `params` beside its `Material3D`. One that does not compile, or that the
+  driver refuses, draws as the engine's own.
 - **An editor reads it as it is compiled**: `fx.shaders.edit.analyzeFile`
   colours it, says what is wrong at its own lines, and completes and
   explains the names above.
@@ -1386,7 +1392,7 @@ fragment {
 const robot = try app.loadScene("res://models/robot.glb");
 const one = try app.instantiate(robot, level);
 const brick = try app.loadMaterial("res://materials/brick.mat3d");
-app.world.get(wall, fx.MeshInstance3D).?.material_override = brick;
+app.world.get(wall, fx.Material3D).?.material = brick;
 ```
 
 - **A model is a scene**: `loadScene`, `instantiate` and a scene's
@@ -1412,11 +1418,12 @@ app.world.get(wall, fx.MeshInstance3D).?.material_override = brick;
   file, and the model is read first; a part has no UUID of its own.
 - **`<model>.import` beside it says how it is brought in**: `{ "scale": 0.01 }`
   for a model made in centimetres, the root that much smaller.
-- **A `.mat3d` is a `Material3D` of its own**, written as a scene writes the
-  component - only what is not as a material starts - and kept under a
-  `MaterialHandle`: `loadMaterial`, `addMaterial` for one made in code,
-  `materialOf` to change it - what draws with it draws the change -
-  `saveMaterial` and `reloadMaterial`.
+- **A `.mat3d` is a `Material3DData`**, written as a scene writes a
+  component - only what is not as a material starts - with its shader's
+  numbers under `params`, and kept under a `MaterialHandle`: `loadMaterial`,
+  `addMaterial` for one made in code, `materialOf` to change it - what draws
+  with it draws the change - `materialParam` and `setMaterialParam` for its
+  shader's numbers, `saveMaterial` and `reloadMaterial`.
 - **A `.mesh` file holds surfaces too**, with corner colours and tangents:
   what `saveMesh` writes now; one written before is read as it was, its
   tangents worked out.

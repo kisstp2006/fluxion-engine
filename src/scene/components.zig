@@ -40,6 +40,7 @@ pub const RenderView = @import("../render/render_components.zig").RenderView;
 pub const MeshInstance3D = @import("../render/render3d_components.zig").MeshInstance3D;
 pub const PrimitiveMesh3D = @import("../render/render3d_components.zig").PrimitiveMesh3D;
 pub const Material3D = @import("../render/render3d_components.zig").Material3D;
+pub const Material3DData = @import("../render/render3d_components.zig").Material3DData;
 pub const Camera3D = @import("../render/render3d_components.zig").Camera3D;
 pub const DirectionalLight3D = @import("../render/render3d_components.zig").DirectionalLight3D;
 pub const PointLight3D = @import("../render/render3d_components.zig").PointLight3D;

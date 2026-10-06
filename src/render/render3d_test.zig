@@ -60,8 +60,10 @@ test "the boxes a camera sees are drawn together, and one behind it is left out"
 
     // Another shape, both sides drawn, and see-through: a draw each.
     const ball = try app.world.spawnWith(.{ Transform3D.at(0, 1, 0), MeshInstance3D{}, PrimitiveMesh3D{ .shape = .sphere } });
-    _ = try app.world.spawnWith(.{ Transform3D.at(0, -1, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .cull = .disabled } });
-    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 1), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .transparency = .alpha, .albedo_color = .{ .r = 1, .g = 1, .b = 1, .a = 0.5 } } });
+    const sheet = try app.addMaterial("sheet", .{ .cull = .disabled });
+    const glass = try app.addMaterial("glass", .{ .transparency = .alpha, .albedo_color = .{ .r = 1, .g = 1, .b = 1, .a = 0.5 } });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, -1, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .material = sheet } });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 1), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .material = glass } });
     _ = try app.step();
     try testing.expectEqual(@as(u32, 6), app.renderer3d.drawn);
     try testing.expectEqual(@as(u32, 4), app.renderer3d.draw_calls);
@@ -137,7 +139,7 @@ test "the first visible environment is the one drawn with" {
     try testing.expectEqual(@as(u32, 1), app.renderer3d.samples);
 }
 
-test "a material naming a 3D shader draws with it, given its numbers by the mesh's entity" {
+test "a material naming a 3D shader draws with it, given its numbers by the material and by the mesh's entity" {
     const app = try headless();
     defer app.destroy();
     _ = try looking(app);
@@ -151,8 +153,9 @@ test "a material naming a 3D shader draws with it, given its numbers by the mesh
     );
     try testing.expect(app.shaderOf(waves).?.is3D());
     try testing.expect(app.shaders.compiledOf(waves) == null);
-    const one = try app.world.spawnWith(.{ Transform3D.at(-1, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .shader = waves } });
-    _ = try app.world.spawnWith(.{ Transform3D.at(1, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .shader = waves } });
+    const surface = try app.addMaterial("waves", .{ .shader = waves });
+    const one = try app.world.spawnWith(.{ Transform3D.at(-1, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .material = surface } });
+    const two = try app.world.spawnWith(.{ Transform3D.at(1, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .material = surface } });
     _ = try app.step();
     try testing.expectEqual(@as(u32, 2), app.renderer3d.drawn);
     try testing.expect(app.renderer3d.items.items[0].compiled == app.shaders.compiled3DOf(waves).?);
@@ -160,7 +163,13 @@ test "a material naming a 3D shader draws with it, given its numbers by the mesh
     try testing.expectEqual(@as(usize, 1), app.renderer3d.param_sets.items.len);
     try testing.expectEqual(@as(u32, 1), app.renderer3d.draw_calls);
 
+    // The material's numbers are both meshes'; an entity's own, its alone.
+    try app.setMaterialParam(surface, "speed", &.{3});
+    var buffer: [16]f32 = undefined;
+    try testing.expectEqualSlices(f32, &.{3}, app.shaderParamOrDefault(two, "speed", &buffer).?);
     try app.setShaderParam(one, "speed", &.{2});
+    try testing.expectEqualSlices(f32, &.{2}, app.shaderParamOrDefault(one, "speed", &buffer).?);
+    try testing.expectEqualSlices(f32, &.{3}, app.shaderParamOrDefault(two, "speed", &buffer).?);
     _ = try app.step();
     try testing.expectEqual(@as(usize, 2), app.renderer3d.param_sets.items.len);
     try testing.expectEqual(@as(u32, 2), app.renderer3d.draw_calls);
@@ -168,7 +177,7 @@ test "a material naming a 3D shader draws with it, given its numbers by the mesh
     // One that does not compile draws as the engine's own.
     const broken = try app.addShader("broken.shader3d", "fragment { ALBEDO = 1; }");
     try testing.expect(!app.shaderOf(broken).?.works());
-    app.world.get(one, Material3D).?.shader = broken;
+    app.world.get(one, Material3D).?.material = try app.addMaterial("broken", .{ .shader = broken });
     _ = try app.step();
     try testing.expectEqual(@as(u32, 2), app.renderer3d.drawn);
     try testing.expect(app.renderer3d.items.items[0].compiled == &app.renderer3d.plain.?);
@@ -199,7 +208,7 @@ test "the 3D components keep what they hold through a scene round trip" {
         Transform3D.at(1, 0, 0),
         MeshInstance3D{ .layers = 0b100, .cast_shadow = false },
         PrimitiveMesh3D{ .shape = .capsule, .radius = 0.25, .height = 1.5, .segments = 12 },
-        Material3D{ .albedo_color = .hex(0x336699), .cull = .front, .transparency = .alpha, .unshaded = true, .uv_scale = .init(2, 3) },
+        Material3D{ .material = try source.addMaterial("blue", .{ .albedo_color = .hex(0x336699), .cull = .front }) },
     });
     try source.setName(pill, "pill");
     const sun = try source.world.spawnWith(.{ Transform3D{}, DirectionalLight3D{ .energy = 2 } });
@@ -210,7 +219,7 @@ test "the 3D components keep what they hold through a scene round trip" {
     try source.setName(spot, "spot");
     const around = try source.world.spawnWith(.{Environment{ .background = .color, .tonemap = .aces, .fog = true, .fog_height = 2, .glow = true, .glow_threshold = 0.7 }});
     try source.setName(around, "around");
-    const shiny = try source.world.spawnWith(.{ Transform3D{}, MeshInstance3D{}, Material3D{ .metallic = 1, .roughness = 0.2, .normal_scale = 0.5 } });
+    const shiny = try source.world.spawnWith(.{ Transform3D{}, MeshInstance3D{}, Material3D{ .material = try source.addMaterial("shiny", .{ .metallic = 1, .roughness = 0.2 }) } });
     try source.setName(shiny, "shiny");
     try source.setShaderParam(shiny, "speed", &.{ 1, 2 });
 
@@ -218,6 +227,9 @@ test "the 3D components keep what they hold through a scene round trip" {
     defer testing.allocator.free(text);
     const copy = try headless();
     defer copy.destroy();
+    // Made in code, as in the first: a scene names a material by its name.
+    const blue = try copy.addMaterial("blue", .{});
+    const shiny_material = try copy.addMaterial("shiny", .{});
     _ = try scene.read(copy, text, .{});
 
     const seen = copy.world.get(copy.find("eye").?, Camera3D).?;
@@ -225,12 +237,12 @@ test "the 3D components keep what they hold through a scene round trip" {
     const back = copy.find("pill").?;
     try testing.expectEqual(source.world.get(pill, MeshInstance3D).?.*, copy.world.get(back, MeshInstance3D).?.*);
     try testing.expectEqual(source.world.get(pill, PrimitiveMesh3D).?.*, copy.world.get(back, PrimitiveMesh3D).?.*);
-    try testing.expectEqual(source.world.get(pill, Material3D).?.*, copy.world.get(back, Material3D).?.*);
+    try testing.expect(copy.world.get(back, Material3D).?.material.eql(blue));
     try testing.expectEqual(@as(f32, 2), copy.world.get(copy.find("sun").?, DirectionalLight3D).?.energy);
     try testing.expectEqual(source.world.get(lamp, PointLight3D).?.*, copy.world.get(copy.find("lamp").?, PointLight3D).?.*);
     try testing.expectEqual(source.world.get(spot, SpotLight3D).?.*, copy.world.get(copy.find("spot").?, SpotLight3D).?.*);
     try testing.expectEqual(source.world.get(around, Environment).?.*, copy.world.get(copy.find("around").?, Environment).?.*);
     const shiny_back = copy.find("shiny").?;
-    try testing.expectEqual(source.world.get(shiny, Material3D).?.*, copy.world.get(shiny_back, Material3D).?.*);
+    try testing.expect(copy.world.get(shiny_back, Material3D).?.material.eql(shiny_material));
     try testing.expectEqualSlices(f32, &.{ 1, 2 }, copy.shader_params.get(shiny_back, "speed").?);
 }

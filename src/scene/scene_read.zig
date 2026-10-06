@@ -248,6 +248,9 @@ pub const Loading = struct {
     /// The entity being filled in, for a value kept beside its component:
     /// a map's tiles.
     entity: Entity = .none,
+    /// Where a shader's numbers read beside a value go, when they are not
+    /// an entity's: a material file's. See `readValueTextKeeping`.
+    params: ?*@import("../render/shaders.zig").ParamList = null,
     /// What has to wait until the whole scene is read: see `whenRead`.
     later: ?*std.ArrayList(Later) = null,
     /// What the scene's roots hang from: see `LoadOptions.parent`.
@@ -835,12 +838,18 @@ fn hang(app: *App, e: Entity, parent: Entity) !void {
 /// file kept as a component is, a `.mat3d`. The files it names are read as a
 /// scene reads them; what it leaves out keeps what `out` held.
 pub fn readValueText(app: *App, comptime T: type, bytes: []const u8, out: *T, diagnostics: ?*json.Diagnostics) anyerror!void {
+    return readValueTextKeeping(app, T, bytes, out, diagnostics, null);
+}
+
+/// The same, with the shader's numbers the text holds beside the value -
+/// under `params` - put in `params`: a material file's.
+pub fn readValueTextKeeping(app: *App, comptime T: type, bytes: []const u8, out: *T, diagnostics: ?*json.Diagnostics, params: ?*@import("../render/shaders.zig").ParamList) anyerror!void {
     var arena: std.heap.ArenaAllocator = .init(app.gpa);
     defer arena.deinit();
     var reader: json.Reader = .init(app.gpa, bytes, readerOptions(.{ .diagnostics = diagnostics }));
     defer reader.deinit();
     const told: Told = .{};
-    var loading: Loading = .{ .app = app, .reader = &reader, .arena = arena.allocator(), .diagnostics = diagnostics, .told = &told };
+    var loading: Loading = .{ .app = app, .reader = &reader, .arena = arena.allocator(), .diagnostics = diagnostics, .told = &told, .params = params };
     try readComponent(&loading, T, out);
 }
 

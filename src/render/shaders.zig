@@ -12,8 +12,10 @@
 //! A `.shader` file is the fragment stage of fluxion-shader's language and
 //! what that reads; the engine writes the rest. See `render/material.zig` for
 //! what one says and the names it reads. A `.shader3d` file is a mesh's
-//! surface, which the engine lights - see `render/shader3d.zig` - and is
-//! named by a `Material3D` the same way, its numbers kept the same way.
+//! surface, which the engine lights - see `render/shader3d.zig` - named by
+//! a material, whose file keeps its numbers under `params` as a scene keeps
+//! a `Material`'s; an entity drawn with the material may give its own in
+//! their place, as a `Material`'s entity does.
 //!
 //! **A `Material` beside a `Sprite`, a `ColorRect` or a `TextureRect` draws
 //! it with the shader** instead of as a plain picture. The shader's own
@@ -53,6 +55,7 @@ pub const shader3d = @import("shader3d.zig");
 pub const edit = @import("shader_edit.zig");
 
 const Material3D = @import("render3d_components.zig").Material3D;
+const materials = @import("materials.zig");
 
 const Entity = ecs.Entity;
 const log = std.log.scoped(.fluxion_engine);
@@ -131,7 +134,8 @@ pub const Shader = struct {
     }
 };
 
-/// A material's numbers in a scene: under `params`, beside its fields. See
+/// A material's numbers in a scene: under `params`, beside its fields - the
+/// entity's, or, in a material's own file, the material's. See
 /// `scene.Beside`.
 pub const scene_params: scene.Beside = .{ .key = "params", .write = writeParams, .read = readParams, .forget = forgetParams };
 
@@ -143,7 +147,7 @@ fn forgetParams(app: *App, entity: Entity) void {
 /// A material's numbers, as an object by field: one number, or a list of
 /// them for a vector or a matrix. What it gives nothing is left out.
 fn writeParams(saving: *Saving, w: *json.Writer) json.Writer.Error!void {
-    const given = saving.app.shader_params.of(saving.entity);
+    const given = saving.params orelse saving.app.shader_params.of(saving.entity);
     if (given.len == 0) return;
     try w.key("params");
     try w.beginObject();
@@ -192,7 +196,9 @@ fn readParams(loading: *Loading) anyerror!void {
             },
             else => |other| return loading.wrong("a number, a list of them or a colour", other),
         }
-        if (!loading.entity.isNone()) try loading.app.setShaderParam(loading.entity, name, numbers[0..len]);
+        if (loading.params) |list| {
+            try setIn(loading.app.gpa, list, name, numbers[0..len]);
+        } else if (!loading.entity.isNone()) try loading.app.setShaderParam(loading.entity, name, numbers[0..len]);
     }
 }
 
@@ -416,6 +422,63 @@ pub const Param = struct {
     }
 };
 
+/// Numbers given to a shader, by the names of the fields they fill: an
+/// entity's, or a material's.
+pub const ParamList = std.ArrayListUnmanaged(Param);
+
+/// The number a list gives a field, or null for none.
+pub fn paramIn(list: []const Param, name: []const u8) ?[]const f32 {
+    for (list) |*param| {
+        if (std.mem.eql(u8, param.name, name)) return param.slice();
+    }
+    return null;
+}
+
+/// Give a field in a list `numbers` - at most sixteen - or, for none, take
+/// it out.
+pub fn setIn(gpa: Allocator, list: *ParamList, name: []const u8, numbers: []const f32) Allocator.Error!void {
+    for (list.items, 0..) |*param, index| {
+        if (!std.mem.eql(u8, param.name, name)) continue;
+        if (numbers.len == 0) {
+            gpa.free(param.name);
+            _ = list.orderedRemove(index);
+        } else fill(param, numbers);
+        return;
+    }
+    if (numbers.len == 0) return;
+    var made: Param = .{ .name = try gpa.dupe(u8, name) };
+    errdefer gpa.free(made.name);
+    fill(&made, numbers);
+    try list.append(gpa, made);
+}
+
+fn fill(param: *Param, numbers: []const f32) void {
+    const len = @min(numbers.len, param.numbers.len);
+    @memcpy(param.numbers[0..len], numbers[0..len]);
+    param.len = @intCast(len);
+}
+
+/// A list let go of, its names with it.
+pub fn freeParams(gpa: Allocator, list: *ParamList) void {
+    for (list.items) |param| gpa.free(param.name);
+    list.deinit(gpa);
+}
+
+/// A copy of a list, its names its own.
+pub fn copyParams(gpa: Allocator, list: []const Param) Allocator.Error!ParamList {
+    var out: ParamList = .empty;
+    errdefer freeParams(gpa, &out);
+    for (list) |param| {
+        var made = param;
+        made.name = try gpa.dupe(u8, param.name);
+        out.append(gpa, made) catch |err| {
+            gpa.free(made.name);
+            return err;
+        };
+    }
+    return out;
+}
+
 /// The numbers each entity's material gives its shader, kept beside the
 /// world as its words are, and gone with it.
 pub const Params = struct {
@@ -433,10 +496,7 @@ pub const Params = struct {
     }
 
     pub fn get(self: *const Params, entity: Entity, name: []const u8) ?[]const f32 {
-        for (self.of(entity)) |*param| {
-            if (std.mem.eql(u8, param.name, name)) return param.slice();
-        }
-        return null;
+        return paramIn(self.of(entity), name);
     }
 
     /// Give a field `numbers` - at most sixteen - or, for none, what the
@@ -444,26 +504,7 @@ pub const Params = struct {
     pub fn set(self: *Params, gpa: Allocator, entity: Entity, name: []const u8, numbers: []const f32) Allocator.Error!void {
         const slot = try self.of_entity.getOrPut(gpa, entity);
         if (!slot.found_existing) slot.value_ptr.* = .empty;
-        const list = slot.value_ptr;
-        for (list.items, 0..) |*param, index| {
-            if (!std.mem.eql(u8, param.name, name)) continue;
-            if (numbers.len == 0) {
-                gpa.free(param.name);
-                _ = list.orderedRemove(index);
-            } else fill(param, numbers);
-            return;
-        }
-        if (numbers.len == 0) return;
-        var made: Param = .{ .name = try gpa.dupe(u8, name) };
-        errdefer gpa.free(made.name);
-        fill(&made, numbers);
-        try list.append(gpa, made);
-    }
-
-    fn fill(param: *Param, numbers: []const f32) void {
-        const len = @min(numbers.len, param.numbers.len);
-        @memcpy(param.numbers[0..len], numbers[0..len]);
-        param.len = @intCast(len);
+        try setIn(gpa, slot.value_ptr, name, numbers);
     }
 
     /// Forget every number an entity gives.
@@ -493,9 +534,8 @@ pub const Params = struct {
         self.of_entity.clearRetainingCapacity();
     }
 
-    fn freeList(gpa: Allocator, list: *std.ArrayListUnmanaged(Param)) void {
-        for (list.items) |param| gpa.free(param.name);
-        list.deinit(gpa);
+    fn freeList(gpa: Allocator, list: *ParamList) void {
+        freeParams(gpa, list);
     }
 };
 
@@ -510,21 +550,30 @@ pub fn paramField(app: *App, entity: Entity, name: []const u8) ?material.Field {
 }
 
 /// The shader an entity's numbers are given to: its `Material`'s, or its
-/// `Material3D`'s.
+/// `Material3D`'s material's.
 pub fn shaderOfEntity(app: *App, entity: Entity) ?ShaderHandle {
     if (app.world.get(entity, Material)) |held| return held.shader;
-    if (app.world.get(entity, Material3D)) |held| return held.shader;
+    if (app.world.get(entity, Material3D)) |held| if (app.materials.get(held.material)) |data| return data.shader;
     return null;
 }
 
+/// The numbers the material of `entity`'s `Material3D` gives its shader,
+/// under the entity's own: none for an entity with none.
+pub fn materialParamsOf(app: *App, entity: Entity) []const Param {
+    const held = app.world.get(entity, Material3D) orelse return &.{};
+    return app.materials.params(held.material);
+}
+
 /// What `entity`'s material gives its shader's field `name` - its own, or
-/// else the file's - as the floats `pack` puts in the buffer, into
-/// `out`. Null for a field its shader does not have.
+/// else its material file's, or else the shader file's - as the floats
+/// `pack` puts in the buffer, into `out`. Null for a field its shader does
+/// not have.
 pub fn paramOrDefault(app: *App, entity: Entity, name: []const u8, out: *[16]f32) ?[]const f32 {
     const field = paramField(app, entity, name) orelse return null;
     const count = componentsOf(field.ty);
     out.* = @splat(0);
     if (field.default) |first| @memcpy(out[0..@min(first.len, count)], first[0..@min(first.len, count)]);
+    if (paramIn(materialParamsOf(app, entity), name)) |file| @memcpy(out[0..@min(file.len, count)], file[0..@min(file.len, count)]);
     if (app.shader_params.get(entity, name)) |own| @memcpy(out[0..@min(own.len, count)], own[0..@min(own.len, count)]);
     return out[0..count];
 }
@@ -546,16 +595,22 @@ pub fn componentsOf(ty: shader.Type) u32 {
 /// A block's bytes, as its uniform buffer holds them: each field as the file
 /// says it starts, and then as `given` says, where it says.
 pub fn pack(block: shader.Block, given: []const Param, out: []u8) void {
+    packLayers(block, &.{given}, out);
+}
+
+/// The same, with each of `layers` over the one before: a material's
+/// numbers, and an entity's over them.
+pub fn packLayers(block: shader.Block, layers: []const []const Param, out: []u8) void {
     @memset(out[0..block.size], 0);
     for (block.fields) |field| {
         var numbers: [16]f32 = @splat(0);
         const count = componentsOf(field.ty);
         if (field.default) |first| @memcpy(numbers[0..@min(first.len, count)], first[0..@min(first.len, count)]);
-        for (given) |*param| {
+        for (layers) |given| for (given) |*param| {
             if (!std.mem.eql(u8, param.name, field.name)) continue;
             const len = @min(param.len, count);
             @memcpy(numbers[0..len], param.numbers[0..len]);
-        }
+        };
         write(field.ty, numbers[0..count], out[field.offset..]);
     }
 }

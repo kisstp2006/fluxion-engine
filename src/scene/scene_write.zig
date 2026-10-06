@@ -159,6 +159,9 @@ pub const Saving = struct {
     /// The entity being written, for a component whose value is kept beside
     /// it: a map's tiles.
     entity: Entity = .none,
+    /// A shader's numbers written beside a value, when they are not an
+    /// entity's: a material file's. See `writeValueTextWith`.
+    params: ?[]const @import("../render/shaders.zig").Param = null,
     /// Every entity, in the order a scene lists them.
     order: std.ArrayList(Entity) = .empty,
     /// Every file written, under the name it was written by, for `assets`.
@@ -514,16 +517,23 @@ fn writeRaw(gpa: Allocator, w: *json.Writer, text: []const u8) json.Writer.Error
 /// caller's: what `scene_read.readValueText` reads. A file it names is
 /// written by its path.
 pub fn writeValueText(app: *App, gpa: Allocator, comptime T: type, value: *const T) json.StringifyError![]u8 {
-    return json.stringify(gpa, ValueText(T){ .app = app, .value = value }, writeOptions(.{}));
+    return writeValueTextWith(app, gpa, T, value, null);
+}
+
+/// The same, with a shader's numbers written beside the value under
+/// `params`: a material file's.
+pub fn writeValueTextWith(app: *App, gpa: Allocator, comptime T: type, value: *const T, params: ?[]const @import("../render/shaders.zig").Param) json.StringifyError![]u8 {
+    return json.stringify(gpa, ValueText(T){ .app = app, .value = value, .params = params }, writeOptions(.{}));
 }
 
 fn ValueText(comptime T: type) type {
     return struct {
         app: *App,
         value: *const T,
+        params: ?[]const @import("../render/shaders.zig").Param = null,
 
         pub fn toJson(self: @This(), w: *json.Writer) json.Writer.Error!void {
-            var saving: Saving = .{ .app = self.app };
+            var saving: Saving = .{ .app = self.app, .params = self.params orelse &.{} };
             defer saving.deinit(self.app.gpa);
             try writeComponent(&saving, w, T, self.value);
         }

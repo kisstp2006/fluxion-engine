@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! The components the 3D layer draws from: `MeshInstance3D` and what gives
-//! it a mesh and a look - `PrimitiveMesh3D`, `Material3D` - the `Camera3D`
+//! it a mesh and a material - `PrimitiveMesh3D`, `Material3D`, and
+//! `Material3DData`, what a material is - the `Camera3D`
 //! it is seen through, the lights it is lit by - `DirectionalLight3D`,
 //! `PointLight3D`, `SpotLight3D` - and the `Environment` round it all: the
 //! light from everywhere, fog, and how the light is turned into a picture.
@@ -9,11 +10,12 @@
 //! is. See `render/renderer3d.zig`.
 //!
 //! ```zig
+//! const red = try app.addMaterial("red", .{ .albedo_color = .hex(0xCC3333) });
 //! _ = try app.world.spawnWith(.{
 //!     fx.Transform3D.at(0, 0.5, 0),
 //!     fx.MeshInstance3D{},
 //!     fx.PrimitiveMesh3D{ .shape = .box },
-//!     fx.Material3D{ .albedo_color = .hex(0xCC3333) },
+//!     fx.Material3D{ .material = red },
 //! });
 //! var eye: fx.Transform3D = .at(0, 2, 5);
 //! eye.lookAt(.zero, .unit_y);
@@ -33,15 +35,13 @@ const shaders = @import("shaders.zig");
 
 /// A mesh drawn where its `Transform3D` is: the one `mesh` names, or the
 /// shape a `PrimitiveMesh3D` beside it says. How each of its surfaces looks
-/// is, first found: a `Material3D` beside it, its `material_override`, the
-/// surface's own material, or plain white and lit. `Appearance.visible`
-/// hides it and `Appearance.modulate` tints it, as everything drawn.
+/// is, first found: the material of a `Material3D` beside it, the surface's
+/// own material, or plain white and lit. `Appearance.visible` hides it and
+/// `Appearance.modulate` tints it, as everything drawn.
 pub const MeshInstance3D = extern struct {
     /// A `.mesh` file, a model's mesh, or a mesh made in code:
     /// `App.addMesh`. A `PrimitiveMesh3D` beside it is drawn in its place.
     mesh: mesh.MeshHandle = .none,
-    /// A `.mat3d` every surface is drawn with, in place of its own.
-    material_override: MaterialHandle = .none,
     /// The render layers it is on: a camera whose `cull_mask` has none of
     /// them does not see it.
     layers: u32 = 1,
@@ -51,7 +51,6 @@ pub const MeshInstance3D = extern struct {
     pub const reflect_name = "MeshInstance3D";
     pub const reflect_fields = .{
         .mesh = .{attr.Doc{ .text = "The mesh drawn; a PrimitiveMesh3D beside it is drawn instead" }},
-        .material_override = .{attr.Doc{ .text = "A material every surface is drawn with, in place of its own" }},
         .layers = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it is on" } },
         .cast_shadow = .{attr.Doc{ .text = "Whether it throws a shadow" }},
     };
@@ -95,15 +94,36 @@ pub const PrimitiveMesh3D = extern struct {
     }
 };
 
+/// The material a mesh beside it is drawn with, every surface of it: a
+/// `.mat3d` file, or one made in code - `App.addMaterial`. It holds nothing
+/// else of how the mesh looks; the material does, and what changes it
+/// changes every mesh drawn with it. With none, each surface is drawn with
+/// its own material, and plain without one.
+///
+/// The numbers of a material's shader are the material's, and an entity can
+/// give its own in their place - `App.setShaderParam` - written in a scene
+/// as `params` beside `material`.
+pub const Material3D = extern struct {
+    material: MaterialHandle = .none,
+
+    /// The numbers this entity gives the shader, kept by the app.
+    pub const scene_beside = [_]@import("../scene/scene.zig").Beside{shaders.scene_params};
+
+    pub const reflect_name = "Material3D";
+    pub const reflect_fields = .{
+        .material = .{attr.Doc{ .text = "The material every surface of the mesh is drawn with: a .mat3d file" }},
+    };
+};
+
 /// How a mesh looks: its colour and its picture, the light it gives off,
-/// lit or not, see-through or not, and which of its sides are drawn. Beside
-/// a `MeshInstance3D`, how all of it looks; as a `.mat3d` file, what a
-/// surface or a `material_override` names - see `render/materials.zig`.
+/// lit or not, see-through or not, and which of its sides are drawn - what
+/// a `.mat3d` file holds, and what a `Material3D` or a mesh's surface
+/// names. See `render/materials.zig`.
 ///
 /// Light falls on it as on a real surface: how much of it is metal, and how
 /// rough it is, say how sharp what it reflects is and of what colour.
 /// Colours are written as a picture shows them, and lit as light adds up.
-pub const Material3D = extern struct {
+pub const Material3DData = extern struct {
     /// Multiplied into the picture; its alpha is how see-through it is,
     /// with `transparency` on.
     albedo_color: Color = .white,
@@ -149,7 +169,7 @@ pub const Material3D = extern struct {
     /// entity's, as a 2D material's are: see `App.setShaderParam`.
     shader: shaders.ShaderHandle = .none,
 
-    /// The numbers a shader is given, kept by the app, written with it.
+    /// Its shader's numbers, kept with it, written under `params`.
     pub const scene_beside = [_]@import("../scene/scene.zig").Beside{shaders.scene_params};
 
     pub const Transparency = enum(u8) {
@@ -168,31 +188,31 @@ pub const Material3D = extern struct {
     /// neither, for a leaf, a sheet of paper.
     pub const Cull = enum(u8) { back, front, disabled };
 
-    pub const reflect_name = "Material3D";
+    pub const reflect_name = "Material3DData";
     pub const reflect_fields = .{
         .albedo_color = .{attr.Doc{ .text = "Multiplied into the picture; the alpha shows with transparency on" }},
         .albedo_texture = .{attr.Doc{ .text = "The picture laid over the mesh; none is white" }},
         .vertex_color = .{attr.Doc{ .text = "The colours the mesh's corners hold, multiplied in" }},
         .metallic = .{ attr.Group{ .name = "Metal and roughness" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much of it is metal: nought for wood, stone and plastic, one for metal" } },
-        .roughness = .{ attr.Group{ .name = "Metal and roughness" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How rough it is: nought is a mirror, one is chalk" } },
-        .metallic_roughness_texture = .{ attr.Group{ .name = "Metal and roughness" }, attr.Doc{ .text = "Times metallic in its blue and roughness in its green" } },
+        .roughness = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How rough it is: nought is a mirror, one is chalk" } },
+        .metallic_roughness_texture = .{attr.Doc{ .text = "Times metallic in its blue and roughness in its green" }},
         .normal_texture = .{ attr.Group{ .name = "Normal map" }, attr.Doc{ .text = "Which way the surface faces at each point: a normal map" } },
-        .normal_scale = .{ attr.Group{ .name = "Normal map" }, attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How strongly the normal map tilts the surface" } },
+        .normal_scale = .{ attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How strongly the normal map tilts the surface" } },
         .occlusion_texture = .{ attr.Group{ .name = "Occlusion" }, attr.Doc{ .text = "How much of the light from everywhere reaches each point, in its red" } },
-        .occlusion_strength = .{ attr.Group{ .name = "Occlusion" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much the occlusion picture darkens" } },
-        .emission = .{attr.Doc{ .text = "Light it gives off whatever lights it" }},
+        .occlusion_strength = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much the occlusion picture darkens" } },
+        .emission = .{ attr.Group{ .name = "Light it gives off" }, attr.Doc{ .text = "Light it gives off whatever lights it" } },
         .emission_energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the light it gives off is" } },
         .emission_texture = .{attr.Doc{ .text = "Where on the mesh it gives off light, times the emission" }},
         .alpha_scissor_threshold = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "Under this alpha nothing is drawn, with transparency at scissor" } },
-        .uv_scale = .{attr.Doc{ .text = "How many times the pictures are laid across" }},
+        .uv_scale = .{ attr.Group{ .name = "Where the pictures lie" }, attr.Doc{ .text = "How many times the pictures are laid across" } },
         .uv_offset = .{attr.Doc{ .text = "How far the pictures are moved, in pictures" }},
-        .transparency = .{attr.Doc{ .text = "Whether it is laid over what is behind it by its alpha, or cut where that is low" }},
+        .transparency = .{ attr.Group{ .name = "Drawing" }, attr.Doc{ .text = "Whether it is laid over what is behind it by its alpha, or cut where that is low" } },
         .cull = .{attr.Doc{ .text = "Which side of its triangles is not drawn" }},
         .unshaded = .{attr.Doc{ .text = "Drawn as its colour, with no light" }},
-        .shader = .{attr.Doc{ .text = "A .shader3d file that says what the surface is; none draws it as these fields say" }},
+        .shader = .{ attr.Group{ .name = "Shader" }, attr.Doc{ .text = "A .shader3d file that says what the surface is; none draws it as these fields say" } },
     };
 
-    pub fn colored(color: Color) Material3D {
+    pub fn colored(color: Color) Material3DData {
         return .{ .albedo_color = color };
     }
 };
@@ -275,8 +295,8 @@ pub const PointLight3D = extern struct {
         .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
         .attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later" } },
         .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
-        .distance_fade_begin = .{ attr.Group{ .name = "Distance fade" }, attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
-        .distance_fade_length = .{ attr.Group{ .name = "Distance fade" }, attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },
+        .distance_fade_begin = .{ attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
+        .distance_fade_length = .{ attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },
     };
 };
 
@@ -304,8 +324,8 @@ pub const SpotLight3D = extern struct {
         .angle = .{ attr.Angle{}, attr.Range{ .min = std.math.degreesToRadians(0.1), .max = std.math.degreesToRadians(89.9) }, attr.Doc{ .text = "From the middle of the cone to its edge" } },
         .angle_attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward the edge of the cone: one evenly, more sooner" } },
         .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
-        .distance_fade_begin = .{ attr.Group{ .name = "Distance fade" }, attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
-        .distance_fade_length = .{ attr.Group{ .name = "Distance fade" }, attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },
+        .distance_fade_begin = .{ attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
+        .distance_fade_length = .{ attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },
     };
 };
 
@@ -367,18 +387,18 @@ pub const Environment = extern struct {
         .background = .{attr.Doc{ .text = "What is behind the 3D world: the project's clear colour, or the colour below" }},
         .background_color = .{attr.Doc{ .text = "Behind the 3D world, with the background at colour" }},
         .ambient_color = .{ attr.Group{ .name = "Ambient light" }, attr.Doc{ .text = "Light from everywhere: what a shadow is lit by" } },
-        .ambient_energy = .{ attr.Group{ .name = "Ambient light" }, attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the light from everywhere is" } },
+        .ambient_energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the light from everywhere is" } },
         .tonemap = .{ attr.Group{ .name = "Tonemap" }, attr.Doc{ .text = "How light brighter than white is brought into the picture" } },
-        .exposure = .{ attr.Group{ .name = "Tonemap" }, attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "Every light times this before it is toned" } },
-        .white = .{ attr.Group{ .name = "Tonemap" }, attr.Range{ .min = 0.1, .max = 16 }, attr.Doc{ .text = "The brightness that comes out white, with Reinhard and filmic" } },
+        .exposure = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "Every light times this before it is toned" } },
+        .white = .{ attr.Range{ .min = 0.1, .max = 16 }, attr.Doc{ .text = "The brightness that comes out white, with Reinhard and filmic" } },
         .fog = .{ attr.Group{ .name = "Fog" }, attr.Doc{ .text = "Fog, thicker the further, and below its height the deeper" } },
-        .fog_color = .{ attr.Group{ .name = "Fog" }, attr.Doc{ .text = "The fog's colour" } },
-        .fog_density = .{ attr.Group{ .name = "Fog" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much of the way a unit of fog hides" } },
-        .fog_height = .{ attr.Group{ .name = "Fog" }, attr.Doc{ .text = "Below this height the fog thickens" } },
-        .fog_height_density = .{ attr.Group{ .name = "Fog" }, attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How much thicker a unit further down: nought for no fog by height" } },
+        .fog_color = .{attr.Doc{ .text = "The fog's colour" }},
+        .fog_density = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much of the way a unit of fog hides" } },
+        .fog_height = .{attr.Doc{ .text = "Below this height the fog thickens" }},
+        .fog_height_density = .{ attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How much thicker a unit further down: nought for no fog by height" } },
         .glow = .{ attr.Group{ .name = "Glow" }, attr.Doc{ .text = "Glow round what is brighter than the threshold" } },
-        .glow_threshold = .{ attr.Group{ .name = "Glow" }, attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "Light brighter than this glows" } },
-        .glow_intensity = .{ attr.Group{ .name = "Glow" }, attr.Range{ .min = 0, .max = 8 }, attr.Doc{ .text = "How much of the glow is added back" } },
-        .glow_spread = .{ attr.Group{ .name = "Glow" }, attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How far it spreads: one is the whole of it, less keeps it close" } },
+        .glow_threshold = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "Light brighter than this glows" } },
+        .glow_intensity = .{ attr.Range{ .min = 0, .max = 8 }, attr.Doc{ .text = "How much of the glow is added back" } },
+        .glow_spread = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How far it spreads: one is the whole of it, less keeps it close" } },
     };
 };

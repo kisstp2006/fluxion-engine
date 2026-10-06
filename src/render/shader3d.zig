@@ -19,8 +19,9 @@
 //!
 //! The file is fluxion-shader's language: its fragment stage, functions,
 //! constants, and one uniform block of its own at slot 3, whose fields - and
-//! their first values - are what a `Material3D` beside a mesh gives it, as a
-//! 2D material's are. The fragment stage does not write `target`: it says
+//! their first values - are what a material gives it in its file's
+//! `params`, and an entity drawn with the material may give in their place,
+//! as a 2D material's entity does. The fragment stage does not write `target`: it says
 //! what the surface is, and the engine lights it. Each of these starts as
 //! the material says - its colours, numbers and pictures - and is what the
 //! stage leaves it as:
@@ -61,7 +62,7 @@ const shader = @import("fluxion_shader");
 
 const material = @import("material.zig");
 const mesh = @import("mesh.zig");
-const Material3D = @import("render3d_components.zig").Material3D;
+const Material3DData = @import("render3d_components.zig").Material3DData;
 
 const log = std.log.scoped(.fluxion_engine);
 
@@ -357,8 +358,8 @@ pub const template =
     \\// as the material says; UV, COLOR, WORLD_POSITION, WORLD_NORMAL,
     \\// CAMERA_POSITION and TIME are there to read.
     \\
-    \\// What a Material3D gives this shader: each field starts as it says here,
-    \\// and the Inspector changes it for one entity.
+    \\// What a material gives this shader: each field starts as it says here,
+    \\// and the Inspector changes it for the material, or for one entity.
     \\uniform Look : 3 {
     \\    vec4 tint = vec4(1.0, 1.0, 1.0, 1.0);
     \\}
@@ -474,7 +475,7 @@ fn lineAndColumn(text: []const u8, offset: u32) struct { line: usize, column: us
 /// over what is behind it. A surface cut by its alpha is solid: the shader
 /// leaves out what is under the threshold.
 pub const Way = struct {
-    cull: Material3D.Cull,
+    cull: Material3DData.Cull,
     blend: bool,
 
     pub const count = 6;
@@ -495,8 +496,8 @@ pub const sample_counts = 4;
 pub const Compiled = struct {
     module: shader.Module,
     gpu: rhi.Shader,
-    /// The file's own block, whose fields a `Material3D` beside a mesh
-    /// fills.
+    /// The file's own block, whose fields a material fills, and an entity
+    /// over it.
     params: ?shader.Block = null,
     writes_normal_map: bool = false,
     /// By the count of samples it draws into - its power of two - and way:
