@@ -241,6 +241,7 @@ fn assetTypeName(comptime kind: AssetKind) [:0]const u8 {
         .shader => "Shader",
         .mesh => "Mesh",
         .material => "Material3DFile",
+        .lightmap => "Lightmap",
     };
 }
 

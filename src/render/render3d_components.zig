@@ -5,9 +5,10 @@
 //! `Material3DData`, what a material is - the `Camera3D`
 //! it is seen through, the lights it is lit by - `DirectionalLight3D`,
 //! `PointLight3D`, `SpotLight3D` - and the `Environment` round it all: the
-//! light from everywhere, fog, and how the light is turned into a picture.
-//! Each but the environment is beside a `Transform3D`, which says where it
-//! is. See `render/renderer3d.zig`.
+//! light from everywhere, fog, and how the light is turned into a picture -
+//! and `LightmapGI`, the light from everywhere baked. Each but the
+//! environment and the lightmap is beside a `Transform3D`, which says where
+//! it is. See `render/renderer3d.zig`.
 //!
 //! ```zig
 //! const red = try app.addMaterial("red", .{ .albedo_color = .hex(0xCC3333) });
@@ -30,6 +31,7 @@ const assets = @import("../assets/assets.zig");
 const attr = @import("../reflect/attr.zig");
 const Color = @import("../math/color.zig").Color;
 const mesh = @import("mesh.zig");
+const LightmapHandle = @import("lightmaps.zig").LightmapHandle;
 const MaterialHandle = @import("materials.zig").MaterialHandle;
 const shaders = @import("shaders.zig");
 
@@ -47,13 +49,40 @@ pub const MeshInstance3D = extern struct {
     layers: u32 = 1,
     /// Whether it casts a shadow where a light that casts them reaches it.
     cast_shadow: bool = true,
+    /// How it takes part in the light a `LightmapGI` bakes.
+    gi_mode: GiMode = .static,
 
     pub const reflect_name = "MeshInstance3D";
     pub const reflect_fields = .{
         .mesh = .{attr.Doc{ .text = "The mesh drawn; a PrimitiveMesh3D beside it is drawn instead" }},
         .layers = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it is on" } },
         .cast_shadow = .{attr.Doc{ .text = "Whether it throws a shadow" }},
+        .gi_mode = .{ attr.Group{ .name = "Global illumination" }, attr.Doc{ .text = "How it takes part in baked light: held in the lightmap and bouncing light, lit by the probes as it moves, or neither" } },
     };
+};
+
+/// How a mesh takes part in the light a `LightmapGI` bakes.
+pub const GiMode = enum(u8) {
+    /// For what never moves: the light on it is held in the lightmap, and it
+    /// stands in the way of light and bounces it. Its mesh needs lightmap
+    /// UVs; one without is lit by the probes.
+    static,
+    /// For what moves: lit by the probes round it, and left out of the bake.
+    dynamic,
+    /// Left out of the bake, and lit as it would be without one.
+    off,
+};
+
+/// What of a light a `LightmapGI` bakes.
+pub const LightBake = enum(u8) {
+    /// None of it: it lights only as it is drawn.
+    none,
+    /// Its light bounced off what it lights; it lights directly as it is
+    /// drawn.
+    indirect,
+    /// All of it: on the still meshes from the lightmap, on those that move
+    /// from the probes, and not drawn once there is a lightmap.
+    all,
 };
 
 /// A mesh made from a few numbers, drawn by the `MeshInstance3D` beside it:
@@ -266,6 +295,8 @@ pub const DirectionalLight3D = extern struct {
     color: Color = .white,
     /// How bright: one is the colour as it is.
     energy: f32 = 1,
+    /// What of its light a `LightmapGI` bakes.
+    bake: LightBake = .indirect,
     shadow: bool = false,
     shadow_bias: f32 = 1,
     shadow_normal_bias: f32 = 1.5,
@@ -295,6 +326,7 @@ pub const DirectionalLight3D = extern struct {
     pub const reflect_fields = .{
         .color = .{attr.Doc{ .text = "The light's colour" }},
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is" } },
+        .bake = .{attr.Doc{ .text = bake_doc }},
         .shadow = .{ attr.Group{ .name = "Shadow" }, attr.Doc{ .text = "Whether what it lights casts a shadow" } },
         .shadow_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How far the point a shadow is looked up for is moved toward the light, in the shadow's texels: more keeps a surface from shadowing itself, and moves the shadow off what casts it" } },
         .shadow_normal_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How far it is moved out along its surface, in the shadow's texels: what keeps a slope from shadowing itself" } },
@@ -315,6 +347,8 @@ pub const PointLight3D = extern struct {
     color: Color = .white,
     /// How bright: one is the colour as it is, next to it.
     energy: f32 = 1,
+    /// What of its light a `LightmapGI` bakes.
+    bake: LightBake = .indirect,
     /// How far it reaches, in units: nothing further is lit by it.
     range: f32 = 5,
     /// How it fades toward `range`: one evenly, more sooner, less later.
@@ -339,6 +373,7 @@ pub const PointLight3D = extern struct {
     pub const reflect_fields = .{
         .color = .{attr.Doc{ .text = "The light's colour" }},
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is, next to it" } },
+        .bake = .{attr.Doc{ .text = bake_doc }},
         .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
         .attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later" } },
         .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
@@ -360,6 +395,8 @@ pub const PointLight3D = extern struct {
 pub const SpotLight3D = extern struct {
     color: Color = .white,
     energy: f32 = 1,
+    /// What of its light a `LightmapGI` bakes.
+    bake: LightBake = .indirect,
     range: f32 = 5,
     attenuation: f32 = 1,
     /// From the middle of the cone to its edge, in radians.
@@ -380,6 +417,7 @@ pub const SpotLight3D = extern struct {
     pub const reflect_fields = .{
         .color = .{attr.Doc{ .text = "The light's colour" }},
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is, next to it" } },
+        .bake = .{attr.Doc{ .text = bake_doc }},
         .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
         .attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later" } },
         .angle = .{ attr.Angle{}, attr.Range{ .min = std.math.degreesToRadians(0.1), .max = std.math.degreesToRadians(89.9) }, attr.Doc{ .text = "From the middle of the cone to its edge" } },
@@ -393,6 +431,72 @@ pub const SpotLight3D = extern struct {
         .shadow_blur = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How soft the shadow's edge is: one is the project's shadow filter as it is, nought a hard edge" } },
         .size = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How big it is: a bigger one's shadows soften the further they fall from what casts them" } },
         .cookie = .{ attr.Group{ .name = "Cookie" }, attr.Doc{ .text = "A picture it shines through: its light takes the picture's colours across its cone, the top toward its up" } },
+    };
+};
+
+const bake_doc = "What of its light a LightmapGI bakes: none, its light bounced, or all of it - then it is not drawn over the lightmap";
+
+/// The light from everywhere, baked once and read back: on the meshes that
+/// never move (`MeshInstance3D.gi_mode` static), the light that falls on
+/// them - the sky's, the environment's ambient light, and every light's
+/// bounced off what it lights - held in a lightmap, a picture of their
+/// lightmap UVs; on those that move, the light at a grid of probes round
+/// them. Baked by an editor, or by `App.bakeLightmap`, into `data`; the
+/// first one found with its data is the world's. With none, the world is
+/// lit by the environment's ambient light.
+pub const LightmapGI = extern struct {
+    /// What was baked: a `.lightmap`.
+    data: LightmapHandle = .none,
+    /// What its light is multiplied by.
+    energy: f32 = 1,
+    /// How many texels a unit of surface has, across.
+    texels_per_unit: f32 = 8,
+    /// The most texels the lightmap is across.
+    max_size: MaxSize = .x2048,
+    /// How many times light bounces.
+    bounces: u32 = 3,
+    /// How many rays each texel sends: more is less grainy, and slower.
+    quality: Quality = .medium,
+    /// Whether what is baked is smoothed where few rays leave it grainy.
+    denoise: bool = true,
+    /// How far apart the probes are, in units.
+    probe_spacing: f32 = 2,
+
+    pub const MaxSize = enum(u8) {
+        x512,
+        x1024,
+        x2048,
+        x4096,
+        x8192,
+
+        pub fn texels(self: MaxSize) u32 {
+            return @as(u32, 512) << @intCast(@intFromEnum(self));
+        }
+    };
+
+    pub const Quality = enum(u8) {
+        low,
+        medium,
+        high,
+        ultra,
+
+        /// How many rays a texel sends for the light bounced to it.
+        pub fn rays(self: Quality) u32 {
+            const step: u5 = @intCast(@intFromEnum(self));
+            return @as(u32, 16) << (2 * step);
+        }
+    };
+
+    pub const reflect_name = "LightmapGI";
+    pub const reflect_fields = .{
+        .data = .{attr.Doc{ .text = "What was baked: a .lightmap" }},
+        .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "What the baked light is multiplied by" } },
+        .texels_per_unit = .{ attr.Group{ .name = "Bake" }, attr.Range{ .min = 0.25, .max = 256 }, attr.Doc{ .text = "How many texels a unit of surface has, across" } },
+        .max_size = .{attr.Doc{ .text = "The most texels the lightmap is across" }},
+        .bounces = .{ attr.Range{ .min = 1, .max = 8 }, attr.Doc{ .text = "How many times light bounces" } },
+        .quality = .{attr.Doc{ .text = "How many rays each texel sends: more is less grainy, and slower" }},
+        .denoise = .{attr.Doc{ .text = "Whether what is baked is smoothed where few rays leave it grainy" }},
+        .probe_spacing = .{ attr.Range{ .min = 0.25, .max = 64 }, attr.Doc{ .text = "How far apart the probes that light what moves are" } },
     };
 };
 

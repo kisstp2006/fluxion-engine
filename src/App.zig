@@ -118,6 +118,8 @@ const shading = @import("render/shaders.zig");
 const view_textures = @import("render/view_textures.zig");
 const mesh_table = @import("render/mesh.zig");
 const material_table = @import("render/materials.zig");
+const lightmap_table = @import("render/lightmaps.zig");
+const lightmap_bake = @import("render/lightmap_bake.zig");
 const models = @import("assets/models.zig");
 const components3d = @import("render/render3d_components.zig");
 const view3d = @import("render/view3d.zig");
@@ -381,6 +383,9 @@ meshes: mesh_table.Meshes = .{},
 /// Every `.mat3d` read or material made, and a model's: see
 /// `render/materials.zig` and `loadMaterial`.
 materials: material_table.Materials = .{},
+/// Every `.lightmap` read or baked: see `render/lightmaps.zig` and
+/// `bakeLightmap`.
+lightmaps: lightmap_table.Lightmaps = .{},
 /// What draws the 3D world: see `render/renderer3d.zig`.
 renderer3d: rendering3d.Renderer3D,
 /// What the frame is cleared to.
@@ -563,6 +568,7 @@ pub const engine_components = .{
     components3d.PointLight3D,
     components3d.SpotLight3D,
     components3d.Environment,
+    components3d.LightmapGI,
     components.RigidBody2D,
     components.CharacterBody2D,
     components.Collider2D,
@@ -629,6 +635,11 @@ const described_types = .{
     shading.ShaderHandle,
     mesh_table.MeshHandle,
     material_table.MaterialHandle,
+    lightmap_table.LightmapHandle,
+    components3d.GiMode,
+    components3d.LightBake,
+    components3d.LightmapGI.MaxSize,
+    components3d.LightmapGI.Quality,
     character.Collision,
     geometry.Vec2i,
     geometry.Rect2,
@@ -937,6 +948,7 @@ pub fn destroy(self: *App) void {
     self.renderer3d.deinit(gpa);
     self.meshes.deinit(gpa, &self.device);
     self.materials.deinit(gpa);
+    self.lightmaps.deinit(gpa, &self.device);
     self.screen_texture.deinit();
     self.shaders.deinit(gpa, &self.device);
     self.views.deinit(gpa);
@@ -4075,6 +4087,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .shader => self.shaders.sourceOf(handle),
         .mesh => self.meshes.sourceOf(handle),
         .material => self.materials.sourceOf(handle),
+        .lightmap => self.lightmaps.sourceOf(handle),
     };
 }
 
@@ -4097,6 +4110,7 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .shader => self.loadShader(path),
         .mesh => self.loadMesh(path),
         .material => self.loadMaterial(path),
+        .lightmap => self.loadLightmap(path),
     };
 }
 
@@ -4117,6 +4131,7 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .shader => self.findShader(path),
         .mesh => self.findMesh(path),
         .material => self.findMaterial(path),
+        .lightmap => self.findLightmap(path),
     };
 }
 
@@ -4477,6 +4492,56 @@ pub fn saveMaterial(self: *App, handle: material_table.MaterialHandle, path: []c
     const file = try self.project.osPath(self.gpa, path);
     defer self.gpa.free(file);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes });
+}
+
+/// Read a `.lightmap` - what a `LightmapGI` baked - or find the one read
+/// from there already.
+pub fn loadLightmap(self: *App, path: []const u8) !lightmap_table.LightmapHandle {
+    return self.lightmaps.load(self, path);
+}
+
+/// A lightmap made in code, kept under `name`: a name given before gets
+/// the new one and keeps its handle.
+pub fn addLightmap(self: *App, name: []const u8, lightmap: lightmap_table.Lightmap) !lightmap_table.LightmapHandle {
+    return self.lightmaps.add(self.gpa, &self.device, name, lightmap);
+}
+
+pub fn findLightmap(self: *App, path: []const u8) ?lightmap_table.LightmapHandle {
+    return self.findSpelt(&self.lightmaps, path);
+}
+
+/// Read a lightmap's file again. Says whether it had one.
+pub fn reloadLightmap(self: *App, handle: lightmap_table.LightmapHandle) !bool {
+    return self.lightmaps.reload(self, handle);
+}
+
+/// What a lightmap holds: its picture, where each mesh is in it, its probes.
+pub fn lightmapOf(self: *App, handle: lightmap_table.LightmapHandle) ?*const lightmap_table.Lightmap {
+    return self.lightmaps.get(handle);
+}
+
+pub fn unloadLightmap(self: *App, handle: lightmap_table.LightmapHandle) void {
+    self.lightmaps.unload(self.gpa, &self.device, handle);
+}
+
+/// Write a lightmap to a `.lightmap` file at `path`.
+pub fn saveLightmap(self: *App, handle: lightmap_table.LightmapHandle, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const held = self.lightmaps.get(handle) orelse return error.NoSuchLightmap;
+    const bytes = try lightmap_table.write(self.gpa, held.*);
+    defer self.gpa.free(bytes);
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes });
+}
+
+/// Start baking the light of the `LightmapGI` on `gi`: what the world's
+/// still meshes and lights are now is gathered here, and the rays traced on
+/// threads of their own. Follow it with `LightmapBake.progress`, stop it
+/// with `cancel`, and keep what it baked with `finish` - which writes it to
+/// `path`, a `.lightmap`, and gives `gi` it. See `render/lightmap_bake.zig`.
+pub fn bakeLightmap(self: *App, gi: ecs.Entity, path: []const u8) !*lightmap_bake.LightmapBake {
+    return lightmap_bake.start(self, gi, path);
 }
 
 pub fn findMesh(self: *App, path: []const u8) ?mesh_table.MeshHandle {

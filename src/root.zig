@@ -208,6 +208,11 @@ pub const MeshHandle = mesh.MeshHandle;
 /// numbers, and a model's materials.
 pub const materials = @import("render/materials.zig");
 pub const MaterialHandle = materials.MaterialHandle;
+/// `.lightmap` files: what a `LightmapGI` bakes. See `render/lightmaps.zig`,
+/// and `render/lightmap_uv.zig` for the UVs it is laid out by.
+pub const lightmaps = @import("render/lightmaps.zig");
+pub const LightmapHandle = lightmaps.LightmapHandle;
+pub const lightmap_uv = @import("render/lightmap_uv.zig");
 /// Models as scenes: glTF read by the engine, FBX and Blender files by way
 /// of an editor. See `assets/models.zig` and `assets/gltf.zig`.
 pub const models = @import("assets/models.zig");
@@ -224,6 +229,7 @@ pub const DirectionalLight3D = components.DirectionalLight3D;
 pub const PointLight3D = components.PointLight3D;
 pub const SpotLight3D = components.SpotLight3D;
 pub const Environment = components.Environment;
+pub const LightmapGI = components.LightmapGI;
 /// What a 3D camera sees: what `App.drawWorld3D` draws the world through.
 pub const View3D = render.view3d.View3D;
 
@@ -555,6 +561,8 @@ test {
     _ = @import("render/render3d_test.zig");
     _ = @import("render/mesh.zig");
     _ = @import("render/lightmap_uv.zig");
+    _ = @import("render/lightmaps.zig");
+    _ = @import("render/lightmap_test.zig");
     _ = @import("render/view3d.zig");
     _ = @import("render/renderer3d.zig");
     _ = @import("render/shader3d.zig");

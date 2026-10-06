@@ -42,6 +42,7 @@ pub fn moveFile(app: *App, from: []const u8, to: []const u8) !void {
     try app.shaders.renamed(app.gpa, old, new);
     try app.meshes.renamed(app.gpa, old, new);
     try app.materials.renamed(app.gpa, old, new);
+    try app.lightmaps.renamed(app.gpa, old, new);
     try app.themes.renamed(app.gpa, old, new);
     if (app.scripts) |scripts| try scripts.renamed(old, new);
 }

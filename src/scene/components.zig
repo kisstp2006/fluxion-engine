@@ -46,6 +46,7 @@ pub const DirectionalLight3D = @import("../render/render3d_components.zig").Dire
 pub const PointLight3D = @import("../render/render3d_components.zig").PointLight3D;
 pub const SpotLight3D = @import("../render/render3d_components.zig").SpotLight3D;
 pub const Environment = @import("../render/render3d_components.zig").Environment;
+pub const LightmapGI = @import("../render/render3d_components.zig").LightmapGI;
 pub const ViewTexture = @import("../render/render_components.zig").ViewTexture;
 pub const RigidBody2D = @import("../physics/physics_components.zig").RigidBody2D;
 pub const CharacterBody2D = @import("../physics/physics_components.zig").CharacterBody2D;

@@ -34,6 +34,11 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run the engine test suite");
     test_step.dependOn(&run_tests.step);
+    const lightmapper_tests = b.addTest(.{
+        .name = "fluxion-lightmapper-tests",
+        .root_module = e.lightmapper,
+    });
+    test_step.dependOn(&b.addRunArtifact(lightmapper_tests).step);
 
     const ndk = b.option([]const u8, "android-ndk", "The Android NDK, for a build for Android (default: ANDROID_NDK_HOME, then the newest in the Android SDK's ndk folder)");
     const program = runtime(b, e, target, optimize, ndk);
@@ -208,6 +213,16 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         },
     });
 
+    // The lightmap baker traces rays, which is nearly all of a bake's time:
+    // built for speed whatever the engine is built as. It needs nothing but
+    // the standard library.
+    const lightmapper = b.createModule(.{
+        .root_source_file = b.path("src/bake/lightmapper.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .single_threaded = single_threaded,
+    });
+
     // Nothing here is lazy, and that is the difference between an engine and
     // the libraries under it. A library keeps its window, its file reading
     // and its renderer behind `lazy` so a consumer never downloads what it
@@ -238,6 +253,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
             .{ .name = "fluxion_audio", .module = audio.module("fluxion_audio") },
             .{ .name = "fluxion_vfs", .module = vfs.module("fluxion_vfs") },
             .{ .name = "fluxion_net", .module = net.module("fluxion_net") },
+            .{ .name = "fluxion_lightmapper", .module = lightmapper },
         },
     };
     const mod = if (exported) b.addModule("fluxion_engine", mod_options) else b.createModule(mod_options);
@@ -276,6 +292,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .audio = audio,
         .vfs = vfs,
         .net = net,
+        .lightmapper = lightmapper,
         .single_threaded = single_threaded,
     };
 }
@@ -294,6 +311,7 @@ const Engine = struct {
     audio: *std.Build.Dependency,
     vfs: *std.Build.Dependency,
     net: *std.Build.Dependency,
+    lightmapper: *std.Build.Module,
     single_threaded: ?bool,
 };
 

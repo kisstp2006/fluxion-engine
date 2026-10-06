@@ -60,6 +60,7 @@ const Color = @import("../math/color.zig").Color;
 const hierarchy = @import("../scene/hierarchy.zig");
 const Transform3D = @import("../scene/transform3d.zig").Transform3D;
 const components3d = @import("render3d_components.zig");
+const lightmaps = @import("lightmaps.zig");
 const mesh = @import("mesh.zig");
 const post3d = @import("post3d.zig");
 const shader3d = @import("shader3d.zig");
@@ -77,6 +78,8 @@ const DirectionalLight3D = components3d.DirectionalLight3D;
 const PointLight3D = components3d.PointLight3D;
 const SpotLight3D = components3d.SpotLight3D;
 const Environment = components3d.Environment;
+const GiMode = components3d.GiMode;
+const LightmapGI = components3d.LightmapGI;
 
 const Frame = shader3d.Frame;
 const Look = shader3d.Look;
@@ -296,6 +299,9 @@ pub const Renderer3D = struct {
     probe_data: shader3d.Probes = .{ .samples = @splat(@splat(0)), .energy = .{ 1, 0, 0, 0 } },
     lightmap: ?rhi.Texture = null,
     lightmap_sampler: rhi.Sampler,
+    /// What the first `LightmapGI` with its data baked, which this draw
+    /// reads; null for none.
+    baked: ?*const lightmaps.Lightmap = null,
     /// The atlas the frame's shadows are drawn into, made the first time a
     /// light casts one and let go a few frames after none does; its size.
     atlas: ?rhi.Texture = null,
@@ -352,6 +358,9 @@ pub const Renderer3D = struct {
     shadow_views_drawn: u32 = 0,
     shadow_casters: u32 = 0,
     shadow_draws: u32 = 0,
+    /// The meshes the last draw lit from the lightmap, and from the probes.
+    gi_lightmapped: u32 = 0,
+    gi_probed: u32 = 0,
 
     const initial_capacity = 64;
     /// Draws an atlas no light has needed is kept for.
@@ -530,6 +539,8 @@ pub const Renderer3D = struct {
         self.shadow_views_drawn = 0;
         self.shadow_casters = 0;
         self.shadow_draws = 0;
+        self.gi_lightmapped = 0;
+        self.gi_probed = 0;
         if (width == 0 or height == 0) return;
         const gpa = app.gpa;
         const device = self.device;
@@ -549,6 +560,7 @@ pub const Renderer3D = struct {
 
         const frustum: math.Frustum = .fromViewProjection(view_projection, clip);
         const rendering: Project.Rendering = if (app.project.settings) |held| held.rendering else .{};
+        try self.findBaked(app);
         try self.gatherLamps(app, view, frustum);
         try self.gatherSuns(app);
         try self.planShadows(gpa, view, rendering);
@@ -682,6 +694,45 @@ pub const Renderer3D = struct {
         try self.device.updateBuffer(self.lights, 0, std.mem.asBytes(&lights));
     }
 
+    /// The first visible `LightmapGI` with what it baked: what this draw
+    /// reads the light from everywhere from, its picture made for the
+    /// device the first time.
+    fn findBaked(self: *Renderer3D, app: *App) !void {
+        self.baked = null;
+        self.lightmap = null;
+        self.probe_data.energy = .{ 1, 0, 0, 0 };
+        var it = try ecs.Query(.{LightmapGI}).over(&app.world);
+        while (it.next()) |chunk| {
+            for (chunk.slice(LightmapGI), chunk.entities) |gi, entity| {
+                if (gi.data.isNone()) continue;
+                if (!app.inherited.of(app.gpa, &app.world, entity).visible) continue;
+                const held = app.lightmaps.get(gi.data) orelse continue;
+                self.baked = held;
+                self.lightmap = try app.lightmaps.textureOf(self.device, gi.data);
+                self.probe_data.energy = .{ @max(gi.energy, 0), 0, 0, 0 };
+                return;
+            }
+        }
+    }
+
+    /// Where a mesh's light from everywhere is read, as `Instance.gi` says:
+    /// its place in the lightmap, the probes' light round it - one more of
+    /// the frame's probe samples - or the environment's.
+    fn giOf(self: *Renderer3D, app: *App, entity: ecs.Entity, mode: GiMode, bounds: math.Aabb) [4]f32 {
+        const baked = self.baked orelse return @splat(0);
+        if (mode == .off) return @splat(0);
+        if (mode == .static) if (app.uuidOf(entity)) |uuid| if (baked.placeOf(uuid)) |place| {
+            self.gi_lightmapped += 1;
+            return place;
+        };
+        if (self.gi_probed == shader3d.most_probe_samples) return @splat(0);
+        const light = baked.probeLight(bounds.center().array()) orelse return @splat(0);
+        const at = self.gi_probed;
+        self.gi_probed += 1;
+        for (0..3) |c| self.probe_data.samples[at * 3 + c] = light[c * 4 ..][0..4].*;
+        return .{ -@as(f32, @floatFromInt(at)) - 1, 0, 0, 0 };
+    }
+
     /// The point and spot lights the camera sees some of, nearest first,
     /// up to `shader3d.most_lamps`.
     fn gatherLamps(self: *Renderer3D, app: *App, view: View3D, frustum: math.Frustum) !void {
@@ -691,6 +742,8 @@ pub const Renderer3D = struct {
             var it = try ecs.Query(.{ Transform3D, PointLight3D }).over(&app.world);
             while (it.next()) |chunk| {
                 for (chunk.slice(PointLight3D), chunk.entities) |light, entity| {
+                    // Baked whole: its light is in the lightmap.
+                    if (light.bake == .all and self.baked != null) continue;
                     const placed = placedLight(app, entity) orelse continue;
                     var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
                     lamp.entity = entity.toInt();
@@ -713,6 +766,7 @@ pub const Renderer3D = struct {
             var it = try ecs.Query(.{ Transform3D, SpotLight3D }).over(&app.world);
             while (it.next()) |chunk| {
                 for (chunk.slice(SpotLight3D), chunk.entities) |light, entity| {
+                    if (light.bake == .all and self.baked != null) continue;
                     const placed = placedLight(app, entity) orelse continue;
                     var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
                     lamp.entity = entity.toInt();
@@ -817,6 +871,7 @@ pub const Renderer3D = struct {
                     .model = .{ model.cols[0].array(), model.cols[1].array(), model.cols[2].array(), model.cols[3].array() },
                     .tint = linear(looks.tint(.white)),
                     .lights = if (seen) self.lampsFor(bounds) else @splat(@splat(-1)),
+                    .gi = if (seen) self.giOf(app, entity, instance.gi_mode, bounds) else @splat(0),
                 });
                 for (kept.mesh.surfaces) |surface| {
                     if (surface.index_count == 0) continue;
@@ -864,6 +919,7 @@ pub const Renderer3D = struct {
         while (it.next()) |chunk| {
             for (chunk.slice(DirectionalLight3D), chunk.entities) |light, entity| {
                 if (self.suns.items.len == shader3d.most_suns) return;
+                if (light.bake == .all and self.baked != null) continue;
                 const placed = placedLight(app, entity) orelse continue;
                 const toward = placed.back().tryNorm() orelse continue;
                 const c = linear(light.color);
