@@ -22,7 +22,10 @@
 //! `shadows3d.zig`. Before the world is drawn, what each such light sees of
 //! it is drawn into the shadow atlas - each mesh with `cast_shadow` whose
 //! box is in a light's view, drawn by its own shader's caster - and the
-//! world is then lit through it.
+//! world is then lit through it. A light keeps its tiles from draw to draw,
+//! and a view whose light and casters are as they were - its signature the
+//! same - is not drawn again: a still room's lamps cost nothing after the
+//! first frame, in every render view that sees them.
 //!
 //! **Cookies.** A spot light's `cookie` is drawn into a tile of the cookie
 //! atlas - sixteen pictures at most in a frame - the first frame it is
@@ -178,6 +181,8 @@ const Lamp = struct {
     cone: f32,
     /// How far it is from the camera.
     distance: f32,
+    /// Its entity: which light it is from draw to draw.
+    entity: u64 = 0,
     /// Half a spot light's cone, in radians.
     angle: f32 = 0,
     /// A spot light's up: its cookie's top.
@@ -298,6 +303,16 @@ pub const Renderer3D = struct {
     comparing: rhi.Sampler,
     reading: rhi.Sampler,
     plan: shadows3d.Plan = .{},
+    /// The tiles each light keeps in the atlas, and what was drawn into them.
+    shadow_cache: ?shadows3d.Cache = null,
+    /// Whether nothing has been drawn into the atlas since it was made.
+    atlas_fresh: bool = false,
+    /// What clears one tile of the atlas, when its view is drawn again.
+    tile_clear: ?TileClear = null,
+    /// The atlas as a picture a person can look at, made when asked for.
+    atlas_picture: ?AtlasPicture = null,
+    signatures: std.ArrayList(u64) = .empty,
+    redraw: std.ArrayList(bool) = .empty,
     suns: std.ArrayList(Sun) = .empty,
     shadow_lamps: std.ArrayList(shadows3d.Lamp) = .empty,
     casters: std.ArrayList(Caster) = .empty,
@@ -323,9 +338,11 @@ pub const Renderer3D = struct {
     /// with.
     lamps_kept: u32 = 0,
     samples: u32 = 1,
-    /// The views of the atlas the last draw drew, the surfaces drawn into
-    /// them, and the draws they took.
+    /// The views of the atlas the last draw used, how many of them it drew
+    /// again - the rest were as they were - the surfaces drawn into them, and
+    /// the draws they took.
     shadow_views: u32 = 0,
+    shadow_views_drawn: u32 = 0,
     shadow_casters: u32 = 0,
     shadow_draws: u32 = 0,
 
@@ -439,6 +456,11 @@ pub const Renderer3D = struct {
         device.destroyTexture(self.flat);
         device.destroyBuffer(self.shadows);
         if (self.atlas) |atlas| device.destroyTexture(atlas);
+        if (self.shadow_cache) |*cache| cache.deinit(gpa);
+        if (self.tile_clear) |*clear| clear.deinit(device);
+        if (self.atlas_picture) |*picture| picture.deinit(device);
+        self.signatures.deinit(gpa);
+        self.redraw.deinit(gpa);
         if (self.no_shadow != self.white) device.destroyTexture(self.no_shadow);
         device.destroySampler(self.comparing);
         device.destroySampler(self.reading);
@@ -465,15 +487,18 @@ pub const Renderer3D = struct {
 
     /// One more frame: targets no draw has used for a few are let go - a
     /// window dragged bigger leaves every size it passed through.
-    pub fn tick(self: *Renderer3D) void {
+    pub fn tick(self: *Renderer3D, gpa: Allocator) void {
         self.last_depth = null;
         if (self.post) |*held| held.tick();
+        if (self.shadow_cache) |*cache| cache.frame += 1;
         if (self.atlas) |atlas| {
             self.atlas_idle += 1;
             if (self.atlas_idle > atlas_kept) {
                 self.device.destroyTexture(atlas);
                 self.atlas = null;
                 self.atlas_size = 0;
+                if (self.shadow_cache) |*cache| cache.deinit(gpa);
+                self.shadow_cache = null;
             }
         }
     }
@@ -487,6 +512,7 @@ pub const Renderer3D = struct {
         self.culled = 0;
         self.lamps_kept = 0;
         self.shadow_views = 0;
+        self.shadow_views_drawn = 0;
         self.shadow_casters = 0;
         self.shadow_draws = 0;
         if (width == 0 or height == 0) return;
@@ -649,7 +675,14 @@ pub const Renderer3D = struct {
                 for (chunk.slice(PointLight3D), chunk.entities) |light, entity| {
                     const placed = placedLight(app, entity) orelse continue;
                     var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
+                    lamp.entity = entity.toInt();
                     if (light.shadow) lamp.shadow = .{ .bias = light.shadow_bias, .normal_bias = light.shadow_normal_bias, .blur = light.shadow_blur, .size = @max(light.size, 0) };
+                    // Its way and up, which turn its cookie; its cone is none.
+                    lamp.aim = placed.forward().tryNorm() orelse .init(0, 0, -1);
+                    lamp.up = placed.up().tryNorm() orelse .unit_y;
+                    if (!light.cookie.isNone()) if (app.assets.get(light.cookie)) |held| {
+                        lamp.cookie = held.gpu;
+                    };
                     try self.keepLamp(gpa, view, frustum, lamp, .{
                         .enabled = light.distance_fade,
                         .begin = light.distance_fade_begin,
@@ -664,6 +697,7 @@ pub const Renderer3D = struct {
                 for (chunk.slice(SpotLight3D), chunk.entities) |light, entity| {
                     const placed = placedLight(app, entity) orelse continue;
                     var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
+                    lamp.entity = entity.toInt();
                     lamp.aim = placed.forward().tryNorm() orelse continue;
                     lamp.angle = std.math.clamp(light.angle, 0, std.math.degreesToRadians(89.9));
                     lamp.edge = @cos(lamp.angle);
@@ -857,6 +891,7 @@ pub const Renderer3D = struct {
             const settings = lamp.shadow orelse continue;
             try self.shadow_lamps.append(gpa, .{
                 .index = @intCast(at),
+                .light = lamp.entity,
                 .place = lamp.place,
                 .range = lamp.range,
                 .spot = if (lamp.edge > -1.5) .{ .aim = lamp.aim, .angle = lamp.angle } else null,
@@ -872,11 +907,15 @@ pub const Renderer3D = struct {
         if (self.atlas == null or self.atlas_size != size) {
             if (self.atlas) |old| device.destroyTexture(old);
             self.atlas = null;
+            if (self.shadow_cache) |*cache| cache.deinit(gpa);
+            self.shadow_cache = null;
             self.atlas = try device.createTexture(.{ .width = size, .height = size, .format = format, .usage = .{ .sampled = true, .render_target = true }, .label = "shadow atlas" });
             self.atlas_size = size;
+            self.shadow_cache = try .init(gpa, size);
+            self.atlas_fresh = true;
         }
         self.atlas_idle = 0;
-        try shadows3d.plan(gpa, &self.plan, view, suns[0..sun_count], self.shadow_lamps.items, .{
+        try shadows3d.plan(gpa, &self.plan, &self.shadow_cache.?, view, suns[0..sun_count], self.shadow_lamps.items, .{
             .atlas = size,
             .filter = switch (rendering.shadow_filter) {
                 .hard => .hard,
@@ -904,14 +943,74 @@ pub const Renderer3D = struct {
         self.shadow_casters = @intCast(self.shadow_items.items.len);
     }
 
-    /// Every view of the atlas drawn: what casts into it, depth alone, by
-    /// each surface's own shader's caster, in one pass.
+    /// What a view of the atlas would draw, as one number: its light and
+    /// tile, and each surface cast into it - where its mesh is, what it is
+    /// and its material - or a new number every time, where a surface's
+    /// shader reads the time.
+    fn signatureOf(self: *const Renderer3D, shadow_view: shadows3d.View, items: []const ShadowItem) u64 {
+        var hash: std.hash.Wyhash = .init(0);
+        hash.update(std.mem.asBytes(&shadow_view.render));
+        hash.update(std.mem.asBytes(&shadow_view.tile));
+        for (items) |shadowed| {
+            const item = shadowed.item;
+            if (item.compiled.reads_time) return self.shadow_cache.?.draw *% 0x9E37_79B9_7F4A_7C15 | 1;
+            hash.update(std.mem.asBytes(&self.gathered.items[item.instance].model));
+            hash.update(std.mem.asBytes(&@intFromPtr(item.compiled)));
+            hash.update(std.mem.asBytes(&item.gpu));
+            hash.update(std.mem.asBytes(&[_]u32{ item.first_index, item.index_count, item.way }));
+            hash.update(std.mem.asBytes(&item.textures[0]));
+            hash.update(std.mem.asBytes(&self.looks.items[item.look]));
+            if (item.params != no_params) {
+                const set = self.param_sets.items[item.params];
+                hash.update(self.param_bytes.items[set.start..][0..set.len]);
+            }
+        }
+        // Nought is "nothing drawn yet".
+        return hash.final() | 1;
+    }
+
+    /// The shadow atlas as a picture to look at - 512 texels a side, the
+    /// atlas's top at the top, nearer its light lighter, an empty tile black - or
+    /// null when there is no atlas. An editor shows it beside `plan.views`.
+    pub fn shadowAtlasPicture(self: *Renderer3D, gpa: Allocator) !?rhi.Texture {
+        const atlas = self.atlas orelse return null;
+        if (self.atlas_picture == null) self.atlas_picture = try .init(gpa, self.device);
+        const picture = &self.atlas_picture.?;
+        try picture.draw(self.device, atlas, self.reading);
+        return picture.texture;
+    }
+
+    /// The views of the atlas whose signature is not what was drawn into
+    /// their tiles last drawn again - each tile cleared, and what casts into
+    /// it drawn, depth alone, by each surface's own shader's caster - in one
+    /// pass; the others left as they are.
     fn drawShadows(self: *Renderer3D, gpa: Allocator) !void {
         const views = self.plan.views.items;
         if (views.len == 0) return;
+        self.shadow_views = @intCast(views.len);
         const device = self.device;
         const atlas = self.atlas.?;
         const format = self.atlas_format.?;
+        const cache = &self.shadow_cache.?;
+
+        // Which views changed: the items are sorted by view.
+        const all = self.shadow_items.items;
+        try self.signatures.resize(gpa, views.len);
+        try self.redraw.resize(gpa, views.len);
+        var stale = false;
+        {
+            var at: usize = 0;
+            for (views, 0..) |shadow_view, index| {
+                const from = at;
+                while (at < all.len and all[at].view == index) at += 1;
+                self.signatures.items[index] = self.signatureOf(shadow_view, all[from..at]);
+                const entry = cache.entries.getPtr(shadow_view.key).?;
+                self.redraw.items[index] = self.atlas_fresh or entry.signature != self.signatures.items[index];
+                stale = stale or self.redraw.items[index];
+            }
+        }
+        if (!stale) return;
+        if (self.tile_clear == null) self.tile_clear = try .init(gpa, device, format);
 
         // Each view's frame: the draw's, seen from its light.
         self.shadow_frames.clear();
@@ -924,15 +1023,31 @@ pub const Renderer3D = struct {
         try self.shadow_frames.upload(device);
 
         const list = device.begin();
-        try list.beginPass(.{ .depth = .{ .texture = atlas, .clear_depth = 1 } });
+        try list.beginPass(.{ .depth = .{ .texture = atlas, .load = if (self.atlas_fresh) .clear else .load, .clear_depth = 1 } });
         const items = self.shadow_items.items;
         const first_instance = self.items.items.len;
+        // Each view drawn again: its tile cleared, before what casts into it.
+        for (views, 0..) |shadow_view, index| {
+            if (!self.redraw.items[index]) continue;
+            cache.entries.getPtr(shadow_view.key).?.signature = self.signatures.items[index];
+            self.shadow_views_drawn += 1;
+            if (self.atlas_fresh) continue;
+            const tile = shadow_view.tile;
+            try list.setViewport(.{ .x = @floatFromInt(tile.x), .y = @floatFromInt(tile.y), .width = @floatFromInt(tile.size), .height = @floatFromInt(tile.size) });
+            try list.setScissor(.{ .x = @intCast(tile.x), .y = @intCast(tile.y), .width = tile.size, .height = tile.size });
+            try self.tile_clear.?.draw(list);
+        }
         var start: usize = 0;
         var current: ?u32 = null;
         while (start < items.len) {
             var end = start + 1;
             while (end < items.len and ShadowItem.joins(items[start], items[end])) end += 1;
             const shadowed = items[start];
+            // A view as it was is skipped whole.
+            if (!self.redraw.items[shadowed.view]) {
+                start = end;
+                continue;
+            }
             if (current != shadowed.view) {
                 current = shadowed.view;
                 const tile = views[shadowed.view].tile;
@@ -970,7 +1085,7 @@ pub const Renderer3D = struct {
         }
         try list.endPass();
         try device.submit();
-        self.shadow_views = @intCast(views.len);
+        self.atlas_fresh = false;
     }
 
     /// Every kept lamp's cookie into a tile of the cookie atlas: the one that
@@ -1116,6 +1231,150 @@ fn cookieRect(tile: u32, bottom_left: bool) [4]f32 {
     const s = 1 / across;
     return if (bottom_left) .{ u, 1 - v, s, -s } else .{ u, v, s, s };
 }
+
+/// The shadow atlas drawn into a picture to look at. Both are drawn into, so
+/// on a device that stores what is drawn bottom row first they are turned
+/// the same way, and reading the one at the other's place shows the atlas
+/// its top at the top on every device.
+const AtlasPicture = struct {
+    gpu: rhi.Shader,
+    pipeline: rhi.Pipeline,
+    corners: rhi.Buffer,
+    texture: rhi.Texture,
+
+    const size = 512;
+
+    const source =
+        \\attribute vec2 corner : 0;
+        \\varying vec2 at;
+        \\texture2d depths : 0;
+        \\vertex {
+        \\    at = vec2(corner.x * 0.5 + 0.5, 0.5 - corner.y * 0.5);
+        \\    position = vec4(corner, 0.0, 1.0);
+        \\}
+        \\fragment {
+        \\    float d = sample_level(depths, at, 0.0).r;
+        \\    // Most of a view's depth is near its far end: stretched, so what
+        \\    // is drawn shows, and what is empty is black.
+        \\    float near = 0.0;
+        \\    if (d < 1.0) {
+        \\        near = 0.15 + 0.85 * pow(1.0 - d, 0.125);
+        \\    }
+        \\    target = vec4(vec3(near), 1.0);
+        \\}
+    ;
+
+    fn init(gpa: Allocator, device: *rhi.Device) !AtlasPicture {
+        var said: std.Io.Writer.Allocating = .init(gpa);
+        defer said.deinit();
+        var module = shader.compile(gpa, source, &said.writer) catch |err| {
+            log.err("the shadow atlas picture's shader: {s}", .{said.written()});
+            return err;
+        };
+        defer module.deinit();
+        const gpu = try device.createShader(.{
+            .glsl = .{ .vertex = module.glsl.vertex, .fragment = module.glsl.fragment },
+            .glsl_es = .{ .vertex = module.glsl_es.vertex, .fragment = module.glsl_es.fragment },
+            .hlsl = .{ .vertex = module.hlsl.vertex, .fragment = module.hlsl.fragment },
+            .spirv = .{ .vertex = module.spirv.vertex, .fragment = module.spirv.fragment },
+            .label = "shadow atlas picture",
+        });
+        errdefer device.destroyShader(gpu);
+        const pipeline = try device.createPipeline(.{
+            .shader = gpu,
+            .attributes = &.{.{ .location = 0, .format = .float2, .offset = 0 }},
+            .buffers = &.{.{ .stride = 8 }},
+            .textures = &.{"depths"},
+            .label = "shadow atlas picture",
+        });
+        errdefer device.destroyPipeline(pipeline);
+        const corners = [6]f32{ -1, -1, 3, -1, -1, 3 };
+        const buffer = try device.createBuffer(.{ .kind = .vertex, .size = @sizeOf(@TypeOf(corners)), .data = std.mem.asBytes(&corners), .label = "shadow atlas picture" });
+        errdefer device.destroyBuffer(buffer);
+        const texture = try device.createTexture(.{ .width = size, .height = size, .usage = .{ .sampled = true, .render_target = true }, .label = "shadow atlas picture" });
+        return .{ .gpu = gpu, .pipeline = pipeline, .corners = buffer, .texture = texture };
+    }
+
+    fn deinit(self: *AtlasPicture, device: *rhi.Device) void {
+        device.destroyTexture(self.texture);
+        device.destroyBuffer(self.corners);
+        device.destroyPipeline(self.pipeline);
+        device.destroyShader(self.gpu);
+    }
+
+    fn draw(self: *const AtlasPicture, device: *rhi.Device, atlas: rhi.Texture, sampler: rhi.Sampler) !void {
+        const list = device.begin();
+        try list.beginPass(.{ .color = .{ .target = .{ .texture = self.texture } } });
+        try list.setPipeline(self.pipeline);
+        try list.setVertexBuffer(0, self.corners, 0);
+        try list.setTexture(0, atlas, sampler);
+        try list.draw(.{ .vertex_count = 3 });
+        try list.endPass();
+        try device.submit();
+    }
+};
+
+/// What clears one tile of the shadow atlas: a quad over the viewport at the
+/// far plane, its depth written whatever was there.
+const TileClear = struct {
+    gpu: rhi.Shader,
+    pipeline: rhi.Pipeline,
+    corners: rhi.Buffer,
+
+    const source =
+        \\attribute vec2 corner : 0;
+        \\vertex {
+        \\    position = vec4(corner * 2.0 - 1.0, 1.0, 1.0);
+        \\}
+        \\fragment {
+        \\}
+    ;
+
+    fn init(gpa: Allocator, device: *rhi.Device, depth_format: rhi.Format) !TileClear {
+        var said: std.Io.Writer.Allocating = .init(gpa);
+        defer said.deinit();
+        var module = shader.compileWith(gpa, source, &said.writer, .{ .depth_only = true }) catch |err| {
+            log.err("the shadow tile shader: {s}", .{said.written()});
+            return err;
+        };
+        defer module.deinit();
+        const gpu = try device.createShader(.{
+            .glsl = .{ .vertex = module.glsl.vertex, .fragment = module.glsl.fragment },
+            .glsl_es = .{ .vertex = module.glsl_es.vertex, .fragment = module.glsl_es.fragment },
+            .hlsl = .{ .vertex = module.hlsl.vertex, .fragment = module.hlsl.fragment },
+            .spirv = .{ .vertex = module.spirv.vertex, .fragment = module.spirv.fragment },
+            .label = "shadow tile",
+        });
+        errdefer device.destroyShader(gpu);
+        const pipeline = try device.createPipeline(.{
+            .shader = gpu,
+            .attributes = &.{.{ .location = 0, .format = .float2, .offset = 0 }},
+            .buffers = &.{.{ .stride = 8 }},
+            .topology = .triangle_strip,
+            .depth = .{ .test_enabled = true, .write = true, .compare = .always },
+            .color_format = null,
+            .depth_format = depth_format,
+            .label = "shadow tile",
+        });
+        errdefer device.destroyPipeline(pipeline);
+        const corners = [8]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
+        const buffer = try device.createBuffer(.{ .kind = .vertex, .size = @sizeOf(@TypeOf(corners)), .data = std.mem.asBytes(&corners), .label = "shadow tile quad" });
+        return .{ .gpu = gpu, .pipeline = pipeline, .corners = buffer };
+    }
+
+    fn deinit(self: *TileClear, device: *rhi.Device) void {
+        device.destroyBuffer(self.corners);
+        device.destroyPipeline(self.pipeline);
+        device.destroyShader(self.gpu);
+    }
+
+    /// The tile the viewport is on cleared.
+    fn draw(self: *const TileClear, list: *rhi.CommandList) !void {
+        try list.setPipeline(self.pipeline);
+        try list.setVertexBuffer(0, self.corners, 0);
+        try list.draw(.{ .vertex_count = 4 });
+    }
+};
 
 /// What draws a picture into a tile of the cookie atlas: a quad over the
 /// tile, the picture's top at the top.

@@ -307,7 +307,10 @@ pub const DirectionalLight3D = extern struct {
 
 /// Light from a point, every way: a bulb, a candle. It reaches `range` from
 /// where its `Transform3D` is, and fades on the way. A mesh is lit by the
-/// eight of these and of `SpotLight3D` nearest it that reach it.
+/// eight of these and of `SpotLight3D` nearest it that reach it. With a
+/// `cookie` - a panorama, all the way round it - its light takes the
+/// picture's colours: the middle of the picture along its `-z`, the top
+/// toward its `+y`.
 pub const PointLight3D = extern struct {
     color: Color = .white,
     /// How bright: one is the colour as it is, next to it.
@@ -330,6 +333,7 @@ pub const PointLight3D = extern struct {
     /// How big it is, in units: a bigger one's shadows soften the further
     /// they fall from what casts them. Nought is a point.
     size: f32 = 0,
+    cookie: assets.TextureHandle = .none,
 
     pub const reflect_name = "PointLight3D";
     pub const reflect_fields = .{
@@ -345,6 +349,7 @@ pub const PointLight3D = extern struct {
         .shadow_normal_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How far it is moved out along its surface, in the shadow's texels: what keeps a slope from shadowing itself" } },
         .shadow_blur = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How soft the shadow's edge is: one is the project's shadow filter as it is, nought a hard edge" } },
         .size = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How big it is: a bigger one's shadows soften the further they fall from what casts them" } },
+        .cookie = .{ attr.Group{ .name = "Cookie" }, attr.Doc{ .text = "A panorama it shines through, all the way round: its middle along the light's way, its top toward its up" } },
     };
 };
 

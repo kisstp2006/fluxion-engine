@@ -394,7 +394,30 @@ const engine_part =
     \\    if (cascade >= int(s.y + 0.5)) {
     \\        return 1.0;
     \\    }
-    \\    float amount = shadowOf(int(s.x + 0.5) + cascade, p, ng, SUN_DIRECTIONS[which].xyz, vec4(s.z, s.w, soft.x, soft.y), turn);
+    \\    int first = int(s.x + 0.5);
+    \\    vec3 l = SUN_DIRECTIONS[which].xyz;
+    \\    vec4 how = vec4(s.z, s.w, soft.x, soft.y);
+    \\    float amount = shadowOf(first + cascade, p, ng, l, how, turn);
+    \\    // Over the last tenth of a cascade the next is mixed in, so where one
+    \\    // ends does not show.
+    \\    float begin = 0.0;
+    \\    float end = splits.x;
+    \\    if (cascade == 1) {
+    \\        begin = splits.x;
+    \\        end = splits.y;
+    \\    }
+    \\    if (cascade == 2) {
+    \\        begin = splits.y;
+    \\        end = splits.z;
+    \\    }
+    \\    if (cascade == 3) {
+    \\        begin = splits.z;
+    \\        end = splits.w;
+    \\    }
+    \\    float band = (end - begin) * 0.1;
+    \\    if (cascade + 1 < int(s.y + 0.5) && d > end - band) {
+    \\        amount = mix(amount, shadowOf(first + cascade + 1, p, ng, l, how, turn), (d - (end - band)) / band);
+    \\    }
     \\    return mix(amount, 1.0, smoothstep(soft.z, soft.w, d));
     \\}
     \\
@@ -459,16 +482,23 @@ const engine_part =
     \\    if (aim.w > -1.5) {
     \\        float t = clamp((dot(-l, aim.xyz) - aim.w) / max(1.0 - aim.w, 0.0001), 0.0, 1.0);
     \\        fade = fade * pow(t, LIGHT_CONES[at].x);
-    \\        vec4 cookie = LIGHT_COOKIES[at];
-    \\        if (cookie.z > 0.0) {
-    \\            // Where in its picture `p` is, the top toward its up.
-    \\            vec4 up = LIGHT_UPS[at];
-    \\            vec3 off = p - place.xyz;
+    \\    }
+    \\    vec4 cookie = LIGHT_COOKIES[at];
+    \\    if (cookie.z > 0.0) {
+    \\        // Where in its picture `p` is, the top toward its up: across the
+    \\        // cone for a spot light, all the way round for a point light.
+    \\        vec4 up = LIGHT_UPS[at];
+    \\        vec3 off = p - place.xyz;
+    \\        vec3 right = cross(aim.xyz, up.xyz);
+    \\        vec2 uv = vec2(0.5);
+    \\        if (aim.w > -1.5) {
     \\            float along = max(dot(off, aim.xyz), 0.0001) * up.w;
-    \\            vec3 right = cross(aim.xyz, up.xyz);
-    \\            vec2 uv = clamp(vec2(0.5 + 0.5 * dot(off, right) / along, 0.5 - 0.5 * dot(off, up.xyz) / along), vec2(0.002), vec2(0.998));
-    \\            color = vec4(color.rgb * toLinear(sample_level(COOKIE_ATLAS, cookie.xy + uv * cookie.zw, 0.0).rgb), color.w);
+    \\            uv = vec2(0.5 + 0.5 * dot(off, right) / along, 0.5 - 0.5 * dot(off, up.xyz) / along);
+    \\        } else {
+    \\            uv = vec2(0.5 + atan2(dot(-l, right), dot(-l, aim.xyz)) / 6.2831853, acos(clamp(dot(-l, up.xyz), -1.0, 1.0)) / 3.14159265);
     \\        }
+    \\        uv = clamp(uv, vec2(0.002), vec2(0.998));
+    \\        color = vec4(color.rgb * toLinear(sample_level(COOKIE_ATLAS, cookie.xy + uv * cookie.zw, 0.0).rgb), color.w);
     \\    }
     \\    vec3 light = shine(n, v, l, albedo, metallic, roughness) * color.rgb * fade;
     \\    if (light.r + light.g + light.b <= 0.0) {
@@ -721,6 +751,9 @@ pub const Compiled = struct {
     refused: bool = false,
     /// What casts its shadow: the same surface, drawn as depth alone.
     caster: Caster,
+    /// Whether the file reads `TIME`: then what it casts may change while
+    /// nothing moves, and a shadow it is in is drawn again every time.
+    reads_time: bool = false,
 
     /// The caster variant, and its pipelines by the side culled.
     pub const Caster = struct {
@@ -886,6 +919,7 @@ pub fn compile(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []c
         .params = lit.params,
         .writes_normal_map = lit.writes_normal_map,
         .caster = .{ .module = caster.module, .gpu = caster.gpu },
+        .reads_time = std.mem.indexOf(u8, text, "TIME") != null,
     };
 }
 

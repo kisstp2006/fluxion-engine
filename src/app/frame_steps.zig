@@ -395,5 +395,5 @@ fn draw(app: *App) anyerror!void {
     if (app.windowMode() != .minimized and !app.input.surface_lost) try layers.render(app);
     for (app.tool_windows.items) |tool| try tool.render(app);
     app.meshes.tick(app.gpa, &app.device);
-    app.renderer3d.tick();
+    app.renderer3d.tick(app.gpa);
 }

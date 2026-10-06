@@ -168,6 +168,8 @@ pub const render = struct {
     pub const shader3d = @import("render/shader3d.zig");
     /// The 3D layer's light turned into a picture: glow, tone, smoothing.
     pub const post3d = @import("render/post3d.zig");
+    /// Where every 3D shadow is drawn: the atlas, its tiles and views.
+    pub const shadows3d = @import("render/shadows3d.zig");
     /// What a 3D camera sees, and where a pixel is in the 3D world.
     pub const view3d = @import("render/view3d.zig");
 };

@@ -186,6 +186,38 @@ test "a light that casts a shadow draws what it sees into the atlas: a spot one 
     try testing.expect(app.renderer3d.atlas == null);
 }
 
+test "a shadow is drawn again only where its light or what casts it changed" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    const box = try boxAt(app, 0, 0, 0);
+    var above: Transform3D = .at(0, 4, 0);
+    above.lookAt(.zero, .unit_z);
+    const spot = try app.world.spawnWith(.{ above, SpotLight3D{ .range = 10, .shadow = true } });
+    // Far from the box: its six views see nothing of it.
+    _ = try app.world.spawnWith(.{ Transform3D.at(2.5, 0, 0), PointLight3D{ .range = 1.5, .shadow = true } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1 + 6), app.renderer3d.shadow_views);
+    try testing.expectEqual(@as(u32, 1 + 6), app.renderer3d.shadow_views_drawn);
+
+    // Nothing moved: nothing drawn.
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1 + 6), app.renderer3d.shadow_views);
+    try testing.expectEqual(@as(u32, 0), app.renderer3d.shadow_views_drawn);
+
+    // The box moves: the spot light's view is drawn again, the point light's not.
+    app.world.get(box, Transform3D).?.position.x = 0.2;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.shadow_views_drawn);
+
+    // The spot light turns: its view again.
+    app.world.get(spot, SpotLight3D).?.angle = 0.6;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.shadow_views_drawn);
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.renderer3d.shadow_views_drawn);
+}
+
 test "the first visible environment is the one drawn with" {
     const app = try headless();
     defer app.destroy();

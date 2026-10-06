@@ -134,6 +134,8 @@ pub const Settings = struct {
 pub const Lamp = struct {
     /// Its place among the frame's lamps: where the shader finds it.
     index: u32,
+    /// Which light it is from draw to draw: its entity.
+    light: u64 = 0,
     place: Vec3,
     range: f32,
     /// A spot light's way and half its cone; none for a point light.
@@ -166,54 +168,200 @@ pub const View = struct {
     frustum: math.Frustum,
     /// And within this, for a lamp: as far as it reaches.
     reach: ?math.Sphere = null,
+    /// Its tile's place in the cache.
+    key: Cache.Key = .{ .light = 0, .face = 0 },
 };
 
-/// Square tiles of sizes that are powers of two, handed out largest first.
-///
-/// The atlas is read in Z order - the order a square splits into four, each
-/// into four, and so on - in units of the smallest tile. A tile `k` units a
-/// side takes `k * k` of them, starting at the next multiple of that; while
-/// each tile asked for is no larger than the one before, that is a square of
-/// the atlas no other tile overlaps, with nothing wasted between.
+/// Square tiles of sizes that are powers of two, taken and given back: a
+/// square of the atlas splits into four to make a smaller one, and four
+/// given back join again. The smallest is a sixty-fourth of the atlas across.
 pub const Tiles = struct {
     atlas: u32,
     unit: u32,
-    next: u32 = 0,
+    /// The free squares of each size: `free[0]` the whole atlas, each level
+    /// after a quarter of the one before.
+    free: [levels]std.ArrayList(Tile) = @splat(.empty),
 
-    pub fn init(atlas: u32) Tiles {
-        return .{ .atlas = atlas, .unit = @max(atlas / 64, 16) };
+    const levels = 7;
+
+    pub fn init(gpa: Allocator, atlas: u32) Allocator.Error!Tiles {
+        var self: Tiles = .{ .atlas = atlas, .unit = @max(atlas / 64, 16) };
+        try self.free[0].append(gpa, .{ .x = 0, .y = 0, .size = atlas });
+        return self;
     }
 
-    /// A tile `size` texels a side - a power of two, no larger than the last
-    /// - or null when the atlas has no room left for one.
-    pub fn take(self: *Tiles, size: u32) ?Tile {
-        const side = @max(size / self.unit, 1);
-        const area = side * side;
-        const across = self.atlas / self.unit;
-        const at = std.mem.alignForward(u32, self.next, area);
-        if (at + area > across * across) return null;
-        self.next = at + area;
-        return .{ .x = compact(at) * self.unit, .y = compact(at >> 1) * self.unit, .size = side * self.unit };
+    pub fn deinit(self: *Tiles, gpa: Allocator) void {
+        for (&self.free) |*list| list.deinit(gpa);
+        self.* = undefined;
     }
 
-    /// Whether `count` tiles of `size` fit in what is left.
-    pub fn fits(self: *const Tiles, size: u32, count: u32) bool {
-        const side = @max(size / self.unit, 1);
-        const area = side * side;
-        const across = self.atlas / self.unit;
-        return std.mem.alignForward(u32, self.next, area) + area * count <= across * across;
+    fn levelOf(self: *const Tiles, size: u32) usize {
+        const wanted = std.math.clamp(size, self.unit, self.atlas);
+        return @min(std.math.log2_int(u32, self.atlas / std.math.floorPowerOfTwo(u32, wanted)), levels - 1);
     }
 
-    /// Every other bit of `v`, from the lowest: a Z-order number's x.
-    fn compact(v: u32) u32 {
-        var x = v & 0x5555_5555;
-        x = (x | (x >> 1)) & 0x3333_3333;
-        x = (x | (x >> 2)) & 0x0F0F_0F0F;
-        x = (x | (x >> 4)) & 0x00FF_00FF;
-        x = (x | (x >> 8)) & 0x0000_FFFF;
-        return x;
+    /// A tile `size` texels a side - a power of two, from the atlas's
+    /// smallest up to the whole of it - or null when none is free.
+    pub fn take(self: *Tiles, gpa: Allocator, size: u32) Allocator.Error!?Tile {
+        const level = self.levelOf(size);
+        var from = level;
+        while (self.free[from].items.len == 0) {
+            if (from == 0) return null;
+            from -= 1;
+        }
+        var tile = self.free[from].pop().?;
+        // Split down to the size asked for, keeping three quarters each time.
+        while (from < level) : (from += 1) {
+            const half = tile.size / 2;
+            try self.free[from + 1].appendSlice(gpa, &.{
+                .{ .x = tile.x + half, .y = tile.y, .size = half },
+                .{ .x = tile.x, .y = tile.y + half, .size = half },
+                .{ .x = tile.x + half, .y = tile.y + half, .size = half },
+            });
+            tile.size = half;
+        }
+        return tile;
+    }
+
+    /// `count` tiles of `size` into `out`, or none of them.
+    pub fn takeMany(self: *Tiles, gpa: Allocator, size: u32, out: []Tile) Allocator.Error!bool {
+        for (out, 0..) |*tile, at| {
+            tile.* = (try self.take(gpa, size)) orelse {
+                for (out[0..at]) |taken| try self.give(gpa, taken);
+                return false;
+            };
+        }
+        return true;
+    }
+
+    /// Give `tile` back, joining it with its three neighbours into the square
+    /// they were split from where they are free too.
+    pub fn give(self: *Tiles, gpa: Allocator, tile: Tile) Allocator.Error!void {
+        const level = self.levelOf(tile.size);
+        if (level > 0) {
+            const whole = tile.size * 2;
+            const parent: Tile = .{ .x = tile.x - tile.x % whole, .y = tile.y - tile.y % whole, .size = whole };
+            var found: [3]usize = undefined;
+            var count: usize = 0;
+            for (self.free[level].items, 0..) |held, at| {
+                if (held.x - held.x % whole == parent.x and held.y - held.y % whole == parent.y) {
+                    if (count < 3) found[count] = at;
+                    count += 1;
+                }
+            }
+            if (count == 3) {
+                // Removed from the back first, so the places before stay put.
+                std.mem.sort(usize, &found, {}, std.sort.desc(usize));
+                for (found) |at| _ = self.free[level].swapRemove(at);
+                return self.give(gpa, parent);
+            }
+        }
+        try self.free[level].append(gpa, tile);
     }
 };
+
+/// The tiles each light's shadow had, and what was drawn into them, kept
+/// from draw to draw: a view whose light and casters are as they were is
+/// not drawn again.
+pub const Cache = struct {
+    tiles: Tiles,
+    entries: std.AutoHashMapUnmanaged(Key, Entry) = .empty,
+    /// Counted up by each plan, and by each frame: what a plan has not used
+    /// may be given up for room, and a light's tile changes size no more
+    /// than once a frame, however many views draw it.
+    draw: u64 = 0,
+    frame: u64 = 0,
+
+    /// A light - a lamp's entity, or a sun's place among the frame's - and
+    /// one of its views.
+    pub const Key = struct { light: u64, face: u32 };
+
+    pub const Entry = struct {
+        tile: Tile,
+        /// What was drawn into it last; nought for nothing yet.
+        signature: u64 = 0,
+        used: u64 = 0,
+        sized: u64 = 0,
+    };
+
+    pub fn init(gpa: Allocator, atlas: u32) Allocator.Error!Cache {
+        return .{ .tiles = try .init(gpa, atlas) };
+    }
+
+    pub fn deinit(self: *Cache, gpa: Allocator) void {
+        self.tiles.deinit(gpa);
+        self.entries.deinit(gpa);
+        self.* = undefined;
+    }
+
+    /// The tiles of `count` views of `light`, about `size` each: the ones it
+    /// had, where they are near that size, or new ones - smaller where there
+    /// is no room, once what no view of this plan uses is given up.
+    pub fn tilesFor(self: *Cache, gpa: Allocator, light: u64, count: u32, size: u32, out: []Tile) Allocator.Error!bool {
+        const views = out[0..count];
+        kept: {
+            var held_size: u32 = 0;
+            for (0..count) |face| {
+                const entry = self.entries.getPtr(.{ .light = light, .face = @intCast(face) }) orelse break :kept;
+                if (face > 0 and entry.tile.size != held_size) break :kept;
+                held_size = entry.tile.size;
+            }
+            // Within twice or half what it wants, it keeps what it has - and
+            // whatever it wants, once a frame has sized it.
+            const first = self.entries.getPtr(.{ .light = light, .face = 0 }).?;
+            if (first.sized != self.frame and (held_size * 2 < size or held_size > size * 2)) break :kept;
+            for (views, 0..) |*tile, face| {
+                const entry = self.entries.getPtr(.{ .light = light, .face = @intCast(face) }).?;
+                entry.used = self.draw;
+                tile.* = entry.tile;
+            }
+            return true;
+        }
+        try self.forget(gpa, light, count);
+        var want = size;
+        while (want >= self.tiles.unit) {
+            if (try self.tiles.takeMany(gpa, want, views)) {
+                for (views, 0..) |tile, face| {
+                    try self.entries.put(gpa, .{ .light = light, .face = @intCast(face) }, .{ .tile = tile, .used = self.draw, .sized = self.frame });
+                }
+                return true;
+            }
+            if (!try self.giveUpOldest(gpa)) want /= 2;
+        }
+        return false;
+    }
+
+    /// The tiles of `light`'s first `count` views - and any after - given back.
+    fn forget(self: *Cache, gpa: Allocator, light: u64, count: u32) Allocator.Error!void {
+        var face: u32 = 0;
+        while (face < @max(count, 6)) : (face += 1) {
+            const gone = self.entries.fetchRemove(.{ .light = light, .face = face }) orelse continue;
+            try self.tiles.give(gpa, gone.value.tile);
+        }
+    }
+
+    /// The tile no view of this plan uses that was used longest ago, given
+    /// back; false when every tile is this plan's.
+    fn giveUpOldest(self: *Cache, gpa: Allocator) Allocator.Error!bool {
+        var oldest: ?Key = null;
+        var when: u64 = std.math.maxInt(u64);
+        var it = self.entries.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.used == self.draw or entry.value_ptr.used >= when) continue;
+            when = entry.value_ptr.used;
+            oldest = entry.key_ptr.*;
+        }
+        const key = oldest orelse return false;
+        try self.forget(gpa, key.light, 1);
+        return true;
+    }
+};
+
+/// A sun's key in the cache: its place among the frame's suns, set apart
+/// from every entity's.
+pub fn sunKey(index: u32) u64 {
+    return 0xFFFF_FFFF_0000_0000 | @as(u64, index);
+}
 
 /// What a frame's shadows are: the views drawn into the atlas, and what the
 /// shader is told of them.
@@ -239,17 +387,17 @@ pub const Options = struct {
 };
 
 /// Work out every view `suns` and `lamps` need, seen from `camera`, into
-/// `plan`: suns first, then lamps in the order given - the one lighting most
-/// of the picture first - each taking what tiles are left.
-pub fn plan(gpa: Allocator, out: *Plan, camera: View3D, suns: []const Sun, lamps: []const Lamp, options: Options) Allocator.Error!void {
+/// `plan`, with the tiles `cache` keeps for them: suns first, then lamps in
+/// the order given - the one lighting most of the picture first - each
+/// taking what room is left. The cache's atlas is `options.atlas` a side.
+pub fn plan(gpa: Allocator, out: *Plan, cache: *Cache, camera: View3D, suns: []const Sun, lamps: []const Lamp, options: Options) Allocator.Error!void {
     out.views.clearRetainingCapacity();
     out.block = .none();
+    cache.draw += 1;
     const block = &out.block;
     const size: f32 = @floatFromInt(options.atlas);
     block.atlas = .{ 1 / size, @floatFromInt(options.filter.taps()), size, 0 };
-    var tiles: Tiles = .init(options.atlas);
-    // Each tile asked for is no larger than the one before.
-    var cap: u32 = options.atlas;
+    var tiles: [6]Tile = undefined;
 
     for (suns) |sun| {
         const count = std.math.clamp(sun.cascades, 1, 4);
@@ -257,12 +405,12 @@ pub fn plan(gpa: Allocator, out: *Plan, camera: View3D, suns: []const Sun, lamps
         const first = out.views.items.len;
         if (first + count > most_views) break;
         const splits = cascadeSplits(camera, count, sun.max_distance);
-        var tile = takeShrinking(&tiles, &cap, wanted, count) orelse continue;
+        if (!try cache.tilesFor(gpa, sunKey(sun.index), count, wanted, &tiles)) continue;
         var start = camera.near;
         for (0..count) |cascade| {
-            if (cascade > 0) tile = tiles.take(tile.size).?;
             const end = splits[cascade];
-            try addCascade(gpa, out, camera, sun.toward, start, end, @max(sun.max_distance, 1), tile, options);
+            try addCascade(gpa, out, camera, sun.toward, start, end, @max(sun.max_distance, 1), tiles[cascade], options);
+            out.views.items[out.views.items.len - 1].key = .{ .light = sunKey(sun.index), .face = @intCast(cascade) };
             start = end;
         }
         const reach = @min(sun.max_distance, camera.far);
@@ -278,31 +426,16 @@ pub fn plan(gpa: Allocator, out: *Plan, camera: View3D, suns: []const Sun, lamps
         const base = if (lamp.spot == null) options.atlas / 16 else options.atlas / 8;
         const wanted = lampTile(base, lamp.range, lamp.distance);
         // Every face of a point light is one size.
-        var tile = takeShrinking(&tiles, &cap, wanted, faces) orelse continue;
+        if (!try cache.tilesFor(gpa, lamp.light, faces, wanted, &tiles)) continue;
         if (lamp.spot) |spot| {
-            try addSpot(gpa, out, lamp, spot.aim, spot.angle, tile, options);
+            try addSpot(gpa, out, lamp, spot.aim, spot.angle, tiles[0], options);
         } else for (0..faces) |face| {
-            if (face > 0) tile = tiles.take(tile.size).?;
-            try addFace(gpa, out, lamp, @intCast(face), tile, options);
+            try addFace(gpa, out, lamp, @intCast(face), tiles[face], options);
         }
+        for (out.views.items[first..], 0..) |*made, face| made.key = .{ .light = lamp.light, .face = @intCast(face) };
         block.lamps[lamp.index] = .{ @floatFromInt(first), @floatFromInt(faces), lamp.settings.bias, lamp.settings.normal_bias };
         block.lamp_softness[lamp.index] = .{ lamp.settings.blur * options.filter.radius(), lamp.settings.size, 0, 0 };
     }
-}
-
-/// The first of `count` tiles of `size` - or of the largest smaller size
-/// all of them fit at - no larger than any before them; the rest follow it
-/// with `tiles.take` of its size. Null where not even the smallest fit.
-fn takeShrinking(tiles: *Tiles, cap: *u32, size: u32, count: u32) ?Tile {
-    var want = @min(size, cap.*);
-    while (want >= tiles.unit) : (want /= 2) {
-        if (tiles.fits(want, count)) {
-            cap.* = want;
-            return tiles.take(want).?;
-        }
-        cap.* = want / 2;
-    }
-    return null;
 }
 
 /// How large a lamp's tile is: `base` for one whose light reaches the
@@ -496,22 +629,58 @@ fn inside(block: *const Shadows, at: usize, uv: Vec3) bool {
     return uv.x >= r[0] and uv.x <= r[2] and uv.y >= r[1] and uv.y <= r[3];
 }
 
-test "tiles are handed out largest first without overlapping, and run out" {
-    var tiles: Tiles = .init(1024);
+fn overlap(a: Tile, b: Tile) bool {
+    return a.x < b.x + b.size and b.x < a.x + a.size and a.y < b.y + b.size and b.y < a.y + a.size;
+}
+
+test "tiles are taken without overlapping, run out, and join again when given back" {
+    var tiles: Tiles = try .init(testing.allocator, 1024);
+    defer tiles.deinit(testing.allocator);
     try testing.expectEqual(@as(u32, 16), tiles.unit);
-    const a = tiles.take(512).?;
-    const b = tiles.take(256).?;
-    const c = tiles.take(256).?;
-    const d = tiles.take(128).?;
-    try testing.expectEqual(Tile{ .x = 0, .y = 0, .size = 512 }, a);
-    try testing.expectEqual(Tile{ .x = 512, .y = 0, .size = 256 }, b);
-    try testing.expectEqual(Tile{ .x = 768, .y = 0, .size = 256 }, c);
-    try testing.expectEqual(Tile{ .x = 512, .y = 256, .size = 128 }, d);
-    // Three quarters of what is left at 512 a side is gone; what remains of
-    // the atlas holds two more of that size.
-    try testing.expect(tiles.take(512) != null);
-    try testing.expect(tiles.take(512) != null);
-    try testing.expect(tiles.take(512) == null);
+    var taken: [8]Tile = undefined;
+    taken[0] = (try tiles.take(testing.allocator, 512)).?;
+    taken[1] = (try tiles.take(testing.allocator, 256)).?;
+    taken[2] = (try tiles.take(testing.allocator, 256)).?;
+    taken[3] = (try tiles.take(testing.allocator, 128)).?;
+    taken[4] = (try tiles.take(testing.allocator, 512)).?;
+    taken[5] = (try tiles.take(testing.allocator, 512)).?;
+    for (taken[0..6], 0..) |a, i| for (taken[i + 1 .. 6]) |b| try testing.expect(!overlap(a, b));
+    try testing.expectEqual(@as(u32, 128), taken[3].size);
+    // A quarter is left, but split: no 512 fits.
+    try testing.expect((try tiles.take(testing.allocator, 512)) == null);
+    // Given back, the 256s and the 128 join into what they were split from.
+    for (taken[1..4]) |tile| try tiles.give(testing.allocator, tile);
+    taken[6] = (try tiles.take(testing.allocator, 512)).?;
+    try testing.expectEqual(@as(u32, 512), taken[6].size);
+    try testing.expect((try tiles.take(testing.allocator, 16)) == null);
+}
+
+test "a light keeps its tiles from draw to draw, and one not drawn gives them up for room" {
+    var cache: Cache = try .init(testing.allocator, 1024);
+    defer cache.deinit(testing.allocator);
+    var tiles: [6]Tile = undefined;
+    cache.draw = 1;
+    try testing.expect(try cache.tilesFor(testing.allocator, 7, 1, 512, &tiles));
+    const first = tiles[0];
+    // Near the size it had, the same tile; drawn into, it says what was.
+    cache.draw = 2;
+    cache.frame = 1;
+    cache.entries.getPtr(.{ .light = 7, .face = 0 }).?.signature = 99;
+    try testing.expect(try cache.tilesFor(testing.allocator, 7, 1, 256, &tiles));
+    try testing.expectEqual(first, tiles[0]);
+    try testing.expectEqual(@as(u64, 99), cache.entries.get(.{ .light = 7, .face = 0 }).?.signature);
+    // Others fill the rest; light 7 is not drawn in this plan, so it gives
+    // up its tile when nothing else is left.
+    cache.draw = 3;
+    for (8..11) |light| try testing.expect(try cache.tilesFor(testing.allocator, light, 1, 512, &tiles));
+    try testing.expect(try cache.tilesFor(testing.allocator, 11, 1, 512, &tiles));
+    try testing.expect(cache.entries.get(.{ .light = 7, .face = 0 }) == null);
+    // Four times the size it has, it gets a new one, drawn into from nothing.
+    cache.draw = 4;
+    cache.frame = 2;
+    try testing.expect(try cache.tilesFor(testing.allocator, 12, 6, 32, &tiles));
+    try testing.expect(try cache.tilesFor(testing.allocator, 12, 6, 32, &tiles));
+    try testing.expectEqual(@as(u32, 32), tiles[5].size);
 }
 
 test "a spot light's view puts what it shines on in its tile, nearer smaller" {
@@ -519,7 +688,9 @@ test "a spot light's view puts what it shines on in its tile, nearer smaller" {
     defer out.deinit(testing.allocator);
     const camera: View3D = .{ .position = .init(0, 0, 10) };
     const lamp: Lamp = .{ .index = 3, .place = .init(0, 5, 0), .range = 20, .spot = .{ .aim = .init(0, -1, 0), .angle = 0.5 }, .settings = .{}, .distance = 11 };
-    try plan(testing.allocator, &out, camera, &.{}, &.{lamp}, .{ .atlas = 2048, .filter = .soft_medium, .clip = .gl, .bottom_left = false });
+    var cache: Cache = try .init(testing.allocator, 2048);
+    defer cache.deinit(testing.allocator);
+    try plan(testing.allocator, &out, &cache, camera, &.{}, &.{lamp}, .{ .atlas = 2048, .filter = .soft_medium, .clip = .gl, .bottom_left = false });
     try testing.expectEqual(@as(usize, 1), out.views.items.len);
     try testing.expectEqual(@as(f32, 0), out.block.lamps[3][0]);
     try testing.expectEqual(@as(f32, -1), out.block.lamps[0][0]);
@@ -541,7 +712,9 @@ test "a point light's six faces each see the side the shader picks for them" {
     var out: Plan = .{};
     defer out.deinit(testing.allocator);
     const lamp: Lamp = .{ .index = 0, .place = .init(1, 2, 3), .range = 10, .settings = .{}, .distance = 5 };
-    try plan(testing.allocator, &out, .{}, &.{}, &.{lamp}, .{ .atlas = 2048, .filter = .soft_medium, .clip = .d3d, .bottom_left = true });
+    var cache: Cache = try .init(testing.allocator, 2048);
+    defer cache.deinit(testing.allocator);
+    try plan(testing.allocator, &out, &cache, .{}, &.{}, &.{lamp}, .{ .atlas = 2048, .filter = .soft_medium, .clip = .d3d, .bottom_left = true });
     try testing.expectEqual(@as(usize, 6), out.views.items.len);
     try testing.expectEqual(@as(f32, 6), out.block.lamps[0][1]);
     for (face_ways, 0..) |way, face| {
@@ -563,7 +736,9 @@ test "a sun's cascades end further apart further away, and cover what the camera
     var out: Plan = .{};
     defer out.deinit(testing.allocator);
     const sun: Sun = .{ .index = 1, .toward = .init(0.3, 1, 0.2), .settings = .{}, .cascades = 4, .max_distance = 100 };
-    try plan(testing.allocator, &out, camera, &.{sun}, &.{}, .{ .atlas = 4096, .filter = .hard, .clip = .gl, .bottom_left = true });
+    var cache: Cache = try .init(testing.allocator, 4096);
+    defer cache.deinit(testing.allocator);
+    try plan(testing.allocator, &out, &cache, camera, &.{sun}, &.{}, .{ .atlas = 4096, .filter = .hard, .clip = .gl, .bottom_left = true });
     try testing.expectEqual(@as(usize, 4), out.views.items.len);
     try testing.expectEqual(@as(f32, 0), out.block.suns[1][0]);
     try testing.expectEqual(@as(f32, 4), out.block.suns[1][1]);
@@ -581,26 +756,17 @@ test "a sun's cascades end further apart further away, and cover what the camera
     try testing.expectEqual(sliceSphere(camera, 1, 9).radius, sliceSphere(turned, 1, 9).radius);
 }
 
-test "a tile that does not fit is made smaller, no larger than the last, until none fits" {
-    var tiles: Tiles = .init(1024);
-    var cap: u32 = 1024;
-    for (0..3) |_| try testing.expectEqual(@as(u32, 512), takeShrinking(&tiles, &cap, 512, 1).?.size);
-    try testing.expectEqual(@as(u32, 256), takeShrinking(&tiles, &cap, 256, 1).?.size);
-    // What is asked for after is no larger: three more 256s fill the last
-    // quarter, and then nothing fits.
-    for (0..3) |_| try testing.expectEqual(@as(u32, 256), takeShrinking(&tiles, &cap, 512, 1).?.size);
-    try testing.expect(takeShrinking(&tiles, &cap, 512, 1) == null);
-}
-
 test "a point light that does not fit at its size gets six smaller faces" {
     var out: Plan = .{};
     defer out.deinit(testing.allocator);
     var lamps: [64]Lamp = undefined;
     // Sixty-three spot lights near the camera, 128 a side each in a 1024
     // atlas, leave room for one more of them.
-    for (lamps[0..63], 0..) |*lamp, i| lamp.* = .{ .index = @intCast(i), .place = .zero, .range = 5, .spot = .{ .aim = .init(0, -1, 0), .angle = 0.6 }, .settings = .{}, .distance = 0 };
-    lamps[63] = .{ .index = 63, .place = .zero, .range = 5, .settings = .{}, .distance = 0 };
-    try plan(testing.allocator, &out, .{}, &.{}, &lamps, .{ .atlas = 1024, .filter = .soft_low, .clip = .d3d, .bottom_left = false });
+    for (lamps[0..63], 0..) |*lamp, i| lamp.* = .{ .index = @intCast(i), .light = i, .place = .zero, .range = 5, .spot = .{ .aim = .init(0, -1, 0), .angle = 0.6 }, .settings = .{}, .distance = 0 };
+    lamps[63] = .{ .index = 63, .light = 63, .place = .zero, .range = 5, .settings = .{}, .distance = 0 };
+    var cache: Cache = try .init(testing.allocator, 1024);
+    defer cache.deinit(testing.allocator);
+    try plan(testing.allocator, &out, &cache, .{}, &.{}, &lamps, .{ .atlas = 1024, .filter = .soft_low, .clip = .d3d, .bottom_left = false });
     try testing.expectEqual(@as(usize, 63 + 6), out.views.items.len);
     try testing.expectEqual(@as(f32, 63), out.block.lamps[63][0]);
     const face = out.views.items[63].tile.size;
