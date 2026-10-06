@@ -289,6 +289,13 @@ pub const Renderer3D = struct {
 
     /// Every shadow's numbers, as the shader's `Shadows` block says.
     shadows: rhi.Buffer,
+    /// The baked light from everywhere: the probes' samples for the meshes
+    /// that move, as the shader's `Probes` block says, and the lightmap the
+    /// frame reads, the lightmap asset's; read across at its edges.
+    probes: rhi.Buffer,
+    probe_data: shader3d.Probes = .{ .samples = @splat(@splat(0)), .energy = .{ 1, 0, 0, 0 } },
+    lightmap: ?rhi.Texture = null,
+    lightmap_sampler: rhi.Sampler,
     /// The atlas the frame's shadows are drawn into, made the first time a
     /// light casts one and let go a few frames after none does; its size.
     atlas: ?rhi.Texture = null,
@@ -367,6 +374,10 @@ pub const Renderer3D = struct {
         errdefer device.destroyTexture(flat);
         const shadow_block = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(shadows3d.Shadows), .dynamic = true, .label = "3D shadows" });
         errdefer device.destroyBuffer(shadow_block);
+        const probes = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(shader3d.Probes), .dynamic = true, .label = "3D probes" });
+        errdefer device.destroyBuffer(probes);
+        const lightmap_sampler = try device.createSampler(.{});
+        errdefer device.destroySampler(lightmap_sampler);
         const atlas_format = atlasFormat(device);
         const no_shadow = try noShadow(device, atlas_format, white);
         errdefer if (no_shadow != white) device.destroyTexture(no_shadow);
@@ -389,6 +400,8 @@ pub const Renderer3D = struct {
             .white = white,
             .flat = flat,
             .shadows = shadow_block,
+            .probes = probes,
+            .lightmap_sampler = lightmap_sampler,
             .atlas_format = atlas_format,
             .no_shadow = no_shadow,
             .comparing = comparing,
@@ -455,6 +468,8 @@ pub const Renderer3D = struct {
         device.destroyTexture(self.white);
         device.destroyTexture(self.flat);
         device.destroyBuffer(self.shadows);
+        device.destroyBuffer(self.probes);
+        device.destroySampler(self.lightmap_sampler);
         if (self.atlas) |atlas| device.destroyTexture(atlas);
         if (self.shadow_cache) |*cache| cache.deinit(gpa);
         if (self.tile_clear) |*clear| clear.deinit(device);
@@ -591,6 +606,8 @@ pub const Renderer3D = struct {
             try list.setTexture(shader3d.shadow_map_slot, shadow_map, self.comparing);
             try list.setTexture(shader3d.shadow_depth_slot, shadow_map, self.reading);
             try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
+            try list.setUniformBuffer(shader3d.probes_slot, self.probes);
+            try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
             try list.setIndexBuffer(first.gpu.indices, .u32);
@@ -643,6 +660,7 @@ pub const Renderer3D = struct {
         try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&frame));
         self.frame_data = frame;
         try self.device.updateBuffer(self.shadows, 0, std.mem.asBytes(&self.plan.block));
+        try self.device.updateBuffer(self.probes, 0, std.mem.asBytes(&self.probe_data));
 
         var lights: Lights = .{
             .places = @splat(@splat(0)),
@@ -792,13 +810,11 @@ pub const Renderer3D = struct {
                 if (!seen and !casts) continue;
                 kept.used = app.meshes.clock;
                 const gpu = try kept.uploaded(self.device);
-                const turn = model.normalMatrix() orelse math.Mat3.identity;
                 const depth = bounds.center().sub(view.position).dot(forward);
                 const own: MaterialHandle = if (app.world.get(entity, Material3D)) |held| held.material else .none;
                 const at: u32 = @intCast(self.gathered.items.len);
                 try self.gathered.append(gpa, .{
                     .model = .{ model.cols[0].array(), model.cols[1].array(), model.cols[2].array(), model.cols[3].array() },
-                    .normal = .{ turn.cols[0].array(), turn.cols[1].array(), turn.cols[2].array() },
                     .tint = linear(looks.tint(.white)),
                     .lights = if (seen) self.lampsFor(bounds) else @splat(@splat(-1)),
                 });
@@ -1076,6 +1092,8 @@ pub const Renderer3D = struct {
             try list.setTexture(shader3d.shadow_map_slot, self.no_shadow, self.comparing);
             try list.setTexture(shader3d.shadow_depth_slot, self.no_shadow, self.reading);
             try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
+            try list.setUniformBuffer(shader3d.probes_slot, self.probes);
+            try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast((first_instance + start) * @sizeOf(Instance)));
             try list.setIndexBuffer(first.gpu.indices, .u32);

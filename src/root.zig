@@ -554,6 +554,7 @@ test {
     _ = @import("render/render_test.zig");
     _ = @import("render/render3d_test.zig");
     _ = @import("render/mesh.zig");
+    _ = @import("render/lightmap_uv.zig");
     _ = @import("render/view3d.zig");
     _ = @import("render/renderer3d.zig");
     _ = @import("render/shader3d.zig");

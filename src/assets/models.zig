@@ -22,7 +22,9 @@
 //!   `.fluxion/imported/` folder; a game reads that. One no editor has
 //!   turned is `error.NotImported`.
 //! - **`<file>.import`** beside the model says how it is brought in:
-//!   `{ "scale": 0.01 }` for a model made in centimetres.
+//!   `{ "scale": 0.01 }` for a model made in centimetres, and
+//!   `"lightmap_uvs": true` for one a lightmap lights that brings no second
+//!   coordinates of its own: they are worked out as it is read.
 //!
 //! A model read in the background (`App.loadInBackground`) has its meshes
 //! made and its pictures decoded on the loading threads, each on its own;
@@ -95,6 +97,9 @@ pub fn readablePath(gpa: Allocator, source: []const u8) Allocator.Error![]u8 {
 pub const ImportSettings = struct {
     /// What its size is multiplied by: 0.01 for one made in centimetres.
     scale: f32 = 1,
+    /// Whether its meshes that bring no lightmap UVs get them worked out,
+    /// for a lightmap to light them.
+    lightmap_uvs: bool = false,
 };
 
 /// A model's import settings, or what they start as when it has none or
@@ -152,7 +157,12 @@ pub fn prepare(gpa: Allocator, files: Project.Files, file: []const u8) !Prepared
     const bytes = try files.read(gpa, file, .limited(file_table.file_limit));
     defer gpa.free(bytes);
     var beside: Beside = .{ .files = files, .folder = folderOf(file) };
-    return .{ .model = try gltf.read(gpa, bytes, beside.fetch()), .settings = settingsOf(gpa, files, file) };
+    const settings = settingsOf(gpa, files, file);
+    var model = try gltf.parse(gpa, bytes, beside.fetch());
+    errdefer model.deinit();
+    model.unwrap_lightmap = settings.lightmap_uvs;
+    try gltf.finish(&model);
+    return .{ .model = model, .settings = settings };
 }
 
 /// Read the model at `path` now, on this thread, and keep what it made: its
@@ -250,12 +260,13 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
         for (surfaces, held.materials) |*surface, material| {
             surface.material = if (material) |m| materials[m] else .none;
         }
-        const made = mesh.Mesh.adopt(vertices, indices, surfaces) catch |err| {
+        var made = mesh.Mesh.adopt(vertices, indices, surfaces) catch |err| {
             gpa.free(vertices);
             gpa.free(indices);
             gpa.free(surfaces);
             return err;
         };
+        made.uv2_texels = held.uv2_texels;
         var name: [512]u8 = undefined;
         _ = try app.meshes.add(gpa, &app.device, try std.fmt.bufPrint(&name, "{s}#mesh/{d}", .{ source, at }), made);
     }

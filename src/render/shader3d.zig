@@ -78,9 +78,17 @@ pub const shadows_slot = 4;
 pub const shadow_map_slot = 5;
 pub const shadow_depth_slot = 6;
 /// How many textures a 3D shader reads: the material's five, the shadow
-/// atlas twice, and the spot lights' cookies.
-pub const texture_count = 8;
+/// atlas twice, the lights' cookies and the lightmap.
+pub const texture_count = 9;
 pub const cookie_slot = 7;
+/// The light from everywhere baked for a frame: the lightmap at this slot,
+/// and the probes' samples, `Probes`, the block at this one.
+pub const lightmap_slot = 8;
+pub const probes_slot = 5;
+
+/// The most probe samples a frame holds: one each for the meshes that move
+/// through a lightmap's probes, nearest the camera first.
+pub const most_probe_samples = 256;
 
 /// The most suns a frame is lit by.
 pub const most_suns = 4;
@@ -152,15 +160,28 @@ pub const Lights = extern struct {
 
 /// One mesh drawn: read by the shader per instance.
 pub const Instance = extern struct {
-    /// Its own space to the world's, column by column.
+    /// Its own space to the world's, column by column. The shader turns its
+    /// normals by the inverse of this turned over, worked out from it.
     model: [4][4]f32,
-    /// Its normals to the world's: the model's inverse turned over, which
-    /// keeps them square to a surface its scale has stretched.
-    normal: [3][3]f32,
     /// What it inherits, linear.
     tint: [4]f32,
     /// The lamps it is lit by, by their place in `Lights`; -1 for none.
     lights: [2][4]f32,
+    /// Where its light from everywhere comes from: with `x` above nought,
+    /// the lightmap, at its lightmap UVs times `x` and `y` and moved by `z`
+    /// and `w`; with `x` below nought, probe sample `-x - 1` of `Probes`;
+    /// with nought, the environment's ambient light.
+    gi: [4]f32 = @splat(0),
+};
+
+/// The probes' light for the meshes that move through them, as the
+/// `Probes` block says: three numbers a colour, how bright a surface facing
+/// each way is, `c0 + c1 x + c2 y + c3 z` of the way it faces.
+pub const Probes = extern struct {
+    /// Each sample's red, green and blue, one after another.
+    samples: [most_probe_samples * 3][4]f32,
+    /// What everything baked is multiplied by, in `x`.
+    energy: [4]f32,
 };
 
 const engine_part =
@@ -171,16 +192,15 @@ const engine_part =
     \\attribute vec2 VERTEX_UV : 2;
     \\attribute vec4 VERTEX_COLOR : 3;
     \\attribute vec4 VERTEX_TANGENT : 4;
-    \\attribute vec4 MODEL_0 : 5;
-    \\attribute vec4 MODEL_1 : 6;
-    \\attribute vec4 MODEL_2 : 7;
-    \\attribute vec4 MODEL_3 : 8;
-    \\attribute vec3 TURN_0 : 9;
-    \\attribute vec3 TURN_1 : 10;
-    \\attribute vec3 TURN_2 : 11;
-    \\attribute vec4 TINT : 12;
-    \\attribute vec4 LIGHTS_0 : 13;
-    \\attribute vec4 LIGHTS_1 : 14;
+    \\attribute vec2 VERTEX_UV2 : 5;
+    \\attribute vec4 MODEL_0 : 6;
+    \\attribute vec4 MODEL_1 : 7;
+    \\attribute vec4 MODEL_2 : 8;
+    \\attribute vec4 MODEL_3 : 9;
+    \\attribute vec4 TINT : 10;
+    \\attribute vec4 LIGHTS_0 : 11;
+    \\attribute vec4 LIGHTS_1 : 12;
+    \\attribute vec4 GI : 13;
     \\
     \\// Where the pixel is, in the world.
     \\varying vec3 WORLD_POSITION;
@@ -193,6 +213,8 @@ const engine_part =
     \\varying vec4 COLOR;
     \\varying vec4 LIGHT_LIST_0;
     \\varying vec4 LIGHT_LIST_1;
+    \\// Where on the lightmap, or which probe sample, and which of the two.
+    \\varying vec4 GI_AT;
     \\
     \\uniform Frame : 0 {
     \\    mat4 VIEW_PROJECTION;
@@ -239,6 +261,11 @@ const engine_part =
     \\    vec4 SHADOW_ATLAS;
     \\}
     \\
+    \\uniform Probes : 5 {
+    \\    vec4 PROBE_SAMPLES[768];
+    \\    vec4 GI_ENERGY;
+    \\}
+    \\
     \\// The material's picture.
     \\texture2d ALBEDO_TEXTURE : 0;
     \\// The light the material gives off, as a picture.
@@ -253,8 +280,10 @@ const engine_part =
     \\texture2d_shadow SHADOW_MAP : 5;
     \\// The same, read as it is: how near its light what casts a shadow is.
     \\texture2d SHADOW_DEPTH : 6;
-    \\// The spot lights' cookies.
+    \\// The lights' cookies.
     \\texture2d COOKIE_ATLAS : 7;
+    \\// The light from everywhere, baked.
+    \\texture2d LIGHTMAP : 8;
     \\
     \\const float PI = 3.14159265;
     \\
@@ -507,10 +536,25 @@ const engine_part =
     \\    return light * lampShadow(at, p, ng, l, turn);
     \\}
     \\
+    \\// The light from everywhere on a surface facing `n`: baked into the
+    \\// lightmap, the probes' round a mesh that moves, or the environment's.
+    \\vec3 indirect(vec3 n, vec4 at) {
+    \\    if (at.w > 1.5) {
+    \\        int i = int(at.z + 0.5) * 3;
+    \\        vec4 way = vec4(1.0, n.x, n.y, n.z);
+    \\        vec3 c = vec3(dot(PROBE_SAMPLES[i], way), dot(PROBE_SAMPLES[i + 1], way), dot(PROBE_SAMPLES[i + 2], way));
+    \\        return max(c, vec3(0.0)) * GI_ENERGY.x;
+    \\    }
+    \\    if (at.w > 0.5) {
+    \\        return sample_level(LIGHTMAP, at.xy, 0.0).rgb * GI_ENERGY.x;
+    \\    }
+    \\    return AMBIENT.rgb;
+    \\}
+    \\
     \\// A surface lit: by the suns, its lamps and the light from everywhere,
     \\// with what it gives off, in the fog.
     \\vec3 lit(vec3 albedo, float metallic, float roughness, vec3 emission, vec3 normal_map, float ao,
-    \\        vec3 p, vec3 normal, vec4 tangent, vec4 lamps_0, vec4 lamps_1) {
+    \\        vec3 p, vec3 normal, vec4 tangent, vec4 lamps_0, vec4 lamps_1, vec4 gi_at) {
     \\    vec3 v = normalize(mix(CAMERA_POSITION.xyz - p, -CAMERA_FORWARD.xyz, CAMERA_FORWARD.w));
     \\    vec3 ng = normalize(normal);
     \\    vec3 n = ng;
@@ -532,7 +576,7 @@ const engine_part =
     \\    light = light + lamp(lamps_1.x, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.y, p, ng, n, v, albedo, m, roughness, turn)
     \\        + lamp(lamps_1.z, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.w, p, ng, n, v, albedo, m, roughness, turn);
     \\    vec3 f0 = mix(vec3(0.04), albedo, m);
-    \\    light = light + (albedo * (1.0 - m) + f0) * AMBIENT.rgb * ao;
+    \\    light = light + (albedo * (1.0 - m) + f0) * indirect(n, gi_at) * ao;
     \\    vec3 color = mix(light, albedo, FEEL.x) + emission;
     \\    float far = length(p - CAMERA_POSITION.xyz);
     \\    float thick = FOG_COLOR.w + max(FOG_HEIGHT.x - p.y, 0.0) * FOG_HEIGHT.y;
@@ -543,13 +587,27 @@ const engine_part =
     \\vertex {
     \\    vec4 world = MODEL_0 * VERTEX_POSITION.x + MODEL_1 * VERTEX_POSITION.y + MODEL_2 * VERTEX_POSITION.z + MODEL_3;
     \\    WORLD_POSITION = world.xyz;
-    \\    WORLD_NORMAL = TURN_0 * VERTEX_NORMAL.x + TURN_1 * VERTEX_NORMAL.y + TURN_2 * VERTEX_NORMAL.z;
+    \\    // The normal turned by the model's inverse turned over: its columns'
+    \\    // crossings, which are that times how much it grows - one way, or
+    \\    // the other where it is mirrored.
+    \\    vec3 a = MODEL_0.xyz;
+    \\    vec3 b = MODEL_1.xyz;
+    \\    vec3 c = MODEL_2.xyz;
+    \\    vec3 turned = cross(b, c) * VERTEX_NORMAL.x + cross(c, a) * VERTEX_NORMAL.y + cross(a, b) * VERTEX_NORMAL.z;
+    \\    WORLD_NORMAL = turned * sign(dot(a, cross(b, c)));
     \\    vec3 tangent = MODEL_0.xyz * VERTEX_TANGENT.x + MODEL_1.xyz * VERTEX_TANGENT.y + MODEL_2.xyz * VERTEX_TANGENT.z;
     \\    WORLD_TANGENT = vec4(tangent, VERTEX_TANGENT.w);
     \\    UV = VERTEX_UV * UV_PLACE.xy + UV_PLACE.zw;
     \\    COLOR = mix(vec4(1.0), vec4(toLinear(VERTEX_COLOR.rgb), VERTEX_COLOR.a), FEEL.y) * TINT;
     \\    LIGHT_LIST_0 = LIGHTS_0;
     \\    LIGHT_LIST_1 = LIGHTS_1;
+    \\    GI_AT = vec4(0.0);
+    \\    if (GI.x > 0.0) {
+    \\        GI_AT = vec4(VERTEX_UV2 * GI.xy + GI.zw, 0.0, 1.0);
+    \\    }
+    \\    if (GI.x < 0.0) {
+    \\        GI_AT = vec4(0.0, 0.0, -GI.x - 1.0, 2.0);
+    \\    }
     \\    position = VIEW_PROJECTION * world;
     \\}
     \\
@@ -570,7 +628,7 @@ pub const prologue_len: u32 = prologue.len;
 /// What it ends with: the surface lit. One line, written before the
 /// stage's `}`.
 const epilogue = " if (ALPHA < FEEL.z) { discard; }" ++
-    " target = vec4(lit(ALBEDO, METALLIC, ROUGHNESS, EMISSION, NORMAL_MAP, AO, WORLD_POSITION, WORLD_NORMAL, WORLD_TANGENT, LIGHT_LIST_0, LIGHT_LIST_1), ALPHA); ";
+    " target = vec4(lit(ALBEDO, METALLIC, ROUGHNESS, EMISSION, NORMAL_MAP, AO, WORLD_POSITION, WORLD_NORMAL, WORLD_TANGENT, LIGHT_LIST_0, LIGHT_LIST_1, GI_AT), ALPHA); ";
 
 pub const epilogue_len: u32 = epilogue.len;
 
@@ -869,7 +927,7 @@ fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, wa
 /// block there, which the device binds nothing to.
 fn blockNames(module: *shader.Module) ![]const [:0]const u8 {
     const arena = module.arena.allocator();
-    const names = try arena.alloc([:0]const u8, shadows_slot + 1);
+    const names = try arena.alloc([:0]const u8, @max(shadows_slot, probes_slot) + 1);
     @memset(names, "");
     for (module.blocks) |block| names[block.slot] = try arena.dupeZ(u8, block.name);
     return names;
@@ -952,7 +1010,7 @@ fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []con
     // One block of its own, at its slot, and no textures but the engine's.
     var params: ?shader.Block = null;
     for (module.blocks) |block| {
-        if (block.slot < params_slot or block.slot == shadows_slot) continue;
+        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot) continue;
         if (block.slot != params_slot or params != null) {
             problems.print("a 3D shader's own numbers are one uniform block, at slot {d}: `{s}` is at {d}\n", .{ params_slot, block.name, block.slot }) catch {};
             return error.ShaderFailed;
@@ -1007,6 +1065,10 @@ fn checkLayout(module: *const shader.Module) void {
     }) |pair| std.debug.assert(shadows.offsetOf(pair[0]).? == @offsetOf(shadows3d.Shadows, pair[1]));
     std.debug.assert(shadows.size == @sizeOf(shadows3d.Shadows));
     std.debug.assert(module.textures[shadow_map_slot].shadow and !module.textures[shadow_depth_slot].shadow);
+    const probes = module.block("Probes").?;
+    std.debug.assert(probes.offsetOf("PROBE_SAMPLES").? == @offsetOf(Probes, "samples"));
+    std.debug.assert(probes.offsetOf("GI_ENERGY").? == @offsetOf(Probes, "energy"));
+    std.debug.assert(probes.size == @sizeOf(Probes));
 }
 
 // -------------------------------------------------------------------------
@@ -1019,8 +1081,9 @@ test "the blocks and an instance are laid out as the shader reads them" {
     try testing.expectEqual(@as(usize, 6144), @sizeOf(Lights));
     // Under the sixteen kilobytes every device binds a block of.
     try testing.expect(@sizeOf(shadows3d.Shadows) <= 16384);
-    try testing.expectEqual(@as(usize, 148), @sizeOf(Instance));
-    try testing.expectEqual(@as(usize, 52), @sizeOf(mesh.Vertex));
+    try testing.expectEqual(@as(usize, 128), @sizeOf(Instance));
+    try testing.expectEqual(@as(usize, 60), @sizeOf(mesh.Vertex));
+    try testing.expect(@sizeOf(Probes) <= 16384);
     for (0..Way.count) |at| try testing.expectEqual(at, Way.of(at).index());
 }
 

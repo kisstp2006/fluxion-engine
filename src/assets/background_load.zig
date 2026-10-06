@@ -314,6 +314,7 @@ pub const Load = struct {
             var beside: models.Beside = .{ .files = self.files, .folder = models.folderOf(self.file) };
             self.prepared = .{ .model = try gltf.parse(self.gpa, self.bytes, beside.fetch()), .settings = models.settingsOf(self.gpa, self.files, self.file) };
             const model = &self.prepared.?.model;
+            model.unwrap_lightmap = self.prepared.?.settings.lightmap_uvs;
             const more: u32 = @intCast(model.images.len + model.meshes.len);
             self.expect(more);
             for (0..model.images.len) |at| try self.pool.push(.{ .load = self, .kind = .image, .index = @intCast(at) });

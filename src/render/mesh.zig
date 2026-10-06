@@ -29,6 +29,7 @@ const rhi = @import("fluxion_rhi");
 const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
 const file_table = @import("../assets/file_table.zig");
+const lightmap_uv = @import("lightmap_uv.zig");
 const MaterialHandle = @import("materials.zig").MaterialHandle;
 
 const Vec3 = math.Vec3;
@@ -43,15 +44,17 @@ pub const MeshHandle = file_table.Handle("MeshHandle");
 
 /// One corner of a triangle: where it is, which way its surface faces,
 /// where on a picture it is, the colour it holds - white for most, a
-/// model's painted shading for some - and which way its pictures' `u` runs
+/// model's painted shading for some - which way its pictures' `u` runs
 /// across the surface, for a normal map: `w` is one, or minus one where `v`
-/// runs the other way round.
+/// runs the other way round - and where on a lightmap it is: `uv2`, where
+/// no two triangles of the mesh overlap. See `lightmap_uv`.
 pub const Vertex = extern struct {
     position: [3]f32,
     normal: [3]f32,
     uv: [2]f32 = .{ 0, 0 },
     color: [4]u8 = .{ 255, 255, 255, 255 },
     tangent: [4]f32 = no_tangent,
+    uv2: [2]f32 = .{ 0, 0 },
 };
 
 /// What a vertex's tangent is until one is worked out.
@@ -141,6 +144,12 @@ pub const Mesh = struct {
     surfaces: []Surface,
     /// The box the vertices are in.
     bounds: Aabb,
+    /// How many texels across its lightmap UVs have to be at least for the
+    /// gaps between their charts to be `lightmap_uv.gap_texels`; nought for
+    /// a mesh with none, which a lightmap does not light. A shape made from
+    /// numbers has them; a model's mesh brings its own, or gets them from
+    /// `lightmap_uv.unwrap`.
+    uv2_texels: u32 = 0,
 
     /// A mesh of one surface, of copies of `vertices` and `indices`, their
     /// tangents worked out where none was given. `error.BadMesh` for an
@@ -223,19 +232,34 @@ fn boundsOf(vertices: []const Vertex) Aabb {
 // -------------------------------------------------------------------------
 
 /// A mesh being put together: vertices and triangles added, then kept.
+/// Each vertex is on a chart of the lightmap UVs, at a place on it in the
+/// world's units: a side of a box, a tube unrolled.
 const Builder = struct {
     gpa: Allocator,
     vertices: std.ArrayList(Vertex) = .empty,
     indices: std.ArrayList(u32) = .empty,
+    chart_of: std.ArrayList(u32) = .empty,
+    flat: std.ArrayList(Vec2) = .empty,
+    charts: u32 = 0,
 
     fn deinit(self: *Builder) void {
         self.vertices.deinit(self.gpa);
         self.indices.deinit(self.gpa);
+        self.chart_of.deinit(self.gpa);
+        self.flat.deinit(self.gpa);
     }
 
-    fn vertex(self: *Builder, position: Vec3, normal: Vec3, uv: Vec2) Allocator.Error!u32 {
+    /// A chart of the lightmap UVs, for the vertices added next.
+    fn chart(self: *Builder) void {
+        self.charts += 1;
+    }
+
+    /// A vertex on the chart begun last, at `flat` on it.
+    fn vertex(self: *Builder, position: Vec3, normal: Vec3, uv: Vec2, flat: Vec2) Allocator.Error!u32 {
         const at: u32 = @intCast(self.vertices.items.len);
         try self.vertices.append(self.gpa, .{ .position = position.array(), .normal = normal.array(), .uv = .{ uv.x, uv.y } });
+        try self.chart_of.append(self.gpa, self.charts - 1);
+        try self.flat.append(self.gpa, flat);
         return at;
     }
 
@@ -260,12 +284,20 @@ const Builder = struct {
     }
 
     fn finish(self: *Builder) Allocator.Error!Mesh {
+        const texels = try lightmap_uv.layOut(self.gpa, self.flat.items, self.chart_of.items, self.charts);
+        for (self.vertices.items, self.flat.items) |*v, p| v.uv2 = p.array();
         const vertices = try self.vertices.toOwnedSlice(self.gpa);
         errdefer self.gpa.free(vertices);
         const indices = try self.indices.toOwnedSlice(self.gpa);
         errdefer self.gpa.free(indices);
         computeTangents(vertices, indices);
-        return .{ .vertices = vertices, .indices = indices, .surfaces = try whole(self.gpa, indices.len), .bounds = boundsOf(vertices) };
+        return .{
+            .vertices = vertices,
+            .indices = indices,
+            .surfaces = try whole(self.gpa, indices.len),
+            .bounds = boundsOf(vertices),
+            .uv2_texels = texels,
+        };
     }
 };
 
@@ -296,15 +328,16 @@ pub fn plane(gpa: Allocator, size: Vec2) Allocator.Error!Mesh {
     return b.finish();
 }
 
-/// One side of a box: `out` from the middle by `depth`, `width` either way
-/// along `right` and `height` along `up`.
+/// One side of a box, a chart of its own: `out` from the middle by
+/// `depth`, `width` either way along `right` and `height` along `up`.
 fn face(b: *Builder, out: Vec3, right: Vec3, up: Vec3, depth: f32, width: f32, height: f32) Allocator.Error!void {
     const middle = out.scale(depth);
     const corners = [_][2]f32{ .{ -1, -1 }, .{ 1, -1 }, .{ 1, 1 }, .{ -1, 1 } };
     var at: [4]u32 = undefined;
+    b.chart();
     for (corners, &at) |corner, *index| {
         const position = middle.add(right.scale(corner[0] * width)).add(up.scale(corner[1] * height));
-        index.* = try b.vertex(position, out, .init((corner[0] + 1) / 2, (1 - corner[1]) / 2));
+        index.* = try b.vertex(position, out, .init((corner[0] + 1) / 2, (1 - corner[1]) / 2), .init(corner[0] * width, corner[1] * height));
     }
     try b.triangle(at[0], at[1], at[2]);
     try b.triangle(at[0], at[2], at[3]);
@@ -340,12 +373,14 @@ pub fn sphere(gpa: Allocator, radius: f32, rings: u32, segments: u32) Allocator.
     const r = @abs(radius);
     const down = std.math.clamp(rings, min_rings, max_rings);
     const round = std.math.clamp(segments, min_segments, max_segments);
+    // One chart: unrolled round its middle, from pole to pole.
+    b.chart();
     for (0..down + 1) |row| {
         const v = @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(down));
         for (0..round + 1) |column| {
             const u = @as(f32, @floatFromInt(column)) / @as(f32, @floatFromInt(round));
             const normal = onSphere(v * std.math.pi, u * std.math.tau);
-            _ = try b.vertex(normal.scale(r), normal, .init(u, v));
+            _ = try b.vertex(normal.scale(r), normal, .init(u, v), .init(u * std.math.tau * r, -v * std.math.pi * r));
         }
     }
     try b.band(0, down + 1, round, true, true);
@@ -359,11 +394,13 @@ pub fn cylinder(gpa: Allocator, radius: f32, height: f32, segments: u32) Allocat
     const r = @abs(radius);
     const half = @abs(height) / 2;
     const round = std.math.clamp(segments, min_segments, max_segments);
+    // The tube unrolled is one chart, each end another.
+    b.chart();
     for ([_]f32{ half, -half }, 0..) |y, row| {
         for (0..round + 1) |column| {
             const u = @as(f32, @floatFromInt(column)) / @as(f32, @floatFromInt(round));
             const out = onSphere(std.math.pi / 2.0, u * std.math.tau);
-            _ = try b.vertex(.init(out.x * r, y, out.z * r), out, .init(u, @floatFromInt(row)));
+            _ = try b.vertex(.init(out.x * r, y, out.z * r), out, .init(u, @floatFromInt(row)), .init(u * std.math.tau * r, y));
         }
     }
     try b.band(0, 2, round, false, false);
@@ -375,12 +412,14 @@ pub fn cylinder(gpa: Allocator, radius: f32, height: f32, segments: u32) Allocat
 /// A flat round end at `y`, facing up or down.
 fn cap(b: *Builder, radius: f32, y: f32, round: u32, up: bool) Allocator.Error!void {
     const normal: Vec3 = if (up) .unit_y else .init(0, -1, 0);
-    const middle = try b.vertex(.init(0, y, 0), normal, .init(0.5, 0.5));
+    b.chart();
+    const middle = try b.vertex(.init(0, y, 0), normal, .init(0.5, 0.5), .zero);
     const first: u32 = @intCast(b.vertices.items.len);
     for (0..round + 1) |column| {
         const u = @as(f32, @floatFromInt(column)) / @as(f32, @floatFromInt(round));
         const out = onSphere(std.math.pi / 2.0, u * std.math.tau);
-        _ = try b.vertex(.init(out.x * radius, y, out.z * radius), normal, .init(0.5 + out.x / 2, 0.5 + if (up) out.z / 2 else -out.z / 2));
+        const flat: Vec2 = .init(out.x * radius, if (up) out.z * radius else -out.z * radius);
+        _ = try b.vertex(.init(out.x * radius, y, out.z * radius), normal, .init(0.5 + out.x / 2, 0.5 + if (up) out.z / 2 else -out.z / 2), flat);
     }
     for (0..round) |column| {
         const at = first + @as(u32, @intCast(column));
@@ -400,16 +439,19 @@ pub fn capsule(gpa: Allocator, radius: f32, height: f32, rings: u32, segments: u
     const half_rings = @max(std.math.clamp(rings, min_rings, max_rings) / 2, 1);
     const round = std.math.clamp(segments, min_segments, max_segments);
     // The top half's rows down to its middle, then the bottom half's from
-    // its middle: the tube is between the two middles.
+    // its middle: the tube is between the two middles. One chart, unrolled
+    // round, and down as far as the way over it is long.
+    b.chart();
     for (0..2) |half| {
         const lift: f32 = if (half == 0) tube else -tube;
         for (0..half_rings + 1) |row| {
             const phi = (@as(f32, @floatFromInt(half)) + @as(f32, @floatFromInt(row)) / @as(f32, @floatFromInt(half_rings))) * std.math.pi / 2.0;
+            const over = phi * r + if (half == 0) 0 else 2 * tube;
             for (0..round + 1) |column| {
                 const u = @as(f32, @floatFromInt(column)) / @as(f32, @floatFromInt(round));
                 const normal = onSphere(phi, u * std.math.tau);
                 const position = normal.scale(r).add(.init(0, lift, 0));
-                _ = try b.vertex(position, normal, .init(u, if (total > 0) (total / 2 - position.y) / total else 0));
+                _ = try b.vertex(position, normal, .init(u, if (total > 0) (total / 2 - position.y) / total else 0), .init(u * std.math.tau * r, -over));
             }
         }
     }
@@ -423,23 +465,27 @@ pub fn capsule(gpa: Allocator, radius: f32, height: f32, rings: u32, segments: u
 
 /// What a `.mesh` file starts with, its version in the last two letters.
 /// A file of an earlier version - eight numbers a vertex and one surface,
-/// or no tangents - is still read, its tangents worked out.
-pub const magic = "FXMESH03";
+/// no tangents, or no lightmap UVs - is still read, its tangents worked
+/// out and its lightmap UVs none.
+pub const magic = "FXMESH04";
 const magic_v1 = "FXMESH01";
 const magic_v2 = "FXMESH02";
+const magic_v3 = "FXMESH03";
 
-const header_size = magic.len + 12 + 24;
+const header_size = magic.len + 16 + 24;
+const header_size_v3 = magic.len + 12 + 24;
 const header_size_v1 = magic.len + 8 + 24;
 const vertex_size_v2 = 8 * 4 + 4;
-const vertex_size = vertex_size_v2 + 4 * 4;
+const vertex_size_v3 = vertex_size_v2 + 4 * 4;
+const vertex_size = vertex_size_v3 + 2 * 4;
 
 /// A mesh as a `.mesh` file's bytes, owned by the caller: `magic`, the
-/// counts of vertices, of indices and of surfaces as `u32`s, the bounds'
-/// least and most corners as six `f32`s, then each vertex's eight `f32`s,
-/// four bytes of colour and its tangent's four `f32`s, each index as a
-/// `u32`, and each surface's first index and count as two `u32`s.
-/// Little-endian throughout. A surface's material is not written: what
-/// reads the file gives it one.
+/// counts of vertices, of indices and of surfaces and its `uv2_texels` as
+/// `u32`s, the bounds' least and most corners as six `f32`s, then each
+/// vertex's eight `f32`s, four bytes of colour, its tangent's four `f32`s
+/// and its lightmap UV's two, each index as a `u32`, and each surface's
+/// first index and count as two `u32`s. Little-endian throughout. A
+/// surface's material is not written: what reads the file gives it one.
 pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
     const size = header_size + mesh.vertices.len * vertex_size + mesh.indices.len * 4 + mesh.surfaces.len * 8;
     var out: std.ArrayList(u8) = try .initCapacity(gpa, size);
@@ -448,11 +494,12 @@ pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
     appendInt(&out, @intCast(mesh.vertices.len));
     appendInt(&out, @intCast(mesh.indices.len));
     appendInt(&out, @intCast(mesh.surfaces.len));
+    appendInt(&out, mesh.uv2_texels);
     for (mesh.bounds.min.array() ++ mesh.bounds.max.array()) |number| appendInt(&out, @bitCast(number));
     for (mesh.vertices) |v| {
         for (v.position ++ v.normal ++ v.uv) |number| appendInt(&out, @bitCast(number));
         out.appendSliceAssumeCapacity(&v.color);
-        for (v.tangent) |number| appendInt(&out, @bitCast(number));
+        for (v.tangent ++ v.uv2) |number| appendInt(&out, @bitCast(number));
     }
     for (mesh.indices) |index| appendInt(&out, index);
     for (mesh.surfaces) |surface| {
@@ -475,14 +522,16 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     if (bytes.len < magic.len) return error.BadMesh;
     const first = std.mem.eql(u8, bytes[0..magic.len], magic_v1);
     const second = std.mem.eql(u8, bytes[0..magic.len], magic_v2);
-    if (!first and !second and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMesh;
-    if (bytes.len < if (first) header_size_v1 else header_size) return error.BadMesh;
+    const third = std.mem.eql(u8, bytes[0..magic.len], magic_v3);
+    if (!first and !second and !third and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMesh;
+    const header: u64 = if (first) header_size_v1 else if (second or third) header_size_v3 else header_size;
+    if (bytes.len < header) return error.BadMesh;
     var at: usize = magic.len;
     const vertex_count = takeInt(bytes, &at);
     const index_count = takeInt(bytes, &at);
     const surface_count: u32 = if (first) 1 else takeInt(bytes, &at);
-    const each: u64 = if (first) 8 * 4 else if (second) vertex_size_v2 else vertex_size;
-    const header: u64 = if (first) header_size_v1 else header_size;
+    const uv2_texels: u32 = if (first or second or third) 0 else takeInt(bytes, &at);
+    const each: u64 = if (first) 8 * 4 else if (second) vertex_size_v2 else if (third) vertex_size_v3 else vertex_size;
     const surfaces_size: u64 = if (first) 0 else @as(u64, surface_count) * 8;
     if (bytes.len != header + @as(u64, vertex_count) * each + @as(u64, index_count) * 4 + surfaces_size) return error.BadMesh;
     at += 24;
@@ -499,6 +548,9 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
         if (!first and !second) for (&v.tangent) |*number| {
             number.* = @bitCast(takeInt(bytes, &at));
         };
+        if (!first and !second and !third) for (&v.uv2) |*number| {
+            number.* = @bitCast(takeInt(bytes, &at));
+        };
     }
     const indices = try gpa.alloc(u32, index_count);
     errdefer gpa.free(indices);
@@ -511,7 +563,9 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     if (first or second) computeTangents(vertices, indices);
     // Worked out again rather than trusted: a file edited by hand keeps
     // its picking and its culling right.
-    return Mesh.adopt(vertices, indices, surfaces);
+    var out = try Mesh.adopt(vertices, indices, surfaces);
+    out.uv2_texels = uv2_texels;
+    return out;
 }
 
 fn takeInt(bytes: []const u8, at: *usize) u32 {
@@ -856,6 +910,7 @@ test "a mesh's file reads back as it was written, and one that is not whole is r
     try testing.expectEqualSlices(u32, mesh.indices, back.indices);
     try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(mesh.vertices), std.mem.sliceAsBytes(back.vertices));
     try testing.expect(mesh.bounds.approxEql(back.bounds));
+    try testing.expectEqual(mesh.uv2_texels, back.uv2_texels);
     try testing.expectEqual(@as(usize, 1), back.surfaces.len);
     try testing.expectEqual(@as(u32, 36), back.surfaces[0].index_count);
 
@@ -884,6 +939,41 @@ test "a mesh's file of the first version still reads, as one white surface" {
     try testing.expectEqual(@as(usize, 3), mesh.vertices.len);
     try testing.expectEqual([4]u8{ 255, 255, 255, 255 }, mesh.vertices[1].color);
     try testing.expectEqual(@as(u32, 3), mesh.surfaces[0].index_count);
+}
+
+test "a mesh's file of the third version still reads, with no lightmap UVs" {
+    var mesh = try box(testing.allocator, .init(1, 1, 1));
+    defer mesh.deinit(testing.allocator);
+    // The same file, but for the count of texels and each vertex's lightmap UV.
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(testing.allocator);
+    try bytes.appendSlice(testing.allocator, "FXMESH03");
+    for ([_]u32{ @intCast(mesh.vertices.len), @intCast(mesh.indices.len), 1 }) |n| try bytes.appendSlice(testing.allocator, std.mem.asBytes(&n));
+    for (mesh.bounds.min.array() ++ mesh.bounds.max.array()) |n| try bytes.appendSlice(testing.allocator, std.mem.asBytes(&n));
+    for (mesh.vertices) |v| {
+        for (v.position ++ v.normal ++ v.uv) |n| try bytes.appendSlice(testing.allocator, std.mem.asBytes(&n));
+        try bytes.appendSlice(testing.allocator, &v.color);
+        for (v.tangent) |n| try bytes.appendSlice(testing.allocator, std.mem.asBytes(&n));
+    }
+    for (mesh.indices) |n| try bytes.appendSlice(testing.allocator, std.mem.asBytes(&n));
+    for ([_]u32{ 0, @intCast(mesh.indices.len) }) |n| try bytes.appendSlice(testing.allocator, std.mem.asBytes(&n));
+    var back = try read(testing.allocator, bytes.items);
+    defer back.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 0), back.uv2_texels);
+    try testing.expectEqual([2]f32{ 0, 0 }, back.vertices[5].uv2);
+    try testing.expectEqual(mesh.vertices[5].tangent, back.vertices[5].tangent);
+}
+
+test "every shape made from numbers has lightmap UVs where no two triangles overlap" {
+    for ([_]Primitive.Shape{ .box, .plane, .sphere, .cylinder, .capsule }) |shape| {
+        var made = try (Primitive{ .shape = shape, .size = .init(1, 2, 3) }).build(testing.allocator);
+        defer made.deinit(testing.allocator);
+        try testing.expect(made.uv2_texels > 0);
+        for (made.vertices) |v| {
+            try testing.expect(v.uv2[0] >= 0 and v.uv2[0] <= 1 and v.uv2[1] >= 0 and v.uv2[1] <= 1);
+        }
+        try testing.expectEqual(@as(usize, 0), try lightmap_uv.overlaps(testing.allocator, made, made.uv2_texels * 2));
+    }
 }
 
 test "a tangent runs along the pictures' first coordinate, square to the normal" {

@@ -32,6 +32,7 @@ const math = @import("fluxion_math");
 
 const Color = @import("../math/color.zig").Color;
 const mesh = @import("../render/mesh.zig");
+const lightmap_uv = @import("../render/lightmap_uv.zig");
 const Material3D = @import("../render/render3d_components.zig").Material3DData;
 
 const Vec3 = math.Vec3;
@@ -99,6 +100,9 @@ pub const MeshData = struct {
     surfaces: []mesh.Surface = &.{},
     /// Each surface's material, by the document's index.
     materials: []?u32 = &.{},
+    /// Its `Mesh.uv2_texels`: what its own second coordinates are laid out
+    /// for, or what `lightmap_uv.unwrap` made; nought for none.
+    uv2_texels: u32 = 0,
     built: bool = false,
 
     /// The vertices, indices and surfaces, which are the caller's from here.
@@ -162,6 +166,9 @@ pub const Model = struct {
     /// Kept for `buildMesh`: the document and its buffers.
     doc: Doc = .{},
     buffers: [][]const u8 = &.{},
+    /// Whether `buildMesh` works out lightmap UVs for a mesh that brings
+    /// none, with `lightmap_uv.unwrap`.
+    unwrap_lightmap: bool = false,
 
     pub fn deinit(self: *Model) void {
         for (self.meshes) |*held| {
@@ -187,14 +194,23 @@ pub const Model = struct {
     }
 };
 
-/// Everything at once: `parse`, every mesh built and every picture decoded.
+/// Everything at once: `parse`, then `finish`.
 pub fn read(gpa: Allocator, bytes: []const u8, fetch: ?Fetch) Error!Model {
     var model = try parse(gpa, bytes, fetch);
     errdefer model.deinit();
-    for (0..model.meshes.len) |at| try buildMesh(&model, at);
-    for (0..model.images.len) |at| try decodeImage(&model, at);
+    try finish(&model);
     return model;
 }
+
+/// Every mesh built and every picture decoded.
+pub fn finish(model: *Model) Error!void {
+    for (0..model.meshes.len) |at| try buildMesh(model, at);
+    for (0..model.images.len) |at| try decodeImage(model, at);
+}
+
+/// How many texels across a mesh's own second coordinates are taken to be
+/// laid out for: what the file does not say.
+pub const brought_uv2_texels = 64;
 
 // -------------------------------------------------------------------------
 // The document
@@ -242,6 +258,7 @@ const PrimitiveDoc = struct {
         POSITION: ?u32 = null,
         NORMAL: ?u32 = null,
         TEXCOORD_0: ?u32 = null,
+        TEXCOORD_1: ?u32 = null,
         COLOR_0: ?u32 = null,
         TANGENT: ?u32 = null,
     } = .{},
@@ -674,6 +691,9 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
     defer surfaces.deinit(gpa);
     var materials: std.ArrayListUnmanaged(?u32) = .empty;
     defer materials.deinit(gpa);
+    // Whether every part brings its lightmap UVs: one that does not leaves
+    // the rest's on top of its own.
+    var all_second = true;
 
     for (given.primitives) |primitive| {
         if (primitive.mode < 4 or primitive.mode > 6) continue;
@@ -683,6 +703,7 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
         const base: u32 = @intCast(vertices.items.len);
         const normals: ?View = if (primitive.attributes.NORMAL) |n| try viewOf(model, n, "normals") else null;
         const uvs: ?View = if (primitive.attributes.TEXCOORD_0) |n| try viewOf(model, n, "coordinates") else null;
+        const second_uvs: ?View = if (primitive.attributes.TEXCOORD_1) |n| try viewOf(model, n, "second coordinates") else null;
         const colors: ?View = if (primitive.attributes.COLOR_0) |n| try viewOf(model, n, "colours") else null;
         const tangents: ?View = if (primitive.attributes.TANGENT) |n| try viewOf(model, n, "tangents") else null;
         try vertices.ensureUnusedCapacity(gpa, positions.count);
@@ -693,6 +714,9 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
             };
             if (uvs) |n| if (i < n.count) {
                 v.uv = .{ n.float(i, 0), n.float(i, 1) };
+            };
+            if (second_uvs) |n| if (i < n.count) {
+                v.uv2 = .{ n.float(i, 0), n.float(i, 1) };
             };
             if (colors) |n| if (i < n.count) {
                 const linear = [4]f32{
@@ -745,15 +769,36 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
         if (tangents == null or normals == null) mesh.computeTangentsFrom(vertices.items, indices.items[first..], base);
         const count: u32 = @intCast(indices.items.len - first);
         if (count == 0) continue;
+        if (second_uvs == null) all_second = false;
         try surfaces.append(gpa, .{ .first_index = first, .index_count = count });
         try materials.append(gpa, if (primitive.material) |m| if (m < model.materials.len) m else null else null);
     }
     if (surfaces.items.len == 0) try surfaces.append(gpa, .{ .first_index = 0, .index_count = 0 });
     if (surfaces.items.len == 1 and materials.items.len == 0) try materials.append(gpa, null);
-    held.vertices = try vertices.toOwnedSlice(gpa);
-    held.indices = try indices.toOwnedSlice(gpa);
+    const own_vertices = try vertices.toOwnedSlice(gpa);
+    const own_indices = indices.toOwnedSlice(gpa) catch |err| {
+        gpa.free(own_vertices);
+        return err;
+    };
+    var built = mesh.Mesh.adopt(own_vertices, own_indices, surfaces.items) catch {
+        gpa.free(own_vertices);
+        gpa.free(own_indices);
+        return error.BadModel;
+    };
+    errdefer {
+        gpa.free(built.vertices);
+        gpa.free(built.indices);
+    }
+    if (all_second and own_indices.len > 0) {
+        built.uv2_texels = brought_uv2_texels;
+    } else if (model.unwrap_lightmap) {
+        try lightmap_uv.unwrap(gpa, &built);
+    }
     held.surfaces = try surfaces.toOwnedSlice(gpa);
     held.materials = try materials.toOwnedSlice(gpa);
+    held.vertices = built.vertices;
+    held.indices = built.indices;
+    held.uv2_texels = built.uv2_texels;
     held.built = true;
 }
 
