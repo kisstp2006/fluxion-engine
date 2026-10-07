@@ -506,16 +506,29 @@ fn addFont(self: *Assets, bytes: []const u8, options: FontOptions, source: []con
 }
 
 /// A fixed guess at the operating system's interface font: one path per
-/// platform, for a caller with no `Assets` at hand. `loadSystemFont` asks
-/// the system instead, and is right where this is not - a Japanese Windows, a
-/// Linux without DejaVu. A game that ships carries its own.
+/// platform, for a caller with no `Assets` at hand. On Linux, the first of a
+/// few common places that is there: DejaVu Sans where Debian, Fedora and Arch
+/// put it, then Liberation Sans. `loadSystemFont` asks the system instead,
+/// and is right where this is not - a Japanese Windows, a Linux with neither
+/// font. A game that ships carries its own.
 pub fn systemFontPath() []const u8 {
     return switch (@import("builtin").os.tag) {
         .windows => "C:/Windows/Fonts/segoeui.ttf",
         .macos => "/System/Library/Fonts/Supplemental/Arial.ttf",
-        else => "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        .linux => for (linux_font_paths) |path| {
+            if (std.os.linux.access(path, std.posix.F_OK) == 0) break path;
+        } else linux_font_paths[0],
+        else => linux_font_paths[0],
     };
 }
+
+const linux_font_paths = [_][:0]const u8{
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+};
 
 /// Open the font the system's own dialogs use, as the system names it: the
 /// message font on Windows - Segoe UI, and Yu Gothic UI on Japanese Windows,

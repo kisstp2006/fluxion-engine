@@ -274,7 +274,13 @@ test "a material naming a 3D shader draws with it, given its numbers by the mate
     app.world.get(one, Material3D).?.material = try app.addMaterial("broken", .{ .shader = broken });
     _ = try app.step();
     try testing.expectEqual(@as(u32, 2), app.renderer3d.drawn);
-    try testing.expect(app.renderer3d.items.items[0].compiled == &app.renderer3d.plain.?);
+    // The items are sorted by where their shaders are in memory, so either
+    // one may come first.
+    const items = app.renderer3d.items.items;
+    const plain = &app.renderer3d.plain.?;
+    const first_plain = items[0].compiled == plain;
+    try testing.expect(items[if (first_plain) 0 else 1].compiled == plain);
+    try testing.expect(items[if (first_plain) 1 else 0].compiled == app.shaders.compiled3DOf(waves).?);
 }
 
 test "a camera's ray and a point on the screen go through the game's pixels" {
