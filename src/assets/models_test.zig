@@ -15,6 +15,7 @@ const Project = @import("../project/Project.zig");
 const components = @import("../scene/components.zig");
 const materials = @import("../render/materials.zig");
 const gltf = @import("gltf.zig");
+const animation = @import("../animation/animation.zig");
 const math = @import("fluxion_math");
 
 const Transform3D = components.Transform3D;
@@ -24,6 +25,7 @@ const Camera3D = components.Camera3D;
 const DirectionalLight3D = components.DirectionalLight3D;
 const Skeleton3D = components.Skeleton3D;
 const BoneAttachment3D = components.BoneAttachment3D;
+const AnimationPlayer = animation.AnimationPlayer;
 
 /// A project in a folder of its own, with a model in `models/`: a red
 /// triangle under a node 1, 2, 3 along, its picture beside it, a camera and
@@ -356,4 +358,46 @@ test "a skin is a skeleton on the entity its bones hang from, and what hangs fro
     try testing.expect(app.boneGlobalPosition(armature, 1).sub(.init(-1, 0, 0)).len() < 1e-4);
     app.resetPose(armature);
     try testing.expect(app.bonePosition(armature, 1).approxEql(.init(0, 1, 0)));
+}
+
+test "a model's animations are a library its root plays: a bone's channel moves the bone, a step's jumps, a spline's is made straight" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const text = try gltf.skinnedGltf(testing.allocator);
+    defer testing.allocator.free(text);
+    try folder.put("models/skinned.gltf", text);
+    const app = try appIn(&folder);
+    defer app.destroy();
+
+    const root = try app.instantiate(try app.loadScene("res://models/skinned.gltf"), .none);
+    const armature = app.find("Armature").?;
+    const library = app.findAnimations("res://models/skinned.gltf#animations").?;
+    try testing.expect(app.world.get(root, AnimationPlayer).?.library.eql(library));
+    try testing.expect((try app.loadAnimations("res://models/skinned.gltf#animations")).eql(library));
+    const bend = &app.animation_libraries.edit(library).?.animations.items[0];
+    try testing.expectEqualStrings("Bend", bend.name);
+    try testing.expectEqual(@as(f32, 1), bend.length);
+    try testing.expectEqual(animation.Loop.none, bend.loop);
+    // A morph target's weights are left out.
+    try testing.expectEqual(@as(usize, 3), bend.tracks.items.len);
+    try testing.expectEqual(animation.Update.discrete, bend.boneTrackOf("Armature", "Lower", "position").?.update);
+    // From one to two with no slope at either end, thirty keys a second:
+    // half way at half a second, and a quarter in, less than a quarter of
+    // the way.
+    const size = bend.boneTrackOf("Armature", "Upper", "scale").?;
+    try testing.expectEqual(@as(usize, 31), size.keys.items.len);
+    try testing.expectApproxEqAbs(@as(f32, 1.5), size.sample(0.5).?.vec3[1], 1e-4);
+    try testing.expect(size.sample(0.25).?.vec3[1] < 1.25);
+
+    try animation.pose(app, root, bend, 0.5);
+    try testing.expect(app.bonePosition(armature, 0).approxEql(.zero));
+    try testing.expect(app.boneRotation(armature, 1).approxEql(.fromAxisAngle(.unit_z, std.math.pi / 4.0)));
+    try animation.pose(app, root, bend, 1);
+    try testing.expect(app.bonePosition(armature, 0).approxEql(.init(0, 3, 0)));
+
+    // The first frame has no time to start it in.
+    app.world.get(root, AnimationPlayer).?.play("Bend", -1);
+    for (0..3) |_| _ = try app.step();
+    try testing.expectEqualStrings("Bend", app.world.get(root, AnimationPlayer).?.currentName());
 }

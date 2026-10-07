@@ -554,8 +554,7 @@ const entity_tables = .{
     .tweens,           .drawings,    .particles,          .texts,
     .shader_params,    .views,       .animation_players,  .signals,
     .current_scene,    .tile_chunks, .bodies,             .areas,
-    .picking,          .audio,       .control_tree,
-    .poses,
+    .picking,          .audio,       .control_tree,       .poses,
 };
 
 /// The engine's own components: what every scene can hold from the start.
@@ -4336,7 +4335,11 @@ pub fn unloadScene(self: *App, handle: SceneHandle) void {
 
 /// Read a `.anim` file - an animation library - or find the one read from
 /// there already. What an `AnimationPlayer` plays; see `animation/animation.zig`.
+/// A model's animations are found by its name - `res://robot.glb#animations`
+/// - with the model read first.
 pub fn loadAnimations(self: *App, path: []const u8) !animation.AnimationLibraryHandle {
+    try self.loadModelOf(path);
+    if (models.baseOf(path) != null) return self.findAnimations(path) orelse error.FileNotFound;
     return self.animation_libraries.load(self, path);
 }
 

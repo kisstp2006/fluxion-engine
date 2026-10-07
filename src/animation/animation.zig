@@ -18,7 +18,7 @@
 //! ```zig
 //! const menu = try app.loadAnimations("res://ui/menu.anim");
 //! const ui = try app.world.spawnWith(.{ fx.AnimationPlayer{ .library = menu } });
-//! app.world.get(ui, fx.AnimationPlayer).?.play("open");
+//! app.world.get(ui, fx.AnimationPlayer).?.play("open", -1);
 //! ```
 //!
 //! **An animation** has a length in seconds and loops or not - round again,
@@ -26,13 +26,21 @@
 //! of one entity: the player's own with an empty `target`, or one under it by
 //! name or by path, `Panel/Title`. It goes from key to key, each key saying
 //! the curve it is got to by, or with `"update": "discrete"` jumps to each
-//! key's value as it comes. A key's value is a number, `[x, y]`, a colour as
-//! `[r, g, b, a]` or `"#rrggbbaa"`, or true or false.
+//! key's value as it comes. A key's value is a number, `[x, y]`, `[x, y, z]`,
+//! a colour as `[r, g, b, a]` or `"#rrggbbaa"`, a rotation as
+//! `{ "x", "y", "z", "w" }`, or true or false. **A bone's track** names a
+//! bone of the target's `Skeleton3D` - `"bone": "Hips"` - and its
+//! `"property"` is `position`, `rotation` or `scale`: see
+//! `render/skeleton.zig`. A model's animations are a library of their own,
+//! `res://robot.glb#animations`, which the model's root plays.
 //!
 //! **The player** is data, as an `AudioPlayer` is: `play`, `stop`, `seek`
 //! and `queue` ask the engine's pass, once a frame before the `.update`
 //! systems while its entity runs, and `current`, `playing` and `position`
-//! say what it found. `animation_started` and `animation_finished` say so
+//! say what it found. **A change of animation fades** over `play`'s `blend`
+//! seconds - its `default_blend` where it does not say: what it played goes
+//! on as the new one comes in, each bone and each property between the two,
+//! a bone one of them does not move between its rest and the other's. `animation_started` and `animation_finished` say so
 //! with the animation's name. A frame with no time moves nothing: an editor
 //! poses a scene with `pose` instead.
 
@@ -75,33 +83,45 @@ pub const Key = struct {
     value: Value,
     /// How the track gets to this key from the one before it.
     ease: math.ease.Kind = .linear,
+
+    fn timeOrder(time: f32, key: Key) std.math.Order {
+        return std.math.order(time, key.time);
+    }
 };
+
+/// What a bone's track moves of it.
+pub const BoneChannel = enum { position, rotation, scale };
 
 pub const Track = struct {
     /// The entity it moves, from the player's: empty for its own, a name, or
     /// a path, `Panel/Title`.
     target: []u8,
+    /// A component's property, `Transform3D.position`; or for a bone's
+    /// track, what it moves of it: `position`, `rotation` or `scale`.
     property: []u8,
+    /// For a track of a skeleton's bone: the bone's name. Empty for a
+    /// component's property.
+    bone: []u8 = &.{},
     update: Update = .continuous,
     /// In the order of their times.
     keys: std.ArrayList(Key) = .empty,
 
     /// What the track says at `time`: the first key's value before it, the
     /// last's after it, and between two, the way to the later one - or with
-    /// `discrete`, the earlier one's. Null with no keys.
+    /// `discrete`, the earlier one's. Null with no keys. The two keys are
+    /// found by halving: a track of a thousand keys costs ten looks.
     pub fn sample(self: *const Track, time: f32) ?Value {
         const keys = self.keys.items;
         if (keys.len == 0) return null;
         if (time <= keys[0].time) return keys[0].value;
-        for (keys[1..], 1..) |key, at| {
-            if (time >= key.time) continue;
-            const before = keys[at - 1];
-            if (self.update == .discrete) return before.value;
-            const span = key.time - before.time;
-            const t: f32 = if (span > 0) (time - before.time) / span else 1;
-            return before.value.lerp(key.value, key.ease.apply(t));
-        }
-        return keys[keys.len - 1].value;
+        const after = std.sort.upperBound(Key, keys, time, Key.timeOrder);
+        if (after >= keys.len) return keys[keys.len - 1].value;
+        const before = keys[after - 1];
+        const key = keys[after];
+        if (self.update == .discrete) return before.value;
+        const span = key.time - before.time;
+        const t: f32 = if (span > 0) (time - before.time) / span else 1;
+        return before.value.lerp(key.value, key.ease.apply(t));
     }
 
     /// Put `key` in its place among the others, or in place of the one
@@ -141,6 +161,7 @@ pub const Track = struct {
     fn deinit(self: *Track, gpa: Allocator) void {
         gpa.free(self.target);
         gpa.free(self.property);
+        gpa.free(self.bone);
         self.keys.deinit(gpa);
     }
 };
@@ -160,21 +181,34 @@ pub const Animation = struct {
 
     /// The track of `target`'s `property`, if there is one.
     pub fn trackOf(self: *Animation, target: []const u8, property: []const u8) ?*Track {
+        return self.boneTrackOf(target, "", property);
+    }
+
+    /// The track of `bone` of `target`'s skeleton - its `position`,
+    /// `rotation` or `scale` - if there is one; with no bone, `trackOf`.
+    pub fn boneTrackOf(self: *Animation, target: []const u8, bone: []const u8, property: []const u8) ?*Track {
         for (self.tracks.items) |*track| {
-            if (std.mem.eql(u8, track.target, target) and std.mem.eql(u8, track.property, property)) return track;
+            if (std.mem.eql(u8, track.target, target) and std.mem.eql(u8, track.bone, bone) and std.mem.eql(u8, track.property, property)) return track;
         }
         return null;
+    }
+
+    /// The track of `bone` of `target`'s skeleton, made with no keys if
+    /// there is none yet.
+    pub fn ensureBoneTrack(self: *Animation, gpa: Allocator, target: []const u8, bone: []const u8, property: []const u8) Allocator.Error!*Track {
+        if (self.boneTrackOf(target, bone, property)) |found| return found;
+        var made: Track = .{ .target = try gpa.dupe(u8, target), .property = &.{} };
+        errdefer made.deinit(gpa);
+        made.property = try gpa.dupe(u8, property);
+        made.bone = try gpa.dupe(u8, bone);
+        try self.tracks.append(gpa, made);
+        return &self.tracks.items[self.tracks.items.len - 1];
     }
 
     /// The track of `target`'s `property`, made with no keys if there is
     /// none yet.
     pub fn ensureTrack(self: *Animation, gpa: Allocator, target: []const u8, property: []const u8) Allocator.Error!*Track {
-        if (self.trackOf(target, property)) |found| return found;
-        var made: Track = .{ .target = try gpa.dupe(u8, target), .property = &.{} };
-        errdefer made.deinit(gpa);
-        made.property = try gpa.dupe(u8, property);
-        try self.tracks.append(gpa, made);
-        return &self.tracks.items[self.tracks.items.len - 1];
+        return self.ensureBoneTrack(gpa, target, "", property);
     }
 
     pub fn removeTrack(self: *Animation, gpa: Allocator, at: usize) void {
@@ -235,7 +269,9 @@ pub const Library = struct {
         held.name = copy;
     }
 
-    fn deinitContent(self: *Library, gpa: Allocator) void {
+    /// Its animations let go of: what a library made in code and never
+    /// kept does.
+    pub fn deinitContent(self: *Library, gpa: Allocator) void {
         for (self.animations.items) |*held| held.deinit(gpa);
         self.animations.deinit(gpa);
     }
@@ -275,9 +311,11 @@ pub fn read(gpa: Allocator, into: *Library, text: []const u8) ReadError!void {
             const prop = track_json.get("property").asString() orelse continue;
             var track: Track = .{
                 .target = try gpa.dupe(u8, track_json.get("target").asString() orelse ""),
-                .property = try gpa.dupe(u8, prop),
+                .property = &.{},
             };
             errdefer track.deinit(gpa);
+            track.property = try gpa.dupe(u8, prop);
+            track.bone = try gpa.dupe(u8, track_json.get("bone").asString() orelse "");
             if (track_json.get("update").asString()) |text_update| track.update = std.meta.stringToEnum(Update, text_update) orelse .continuous;
             for (track_json.get("keys").items()) |key_json| {
                 const value = valueOf(key_json.get("value")) orelse {
@@ -365,6 +403,7 @@ const Document = struct {
             for (held.tracks.items) |*track| {
                 try w.beginObject();
                 try w.field("target", track.target);
+                if (track.bone.len > 0) try w.field("bone", track.bone);
                 try w.field("property", track.property);
                 if (track.update != .continuous) try w.field("update", @tagName(track.update));
                 try w.key("keys");
@@ -450,6 +489,25 @@ pub const Libraries = struct {
             return known;
         }
         return self.keep(gpa, name, text, false);
+    }
+
+    /// Animations made in code - a model's - kept under `name`, taken from
+    /// `animations`, which is left empty: a name given before gets them,
+    /// and what plays it binds its tracks again.
+    pub fn adopt(self: *Libraries, gpa: Allocator, name: []const u8, animations: *std.ArrayList(Animation)) !AnimationLibraryHandle {
+        if (self.find(name)) |known| {
+            const held = self.table.get(toId(known)).?;
+            held.deinitContent(gpa);
+            held.animations = animations.*;
+            animations.* = .empty;
+            held.touched();
+            return known;
+        }
+        const source = try gpa.dupe(u8, name);
+        errdefer gpa.free(source);
+        const handle = fromId(try self.table.add(gpa, .{ .source = source, .on_disc = false, .animations = animations.* }));
+        animations.* = .empty;
+        return handle;
     }
 
     fn keep(self: *Libraries, gpa: Allocator, source: []const u8, text: []const u8, on_disc: bool) !AnimationLibraryHandle {
@@ -553,8 +611,9 @@ pub const Libraries = struct {
 // The player
 // -------------------------------------------------------------------------
 
-/// How long an animation's name may be, in a player.
-pub const name_len = 32;
+/// How long an animation's name may be, in a player: a model's are often
+/// long, `Armature|Walk.Cycle`.
+pub const name_len = Value.name_len;
 
 /// Plays the animations of a library on its entity and the ones under it.
 /// See the top of this file.
@@ -582,6 +641,18 @@ pub const AnimationPlayer = extern struct {
     started: bool = false,
     /// Played from its end toward its start: `playBackwards`.
     backwards: bool = false,
+    /// How long a change from one animation to another takes, in seconds,
+    /// where `play` does not say: what it played fades out as the new one
+    /// fades in. Nought cuts straight to it.
+    default_blend: f32 = 0,
+    /// What `play` asked the fade to take; below nought, `default_blend`.
+    blend: f32 = -1,
+    /// While a change fades: what it played before, where in it it is, and
+    /// how long the fade has gone and takes.
+    fading: [name_len]u8 = @splat(0),
+    fading_position: f32 = 0,
+    fade: f32 = 0,
+    fade_length: f32 = 0,
 
     pub const Request = enum(u8) { none, play, stop, seek };
 
@@ -604,9 +675,15 @@ pub const AnimationPlayer = extern struct {
         .next = .{attr.Hidden{}},
         .started = .{attr.Hidden{}},
         .backwards = .{attr.Hidden{}},
+        .default_blend = .{ attr.Unit{ .text = "s" }, attr.Range{ .min = 0, .max = 10 }, attr.Doc{ .text = "How long a change of animation fades from one to the other where play does not say; nought cuts" } },
+        .blend = .{attr.Hidden{}},
+        .fading = .{attr.Hidden{}},
+        .fading_position = .{attr.Hidden{}},
+        .fade = .{attr.Hidden{}},
+        .fade_length = .{attr.Hidden{}},
     };
     pub const reflect_methods = .{
-        .play = .{ attr.Params{ .names = &.{"name"} }, attr.defaults(.{""}) },
+        .play = .{ attr.Params{ .names = &.{ "name", "blend" } }, attr.defaults(.{ "", @as(f32, -1) }) },
         .playBackwards = .{attr.Params{ .names = &.{"name"} }},
         .pause = .{},
         .stop = .{},
@@ -617,10 +694,13 @@ pub const AnimationPlayer = extern struct {
         .currentName = .{},
     };
 
-    /// Play `name` from its start, at the next pass. With no name, what it
-    /// played last goes on from where it was: after `pause`.
-    pub fn play(self: *AnimationPlayer, name: []const u8) void {
+    /// Play `name` from its start, at the next pass, fading in over `blend`
+    /// seconds from what it plays - `default_blend` where `blend` is below
+    /// nought. With no name, what it played last goes on from where it was:
+    /// after `pause`.
+    pub fn play(self: *AnimationPlayer, name: []const u8, blend: f32) void {
         self.paused = false;
+        self.blend = blend;
         if (name.len == 0) {
             if (self.playing or self.request == .play) return;
             self.request = .play;
@@ -638,7 +718,7 @@ pub const AnimationPlayer = extern struct {
 
     /// Play `name` from its end toward its start, at the next pass.
     pub fn playBackwards(self: *AnimationPlayer, name: []const u8) void {
-        self.play(name);
+        self.play(name, -1);
         self.from = from_the_end;
         self.backwards = true;
     }
@@ -680,9 +760,9 @@ pub const AnimationPlayer = extern struct {
     }
 
     /// Play `name` once what it plays has finished - at once when it plays
-    /// nothing.
+    /// nothing - fading in over `default_blend`.
     pub fn queue(self: *AnimationPlayer, name: []const u8) void {
-        if (!self.playing and self.request != .play) return self.play(name);
+        if (!self.playing and self.request != .play) return self.play(name, -1);
         fixed_text.set(&self.next, name);
     }
 
@@ -699,19 +779,81 @@ pub const AnimationPlayer = extern struct {
     }
 };
 
-/// A track bound to the entity and the property it moves.
+/// A track bound to the entity and what it moves of it: a property, or a
+/// bone of its skeleton.
 const Bound = struct {
     track: usize,
     entity: Entity,
-    property: Property,
+    moves: union(enum) {
+        property: Property,
+        bone: struct { index: u16, channel: BoneChannel },
+    },
+
+    /// `value` where the track puts it.
+    fn put(self: Bound, app: *App, value: Value) void {
+        switch (self.moves) {
+            .property => |property| _ = property.write(app, self.entity, value),
+            .bone => |bone| {
+                const held_pose = app.poses.of(app, self.entity) orelse return;
+                if (bone.index >= held_pose.locals.len) return;
+                const local = &held_pose.locals[bone.index];
+                switch (bone.channel) {
+                    .position => if (value == .vec3) {
+                        local.translation = .fromArray(value.vec3);
+                    } else return,
+                    .rotation => if (value == .quat) {
+                        local.rotation = (math.Quat{ .x = value.quat[0], .y = value.quat[1], .z = value.quat[2], .w = value.quat[3] }).norm();
+                    } else return,
+                    .scale => if (value == .vec3) {
+                        local.scale = .fromArray(value.vec3);
+                    } else return,
+                }
+                held_pose.moved();
+            },
+        }
+    }
+
+    /// What the bone is at rest, for a track of a bone; null for a
+    /// property's.
+    fn rest(self: Bound, app: *App) ?Value {
+        const bone = switch (self.moves) {
+            .bone => |held| held,
+            .property => return null,
+        };
+        const held_pose = app.poses.of(app, self.entity) orelse return null;
+        const skeleton = app.skeletons.get(held_pose.skeleton) orelse return null;
+        if (bone.index >= skeleton.bones.len) return null;
+        const at_rest = skeleton.bones[bone.index].rest;
+        return switch (bone.channel) {
+            .position => .{ .vec3 = at_rest.translation.array() },
+            .rotation => .{ .quat = .{ at_rest.rotation.x, at_rest.rotation.y, at_rest.rotation.z, at_rest.rotation.w } },
+            .scale => .{ .vec3 = at_rest.scale.array() },
+        };
+    }
+
+    /// What it moves, as one number: the entity and the track's property and
+    /// bone, so that the same is found in two animations.
+    fn key(self: Bound, animation: *const Animation) u64 {
+        const track = animation.tracks.items[self.track];
+        var hash: std.hash.Wyhash = .init(@bitCast(self.entity));
+        hash.update(track.property);
+        hash.update("\x00");
+        hash.update(track.bone);
+        return hash.final();
+    }
 };
 
 /// What each player's tracks are bound to, for the library's revision and
 /// the animation it plays: `app.animation_players`.
 pub const Players = struct {
     of_entity: std.AutoArrayHashMapUnmanaged(Entity, Binding) = .empty,
+    /// The same, for what each player fades out of.
+    fading: std.AutoArrayHashMapUnmanaged(Entity, Binding) = .empty,
     /// Signals to say after the pass.
     said: std.ArrayList(Said) = .empty,
+    /// While a change fades: what the animation it fades out of says, by
+    /// what it moves.
+    faded: std.AutoHashMapUnmanaged(u64, Value) = .empty,
 
     const Said = struct { entity: Entity, started: bool, name: [name_len]u8 };
 
@@ -723,23 +865,30 @@ pub const Players = struct {
     };
 
     pub fn deinit(self: *Players, gpa: Allocator) void {
-        for (self.of_entity.values()) |*binding| binding.tracks.deinit(gpa);
-        self.of_entity.deinit(gpa);
+        for ([_]*std.AutoArrayHashMapUnmanaged(Entity, Binding){ &self.of_entity, &self.fading }) |map| {
+            for (map.values()) |*binding| binding.tracks.deinit(gpa);
+            map.deinit(gpa);
+        }
         self.said.deinit(gpa);
+        self.faded.deinit(gpa);
     }
 
     pub fn clear(self: *Players, app: *App) void {
-        for (self.of_entity.values()) |*binding| binding.tracks.deinit(app.gpa);
-        self.of_entity.clearRetainingCapacity();
+        for ([_]*std.AutoArrayHashMapUnmanaged(Entity, Binding){ &self.of_entity, &self.fading }) |map| {
+            for (map.values()) |*binding| binding.tracks.deinit(app.gpa);
+            map.clearRetainingCapacity();
+        }
     }
 
     pub fn forgetDead(self: *Players, app: *App) void {
-        var at = self.of_entity.count();
-        while (at > 0) {
-            at -= 1;
-            if (app.world.isAlive(self.of_entity.keys()[at])) continue;
-            self.of_entity.values()[at].tracks.deinit(app.gpa);
-            self.of_entity.swapRemoveAt(at);
+        for ([_]*std.AutoArrayHashMapUnmanaged(Entity, Binding){ &self.of_entity, &self.fading }) |map| {
+            var at = map.count();
+            while (at > 0) {
+                at -= 1;
+                if (app.world.isAlive(map.keys()[at])) continue;
+                map.values()[at].tracks.deinit(app.gpa);
+                map.swapRemoveAt(at);
+            }
         }
     }
 };
@@ -776,11 +925,13 @@ fn advance(app: *App, e: Entity, player: *AnimationPlayer, delta: f32, flowing: 
             player.playing = false;
             player.position = 0;
             player.next = @splat(0);
+            player.fade_length = 0;
         },
         // Nothing starts in a frame with no time.
         .play => if (flowing) {
             player.request = .none;
-            try start(app, e, player, fixed_text.get(&player.wanted), player.from);
+            const blend = if (player.blend >= 0) player.blend else player.default_blend;
+            try start(app, e, player, fixed_text.get(&player.wanted), player.from, blend);
         },
         .seek => {
             player.request = .none;
@@ -791,7 +942,7 @@ fn advance(app: *App, e: Entity, player: *AnimationPlayer, delta: f32, flowing: 
     if (!player.started and flowing) {
         player.started = true;
         const name = fixed_text.get(&player.autoplay);
-        if (name.len > 0 and !player.playing) try start(app, e, player, name, 0);
+        if (name.len > 0 and !player.playing) try start(app, e, player, name, 0, 0);
     }
     if (!player.playing or player.paused or !app.timeMovesFor(e)) return;
 
@@ -813,7 +964,21 @@ fn advance(app: *App, e: Entity, player: *AnimationPlayer, delta: f32, flowing: 
         .repeat => player.position = if (length > 0) @mod(player.position, length) else 0,
         .ping_pong => player.position = if (length > 0) @mod(player.position, length * 2) else 0,
     }
+    // What it fades out of goes on as it was, until the fade is done.
+    if (player.fade_length > 0) {
+        player.fade += @abs(delta * player.speed);
+        if (library.find(fixed_text.get(&player.fading))) |before| {
+            player.fading_position += delta * player.speed * direction;
+            player.fading_position = switch (before.loop) {
+                .none => std.math.clamp(player.fading_position, 0, before.length),
+                .repeat => if (before.length > 0) @mod(player.fading_position, before.length) else 0,
+                .ping_pong => if (before.length > 0) @mod(player.fading_position, before.length * 2) else 0,
+            };
+        }
+    }
     try poseOf(app, e, player);
+    // Done fading once posed all the way to the new one.
+    if (player.fade_length > 0 and player.fade >= player.fade_length) player.fade_length = 0;
     if (!ended) return;
     player.playing = false;
     try players.said.append(app.gpa, .{ .entity = e, .started = false, .name = player.current });
@@ -821,11 +986,11 @@ fn advance(app: *App, e: Entity, player: *AnimationPlayer, delta: f32, flowing: 
     if (next.len > 0) {
         var name: [name_len]u8 = player.next;
         player.next = @splat(0);
-        try start(app, e, player, fixed_text.get(&name), 0);
+        try start(app, e, player, fixed_text.get(&name), 0, player.default_blend);
     }
 }
 
-fn start(app: *App, e: Entity, player: *AnimationPlayer, name: []const u8, from: f32) !void {
+fn start(app: *App, e: Entity, player: *AnimationPlayer, name: []const u8, from: f32, blend: f32) !void {
     const library = app.animation_libraries.get(player.library) orelse {
         player.playing = false;
         return;
@@ -835,6 +1000,15 @@ fn start(app: *App, e: Entity, player: *AnimationPlayer, name: []const u8, from:
         player.playing = false;
         return;
     };
+    // A change from another fades out of it, from where it was.
+    const before = player.currentName();
+    player.fade_length = 0;
+    if (blend > 0 and before.len > 0 and !std.mem.eql(u8, before, name) and library.find(before) != null) {
+        player.fading = player.current;
+        player.fading_position = player.position;
+        player.fade = 0;
+        player.fade_length = blend;
+    }
     fixed_text.set(&player.current, name);
     player.position = if (from == AnimationPlayer.from_the_end) animation.length else from;
     player.playing = true;
@@ -842,15 +1016,48 @@ fn start(app: *App, e: Entity, player: *AnimationPlayer, name: []const u8, from:
     try poseOf(app, e, player);
 }
 
-/// The player's entities as its animation says they are where it is.
+/// The player's entities as its animation says they are where it is - and
+/// while a change fades, between what the one before says and what this
+/// one does.
 fn poseOf(app: *App, e: Entity, player: *const AnimationPlayer) !void {
     const library = app.animation_libraries.get(player.library) orelse return;
     const animation = library.find(player.currentName()) orelse return;
-    const binding = try bindingOf(app, e, player, library, animation);
+    const binding = try bindingOf(app, &app.animation_players.of_entity, e, player.library, &player.current, library, animation);
     const time = timeIn(animation, player.position);
+    const fading_name = fixed_text.get(&player.fading);
+    const before = if (player.fade_length > 0) library.find(fading_name) else null;
+    if (before == null) {
+        for (binding.tracks.items) |bound| {
+            const value = animation.tracks.items[bound.track].sample(time) orelse continue;
+            bound.put(app, value);
+        }
+        return;
+    }
+
+    // What it fades out of, by what each track moves.
+    const out = before.?;
+    const faded = &app.animation_players.faded;
+    faded.clearRetainingCapacity();
+    const out_binding = try bindingOf(app, &app.animation_players.fading, e, player.library, &player.fading, library, out);
+    const out_time = timeIn(out, player.fading_position);
+    for (out_binding.tracks.items) |bound| {
+        const value = out.tracks.items[bound.track].sample(out_time) orelse continue;
+        try faded.put(app.gpa, bound.key(out), value);
+    }
+    const weight = std.math.clamp(player.fade / player.fade_length, 0, 1);
+    // Each the new one moves, from what the old one says - from a bone's rest
+    // where it says nothing of it.
     for (binding.tracks.items) |bound| {
         const value = animation.tracks.items[bound.track].sample(time) orelse continue;
-        _ = bound.property.write(app, bound.entity, value);
+        const was = if (faded.fetchRemove(bound.key(animation))) |held| held.value else bound.rest(app);
+        bound.put(app, if (was) |from| from.lerp(value, weight) else value);
+    }
+    // And each only the old one moved: a bone toward its rest, a property
+    // held as it was.
+    for (out_binding.tracks.items) |bound| {
+        const was = faded.get(bound.key(out)) orelse continue;
+        const to = bound.rest(app) orelse was;
+        bound.put(app, was.lerp(to, weight));
     }
 }
 
@@ -861,20 +1068,21 @@ fn timeIn(animation: *const Animation, position: f32) f32 {
     return position;
 }
 
-/// The player's tracks bound to what they move, again after a change to the
-/// library or to what it plays, or when an entity bound is gone.
-fn bindingOf(app: *App, e: Entity, player: *const AnimationPlayer, library: *const Library, animation: *const Animation) !*Players.Binding {
-    const entry = try app.animation_players.of_entity.getOrPut(app.gpa, e);
+/// A player's tracks of the animation called `name` bound to what they
+/// move, in `map`, again after a change to the library or to the name, or
+/// when an entity bound is gone.
+fn bindingOf(app: *App, map: *std.AutoArrayHashMapUnmanaged(Entity, Players.Binding), e: Entity, handle: AnimationLibraryHandle, name: *const [name_len]u8, library: *const Library, animation: *const Animation) !*Players.Binding {
+    const entry = try map.getOrPut(app.gpa, e);
     if (!entry.found_existing) entry.value_ptr.* = .{};
     const binding = entry.value_ptr;
-    var fresh = !binding.library.eql(player.library) or binding.revision != library.revision or !std.mem.eql(u8, &binding.name, &player.current);
+    var fresh = !binding.library.eql(handle) or binding.revision != library.revision or !std.mem.eql(u8, &binding.name, name);
     if (!fresh) for (binding.tracks.items) |bound| {
         if (!app.world.isAlive(bound.entity)) fresh = true;
     };
     if (!fresh) return binding;
-    binding.library = player.library;
+    binding.library = handle;
     binding.revision = library.revision;
-    binding.name = player.current;
+    binding.name = name.*;
     binding.tracks.clearRetainingCapacity();
     try bindTracks(app, e, animation, &binding.tracks);
     return binding;
@@ -883,8 +1091,17 @@ fn bindingOf(app: *App, e: Entity, player: *const AnimationPlayer, library: *con
 fn bindTracks(app: *App, root: Entity, animation: *const Animation, into: *std.ArrayList(Bound)) !void {
     for (animation.tracks.items, 0..) |*track, at| {
         const target = targetOf(app, root, track.target) orelse continue;
+        if (track.bone.len > 0) {
+            // A bone of the target's skeleton, by its name.
+            const channel = std.meta.stringToEnum(BoneChannel, track.property) orelse continue;
+            const held_pose = app.poses.of(app, target) orelse continue;
+            const skeleton = app.skeletons.get(held_pose.skeleton) orelse continue;
+            const index = skeleton.find(track.bone) orelse continue;
+            try into.append(app.gpa, .{ .track = at, .entity = target, .moves = .{ .bone = .{ .index = index, .channel = channel } } });
+            continue;
+        }
         const compiled = Property.compile(app, track.property) catch continue;
-        try into.append(app.gpa, .{ .track = at, .entity = target, .property = compiled });
+        try into.append(app.gpa, .{ .track = at, .entity = target, .moves = .{ .property = compiled } });
     }
 }
 
@@ -926,7 +1143,7 @@ pub fn pose(app: *App, root: Entity, animation: *const Animation, time: f32) !vo
     try bindTracks(app, root, animation, &bound);
     for (bound.items) |held| {
         const value = animation.tracks.items[held.track].sample(time) orelse continue;
-        _ = held.property.write(app, held.entity, value);
+        held.put(app, value);
     }
 }
 

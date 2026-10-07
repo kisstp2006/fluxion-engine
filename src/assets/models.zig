@@ -13,8 +13,8 @@
 //!
 //! What it is made of is kept under its name with what it is after a `#`:
 //! `res://models/robot.glb#mesh/0`, `#material/2`, `#image/1`,
-//! `#skeleton/0`. A scene or a script can name one of those as any file -
-//! the model is read first.
+//! `#skeleton/0`, `#animations`. A scene or a script can name one of those
+//! as any file - the model is read first.
 //!
 //! **A skin** is a `Skeleton` - its bones are not entities - on the entity
 //! of the node its top bones hang from (the model's root where they hang
@@ -22,6 +22,14 @@
 //! `MeshInstance3D` whose `skeleton` names that entity. What hangs from a
 //! bone in the file is put under an entity named after the bone, with a
 //! `BoneAttachment3D`, under the skeleton's entity.
+//!
+//! **Its animations** are one library, `#animations`, which an
+//! `AnimationPlayer` on the model's root plays: a bone's channel a track of
+//! the bone on its skeleton's entity, any other node's a track of its
+//! entity's `Transform3D`. A cubic spline is turned into straight keys,
+//! thirty a second; a step's track jumps from key to key. One whose name
+//! ends in `loop` goes round and round, and with `"loop_animations": true`
+//! in the `.import` file every one does.
 //!
 //! - **glTF 2.0** - `.glb`, or `.gltf` with its files beside it - is read
 //!   as it is: see `assets/gltf.zig`.
@@ -55,6 +63,8 @@ const SceneHandle = @import("scene_table.zig").SceneHandle;
 const MaterialHandle = @import("../render/materials.zig").MaterialHandle;
 const TextureHandle = @import("assets.zig").TextureHandle;
 const skeleton_table = @import("../render/skeleton.zig");
+const animation = @import("../animation/animation.zig");
+const Value = @import("../reflect/property.zig").Value;
 
 const log = std.log.scoped(.fluxion_engine);
 
@@ -109,6 +119,9 @@ pub const ImportSettings = struct {
     /// Whether its meshes that bring no lightmap UVs get them worked out,
     /// for a lightmap to light them.
     lightmap_uvs: bool = false,
+    /// Whether every one of its animations goes round and round, not only
+    /// one whose name ends in `loop`.
+    loop_animations: bool = false,
 };
 
 /// A model's import settings, or what they start as when it has none or
@@ -303,6 +316,15 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
         _ = try app.skeletons.add(gpa, try std.fmt.bufPrint(&name, "{s}#skeleton/{d}", .{ source, at }), made);
     }
 
+    // Its animations, one library: what its root's player plays.
+    if (model.animations.len > 0) {
+        var made: animation.Library = .{ .source = &.{}, .on_disc = false };
+        defer made.deinitContent(gpa);
+        try animationsOf(gpa, source, model, parents, prepared.settings, &made);
+        var name: [512]u8 = undefined;
+        _ = try app.animation_libraries.adopt(gpa, try std.fmt.bufPrint(&name, "{s}#animations", .{source}), &made.animations);
+    }
+
     const text = try sceneText(gpa, source, prepared);
     defer gpa.free(text);
     return app.scenes.add(gpa, source, text);
@@ -385,6 +407,130 @@ fn skeletonOf(gpa: Allocator, model: *const gltf.Model, parents: []const ?u32, s
     return skeleton_table.Skeleton.init(gpa, bones);
 }
 
+/// The model's animations into `into`, each channel a track: of a bone on
+/// its skeleton's entity, or of a node's entity's `Transform3D`.
+fn animationsOf(gpa: Allocator, source: []const u8, model: *const gltf.Model, parents: []const ?u32, settings: ImportSettings, into: *animation.Library) !void {
+    var path: std.ArrayList(u8) = .empty;
+    defer path.deinit(gpa);
+    var noted = false;
+    for (model.animations, 0..) |given, at| {
+        // Cut to what a player holds, and made unlike the others.
+        var name_buffer: [animation.name_len]u8 = undefined;
+        var name = cutTo(given.name, animation.name_len);
+        if (into.find(name) != null) name = std.fmt.bufPrint(&name_buffer, "{s} {d}", .{ cutTo(given.name, animation.name_len - 8), at }) catch name;
+        const made = try into.addAnimation(gpa, name);
+        made.length = given.length;
+        const looped = settings.loop_animations or std.ascii.endsWithIgnoreCase(name, "loop");
+        made.loop = if (looped) .repeat else .none;
+        for (given.channels) |channel| {
+            const track = if (boneSkin(model, channel.node)) |skin| bone: {
+                const owner = skeletonNode(model.skins[skin], parents);
+                const above = parents[channel.node];
+                if (!noted and above != null and above != owner and boneSkin(model, above.?) == null) {
+                    log.warn("{s}: a bone under a node that is not a bone moves as if that node were not there", .{source});
+                    noted = true;
+                }
+                try entityPath(gpa, model, parents, owner, &path);
+                break :bone try made.ensureBoneTrack(gpa, path.items, model.nodes[channel.node].name, @tagName(boneChannel(channel.path)));
+            } else node: {
+                try entityPath(gpa, model, parents, channel.node, &path);
+                break :node try made.ensureTrack(gpa, path.items, switch (channel.path) {
+                    .translation => "Transform3D.position",
+                    .rotation => "Transform3D.rotation",
+                    .scale => "Transform3D.scale",
+                });
+            };
+            track.update = if (channel.interpolation == .step) .discrete else .continuous;
+            track.keys.clearRetainingCapacity();
+            try keysOf(gpa, channel, &track.keys);
+        }
+    }
+}
+
+/// A name no longer than `limit` - what a player holds - cut where a
+/// letter starts.
+fn cutTo(name: []const u8, limit: usize) []const u8 {
+    if (name.len <= limit) return name;
+    var end: usize = limit;
+    while (end > 0 and name[end] & 0xc0 == 0x80) end -= 1;
+    return name[0..end];
+}
+
+fn boneChannel(path: gltf.Channel.Path) animation.BoneChannel {
+    return switch (path) {
+        .translation => .position,
+        .rotation => .rotation,
+        .scale => .scale,
+    };
+}
+
+/// A channel's keys: its own, or along a cubic spline thirty a second.
+fn keysOf(gpa: Allocator, channel: gltf.Channel, into: *std.ArrayList(animation.Key)) !void {
+    const width = channel.width();
+    const times = channel.times;
+    if (channel.interpolation != .cubic) {
+        for (times, 0..) |time, at| try into.append(gpa, .{ .time = time, .value = valueOf(channel.path, channel.values[at * width ..][0..width]) });
+        return;
+    }
+    // Three values a key: the tangent in, the value, the tangent out.
+    const per_key = width * 3;
+    for (times, 0..) |time, at| {
+        const here = channel.values[at * per_key ..][0..per_key];
+        try into.append(gpa, .{ .time = time, .value = valueOf(channel.path, here[width..][0..width]) });
+        if (at + 1 == times.len) break;
+        const next = channel.values[(at + 1) * per_key ..][0..per_key];
+        const span = times[at + 1] - time;
+        const steps: usize = @intFromFloat(@max(1, @ceil(span * 30)));
+        for (1..steps) |step| {
+            const s = @as(f32, @floatFromInt(step)) / @as(f32, @floatFromInt(steps));
+            const s2 = s * s;
+            const s3 = s2 * s;
+            var out: [4]f32 = undefined;
+            for (0..width) |c| {
+                out[c] = (2 * s3 - 3 * s2 + 1) * here[width + c] + span * (s3 - 2 * s2 + s) * here[2 * width + c] +
+                    (-2 * s3 + 3 * s2) * next[width + c] + span * (s3 - s2) * next[c];
+            }
+            try into.append(gpa, .{ .time = time + span * s, .value = valueOf(channel.path, out[0..width]) });
+        }
+    }
+}
+
+fn valueOf(path: gltf.Channel.Path, numbers: []const f32) Value {
+    if (path != .rotation) return .{ .vec3 = numbers[0..3].* };
+    const turn = (math.Quat{ .x = numbers[0], .y = numbers[1], .z = numbers[2], .w = numbers[3] }).norm();
+    return .{ .quat = .{ turn.x, turn.y, turn.z, turn.w } };
+}
+
+/// The path from the model's root a track names `node`'s entity by - empty
+/// for the root - as the scene puts it: what hangs from a bone hangs from
+/// an entity named after it, under its skeleton's.
+fn entityPath(gpa: Allocator, model: *const gltf.Model, parents: []const ?u32, node: ?u32, into: *std.ArrayList(u8)) !void {
+    into.clearRetainingCapacity();
+    var names: std.ArrayList([]const u8) = .empty;
+    defer names.deinit(gpa);
+    var at = node;
+    // No deeper than the nodes are many, should a broken file go round.
+    while (at) |here| {
+        if (names.items.len > model.nodes.len) break;
+        try names.append(gpa, model.nodes[here].name);
+        at = if (boneSkin(model, here)) |skin| skeletonNode(model.skins[skin], parents) else parents[here];
+    }
+    var i = names.items.len;
+    while (i > 0) {
+        i -= 1;
+        try into.appendSlice(gpa, names.items[i]);
+        if (i > 0) try into.append(gpa, '/');
+    }
+}
+
+/// The first skin that has `node` as a bone.
+fn boneSkin(model: *const gltf.Model, node: u32) ?u32 {
+    for (model.skins, 0..) |skin, at| {
+        if (jointIndex(skin, node) != null) return @intCast(at);
+    }
+    return null;
+}
+
 /// The skin the first node that draws mesh `at` bends it with, if one does
 /// and it has bones.
 fn skinOf(model: *const gltf.Model, at: usize) ?gltf.Skin {
@@ -446,6 +592,14 @@ const ModelScene = struct {
             try self.skeletonField(w, skin);
             try w.endObject();
         }
+        // Its animations, for the root to play.
+        if (model.animations.len > 0) {
+            var name: [512]u8 = undefined;
+            try w.key("AnimationPlayer");
+            try w.beginObject();
+            try w.field("library", std.fmt.bufPrint(&name, "{s}#animations", .{self.source}) catch "");
+            try w.endObject();
+        }
         try w.endObject();
         // Each node once, under the node that has it - the first that does,
         // where a broken file has two - from the shown scene's roots down.
@@ -475,12 +629,8 @@ const ModelScene = struct {
         return null;
     }
 
-    /// The first skin with bones that has `node` as a bone.
     fn skinOfBone(self: ModelScene, at_node: u32) ?u32 {
-        for (self.prepared.model.skins, 0..) |skin, at| {
-            if (jointIndex(skin, at_node) != null) return @intCast(at);
-        }
-        return null;
+        return boneSkin(&self.prepared.model, at_node);
     }
 
     fn skeletonField(self: ModelScene, w: *json.Writer, skin: u32) json.Writer.Error!void {
