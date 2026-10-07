@@ -34,6 +34,7 @@ const mesh = @import("mesh.zig");
 const LightmapHandle = @import("lightmaps.zig").LightmapHandle;
 const MaterialHandle = @import("materials.zig").MaterialHandle;
 const shaders = @import("shaders.zig");
+const Entity = @import("fluxion_ecs").Entity;
 
 /// A mesh drawn where its `Transform3D` is: the one `mesh` names, or the
 /// shape a `PrimitiveMesh3D` beside it says. How each of its surfaces looks
@@ -51,6 +52,10 @@ pub const MeshInstance3D = extern struct {
     cast_shadow: bool = true,
     /// How it takes part in the light a `LightmapGI` bakes.
     gi_mode: GiMode = .static,
+    /// For a mesh with a skin: the entity whose `Skeleton3D` bends it. It is
+    /// drawn in that entity's space, as its bones are now - its own
+    /// `Transform3D` is not used. None draws it as it was made.
+    skeleton: Entity = .none,
 
     pub const reflect_name = "MeshInstance3D";
     pub const reflect_fields = .{
@@ -58,6 +63,7 @@ pub const MeshInstance3D = extern struct {
         .layers = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it is on" } },
         .cast_shadow = .{attr.Doc{ .text = "Whether it throws a shadow" }},
         .gi_mode = .{ attr.Group{ .name = "Global illumination" }, attr.Doc{ .text = "How it takes part in baked light: held in the lightmap and bouncing light, lit by the probes as it moves, or neither" } },
+        .skeleton = .{ attr.Group{ .name = "Skeleton" }, attr.Doc{ .text = "The entity whose Skeleton3D bends its skin; it is drawn in that entity's space" } },
     };
 };
 

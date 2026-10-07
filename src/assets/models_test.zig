@@ -14,12 +14,16 @@ const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
 const components = @import("../scene/components.zig");
 const materials = @import("../render/materials.zig");
+const gltf = @import("gltf.zig");
+const math = @import("fluxion_math");
 
 const Transform3D = components.Transform3D;
 const MeshInstance3D = components.MeshInstance3D;
 const Material3DData = components.Material3DData;
 const Camera3D = components.Camera3D;
 const DirectionalLight3D = components.DirectionalLight3D;
+const Skeleton3D = components.Skeleton3D;
+const BoneAttachment3D = components.BoneAttachment3D;
 
 /// A project in a folder of its own, with a model in `models/`: a red
 /// triangle under a node 1, 2, 3 along, its picture beside it, a camera and
@@ -296,4 +300,60 @@ test "an app let go of with loads under way and loads done but not taken frees t
     try app.loadInBackground("res://models/red.png");
     var words: [64]u8 = undefined;
     while (app.loadStatus("res://models/red.png") == .loading) _ = app.loadsReport(&words);
+}
+
+test "a skin is a skeleton on the entity its bones hang from, and what hangs from a bone follows it" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    // Two bones bending a square, and a hat on the upper bone.
+    const text = try gltf.skinnedGltf(testing.allocator);
+    defer testing.allocator.free(text);
+    const upper_hat = try std.mem.replaceOwned(u8, testing.allocator, text, "{ \"name\": \"Upper\", \"translation\": [0, 1, 0] }", "{ \"name\": \"Upper\", \"translation\": [0, 1, 0], \"children\": [4] }");
+    defer testing.allocator.free(upper_hat);
+    const with_hat = try std.mem.replaceOwned(u8, testing.allocator, upper_hat, "{ \"name\": \"Body\", \"mesh\": 0, \"skin\": 0 }", "{ \"name\": \"Body\", \"mesh\": 0, \"skin\": 0 }, { \"name\": \"Hat\", \"translation\": [0, 0.5, 0] }");
+    defer testing.allocator.free(with_hat);
+    try testing.expect(!std.mem.eql(u8, text, with_hat));
+    try folder.put("models/skinned.gltf", with_hat);
+    const app = try appIn(&folder);
+    defer app.destroy();
+
+    const root = try app.instantiate(try app.loadScene("res://models/skinned.gltf"), .none);
+    const armature = app.find("Armature").?;
+    try testing.expect(app.parentOf(armature).eql(root));
+    const skeleton = app.world.get(armature, Skeleton3D).?.skeleton;
+    try testing.expect(skeleton.eql(app.findSkeleton("res://models/skinned.gltf#skeleton/0").?));
+    const bones = app.skeletonOf(skeleton).?.bones;
+    try testing.expectEqual(@as(usize, 2), bones.len);
+    try testing.expectEqualStrings("Upper", bones[1].name);
+    try testing.expectEqual(@as(?u16, 0), bones[1].parent);
+    try testing.expect(bones[1].rest.translation.approxEql(.init(0, 1, 0)));
+
+    // The bones are not entities; the mesh is bent by the armature's skeleton.
+    try testing.expect(app.find("Lower") == null);
+    const body = app.find("Body").?;
+    try testing.expect(app.world.get(body, MeshInstance3D).?.skeleton.eql(armature));
+    const square = app.meshOf(app.world.get(body, MeshInstance3D).?.mesh).?;
+    try testing.expectEqual(@as(usize, 6), square.skin.len);
+    try testing.expectEqual(@as(usize, 2), square.bone_bounds.len);
+
+    // The hat hangs from an entity named after its bone, which follows it.
+    const upper = app.find("Upper").?;
+    try testing.expectEqualStrings("Upper", app.world.get(upper, BoneAttachment3D).?.boneName());
+    try testing.expect(app.parentOf(upper).eql(armature));
+    const hat = app.find("Hat").?;
+    try testing.expect(app.parentOf(hat).eql(upper));
+    _ = try app.step();
+    try testing.expect(app.globalPosition3D(hat).?.approxEql(.init(0, 1.5, 0)));
+
+    // The lower bone turned a quarter about z: the hat swings round with it.
+    try testing.expectEqual(@as(u32, 2), app.boneCount(armature));
+    try testing.expectEqual(@as(i32, 0), app.findBone(armature, "Lower"));
+    try testing.expectEqual(@as(i32, -1), app.findBone(armature, "Tail"));
+    app.setBoneRotation(armature, 0, .fromAxisAngle(.unit_z, std.math.pi / 2.0));
+    _ = try app.step();
+    try testing.expect(app.globalPosition3D(hat).?.sub(.init(-1.5, 0, 0)).len() < 1e-4);
+    try testing.expect(app.boneGlobalPosition(armature, 1).sub(.init(-1, 0, 0)).len() < 1e-4);
+    app.resetPose(armature);
+    try testing.expect(app.bonePosition(armature, 1).approxEql(.init(0, 1, 0)));
 }

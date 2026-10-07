@@ -12,8 +12,16 @@
 //! ```
 //!
 //! What it is made of is kept under its name with what it is after a `#`:
-//! `res://models/robot.glb#mesh/0`, `#material/2`, `#image/1`. A scene or a
-//! script can name one of those as any file - the model is read first.
+//! `res://models/robot.glb#mesh/0`, `#material/2`, `#image/1`,
+//! `#skeleton/0`. A scene or a script can name one of those as any file -
+//! the model is read first.
+//!
+//! **A skin** is a `Skeleton` - its bones are not entities - on the entity
+//! of the node its top bones hang from (the model's root where they hang
+//! from none), as a `Skeleton3D`; the node whose mesh it bends gets a
+//! `MeshInstance3D` whose `skeleton` names that entity. What hangs from a
+//! bone in the file is put under an entity named after the bone, with a
+//! `BoneAttachment3D`, under the skeleton's entity.
 //!
 //! - **glTF 2.0** - `.glb`, or `.gltf` with its files beside it - is read
 //!   as it is: see `assets/gltf.zig`.
@@ -46,6 +54,7 @@ const mesh = @import("../render/mesh.zig");
 const SceneHandle = @import("scene_table.zig").SceneHandle;
 const MaterialHandle = @import("../render/materials.zig").MaterialHandle;
 const TextureHandle = @import("assets.zig").TextureHandle;
+const skeleton_table = @import("../render/skeleton.zig");
 
 const log = std.log.scoped(.fluxion_engine);
 
@@ -283,9 +292,97 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
         _ = try app.meshes.add(gpa, &app.device, try std.fmt.bufPrint(&name, "{s}#mesh/{d}", .{ source, at }), made);
     }
 
+    // Each skin a skeleton of its bones, in its order.
+    const parents = try parentsOf(gpa, model);
+    defer gpa.free(parents);
+    for (model.skins, 0..) |skin, at| {
+        if (skin.joints.len == 0) continue;
+        var made = try skeletonOf(gpa, model, parents, skin);
+        errdefer made.deinit(gpa);
+        var name: [512]u8 = undefined;
+        _ = try app.skeletons.add(gpa, try std.fmt.bufPrint(&name, "{s}#skeleton/{d}", .{ source, at }), made);
+    }
+
     const text = try sceneText(gpa, source, prepared);
     defer gpa.free(text);
     return app.scenes.add(gpa, source, text);
+}
+
+/// Each node's parent, the first that lists it; none for a root.
+fn parentsOf(gpa: Allocator, model: *const gltf.Model) Allocator.Error![]?u32 {
+    const out = try gpa.alloc(?u32, model.nodes.len);
+    @memset(out, null);
+    for (model.nodes, 0..) |node, at| for (node.children) |child| {
+        if (out[child] == null) out[child] = @intCast(at);
+    };
+    return out;
+}
+
+/// The place of `node` in `skin`'s bones, if it is one.
+fn jointIndex(skin: gltf.Skin, node: u32) ?u16 {
+    for (skin.joints, 0..) |joint, at| if (joint == node) return @intCast(at);
+    return null;
+}
+
+/// The node `skin`'s skeleton is on: the one its first top bone hangs from,
+/// or none - the model's root - where it hangs from none.
+fn skeletonNode(skin: gltf.Skin, parents: []const ?u32) ?u32 {
+    for (skin.joints) |joint| {
+        var up = parents[joint];
+        var top = true;
+        while (up) |node| : (up = parents[node]) {
+            if (jointIndex(skin, node) != null) {
+                top = false;
+                break;
+            }
+        }
+        if (top) return parents[joint];
+    }
+    return null;
+}
+
+/// Where `node` is from `from` - one of its ancestors, or the scene's root
+/// for none - each node's own place, turn and size on the way down.
+fn placeFrom(model: *const gltf.Model, parents: []const ?u32, from: ?u32, node: u32) math.Mat4 {
+    var out = model.nodes[node].transform.toMat4();
+    var up = parents[node];
+    while (up) |at| : (up = parents[at]) {
+        if (from != null and at == from.?) break;
+        out = model.nodes[at].transform.toMat4().mul(out);
+    }
+    return out;
+}
+
+/// `skin`'s bones as a skeleton: each one's parent the nearest bone above it,
+/// and its place at rest from there - from the skeleton's node for a bone at
+/// the top.
+fn skeletonOf(gpa: Allocator, model: *const gltf.Model, parents: []const ?u32, skin: gltf.Skin) !skeleton_table.Skeleton {
+    const owner = skeletonNode(skin, parents);
+    const bones = try gpa.alloc(skeleton_table.Bone, skin.joints.len);
+    defer gpa.free(bones);
+    for (skin.joints, bones, 0..) |joint, *bone, at| {
+        var parent: ?u16 = null;
+        var from: ?u32 = owner;
+        var up = parents[joint];
+        while (up) |node| : (up = parents[node]) {
+            if (jointIndex(skin, node)) |found| {
+                parent = found;
+                from = node;
+                break;
+            }
+            if (owner != null and node == owner.?) break;
+        }
+        // A node between two bones, or between the skeleton and its top
+        // bone, is folded into the bone's place.
+        const local = if (parent == null and owner == null) placeFrom(model, parents, null, joint) else placeFrom(model, parents, from, joint);
+        bone.* = .{
+            .name = model.nodes[joint].name,
+            .parent = parent,
+            .rest = .fromMat4(local),
+            .inverse_bind = skin.inverse_binds[at],
+        };
+    }
+    return skeleton_table.Skeleton.init(gpa, bones);
 }
 
 /// The skin the first node that draws mesh `at` bends it with, if one does
@@ -339,20 +436,105 @@ const ModelScene = struct {
         try w.beginObject();
         if (scale != 1) try vector(w, "scale", .{ scale, scale, scale });
         try w.endObject();
+        // A skeleton on the root, for a skin whose top bones hang from no
+        // node.
+        const parents = parentsOf(std.heap.page_allocator, model) catch return error.WriteFailed;
+        defer std.heap.page_allocator.free(parents);
+        if (self.skinOn(null, parents)) |skin| {
+            try w.key("Skeleton3D");
+            try w.beginObject();
+            try self.skeletonField(w, skin);
+            try w.endObject();
+        }
         try w.endObject();
         // Each node once, under the node that has it - the first that does,
         // where a broken file has two - from the shown scene's roots down.
         const placed = std.heap.page_allocator.alloc(bool, model.nodes.len) catch return error.WriteFailed;
         defer std.heap.page_allocator.free(placed);
         @memset(placed, false);
-        for (model.roots) |at| try self.node(w, at, &root, placed);
+        const scene: Scene = .{ .placed = placed, .parents = parents };
+        for (model.roots) |at| try self.node(w, at, &root, scene);
         try w.endArray();
         try w.endObject();
     }
 
-    fn node(self: ModelScene, w: *json.Writer, at: u32, parent: []const u8, placed: []bool) json.Writer.Error!void {
-        if (placed[at]) return;
-        placed[at] = true;
+    /// What the walk down the nodes keeps.
+    const Scene = struct {
+        placed: []bool,
+        parents: []const ?u32,
+    };
+
+    /// The first skin with bones whose skeleton is on `node` - the root for
+    /// none.
+    fn skinOn(self: ModelScene, owner: ?u32, parents: []const ?u32) ?u32 {
+        for (self.prepared.model.skins, 0..) |skin, at| {
+            if (skin.joints.len == 0) continue;
+            const on = skeletonNode(skin, parents);
+            if (on == owner) return @intCast(at);
+        }
+        return null;
+    }
+
+    /// The first skin with bones that has `node` as a bone.
+    fn skinOfBone(self: ModelScene, at_node: u32) ?u32 {
+        for (self.prepared.model.skins, 0..) |skin, at| {
+            if (jointIndex(skin, at_node) != null) return @intCast(at);
+        }
+        return null;
+    }
+
+    fn skeletonField(self: ModelScene, w: *json.Writer, skin: u32) json.Writer.Error!void {
+        var name: [512]u8 = undefined;
+        try w.field("skeleton", std.fmt.bufPrint(&name, "{s}#skeleton/{d}", .{ self.source, skin }) catch "");
+    }
+
+    /// The UUID of the entity skin `skin`'s skeleton is on.
+    fn skeletonEntity(self: ModelScene, skin: u32, parents: []const ?u32) [36]u8 {
+        const on = skeletonNode(self.prepared.model.skins[skin], parents);
+        return uuidOf(self.source, if (on) |node_at| node_at else null);
+    }
+
+    /// A bone: no entity of its own. What hangs from it in the file hangs
+    /// from an entity named after it, with a `BoneAttachment3D`, under its
+    /// skeleton's; its bones below are walked the same way.
+    fn bone(self: ModelScene, w: *json.Writer, at: u32, scene: Scene) json.Writer.Error!void {
+        if (scene.placed[at]) return;
+        scene.placed[at] = true;
+        const model = &self.prepared.model;
+        const held = model.nodes[at];
+        const skin = self.skinOfBone(at).?;
+        const skeleton = self.skeletonEntity(skin, scene.parents);
+        var attachment: ?[36]u8 = null;
+        for (held.children) |child| {
+            if (self.skinOfBone(child) != null) {
+                try self.bone(w, child, scene);
+                continue;
+            }
+            if (attachment == null) {
+                var name: [600]u8 = undefined;
+                const uuid = Uuid.fromName(namespace, std.fmt.bufPrint(&name, "{s}#bone/{d}", .{ self.source, at }) catch self.source).toString();
+                attachment = uuid;
+                try w.beginObject();
+                try w.field("uuid", @as([]const u8, &uuid));
+                try w.field("parent", @as([]const u8, &skeleton));
+                try w.field("name", held.name);
+                try w.key("Transform3D");
+                try w.beginObject();
+                try w.endObject();
+                try w.key("BoneAttachment3D");
+                try w.beginObject();
+                try w.field("bone", held.name);
+                try w.endObject();
+                try w.endObject();
+            }
+            try self.node(w, child, &attachment.?, scene);
+        }
+    }
+
+    fn node(self: ModelScene, w: *json.Writer, at: u32, parent: []const u8, scene: Scene) json.Writer.Error!void {
+        if (self.skinOfBone(at) != null) return self.bone(w, at, scene);
+        if (scene.placed[at]) return;
+        scene.placed[at] = true;
         const model = &self.prepared.model;
         const held = model.nodes[at];
         const uuid = uuidOf(self.source, at);
@@ -378,6 +560,16 @@ const ModelScene = struct {
             try w.key("MeshInstance3D");
             try w.beginObject();
             try w.field("mesh", std.fmt.bufPrint(&name, "{s}#mesh/{d}", .{ self.source, m }) catch "");
+            if (held.skin) |skin| if (model.skins[skin].joints.len > 0) {
+                const skeleton = self.skeletonEntity(skin, scene.parents);
+                try w.field("skeleton", @as([]const u8, &skeleton));
+            };
+            try w.endObject();
+        }
+        if (self.skinOn(at, scene.parents)) |skin| {
+            try w.key("Skeleton3D");
+            try w.beginObject();
+            try self.skeletonField(w, skin);
             try w.endObject();
         }
         if (held.camera) |c| {
@@ -421,7 +613,7 @@ const ModelScene = struct {
             try w.endObject();
         }
         try w.endObject();
-        for (held.children) |child| try self.node(w, child, &uuid, placed);
+        for (held.children) |child| try self.node(w, child, &uuid, scene);
     }
 
     fn vector(w: *json.Writer, name: []const u8, v: [3]f32) json.Writer.Error!void {

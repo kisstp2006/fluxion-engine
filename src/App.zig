@@ -120,6 +120,7 @@ const mesh_table = @import("render/mesh.zig");
 const material_table = @import("render/materials.zig");
 const lightmap_table = @import("render/lightmaps.zig");
 const lightmap_bake = @import("render/lightmap_bake.zig");
+const skeleton_table = @import("render/skeleton.zig");
 const models = @import("assets/models.zig");
 const components3d = @import("render/render3d_components.zig");
 const view3d = @import("render/view3d.zig");
@@ -386,6 +387,11 @@ materials: material_table.Materials = .{},
 /// Every `.lightmap` read or baked: see `render/lightmaps.zig` and
 /// `bakeLightmap`.
 lightmaps: lightmap_table.Lightmaps = .{},
+/// Every skeleton read or made: see `render/skeleton.zig` and
+/// `loadSkeleton`.
+skeletons: skeleton_table.Skeletons = .{},
+/// Each `Skeleton3D`'s pose: where its bones are now.
+poses: skeleton_table.Poses = .{},
 /// What draws the 3D world: see `render/renderer3d.zig`.
 renderer3d: rendering3d.Renderer3D,
 /// What the frame is cleared to.
@@ -549,6 +555,7 @@ const entity_tables = .{
     .shader_params,    .views,       .animation_players,  .signals,
     .current_scene,    .tile_chunks, .bodies,             .areas,
     .picking,          .audio,       .control_tree,
+    .poses,
 };
 
 /// The engine's own components: what every scene can hold from the start.
@@ -569,6 +576,8 @@ pub const engine_components = .{
     components3d.SpotLight3D,
     components3d.Environment,
     components3d.LightmapGI,
+    skeleton_table.Skeleton3D,
+    skeleton_table.BoneAttachment3D,
     components.RigidBody2D,
     components.CharacterBody2D,
     components.Collider2D,
@@ -636,6 +645,7 @@ const described_types = .{
     mesh_table.MeshHandle,
     material_table.MaterialHandle,
     lightmap_table.LightmapHandle,
+    skeleton_table.SkeletonHandle,
     components3d.GiMode,
     components3d.LightBake,
     components3d.LightmapGI.MaxSize,
@@ -949,6 +959,8 @@ pub fn destroy(self: *App) void {
     self.meshes.deinit(gpa, &self.device);
     self.materials.deinit(gpa);
     self.lightmaps.deinit(gpa, &self.device);
+    self.poses.deinit(gpa);
+    self.skeletons.deinit(gpa);
     self.screen_texture.deinit();
     self.shaders.deinit(gpa, &self.device);
     self.views.deinit(gpa);
@@ -4088,6 +4100,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .mesh => self.meshes.sourceOf(handle),
         .material => self.materials.sourceOf(handle),
         .lightmap => self.lightmaps.sourceOf(handle),
+        .skeleton => self.skeletons.sourceOf(handle),
     };
 }
 
@@ -4111,6 +4124,7 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .mesh => self.loadMesh(path),
         .material => self.loadMaterial(path),
         .lightmap => self.loadLightmap(path),
+        .skeleton => self.loadSkeleton(path),
     };
 }
 
@@ -4132,6 +4146,7 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .mesh => self.findMesh(path),
         .material => self.findMaterial(path),
         .lightmap => self.findLightmap(path),
+        .skeleton => self.findSkeleton(path),
     };
 }
 
@@ -4522,6 +4537,153 @@ pub fn lightmapOf(self: *App, handle: lightmap_table.LightmapHandle) ?*const lig
 
 pub fn unloadLightmap(self: *App, handle: lightmap_table.LightmapHandle) void {
     self.lightmaps.unload(self.gpa, &self.device, handle);
+}
+
+/// Read a `.skeleton` file, or find the one read from there already: what a
+/// `Skeleton3D` names. A model's skeleton is found by its name -
+/// `res://robot.glb#skeleton/0` - with the model read first. See
+/// `render/skeleton.zig`.
+pub fn loadSkeleton(self: *App, path: []const u8) !skeleton_table.SkeletonHandle {
+    try self.loadModelOf(path);
+    if (models.baseOf(path) != null) return self.findSkeleton(path) orelse error.FileNotFound;
+    return self.skeletons.load(self, path);
+}
+
+/// A skeleton made in code, kept under `name`: a name given before gets
+/// the new one and keeps its handle.
+pub fn addSkeleton(self: *App, name: []const u8, made: skeleton_table.Skeleton) !skeleton_table.SkeletonHandle {
+    return self.skeletons.add(self.gpa, name, made);
+}
+
+pub fn findSkeleton(self: *App, path: []const u8) ?skeleton_table.SkeletonHandle {
+    return self.findSpelt(&self.skeletons, path);
+}
+
+/// Read a skeleton's file again. Says whether it had one.
+pub fn reloadSkeleton(self: *App, handle: skeleton_table.SkeletonHandle) !bool {
+    return self.skeletons.reload(self, handle);
+}
+
+/// What a skeleton holds: its bones.
+pub fn skeletonOf(self: *App, handle: skeleton_table.SkeletonHandle) ?*const skeleton_table.Skeleton {
+    return self.skeletons.get(handle);
+}
+
+pub fn unloadSkeleton(self: *App, handle: skeleton_table.SkeletonHandle) void {
+    self.skeletons.unload(self.gpa, handle);
+}
+
+/// Write a skeleton to a `.skeleton` file at `path`.
+pub fn saveSkeleton(self: *App, handle: skeleton_table.SkeletonHandle, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const held = self.skeletons.get(handle) orelse return error.NoSuchSkeleton;
+    const text = try skeleton_table.write(self.gpa, held.*);
+    defer self.gpa.free(text);
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = text });
+}
+
+// -------------------------------------------------------------------------
+// Bones
+//
+// A `Skeleton3D`'s pose, bone by bone: what an animation's bone tracks set
+// and a script can set too. A bone is named by its place in the skeleton's
+// list - `findBone` gives it - and its place, turn and size are from its
+// parent bone, or from the entity for a bone at the root.
+// -------------------------------------------------------------------------
+
+/// How many bones the skeleton of `entity`'s `Skeleton3D` has; nought for
+/// none.
+pub fn boneCount(self: *App, entity: ecs.Entity) u32 {
+    const pose = self.poses.of(self, entity) orelse return 0;
+    return @intCast(pose.locals.len);
+}
+
+/// The place of the bone called `name`, or minus one where there is none.
+pub fn findBone(self: *App, entity: ecs.Entity, name: []const u8) i32 {
+    const pose = self.poses.of(self, entity) orelse return -1;
+    const skeleton = self.skeletons.get(pose.skeleton) orelse return -1;
+    return if (skeleton.find(name)) |at| at else -1;
+}
+
+/// The name of bone `bone`; empty for one there is not.
+pub fn boneName(self: *App, entity: ecs.Entity, bone: u32) []const u8 {
+    const pose = self.poses.of(self, entity) orelse return "";
+    const skeleton = self.skeletons.get(pose.skeleton) orelse return "";
+    return if (bone < skeleton.bones.len) skeleton.bones[bone].name else "";
+}
+
+/// The place of bone `bone`'s parent, or minus one for one at the root.
+pub fn boneParent(self: *App, entity: ecs.Entity, bone: u32) i32 {
+    const pose = self.poses.of(self, entity) orelse return -1;
+    const skeleton = self.skeletons.get(pose.skeleton) orelse return -1;
+    if (bone >= skeleton.bones.len) return -1;
+    return if (skeleton.bones[bone].parent) |parent| parent else -1;
+}
+
+/// Where bone `bone` is from its parent now: its place, turn and size.
+pub fn bonePose(self: *App, entity: ecs.Entity, bone: u32) ?math.Transform {
+    const pose = self.poses.of(self, entity) orelse return null;
+    return if (bone < pose.locals.len) pose.locals[bone] else null;
+}
+
+/// Put bone `bone` somewhere else from its parent.
+pub fn setBonePose(self: *App, entity: ecs.Entity, bone: u32, placed: math.Transform) void {
+    const pose = self.poses.of(self, entity) orelse return;
+    if (bone >= pose.locals.len) return;
+    pose.locals[bone] = placed;
+    pose.moved();
+}
+
+pub fn bonePosition(self: *App, entity: ecs.Entity, bone: u32) math.Vec3 {
+    return if (self.bonePose(entity, bone)) |held| held.translation else .zero;
+}
+
+pub fn boneRotation(self: *App, entity: ecs.Entity, bone: u32) math.Quat {
+    return if (self.bonePose(entity, bone)) |held| held.rotation else .identity;
+}
+
+pub fn boneScale(self: *App, entity: ecs.Entity, bone: u32) math.Vec3 {
+    return if (self.bonePose(entity, bone)) |held| held.scale else .one;
+}
+
+pub fn setBonePosition(self: *App, entity: ecs.Entity, bone: u32, position: math.Vec3) void {
+    var held = self.bonePose(entity, bone) orelse return;
+    held.translation = position;
+    self.setBonePose(entity, bone, held);
+}
+
+pub fn setBoneRotation(self: *App, entity: ecs.Entity, bone: u32, rotation: math.Quat) void {
+    var held = self.bonePose(entity, bone) orelse return;
+    held.rotation = rotation.norm();
+    self.setBonePose(entity, bone, held);
+}
+
+pub fn setBoneScale(self: *App, entity: ecs.Entity, bone: u32, scale: math.Vec3) void {
+    var held = self.bonePose(entity, bone) orelse return;
+    held.scale = scale;
+    self.setBonePose(entity, bone, held);
+}
+
+/// Where bone `bone` is in the space of `entity` - its `Skeleton3D`'s -
+/// now.
+pub fn boneGlobalPose(self: *App, entity: ecs.Entity, bone: u32) ?math.Transform {
+    const globals = self.poses.globalsOf(self, entity) orelse return null;
+    return if (bone < globals.len) .fromMat4(globals[bone]) else null;
+}
+
+/// Where bone `bone` is in `entity`'s space now.
+pub fn boneGlobalPosition(self: *App, entity: ecs.Entity, bone: u32) math.Vec3 {
+    return if (self.boneGlobalPose(entity, bone)) |held| held.translation else .zero;
+}
+
+/// Every bone of `entity`'s skeleton back to where it is at rest.
+pub fn resetPose(self: *App, entity: ecs.Entity) void {
+    const pose = self.poses.of(self, entity) orelse return;
+    const skeleton = self.skeletons.get(pose.skeleton) orelse return;
+    for (skeleton.bones, pose.locals) |bone, *local| local.* = bone.rest;
+    pose.moved();
 }
 
 /// Write a lightmap to a `.lightmap` file at `path`.
@@ -5624,6 +5786,19 @@ pub const reflect_methods = .{
     .animationNames = .{attr.Params{ .names = &.{"player"} }},
     .hasAnimation = .{attr.Params{ .names = &.{ "player", "name" } }},
     .animationLength = .{attr.Params{ .names = &.{ "player", "name" } }},
+    // Bones
+    .boneCount = .{attr.Params{ .names = &.{"entity"} }},
+    .findBone = .{attr.Params{ .names = &.{ "entity", "name" } }},
+    .boneName = .{attr.Params{ .names = &.{ "entity", "bone" } }},
+    .boneParent = .{attr.Params{ .names = &.{ "entity", "bone" } }},
+    .bonePosition = .{attr.Params{ .names = &.{ "entity", "bone" } }},
+    .boneRotation = .{attr.Params{ .names = &.{ "entity", "bone" } }},
+    .boneScale = .{attr.Params{ .names = &.{ "entity", "bone" } }},
+    .setBonePosition = .{attr.Params{ .names = &.{ "entity", "bone", "position" } }},
+    .setBoneRotation = .{attr.Params{ .names = &.{ "entity", "bone", "rotation" } }},
+    .setBoneScale = .{attr.Params{ .names = &.{ "entity", "bone", "scale" } }},
+    .boneGlobalPosition = .{attr.Params{ .names = &.{ "entity", "bone" } }},
+    .resetPose = .{attr.Params{ .names = &.{"entity"} }},
     // Drawing
     .drawLine = .{ attr.Params{ .names = &.{ "entity", "from", "to", "color", "width" } }, attr.defaults(.{@as(f32, 1)}) },
     .drawRect = .{ attr.Params{ .names = &.{ "entity", "position", "size", "color", "filled", "width" } }, attr.defaults(.{ true, @as(f32, 1) }) },

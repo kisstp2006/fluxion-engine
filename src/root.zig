@@ -172,6 +172,8 @@ pub const render = struct {
     pub const shadows3d = @import("render/shadows3d.zig");
     /// What a 3D camera sees, and where a pixel is in the 3D world.
     pub const view3d = @import("render/view3d.zig");
+    /// Skeletons, their bones and poses.
+    pub const skeleton = @import("render/skeleton.zig");
 };
 
 /// Every glyph the game has drawn, in one texture.
@@ -232,6 +234,10 @@ pub const PointLight3D = components.PointLight3D;
 pub const SpotLight3D = components.SpotLight3D;
 pub const Environment = components.Environment;
 pub const LightmapGI = components.LightmapGI;
+/// Skeletons and the meshes they bend: see `render/skeleton.zig`.
+pub const Skeleton3D = components.Skeleton3D;
+pub const BoneAttachment3D = components.BoneAttachment3D;
+pub const skeleton = render.skeleton;
 /// What a 3D camera sees: what `App.drawWorld3D` draws the world through.
 pub const View3D = render.view3d.View3D;
 
@@ -564,6 +570,7 @@ test {
     _ = @import("render/mesh.zig");
     _ = @import("render/lightmap_uv.zig");
     _ = @import("render/lightmaps.zig");
+    _ = @import("render/skeleton.zig");
     _ = @import("render/lightmap_test.zig");
     _ = @import("render/view3d.zig");
     _ = @import("render/renderer3d.zig");
