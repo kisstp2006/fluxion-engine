@@ -36,10 +36,11 @@ const Nesting = scene.Nesting;
 const Loaded = scene.Loaded;
 
 /// What `assets` says of one file: its UUID, and how a texture is sampled
-/// when that is not the way `Assets.loadTexture` samples by default.
+/// when that is not the way `Assets.loadTexture` samples by default - the
+/// project's `rendering.default_texture_filter` where it says no filter.
 const FileInfo = struct {
     uid: ?Uuid = null,
-    filter: rhi.Filter = .nearest,
+    filter: ?rhi.Filter = null,
     wrap: rhi.Wrap = .clamp_to_edge,
 };
 
@@ -416,7 +417,9 @@ pub const Loading = struct {
                 loading.path.pop(mark);
             } else if (std.mem.eql(u8, field, "filter")) {
                 const mark = loading.path.push("filter", .{});
-                try readValue(loading, rhi.Filter, &info.filter);
+                var filter: rhi.Filter = .nearest;
+                try readValue(loading, rhi.Filter, &filter);
+                info.filter = filter;
                 loading.path.pop(mark);
             } else if (std.mem.eql(u8, field, "wrap")) {
                 const mark = loading.path.push("wrap", .{});

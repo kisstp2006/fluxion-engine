@@ -188,6 +188,10 @@ pub const Material3DData = extern struct {
     /// they are moved, in pictures.
     uv_scale: math.Vec2 = .one,
     uv_offset: math.Vec2 = .zero,
+    /// How its pictures are read: smoothly, through their smaller levels
+    /// and sharp at a slant; texel by texel, for pixel art; or as each
+    /// picture says it is sampled.
+    texture_filter: TextureFilter = .linear,
     /// Light it gives off whatever lights it, times `emission_energy`, and
     /// times `emission_texture` where it has one: a screen, a lamp's bulb.
     emission: Color = .black,
@@ -206,6 +210,17 @@ pub const Material3DData = extern struct {
 
     /// Its shader's numbers, kept with it, written under `params`.
     pub const scene_beside = [_]@import("../scene/scene.zig").Beside{shaders.scene_params};
+
+    pub const TextureFilter = enum(u8) {
+        /// Smooth, through the picture's smaller levels, and sharp seen at
+        /// a slant: what a surface in the distance wants.
+        linear,
+        /// Each texel a square: pixel art.
+        nearest,
+        /// As the picture itself is sampled: the project's
+        /// `default_texture_filter`, or what the scene says of the file.
+        texture,
+    };
 
     pub const Transparency = enum(u8) {
         /// Solid, drawn front to back.
@@ -241,6 +256,7 @@ pub const Material3DData = extern struct {
         .alpha_scissor_threshold = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "Under this alpha nothing is drawn, with transparency at scissor" } },
         .uv_scale = .{ attr.Group{ .name = "Where the pictures lie" }, attr.Doc{ .text = "How many times the pictures are laid across" } },
         .uv_offset = .{attr.Doc{ .text = "How far the pictures are moved, in pictures" }},
+        .texture_filter = .{attr.Doc{ .text = "How the pictures are read: smooth and sharp at a slant, texel by texel for pixel art, or as each picture says" }},
         .transparency = .{ attr.Group{ .name = "Drawing" }, attr.Doc{ .text = "Whether it is laid over what is behind it by its alpha, or cut where that is low" } },
         .cull = .{attr.Doc{ .text = "Which side of its triangles is not drawn" }},
         .unshaded = .{attr.Doc{ .text = "Drawn as its colour, with no light" }},

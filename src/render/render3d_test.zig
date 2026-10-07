@@ -442,3 +442,23 @@ test "a skeleton that shows its bones draws a line from each to its parent and a
     // One line, two dots.
     try testing.expectEqual(@as(usize, 3), app.debug_3d_frame.lines.items.len);
 }
+
+test "a surface's pictures are read as its material says: smoothly, texel by texel, or as the picture is sampled" {
+    const app = try headless();
+    defer app.destroy();
+    const pixels: [16]u8 = @splat(255);
+    const picture = try app.assets.adoptTexture("check", 2, 2, &pixels, .{ .filter = .nearest, .mips = true });
+    const material = try app.addMaterial("checked", .{ .albedo_texture = picture });
+    _ = try looking(app);
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .material = material } });
+
+    // Smooth by default, whatever the picture says of itself.
+    _ = try app.step();
+    try testing.expect(app.renderer3d.items.items[0].sampler.eql(app.assets.mipSamplerFor(.linear, .repeat)));
+    app.materialOf(material).?.texture_filter = .nearest;
+    _ = try app.step();
+    try testing.expect(app.renderer3d.items.items[0].sampler.eql(app.assets.mipSamplerFor(.nearest, .repeat)));
+    app.materialOf(material).?.texture_filter = .texture;
+    _ = try app.step();
+    try testing.expect(app.renderer3d.items.items[0].sampler.eql(app.assets.mipSamplerFor(.nearest, .repeat)));
+}

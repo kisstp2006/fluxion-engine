@@ -27,9 +27,10 @@ const version = scene.version;
 const SaveOptions = scene.SaveOptions;
 
 /// How a texture a scene points at is sampled, when it is not the way
-/// `Assets.loadTexture` samples by default.
+/// `Assets.loadTexture` samples by default: a filter that is not the
+/// project's `default_texture_filter`, a wrap that is not clamping.
 const TextureOptions = struct {
-    filter: rhi.Filter = .nearest,
+    filter: ?rhi.Filter = null,
     wrap: rhi.Wrap = .clamp_to_edge,
 };
 
@@ -452,9 +453,9 @@ pub const Saving = struct {
                 var text: [Project.uid_scheme.len + Uuid.string_len]u8 = undefined;
                 try w.field("uid", std.fmt.bufPrint(&text, Project.uid_scheme ++ "{f}", .{held}) catch unreachable);
             }
-            if (sampled.filter != .nearest) {
+            if (sampled.filter) |filter| {
                 try w.key("filter");
-                try writeValue(saving, w, rhi.Filter, &sampled.filter);
+                try writeValue(saving, w, rhi.Filter, &filter);
             }
             if (sampled.wrap != .clamp_to_edge) {
                 try w.key("wrap");
@@ -590,7 +591,8 @@ fn writeValue(saving: *Saving, w: *json.Writer, comptime T: type, value: *const 
             // How a texture is sampled is the file'saving, and goes in `assets`.
             .texture => {
                 const texture = saving.app.assets.get(value.*).?;
-                kept.value_ptr.* = .{ .filter = texture.filter, .wrap = texture.wrap };
+                const filter: ?rhi.Filter = if (texture.filter == saving.app.assets.default_filter) null else texture.filter;
+                kept.value_ptr.* = .{ .filter = filter, .wrap = texture.wrap };
             },
             // The first font of a file is the file. Another font of a
             // collection is an object that says which, so one scene can

@@ -17,6 +17,7 @@ const materials = @import("../render/materials.zig");
 const gltf = @import("gltf.zig");
 const animation = @import("../animation/animation.zig");
 const math = @import("fluxion_math");
+const rhi = @import("fluxion_rhi");
 
 const Transform3D = components.Transform3D;
 const MeshInstance3D = components.MeshInstance3D;
@@ -400,4 +401,85 @@ test "a model's animations are a library its root plays: a bone's channel moves 
     app.world.get(root, AnimationPlayer).?.play("Bend", -1);
     for (0..3) |_| _ = try app.step();
     try testing.expectEqualStrings("Bend", app.world.get(root, AnimationPlayer).?.currentName());
+}
+
+test "a bone hung from its parent through a node that is not a bone moves as that node does" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    // Between the two bones a node a unit up that turns a quarter about z
+    // in a second.
+    const text = try gltf.skinnedGltf(testing.allocator);
+    defer testing.allocator.free(text);
+    const lower = try std.mem.replaceOwned(u8, testing.allocator, text, "{ \"name\": \"Lower\", \"children\": [2] }", "{ \"name\": \"Lower\", \"children\": [4] }");
+    defer testing.allocator.free(lower);
+    const mid = try std.mem.replaceOwned(u8, testing.allocator, lower, "{ \"name\": \"Body\", \"mesh\": 0, \"skin\": 0 }", "{ \"name\": \"Body\", \"mesh\": 0, \"skin\": 0 }, { \"name\": \"Mid\", \"translation\": [0, 1, 0], \"children\": [2] }");
+    defer testing.allocator.free(mid);
+    const turned = try std.mem.replaceOwned(u8, testing.allocator, mid, "{ \"sampler\": 0, \"target\": { \"node\": 3, \"path\": \"weights\" } }", "{ \"sampler\": 0, \"target\": { \"node\": 4, \"path\": \"rotation\" } }");
+    defer testing.allocator.free(turned);
+    try testing.expect(!std.mem.eql(u8, mid, turned));
+    try folder.put("models/between.gltf", turned);
+    const app = try appIn(&folder);
+    defer app.destroy();
+
+    const root = try app.instantiate(try app.loadScene("res://models/between.gltf"), .none);
+    const armature = app.find("Armature").?;
+    // At rest the upper bone is two up: its own unit and the node's.
+    try testing.expect(app.bonePosition(armature, 1).approxEql(.init(0, 2, 0)));
+    const bend = &app.animation_libraries.edit(app.findAnimations("res://models/between.gltf#animations").?).?.animations.items[0];
+    // Baked whole: where it is, how it is turned and how big, from its
+    // keys, the node's and thirty a second between.
+    const place = bend.boneTrackOf("Armature", "Upper", "position").?;
+    try testing.expectEqual(@as(usize, 31), place.keys.items.len);
+    try testing.expect(bend.boneTrackOf("Armature", "Upper", "scale") != null);
+
+    // A second in, the node has turned a quarter: the bone is a unit to
+    // its left, turned with it as well as by its own quarter.
+    try animation.pose(app, root, bend, 1);
+    try testing.expect(app.bonePosition(armature, 1).sub(.init(-1, 1, 0)).len() < 1e-4);
+    try testing.expect(app.boneRotation(armature, 1).rotate(.init(1, 0, 0)).sub(.init(-1, 0, 0)).len() < 1e-4);
+    try animation.pose(app, root, bend, 0.5);
+    const half = std.math.sqrt1_2;
+    try testing.expect(app.bonePosition(armature, 1).sub(.init(-half, 1 + half, 0)).len() < 1e-3);
+}
+
+test "a picture a material or a scene names is sampled as the project says, unless the scene says otherwise" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    try Project.writeSettings(testing.allocator, testing.io, folder.root(), .{ .application = .{ .name = "Models" }, .rendering = .{ .default_texture_filter = .linear } });
+    var pixels: [2 * 2 * 4]u8 = @splat(255);
+    var path: [200]u8 = undefined;
+    for ([_][]const u8{ "blue", "green" }) |name| {
+        try image.png.writeFile(testing.allocator, testing.io, try std.fmt.bufPrint(&path, "{s}/models/{s}.png", .{ folder.root(), name }), .{ .width = 2, .height = 2, .pixels = &pixels, .row_pitch = 8 }, .{});
+    }
+    try folder.put("models/floor.mat3d", "{ \"albedo_texture\": \"res://models/red.png\" }");
+    try folder.put("models/two.json",
+        \\{ "fluxion_scene": 3, "entities": [
+        \\  { "uuid": "00000000-0000-4000-8000-000000000001", "name": "Two" },
+        \\  { "parent": "00000000-0000-4000-8000-000000000001", "Sprite": { "texture": "res://models/blue.png" } },
+        \\  { "parent": "00000000-0000-4000-8000-000000000001", "Sprite": { "texture": "res://models/green.png" } } ],
+        \\  "assets": { "res://models/green.png": { "filter": "nearest" } } }
+    );
+    const app = try appIn(&folder);
+    defer app.destroy();
+
+    // A material's picture, and a scene's of which it says nothing: as the
+    // project says.
+    const floor = try app.loadMaterial("res://models/floor.mat3d");
+    try testing.expectEqual(rhi.Filter.linear, app.assets.get(app.materialOf(floor).?.albedo_texture).?.filter);
+    // Read into the world as it is, so that writing it writes its sprites.
+    const bytes = try app.project.readFileAlloc(testing.allocator, "res://models/two.json", .unlimited);
+    defer testing.allocator.free(bytes);
+    _ = try @import("../scene/scene_read.zig").read(app, bytes, .{});
+    const blue = app.assets.findTexture("res://models/blue.png").?;
+    const green = app.assets.findTexture("res://models/green.png").?;
+    try testing.expectEqual(rhi.Filter.linear, app.assets.get(blue).?.filter);
+    try testing.expectEqual(rhi.Filter.nearest, app.assets.get(green).?.filter);
+
+    // Written again, only what is not the project's is said.
+    const text = try @import("../scene/scene_write.zig").write(app, testing.allocator, .{});
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "\"nearest\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"linear\"") == null);
 }
