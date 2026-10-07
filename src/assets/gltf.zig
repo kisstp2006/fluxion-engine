@@ -18,9 +18,13 @@
 //! show, and the unlit extension; a picture's coordinates moved and scaled
 //! by the texture-transform extension; PNG and JPEG pictures, in the file
 //! or beside it; nodes' places, turns and sizes, given apart or as a
-//! matrix; perspective and orthographic cameras; and the punctual lights.
-//! What is left out - lines, points, morph targets, a sparse accessor, a
-//! picture of another format - is said in `Model.notes`.
+//! matrix; perspective and orthographic cameras; the punctual lights;
+//! skins - the nodes that are a skeleton's bones, each one's inverse bind
+//! matrix, and each vertex's four bones and weights - and animations, each
+//! channel a node's place, turn or size, stepped, straight or along a cubic
+//! spline. What is left out - lines, points, morph targets and their
+//! weights, a sparse accessor, a picture of another format, a skin of more
+//! than `mesh.max_bones` bones - is said in `Model.notes`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -103,16 +107,21 @@ pub const MeshData = struct {
     /// Its `Mesh.uv2_texels`: what its own second coordinates are laid out
     /// for, or what `lightmap_uv.unwrap` made; nought for none.
     uv2_texels: u32 = 0,
+    /// Each vertex's bones, for a mesh a skin bends; empty for one that is
+    /// not. See `mesh.SkinVertex`.
+    skin: []mesh.SkinVertex = &.{},
     built: bool = false,
 
-    /// The vertices, indices and surfaces, which are the caller's from here.
-    pub fn take(self: *MeshData) struct { []mesh.Vertex, []u32, []mesh.Surface } {
+    /// The vertices, indices, surfaces and skin, which are the caller's from
+    /// here.
+    pub fn take(self: *MeshData) struct { []mesh.Vertex, []u32, []mesh.Surface, []mesh.SkinVertex } {
         defer {
             self.vertices = &.{};
             self.indices = &.{};
             self.surfaces = &.{};
+            self.skin = &.{};
         }
-        return .{ self.vertices, self.indices, self.surfaces };
+        return .{ self.vertices, self.indices, self.surfaces, self.skin };
     }
 };
 
@@ -142,9 +151,48 @@ pub const Node = struct {
     name: []const u8,
     transform: math.Transform = .{},
     mesh: ?u32 = null,
+    /// The skin its mesh is bent by, if it is.
+    skin: ?u32 = null,
     camera: ?u32 = null,
     light: ?u32 = null,
     children: []const u32 = &.{},
+};
+
+/// A skeleton: the nodes that are its bones, in the order a vertex of a
+/// mesh it bends names them, and each one's inverse bind matrix - what takes
+/// a vertex from where the mesh was made to the bone's own space.
+pub const Skin = struct {
+    name: []const u8,
+    joints: []const u32,
+    inverse_binds: []const math.Mat4,
+};
+
+/// One node's place, turn or size over time.
+pub const Channel = struct {
+    node: u32,
+    path: Path,
+    interpolation: Interpolation,
+    /// Seconds, rising.
+    times: []const f32,
+    /// Each key's numbers: three for a place or a size, four for a turn -
+    /// x, y, z, w. On a cubic spline, three of those a key: the tangent in,
+    /// the value, the tangent out.
+    values: []const f32,
+
+    pub const Path = enum { translation, rotation, scale };
+    pub const Interpolation = enum { linear, step, cubic };
+
+    /// How many numbers one value is.
+    pub fn width(self: Channel) usize {
+        return if (self.path == .rotation) 4 else 3;
+    }
+};
+
+pub const Animation = struct {
+    name: []const u8,
+    channels: []const Channel,
+    /// Its last key's time, in seconds.
+    length: f32,
 };
 
 pub const Model = struct {
@@ -161,6 +209,8 @@ pub const Model = struct {
     roots: []const u32 = &.{},
     cameras: []Camera = &.{},
     lights: []Light = &.{},
+    skins: []Skin = &.{},
+    animations: []Animation = &.{},
     /// What was left out, in words: one line each.
     notes: std.ArrayListUnmanaged([]const u8) = .empty,
     /// Kept for `buildMesh`: the document and its buffers.
@@ -176,6 +226,7 @@ pub const Model = struct {
             self.gpa.free(held.indices);
             self.gpa.free(held.surfaces);
             self.gpa.free(held.materials);
+            self.gpa.free(held.skin);
         }
         for (self.images) |held| self.gpa.free(held.pixels);
         self.arena.deinit();
@@ -231,15 +282,37 @@ const Doc = struct {
     images: []const struct { uri: ?[]const u8 = null, bufferView: ?u32 = null, mimeType: []const u8 = "", name: []const u8 = "" } = &.{},
     samplers: []const struct { magFilter: ?u32 = null } = &.{},
     cameras: []const CameraDoc = &.{},
+    skins: []const SkinDoc = &.{},
+    animations: []const AnimationDoc = &.{},
     extensions: struct {
         KHR_lights_punctual: ?struct { lights: []const LightDoc = &.{} } = null,
     } = .{},
+};
+
+const SkinDoc = struct {
+    name: []const u8 = "",
+    inverseBindMatrices: ?u32 = null,
+    joints: []const u32 = &.{},
+};
+
+const AnimationDoc = struct {
+    name: []const u8 = "",
+    channels: []const struct {
+        sampler: u32,
+        target: struct { node: ?u32 = null, path: []const u8 = "" },
+    } = &.{},
+    samplers: []const struct {
+        input: u32,
+        output: u32,
+        interpolation: []const u8 = "LINEAR",
+    } = &.{},
 };
 
 const NodeDoc = struct {
     name: []const u8 = "",
     children: []const u32 = &.{},
     mesh: ?u32 = null,
+    skin: ?u32 = null,
     camera: ?u32 = null,
     matrix: ?[16]f32 = null,
     translation: ?[3]f32 = null,
@@ -261,6 +334,8 @@ const PrimitiveDoc = struct {
         TEXCOORD_1: ?u32 = null,
         COLOR_0: ?u32 = null,
         TANGENT: ?u32 = null,
+        JOINTS_0: ?u32 = null,
+        WEIGHTS_0: ?u32 = null,
     } = .{},
     indices: ?u32 = null,
     material: ?u32 = null,
@@ -330,7 +405,7 @@ const LightDoc = struct {
 };
 
 /// The extensions a file may need and still be read.
-const understood = [_][]const u8{ "KHR_texture_transform", "KHR_materials_emissive_strength", "KHR_materials_unlit", "KHR_lights_punctual" };
+const understood = [_][]const u8{ "KHR_texture_transform", "KHR_materials_emissive_strength", "KHR_materials_unlit", "KHR_lights_punctual", "KHR_mesh_quantization" };
 
 /// A `.glb`'s two parts: the document, and the binary buffer if it has one.
 fn split(bytes: []const u8) Error!struct { text: []const u8, bin: ?[]const u8 } {
@@ -451,6 +526,7 @@ pub fn parse(gpa: Allocator, bytes: []const u8, fetch: ?Fetch) Error!Model {
             .name = if (given.name.len > 0) given.name else try std.fmt.allocPrint(a, "Node {d}", .{at}),
             .transform = transformOf(given),
             .mesh = given.mesh,
+            .skin = if (given.skin) |held| if (held < doc.skins.len) held else null else null,
             .camera = given.camera,
             .children = given.children,
         };
@@ -459,6 +535,9 @@ pub fn parse(gpa: Allocator, bytes: []const u8, fetch: ?Fetch) Error!Model {
             out.light = held.light;
         }
     }
+
+    try readSkins(&model);
+    try readAnimations(&model);
 
     // The scene shown: the one it names, the first, or every node no other
     // has as a child.
@@ -478,6 +557,87 @@ pub fn parse(gpa: Allocator, bytes: []const u8, fetch: ?Fetch) Error!Model {
         model.roots = roots.items;
     }
     return model;
+}
+
+/// Each skin's bones and inverse bind matrices. One of more bones than a
+/// vertex can name is left out, and its meshes drawn as they are.
+fn readSkins(model: *Model) Error!void {
+    const doc = model.doc;
+    const a = model.arena.allocator();
+    model.skins = try a.alloc(Skin, doc.skins.len);
+    for (doc.skins, model.skins, 0..) |given, *out, at| {
+        for (given.joints) |joint| if (joint >= doc.nodes.len) return error.BadModel;
+        const name = if (given.name.len > 0) given.name else try std.fmt.allocPrint(a, "Skin {d}", .{at});
+        if (given.joints.len > mesh.max_bones) {
+            try model.note("the skin {s} has {d} bones, more than {d}: its meshes are drawn as they were made", .{ name, given.joints.len, mesh.max_bones });
+            out.* = .{ .name = name, .joints = &.{}, .inverse_binds = &.{} };
+            continue;
+        }
+        const binds = try a.alloc(math.Mat4, given.joints.len);
+        @memset(binds, math.Mat4.identity);
+        if (given.inverseBindMatrices) |accessor| {
+            const view = try viewOf(model, accessor, "inverse bind matrices");
+            if (view.components != 16 or view.count < given.joints.len) return error.BadModel;
+            for (binds, 0..) |*bind, i| {
+                var numbers: [16]f32 = undefined;
+                for (&numbers, 0..) |*number, c| number.* = view.float(i, c);
+                bind.* = .fromArray(numbers);
+            }
+        }
+        out.* = .{ .name = name, .joints = given.joints, .inverse_binds = binds };
+    }
+}
+
+/// Each animation's channels: its nodes' places, turns and sizes, keyed.
+/// A morph target's weights, and a channel that names no node, are left
+/// out.
+fn readAnimations(model: *Model) Error!void {
+    const doc = model.doc;
+    const a = model.arena.allocator();
+    var animations: std.ArrayListUnmanaged(Animation) = .empty;
+    var weights_noted = false;
+    for (doc.animations, 0..) |given, at| {
+        var channels: std.ArrayListUnmanaged(Channel) = .empty;
+        var length: f32 = 0;
+        for (given.channels) |channel| {
+            const node = channel.target.node orelse continue;
+            if (node >= doc.nodes.len or channel.sampler >= given.samplers.len) return error.BadModel;
+            const path: Channel.Path = if (std.mem.eql(u8, channel.target.path, "translation"))
+                .translation
+            else if (std.mem.eql(u8, channel.target.path, "rotation"))
+                .rotation
+            else if (std.mem.eql(u8, channel.target.path, "scale"))
+                .scale
+            else {
+                if (!weights_noted) try model.note("a morph target's weights are not animated", .{});
+                weights_noted = true;
+                continue;
+            };
+            const sampler = given.samplers[channel.sampler];
+            const interpolation: Channel.Interpolation = if (std.mem.eql(u8, sampler.interpolation, "STEP"))
+                .step
+            else if (std.mem.eql(u8, sampler.interpolation, "CUBICSPLINE"))
+                .cubic
+            else
+                .linear;
+            const input = try viewOf(model, sampler.input, "key times");
+            const output = try viewOf(model, sampler.output, "key values");
+            const width: usize = if (path == .rotation) 4 else 3;
+            const per_key: usize = if (interpolation == .cubic) 3 else 1;
+            if (input.components != 1 or output.components != width or output.count < input.count * per_key) return error.BadModel;
+            const times = try a.alloc(f32, input.count);
+            for (times, 0..) |*time, i| time.* = input.float(i, 0);
+            const values = try a.alloc(f32, input.count * per_key * width);
+            for (0..input.count * per_key) |i| for (0..width) |c| {
+                values[i * width + c] = output.float(i, c);
+            };
+            if (times.len > 0) length = @max(length, times[times.len - 1]);
+            try channels.append(a, .{ .node = node, .path = path, .interpolation = interpolation, .times = times, .values = values });
+        }
+        const name = if (given.name.len > 0) given.name else try std.fmt.allocPrint(a, "Animation {d}", .{at});
+        try animations.append(a, .{ .name = name, .channels = channels.items, .length = length });
+    }
+    model.animations = animations.items;
 }
 
 fn transformOf(given: NodeDoc) math.Transform {
@@ -648,7 +808,13 @@ const View = struct {
     }
 
     fn index(self: View, i: usize) u32 {
-        const at = self.bytes[i * self.stride ..];
+        return self.whole(i, 0);
+    }
+
+    /// Item `i`'s component `c`, as a whole number: what a vertex's bones
+    /// are named by.
+    fn whole(self: View, i: usize, c: usize) u32 {
+        const at = self.bytes[i * self.stride + c * (componentSize(self.component) orelse 1) ..];
         return switch (self.component) {
             5121 => at[0],
             5123 => std.mem.readInt(u16, at[0..2], .little),
@@ -663,7 +829,7 @@ fn viewOf(model: *const Model, at: u32, comptime what: []const u8) Error!View {
     if (at >= doc.accessors.len) return error.BadModel;
     const accessor = doc.accessors[at];
     if (accessor.sparse != null) return error.UnsupportedModel;
-    const components: u32 = if (std.mem.eql(u8, accessor.type, "SCALAR")) 1 else if (std.mem.eql(u8, accessor.type, "VEC2")) 2 else if (std.mem.eql(u8, accessor.type, "VEC3")) 3 else if (std.mem.eql(u8, accessor.type, "VEC4")) 4 else return error.BadModel;
+    const components: u32 = if (std.mem.eql(u8, accessor.type, "SCALAR")) 1 else if (std.mem.eql(u8, accessor.type, "VEC2")) 2 else if (std.mem.eql(u8, accessor.type, "VEC3")) 3 else if (std.mem.eql(u8, accessor.type, "VEC4")) 4 else if (std.mem.eql(u8, accessor.type, "MAT4")) 16 else return error.BadModel;
     const size = View.componentSize(accessor.componentType) orelse return error.BadModel;
     const view_index = accessor.bufferView orelse return error.BadModel;
     const bytes = try viewBytes(model, view_index);
@@ -694,6 +860,14 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
     // Whether every part brings its lightmap UVs: one that does not leaves
     // the rest's on top of its own.
     var all_second = true;
+    // Bent by a skin where any part names its bones: each vertex's bones
+    // beside it, on the first bone where a part names none.
+    var skin: std.ArrayListUnmanaged(mesh.SkinVertex) = .empty;
+    defer skin.deinit(gpa);
+    const skinned = for (given.primitives) |primitive| {
+        if (primitive.attributes.JOINTS_0 != null and primitive.attributes.WEIGHTS_0 != null) break true;
+    } else false;
+    var far_bone = false;
 
     for (given.primitives) |primitive| {
         if (primitive.mode < 4 or primitive.mode > 6) continue;
@@ -706,6 +880,9 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
         const second_uvs: ?View = if (primitive.attributes.TEXCOORD_1) |n| try viewOf(model, n, "second coordinates") else null;
         const colors: ?View = if (primitive.attributes.COLOR_0) |n| try viewOf(model, n, "colours") else null;
         const tangents: ?View = if (primitive.attributes.TANGENT) |n| try viewOf(model, n, "tangents") else null;
+        const joints: ?View = if (primitive.attributes.JOINTS_0) |n| try viewOf(model, n, "bones") else null;
+        const weights: ?View = if (primitive.attributes.WEIGHTS_0) |n| try viewOf(model, n, "weights") else null;
+        if (skinned) try skin.ensureUnusedCapacity(gpa, positions.count);
         try vertices.ensureUnusedCapacity(gpa, positions.count);
         for (0..positions.count) |i| {
             var v: mesh.Vertex = .{ .position = .{ positions.float(i, 0), positions.float(i, 1), positions.float(i, 2) }, .normal = .{ 0, 1, 0 } };
@@ -732,6 +909,24 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
                 v.tangent = .{ n.float(i, 0), n.float(i, 1), n.float(i, 2), if (n.float(i, 3) < 0) -1 else 1 };
             };
             vertices.appendAssumeCapacity(v);
+            if (skinned) {
+                var bones: mesh.SkinVertex = .{};
+                if (joints != null and weights != null and i < joints.?.count and i < weights.?.count) {
+                    for (0..4) |c| {
+                        const joint = if (c < joints.?.components) joints.?.whole(i, c) else 0;
+                        const weight = if (c < weights.?.components) weights.?.float(i, c) else 0;
+                        if (joint >= mesh.max_bones) {
+                            far_bone = true;
+                            bones.joints[c] = 0;
+                            bones.weights[c] = 0;
+                        } else {
+                            bones.joints[c] = @intCast(joint);
+                            bones.weights[c] = weight;
+                        }
+                    }
+                }
+                skin.appendAssumeCapacity(bones.normalized());
+            }
         }
 
         // The corners, as triangles.
@@ -763,7 +958,7 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
             else => unreachable,
         }
         for (indices.items[first..]) |index| if (index >= vertices.items.len) return error.BadModel;
-        if (normals == null) try flatten(gpa, &vertices, &indices, base, first);
+        if (normals == null) try flatten(gpa, &vertices, &indices, if (skinned) &skin else null, base, first);
         // Worked out where the file gives none, or the corners were made
         // apart and lost what it gave.
         if (tangents == null or normals == null) mesh.computeTangentsFrom(vertices.items, indices.items[first..], base);
@@ -789,11 +984,15 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
         gpa.free(built.vertices);
         gpa.free(built.indices);
     }
+    if (far_bone) try model.note("the mesh {s} names a bone past the {d} a skin may have", .{ held.name, mesh.max_bones });
     if (all_second and own_indices.len > 0) {
         built.uv2_texels = brought_uv2_texels;
-    } else if (model.unwrap_lightmap) {
+    } else if (model.unwrap_lightmap and !skinned) {
+        // A mesh a skeleton bends is lit from the probes, never a lightmap:
+        // and unwrapping would part vertices from their bones.
         try lightmap_uv.unwrap(gpa, &built);
     }
+    held.skin = try skin.toOwnedSlice(gpa);
     held.surfaces = try surfaces.toOwnedSlice(gpa);
     held.materials = try materials.toOwnedSlice(gpa);
     held.vertices = built.vertices;
@@ -804,13 +1003,16 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
 
 /// A primitive with no normals made flat, as glTF says it is: each of its
 /// triangles' corners a vertex of its own, facing the triangle's way.
-fn flatten(gpa: Allocator, vertices: *std.ArrayListUnmanaged(mesh.Vertex), indices: *std.ArrayListUnmanaged(u32), base: u32, first: u32) Allocator.Error!void {
+fn flatten(gpa: Allocator, vertices: *std.ArrayListUnmanaged(mesh.Vertex), indices: *std.ArrayListUnmanaged(u32), skin: ?*std.ArrayListUnmanaged(mesh.SkinVertex), base: u32, first: u32) Allocator.Error!void {
     const corners = try gpa.dupe(u32, indices.items[first..]);
     defer gpa.free(corners);
     const shared = try gpa.dupe(mesh.Vertex, vertices.items[base..]);
     defer gpa.free(shared);
+    const shared_bones = if (skin) |held| try gpa.dupe(mesh.SkinVertex, held.items[base..]) else &.{};
+    defer gpa.free(shared_bones);
     vertices.shrinkRetainingCapacity(base);
     indices.shrinkRetainingCapacity(first);
+    if (skin) |held| held.shrinkRetainingCapacity(base);
     var at: usize = 0;
     while (at + 3 <= corners.len) : (at += 3) {
         var three: [3]mesh.Vertex = .{ shared[corners[at] - base], shared[corners[at + 1] - base], shared[corners[at + 2] - base] };
@@ -822,6 +1024,7 @@ fn flatten(gpa: Allocator, vertices: *std.ArrayListUnmanaged(mesh.Vertex), indic
         const start: u32 = @intCast(vertices.items.len);
         try vertices.appendSlice(gpa, &three);
         try indices.appendSlice(gpa, &.{ start, start + 1, start + 2 });
+        if (skin) |held| for (corners[at..][0..3]) |corner| try held.append(gpa, shared_bones[corner - base]);
     }
 }
 
@@ -957,6 +1160,126 @@ test "a .glb's document and binary part are read, and a strip and a fan become t
         const c = Vec3.fromArray(v[i[2]].position);
         try testing.expect(b.sub(a).cross(c.sub(a)).z > 0);
     }
+}
+
+/// Two bones up the y axis bending a square, and an animation of them: a
+/// turn, straight; a place, stepped; a size, along a cubic spline. Its
+/// weights are normalized shorts, and its skin's inverse bind matrices a
+/// MAT4 accessor.
+pub fn skinnedGltf(gpa: Allocator) ![]u8 {
+    var raw: std.ArrayList(u8) = .empty;
+    defer raw.deinit(gpa);
+    const positions = [_]f32{ -0.5, 0, 0, 0.5, 0, 0, 0.5, 2, 0, -0.5, 2, 0 };
+    const joints = [_]u8{ 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0 };
+    const weights = [_]u16{ 65535, 0, 0, 0, 65535, 0, 0, 0, 32767, 32768, 0, 0, 0, 0, 0, 0 };
+    const indices = [_]u16{ 0, 1, 2, 0, 2, 3 };
+    // Column-major: the first bone at the origin, the second one up.
+    const binds = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, -1, 0, 1 };
+    const times = [_]f32{ 0, 1 };
+    const half = std.math.sqrt1_2;
+    const turns = [_]f32{ 0, 0, 0, 1, 0, 0, half, half };
+    const places = [_]f32{ 0, 0, 0, 0, 3, 0 };
+    // In-tangent, value, out-tangent, for each of the two keys.
+    const sizes = [_]f32{ 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 2, 2, 2, 0, 0, 0 };
+    try raw.appendSlice(gpa, std.mem.sliceAsBytes(&positions)); // 0, 48
+    try raw.appendSlice(gpa, &joints); // 48, 16
+    try raw.appendSlice(gpa, std.mem.sliceAsBytes(&weights)); // 64, 32
+    try raw.appendSlice(gpa, std.mem.sliceAsBytes(&indices)); // 96, 12
+    try raw.appendSlice(gpa, std.mem.sliceAsBytes(&binds)); // 108, 128
+    try raw.appendSlice(gpa, std.mem.sliceAsBytes(&times)); // 236, 8
+    try raw.appendSlice(gpa, std.mem.sliceAsBytes(&turns)); // 244, 32
+    try raw.appendSlice(gpa, std.mem.sliceAsBytes(&places)); // 276, 24
+    try raw.appendSlice(gpa, std.mem.sliceAsBytes(&sizes)); // 300, 72
+    const coded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(raw.items.len));
+    defer gpa.free(coded);
+    _ = std.base64.standard.Encoder.encode(coded, raw.items);
+    return std.fmt.allocPrint(gpa,
+        \\{{
+        \\  "asset": {{ "version": "2.0" }},
+        \\  "extensionsRequired": ["KHR_mesh_quantization"],
+        \\  "scene": 0,
+        \\  "scenes": [{{ "nodes": [0] }}],
+        \\  "nodes": [
+        \\    {{ "name": "Armature", "children": [1, 3] }},
+        \\    {{ "name": "Lower", "children": [2] }},
+        \\    {{ "name": "Upper", "translation": [0, 1, 0] }},
+        \\    {{ "name": "Body", "mesh": 0, "skin": 0 }}
+        \\  ],
+        \\  "meshes": [{{ "name": "Square", "primitives": [{{ "attributes": {{ "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 }}, "indices": 3 }}] }}],
+        \\  "skins": [{{ "name": "Bones", "inverseBindMatrices": 4, "joints": [1, 2] }}],
+        \\  "animations": [{{ "name": "Bend",
+        \\    "channels": [
+        \\      {{ "sampler": 0, "target": {{ "node": 2, "path": "rotation" }} }},
+        \\      {{ "sampler": 1, "target": {{ "node": 1, "path": "translation" }} }},
+        \\      {{ "sampler": 2, "target": {{ "node": 2, "path": "scale" }} }},
+        \\      {{ "sampler": 0, "target": {{ "node": 3, "path": "weights" }} }}
+        \\    ],
+        \\    "samplers": [
+        \\      {{ "input": 5, "output": 6 }},
+        \\      {{ "input": 5, "output": 7, "interpolation": "STEP" }},
+        \\      {{ "input": 5, "output": 8, "interpolation": "CUBICSPLINE" }}
+        \\    ] }}],
+        \\  "accessors": [
+        \\    {{ "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3" }},
+        \\    {{ "bufferView": 1, "componentType": 5121, "count": 4, "type": "VEC4" }},
+        \\    {{ "bufferView": 2, "componentType": 5123, "normalized": true, "count": 4, "type": "VEC4" }},
+        \\    {{ "bufferView": 3, "componentType": 5123, "count": 6, "type": "SCALAR" }},
+        \\    {{ "bufferView": 4, "componentType": 5126, "count": 2, "type": "MAT4" }},
+        \\    {{ "bufferView": 5, "componentType": 5126, "count": 2, "type": "SCALAR" }},
+        \\    {{ "bufferView": 6, "componentType": 5126, "count": 2, "type": "VEC4" }},
+        \\    {{ "bufferView": 7, "componentType": 5126, "count": 2, "type": "VEC3" }},
+        \\    {{ "bufferView": 8, "componentType": 5126, "count": 6, "type": "VEC3" }}
+        \\  ],
+        \\  "bufferViews": [
+        \\    {{ "buffer": 0, "byteOffset": 0, "byteLength": 48 }}, {{ "buffer": 0, "byteOffset": 48, "byteLength": 16 }},
+        \\    {{ "buffer": 0, "byteOffset": 64, "byteLength": 32 }}, {{ "buffer": 0, "byteOffset": 96, "byteLength": 12 }},
+        \\    {{ "buffer": 0, "byteOffset": 108, "byteLength": 128 }}, {{ "buffer": 0, "byteOffset": 236, "byteLength": 8 }},
+        \\    {{ "buffer": 0, "byteOffset": 244, "byteLength": 32 }}, {{ "buffer": 0, "byteOffset": 276, "byteLength": 24 }},
+        \\    {{ "buffer": 0, "byteOffset": 300, "byteLength": 72 }}
+        \\  ],
+        \\  "buffers": [{{ "byteLength": {d}, "uri": "data:application/octet-stream;base64,{s}" }}]
+        \\}}
+    , .{ raw.items.len, coded });
+}
+
+test "a skin's bones, its vertices' weights and an animation's channels are read" {
+    const text = try skinnedGltf(testing.allocator);
+    defer testing.allocator.free(text);
+    var model = try read(testing.allocator, text, null);
+    defer model.deinit();
+
+    try testing.expectEqual(@as(usize, 1), model.skins.len);
+    const bones = model.skins[0];
+    try testing.expectEqualStrings("Bones", bones.name);
+    try testing.expectEqualSlices(u32, &.{ 1, 2 }, bones.joints);
+    try testing.expect(bones.inverse_binds[1].translation().approxEql(.init(0, -1, 0)));
+    try testing.expectEqual(@as(?u32, 0), model.nodes[3].skin);
+
+    // Each vertex's bones, the weights made to sum to one - with no normals,
+    // each triangle's corners made apart, and their bones with them.
+    const square = model.meshes[0];
+    try testing.expectEqual(@as(usize, 6), square.skin.len);
+    try testing.expectEqual([4]u8{ 0, 1, 0, 0 }, square.skin[0].joints);
+    try testing.expectEqual(@as(f32, 1), square.skin[0].weights[0]);
+    try testing.expectApproxEqAbs(@as(f32, 0.5), square.skin[2].weights[0], 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 1), square.skin[2].weights[0] + square.skin[2].weights[1], 0.0001);
+    try testing.expectEqual(square.skin[2], square.skin[4]);
+    // A vertex with no weight hangs from its first bone.
+    try testing.expectEqual([4]f32{ 1, 0, 0, 0 }, square.skin[5].weights);
+
+    // Three channels; the morph target's weights are left out, and said so.
+    const bend = model.animations[0];
+    try testing.expectEqualStrings("Bend", bend.name);
+    try testing.expectEqual(@as(f32, 1), bend.length);
+    try testing.expectEqual(@as(usize, 3), bend.channels.len);
+    try testing.expectEqual(Channel.Path.rotation, bend.channels[0].path);
+    try testing.expectEqual(Channel.Interpolation.linear, bend.channels[0].interpolation);
+    try testing.expectEqual(@as(usize, 8), bend.channels[0].values.len);
+    try testing.expectEqual(Channel.Interpolation.step, bend.channels[1].interpolation);
+    try testing.expectEqual(@as(u32, 1), bend.channels[1].node);
+    try testing.expectEqual(Channel.Interpolation.cubic, bend.channels[2].interpolation);
+    try testing.expectEqual(@as(usize, 18), bend.channels[2].values.len);
+    try testing.expectEqual(@as(usize, 1), model.notes.items.len);
 }
 
 test "what is not glTF 2.0 is refused, and a number past what it names too" {

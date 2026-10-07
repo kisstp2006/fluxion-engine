@@ -17,6 +17,11 @@
 //! mesh has one for each material it was made with. A `.mesh` file is the
 //! vertices, the indices and the surfaces as they are held, little-endian -
 //! see `write`.
+//!
+//! **A mesh a skeleton bends** has a `skin`: each vertex's bones - up to
+//! four of the skin's, by their place in its list - and how much each moves
+//! it. Its bones' boxes, `bone_bounds`, are what the box of the mesh bent is
+//! made from. See `Skeleton3D`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -56,6 +61,32 @@ pub const Vertex = extern struct {
     tangent: [4]f32 = no_tangent,
     uv2: [2]f32 = .{ 0, 0 },
 };
+
+/// Where a vertex of a mesh a skeleton bends hangs from: up to four bones,
+/// by their place in the skin's list of bones, and how much each moves it -
+/// the four summing to one. What `SKIN_JOINTS` and `SKIN_WEIGHTS` are in
+/// the 3D shader, in a buffer of their own beside the vertices.
+pub const SkinVertex = extern struct {
+    joints: [4]u8 = .{ 0, 0, 0, 0 },
+    weights: [4]f32 = .{ 1, 0, 0, 0 },
+
+    /// The weights made to sum to one: all on the first bone where they sum
+    /// to nothing.
+    pub fn normalized(self: SkinVertex) SkinVertex {
+        var out = self;
+        const sum = self.weights[0] + self.weights[1] + self.weights[2] + self.weights[3];
+        if (sum <= 1e-6) {
+            out.weights = .{ 1, 0, 0, 0 };
+        } else for (&out.weights) |*w| {
+            w.* /= sum;
+        }
+        return out;
+    }
+};
+
+/// The most bones a skin may have: a vertex names its bones in a byte each,
+/// and the 3D shader's block of bones holds so many.
+pub const max_bones = 256;
 
 /// What a vertex's tangent is until one is worked out.
 pub const no_tangent: [4]f32 = .{ 1, 0, 0, 1 };
@@ -150,6 +181,15 @@ pub const Mesh = struct {
     /// numbers has them; a model's mesh brings its own, or gets them from
     /// `lightmap_uv.unwrap`.
     uv2_texels: u32 = 0,
+    /// For a mesh a skeleton bends: each vertex's bones, one for each of
+    /// `vertices`. Empty for one that stays as it is.
+    skin: []SkinVertex = &.{},
+    /// Each of the skin's bones' boxes: the vertices it moves, in that
+    /// bone's own space at rest - its inverse bind matrix times the vertex.
+    /// Each moved as its bone is, together they are the box of the mesh bent.
+    /// Empty where there is no skin; a bone that moves nothing has an empty
+    /// box. See `boneBounds`.
+    bone_bounds: []Aabb = &.{},
 
     /// A mesh of one surface, of copies of `vertices` and `indices`, their
     /// tangents worked out where none was given. `error.BadMesh` for an
@@ -184,7 +224,23 @@ pub const Mesh = struct {
         gpa.free(self.vertices);
         gpa.free(self.indices);
         gpa.free(self.surfaces);
+        gpa.free(self.skin);
+        gpa.free(self.bone_bounds);
         self.* = undefined;
+    }
+
+    /// The box of the mesh as its bones are now, in the space the bones are
+    /// in: each bone's box moved to where that bone is now - `bones`, each
+    /// one's place in that space - together. Its own box where it has no
+    /// skin.
+    pub fn bentBounds(self: Mesh, bones: []const math.Mat4) Aabb {
+        if (self.bone_bounds.len == 0) return self.bounds;
+        var out: Aabb = .empty;
+        for (self.bone_bounds, 0..) |held, bone| {
+            if (bone >= bones.len or held.isEmpty()) continue;
+            out = out.unionWith(held.transformed(bones[bone]));
+        }
+        return if (out.isEmpty()) self.bounds else out;
     }
 
     pub fn triangleCount(self: Mesh) usize {
@@ -218,6 +274,21 @@ fn whole(gpa: Allocator, count: usize) Allocator.Error![]Surface {
 fn check(vertex_count: usize, indices: []const u32) error{BadMesh}!void {
     if (indices.len % 3 != 0) return error.BadMesh;
     for (indices) |index| if (index >= vertex_count) return error.BadMesh;
+}
+
+/// Each bone's box, as `Mesh.bone_bounds` keeps them: every vertex a bone
+/// moves at all, taken into that bone's space at rest by its inverse bind
+/// matrix. As many as `inverse_binds`; the caller's.
+pub fn boneBounds(gpa: Allocator, vertices: []const Vertex, skin: []const SkinVertex, inverse_binds: []const math.Mat4) Allocator.Error![]Aabb {
+    const out = try gpa.alloc(Aabb, inverse_binds.len);
+    @memset(out, Aabb.empty);
+    for (vertices, skin) |v, bones| {
+        for (bones.joints, bones.weights) |joint, weight| {
+            if (weight <= 0 or joint >= inverse_binds.len) continue;
+            out[joint] = out[joint].expand(inverse_binds[joint].mulPoint(.fromArray(v.position)));
+        }
+    }
+    return out;
 }
 
 fn boundsOf(vertices: []const Vertex) Aabb {
@@ -465,29 +536,38 @@ pub fn capsule(gpa: Allocator, radius: f32, height: f32, rings: u32, segments: u
 
 /// What a `.mesh` file starts with, its version in the last two letters.
 /// A file of an earlier version - eight numbers a vertex and one surface,
-/// no tangents, or no lightmap UVs - is still read, its tangents worked
-/// out and its lightmap UVs none.
-pub const magic = "FXMESH04";
+/// no tangents, no lightmap UVs, or no skin - is still read, its tangents
+/// worked out and its lightmap UVs and skin none.
+pub const magic = "FXMESH05";
 const magic_v1 = "FXMESH01";
 const magic_v2 = "FXMESH02";
 const magic_v3 = "FXMESH03";
+const magic_v4 = "FXMESH04";
 
-const header_size = magic.len + 16 + 24;
+const header_size = magic.len + 20 + 24;
+const header_size_v4 = magic.len + 16 + 24;
 const header_size_v3 = magic.len + 12 + 24;
 const header_size_v1 = magic.len + 8 + 24;
 const vertex_size_v2 = 8 * 4 + 4;
 const vertex_size_v3 = vertex_size_v2 + 4 * 4;
 const vertex_size = vertex_size_v3 + 2 * 4;
+const skin_vertex_size = 4 + 4 * 4;
+const bone_bounds_size = 6 * 4;
 
 /// A mesh as a `.mesh` file's bytes, owned by the caller: `magic`, the
-/// counts of vertices, of indices and of surfaces and its `uv2_texels` as
-/// `u32`s, the bounds' least and most corners as six `f32`s, then each
-/// vertex's eight `f32`s, four bytes of colour, its tangent's four `f32`s
-/// and its lightmap UV's two, each index as a `u32`, and each surface's
-/// first index and count as two `u32`s. Little-endian throughout. A
-/// surface's material is not written: what reads the file gives it one.
+/// counts of vertices, of indices and of surfaces, its `uv2_texels` and
+/// how many bones its skin has - nought for none - as `u32`s, the bounds'
+/// least and most corners as six `f32`s, then each vertex's eight `f32`s,
+/// four bytes of colour, its tangent's four `f32`s and its lightmap UV's
+/// two; with a skin, each vertex's four bones as bytes and four weights as
+/// `f32`s; each index as a `u32`, each surface's first index and count as
+/// two `u32`s, and with a skin each bone's box as six `f32`s. Little-endian
+/// throughout. A surface's material is not written: what reads the file
+/// gives it one.
 pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
-    const size = header_size + mesh.vertices.len * vertex_size + mesh.indices.len * 4 + mesh.surfaces.len * 8;
+    const bones: u32 = if (mesh.skin.len > 0) @intCast(mesh.bone_bounds.len) else 0;
+    const skinned = mesh.skin.len > 0;
+    const size = header_size + mesh.vertices.len * vertex_size + (if (skinned) mesh.vertices.len * skin_vertex_size else 0) + mesh.indices.len * 4 + mesh.surfaces.len * 8 + @as(usize, bones) * bone_bounds_size;
     var out: std.ArrayList(u8) = try .initCapacity(gpa, size);
     errdefer out.deinit(gpa);
     out.appendSliceAssumeCapacity(magic);
@@ -495,16 +575,30 @@ pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
     appendInt(&out, @intCast(mesh.indices.len));
     appendInt(&out, @intCast(mesh.surfaces.len));
     appendInt(&out, mesh.uv2_texels);
+    // A skin with no bones' boxes is written with one bone, so that a
+    // reader knows it has a skin.
+    appendInt(&out, if (skinned) @max(bones, 1) else 0);
     for (mesh.bounds.min.array() ++ mesh.bounds.max.array()) |number| appendInt(&out, @bitCast(number));
     for (mesh.vertices) |v| {
         for (v.position ++ v.normal ++ v.uv) |number| appendInt(&out, @bitCast(number));
         out.appendSliceAssumeCapacity(&v.color);
         for (v.tangent ++ v.uv2) |number| appendInt(&out, @bitCast(number));
     }
+    if (skinned) for (mesh.skin) |bones_of| {
+        out.appendSliceAssumeCapacity(&bones_of.joints);
+        for (bones_of.weights) |number| appendInt(&out, @bitCast(number));
+    };
     for (mesh.indices) |index| appendInt(&out, index);
     for (mesh.surfaces) |surface| {
         appendInt(&out, surface.first_index);
         appendInt(&out, surface.index_count);
+    }
+    if (skinned) {
+        if (bones == 0) {
+            for (Aabb.empty.min.array() ++ Aabb.empty.max.array()) |number| appendInt(&out, @bitCast(number));
+        } else for (mesh.bone_bounds) |held| {
+            for (held.min.array() ++ held.max.array()) |number| appendInt(&out, @bitCast(number));
+        }
     }
     return out.toOwnedSlice(gpa);
 }
@@ -523,17 +617,21 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     const first = std.mem.eql(u8, bytes[0..magic.len], magic_v1);
     const second = std.mem.eql(u8, bytes[0..magic.len], magic_v2);
     const third = std.mem.eql(u8, bytes[0..magic.len], magic_v3);
-    if (!first and !second and !third and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMesh;
-    const header: u64 = if (first) header_size_v1 else if (second or third) header_size_v3 else header_size;
+    const fourth = std.mem.eql(u8, bytes[0..magic.len], magic_v4);
+    if (!first and !second and !third and !fourth and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMesh;
+    const header: u64 = if (first) header_size_v1 else if (second or third) header_size_v3 else if (fourth) header_size_v4 else header_size;
     if (bytes.len < header) return error.BadMesh;
     var at: usize = magic.len;
     const vertex_count = takeInt(bytes, &at);
     const index_count = takeInt(bytes, &at);
     const surface_count: u32 = if (first) 1 else takeInt(bytes, &at);
     const uv2_texels: u32 = if (first or second or third) 0 else takeInt(bytes, &at);
+    const bone_count: u32 = if (first or second or third or fourth) 0 else takeInt(bytes, &at);
+    if (bone_count > max_bones) return error.BadMesh;
     const each: u64 = if (first) 8 * 4 else if (second) vertex_size_v2 else if (third) vertex_size_v3 else vertex_size;
     const surfaces_size: u64 = if (first) 0 else @as(u64, surface_count) * 8;
-    if (bytes.len != header + @as(u64, vertex_count) * each + @as(u64, index_count) * 4 + surfaces_size) return error.BadMesh;
+    const skin_size: u64 = if (bone_count > 0) @as(u64, vertex_count) * skin_vertex_size + @as(u64, bone_count) * bone_bounds_size else 0;
+    if (bytes.len != header + @as(u64, vertex_count) * each + @as(u64, index_count) * 4 + surfaces_size + skin_size) return error.BadMesh;
     at += 24;
     const vertices = try gpa.alloc(Vertex, vertex_count);
     errdefer gpa.free(vertices);
@@ -552,6 +650,14 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
             number.* = @bitCast(takeInt(bytes, &at));
         };
     }
+    const skin = try gpa.alloc(SkinVertex, if (bone_count > 0) vertex_count else 0);
+    errdefer gpa.free(skin);
+    for (skin) |*bones| {
+        bones.joints = bytes[at..][0..4].*;
+        at += 4;
+        for (&bones.weights) |*number| number.* = @bitCast(takeInt(bytes, &at));
+        for (bones.joints) |joint| if (joint >= bone_count) return error.BadMesh;
+    }
     const indices = try gpa.alloc(u32, index_count);
     errdefer gpa.free(indices);
     for (indices) |*index| index.* = takeInt(bytes, &at);
@@ -560,11 +666,20 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     if (!first) for (surfaces) |*surface| {
         surface.* = .{ .first_index = takeInt(bytes, &at), .index_count = takeInt(bytes, &at) };
     };
+    const bone_bounds = try gpa.alloc(Aabb, bone_count);
+    errdefer gpa.free(bone_bounds);
+    for (bone_bounds) |*held| {
+        var numbers: [6]f32 = undefined;
+        for (&numbers) |*number| number.* = @bitCast(takeInt(bytes, &at));
+        held.* = .init(.fromArray(numbers[0..3].*), .fromArray(numbers[3..6].*));
+    }
     if (first or second) computeTangents(vertices, indices);
     // Worked out again rather than trusted: a file edited by hand keeps
     // its picking and its culling right.
     var out = try Mesh.adopt(vertices, indices, surfaces);
     out.uv2_texels = uv2_texels;
+    out.skin = skin;
+    out.bone_bounds = bone_bounds;
     return out;
 }
 
@@ -582,6 +697,9 @@ pub const Gpu = struct {
     vertices: rhi.Buffer,
     indices: rhi.Buffer,
     index_count: u32,
+    /// Each vertex's bones, for a mesh a skeleton bends: the 3D shader's
+    /// third buffer. None for one that is not bent.
+    skin: rhi.Buffer = .none,
 
     fn of(device: *rhi.Device, mesh: Mesh, label: []const u8) rhi.Error!Gpu {
         // An empty mesh still has buffers, of one vertex and one triangle
@@ -603,12 +721,20 @@ pub const Gpu = struct {
             .data = std.mem.sliceAsBytes(indices),
             .label = label,
         });
-        return .{ .vertices = vertex_buffer, .indices = index_buffer, .index_count = @intCast(mesh.indices.len) };
+        errdefer device.destroyBuffer(index_buffer);
+        const skin_buffer: rhi.Buffer = if (mesh.skin.len > 0 and mesh.vertices.len > 0) try device.createBuffer(.{
+            .kind = .vertex,
+            .size = @intCast(mesh.skin.len * @sizeOf(SkinVertex)),
+            .data = std.mem.sliceAsBytes(mesh.skin),
+            .label = label,
+        }) else .none;
+        return .{ .vertices = vertex_buffer, .indices = index_buffer, .index_count = @intCast(mesh.indices.len), .skin = skin_buffer };
     }
 
     fn deinit(self: Gpu, device: *rhi.Device) void {
         device.destroyBuffer(self.vertices);
         device.destroyBuffer(self.indices);
+        if (!self.skin.isNone()) device.destroyBuffer(self.skin);
     }
 };
 
@@ -962,6 +1088,56 @@ test "a mesh's file of the third version still reads, with no lightmap UVs" {
     try testing.expectEqual(@as(u32, 0), back.uv2_texels);
     try testing.expectEqual([2]f32{ 0, 0 }, back.vertices[5].uv2);
     try testing.expectEqual(mesh.vertices[5].tangent, back.vertices[5].tangent);
+}
+
+test "a skinned mesh's bones go to its file and back, and its box follows them" {
+    var mesh = try box(testing.allocator, .init(1, 1, 1));
+    defer mesh.deinit(testing.allocator);
+    // The bottom four corners on the first bone, the top on the second.
+    mesh.skin = try testing.allocator.alloc(SkinVertex, mesh.vertices.len);
+    for (mesh.vertices, mesh.skin) |v, *bones| bones.* = .{ .joints = .{ if (v.position[1] > 0) 1 else 0, 0, 0, 0 } };
+    const binds = [_]math.Mat4{ .identity, .fromTranslation(.init(0, -0.5, 0)) };
+    mesh.bone_bounds = try boneBounds(testing.allocator, mesh.vertices, mesh.skin, &binds);
+    // The second bone's box is the top face, in its own space: at its height nought.
+    try testing.expectApproxEqAbs(@as(f32, 0), mesh.bone_bounds[1].max.y, 1e-6);
+
+    const bytes = try write(testing.allocator, mesh);
+    defer testing.allocator.free(bytes);
+    var back = try read(testing.allocator, bytes);
+    defer back.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, std.mem.sliceAsBytes(mesh.skin), std.mem.sliceAsBytes(back.skin));
+    try testing.expectEqual(@as(usize, 2), back.bone_bounds.len);
+    try testing.expect(back.bone_bounds[1].approxEql(mesh.bone_bounds[1]));
+
+    // The second bone lifted two: the top goes with it, and the box with that.
+    const lifted = [_]math.Mat4{ .identity, .fromTranslation(.init(0, 2.5, 0)) };
+    const bent = back.bentBounds(&lifted);
+    try testing.expectApproxEqAbs(@as(f32, 2.5), bent.max.y, 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, -0.5), bent.min.y, 1e-5);
+
+    // A bone past what the file's skin has is refused.
+    const broken = try testing.allocator.dupe(u8, bytes);
+    defer testing.allocator.free(broken);
+    const first_bones = header_size + mesh.vertices.len * vertex_size;
+    broken[first_bones] = 7;
+    try testing.expectError(error.BadMesh, read(testing.allocator, broken));
+}
+
+test "a mesh's file of the fourth version still reads, with no skin" {
+    var mesh = try box(testing.allocator, .init(1, 1, 1));
+    defer mesh.deinit(testing.allocator);
+    const bytes = try write(testing.allocator, mesh);
+    defer testing.allocator.free(bytes);
+    // The same, but for the count of bones.
+    var old: std.ArrayList(u8) = .empty;
+    defer old.deinit(testing.allocator);
+    try old.appendSlice(testing.allocator, "FXMESH04");
+    try old.appendSlice(testing.allocator, bytes[magic.len .. magic.len + 16]);
+    try old.appendSlice(testing.allocator, bytes[magic.len + 20 ..]);
+    var back = try read(testing.allocator, old.items);
+    defer back.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), back.skin.len);
+    try testing.expectEqualSlices(u32, mesh.indices, back.indices);
 }
 
 test "every shape made from numbers has lightmap UVs where no two triangles overlap" {

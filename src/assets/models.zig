@@ -252,10 +252,11 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
     const same = model.gpa.ptr == gpa.ptr and model.gpa.vtable == gpa.vtable;
     for (model.meshes, 0..) |*held, at| {
         if (!held.built) try gltf.buildMesh(model, at);
-        const vertices, const indices, const surfaces = if (same) held.take() else .{
+        const vertices, const indices, const surfaces, const skin = if (same) held.take() else .{
             try gpa.dupe(mesh.Vertex, held.vertices),
             try gpa.dupe(u32, held.indices),
             try gpa.dupe(mesh.Surface, held.surfaces),
+            try gpa.dupe(mesh.SkinVertex, held.skin),
         };
         for (surfaces, held.materials) |*surface, material| {
             surface.material = if (material) |m| materials[m] else .none;
@@ -264,9 +265,20 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
             gpa.free(vertices);
             gpa.free(indices);
             gpa.free(surfaces);
+            gpa.free(skin);
             return err;
         };
         made.uv2_texels = held.uv2_texels;
+        // Bent by the skin of the first node that draws it with one, its
+        // bones' boxes in that skin's bones' spaces; drawn as it was made
+        // where no node does.
+        if (skinOf(model, at)) |bending| {
+            made.skin = skin;
+            made.bone_bounds = mesh.boneBounds(gpa, vertices, skin, bending.inverse_binds) catch |err| {
+                made.deinit(gpa);
+                return err;
+            };
+        } else gpa.free(skin);
         var name: [512]u8 = undefined;
         _ = try app.meshes.add(gpa, &app.device, try std.fmt.bufPrint(&name, "{s}#mesh/{d}", .{ source, at }), made);
     }
@@ -274,6 +286,18 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
     const text = try sceneText(gpa, source, prepared);
     defer gpa.free(text);
     return app.scenes.add(gpa, source, text);
+}
+
+/// The skin the first node that draws mesh `at` bends it with, if one does
+/// and it has bones.
+fn skinOf(model: *const gltf.Model, at: usize) ?gltf.Skin {
+    for (model.nodes) |node| {
+        const drawn = node.mesh orelse continue;
+        if (drawn != at) continue;
+        const skin = model.skins[node.skin orelse continue];
+        if (skin.joints.len > 0) return skin;
+    }
+    return null;
 }
 
 /// What every UUID of a model's scene is made from, with the model's path
