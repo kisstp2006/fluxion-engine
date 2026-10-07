@@ -27,7 +27,10 @@
 //! `AnimationPlayer` on the model's root plays: a bone's channel a track of
 //! the bone on its skeleton's entity, any other node's a track of its
 //! entity's `Transform3D`. A cubic spline is turned into straight keys,
-//! thirty a second; a step's track jumps from key to key. One whose name
+//! thirty a second; a step's track jumps from key to key. A bone hung from
+//! its parent bone through nodes that are not bones - folded into its place
+//! at rest - is baked with them: its place through them at each of their
+//! keys and its, and thirty times a second between. One whose name
 //! ends in `loop` goes round and round, and with `"loop_animations": true`
 //! in the `.import` file every one does.
 //!
@@ -260,7 +263,12 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
     defer gpa.free(materials);
     for (model.materials, materials, 0..) |material, *out, at| {
         var look = material.look;
-        if (material.albedo) |ref| look.albedo_texture = pictures[ref.image];
+        // Read as the file says its colour picture is: texel by texel, or
+        // smoothly.
+        if (material.albedo) |ref| {
+            look.albedo_texture = pictures[ref.image];
+            if (ref.nearest) look.texture_filter = .nearest;
+        }
         if (material.emission) |ref| look.emission_texture = pictures[ref.image];
         if (material.metallic_roughness) |ref| look.metallic_roughness_texture = pictures[ref.image];
         if (material.normal) |ref| look.normal_texture = pictures[ref.image];
@@ -320,7 +328,7 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
     if (model.animations.len > 0) {
         var made: animation.Library = .{ .source = &.{}, .on_disc = false };
         defer made.deinitContent(gpa);
-        try animationsOf(gpa, source, model, parents, prepared.settings, &made);
+        try animationsOf(gpa, model, parents, prepared.settings, &made);
         var name: [512]u8 = undefined;
         _ = try app.animation_libraries.adopt(gpa, try std.fmt.bufPrint(&name, "{s}#animations", .{source}), &made.animations);
     }
@@ -409,10 +417,11 @@ fn skeletonOf(gpa: Allocator, model: *const gltf.Model, parents: []const ?u32, s
 
 /// The model's animations into `into`, each channel a track: of a bone on
 /// its skeleton's entity, or of a node's entity's `Transform3D`.
-fn animationsOf(gpa: Allocator, source: []const u8, model: *const gltf.Model, parents: []const ?u32, settings: ImportSettings, into: *animation.Library) !void {
+fn animationsOf(gpa: Allocator, model: *const gltf.Model, parents: []const ?u32, settings: ImportSettings, into: *animation.Library) !void {
     var path: std.ArrayList(u8) = .empty;
     defer path.deinit(gpa);
-    var noted = false;
+    var between: std.ArrayList(u32) = .empty;
+    defer between.deinit(gpa);
     for (model.animations, 0..) |given, at| {
         // Cut to what a player holds, and made unlike the others.
         var name_buffer: [animation.name_len]u8 = undefined;
@@ -424,13 +433,10 @@ fn animationsOf(gpa: Allocator, source: []const u8, model: *const gltf.Model, pa
         made.loop = if (looped) .repeat else .none;
         for (given.channels) |channel| {
             const track = if (boneSkin(model, channel.node)) |skin| bone: {
-                const owner = skeletonNode(model.skins[skin], parents);
-                const above = parents[channel.node];
-                if (!noted and above != null and above != owner and boneSkin(model, above.?) == null) {
-                    log.warn("{s}: a bone under a node that is not a bone moves as if that node were not there", .{source});
-                    noted = true;
-                }
-                try entityPath(gpa, model, parents, owner, &path);
+                // A bone under nodes that are not bones is baked, below,
+                // with theirs.
+                if (try betweenBones(gpa, model, parents, skin, channel.node, &between) > 0) continue;
+                try entityPath(gpa, model, parents, skeletonNode(model.skins[skin], parents), &path);
                 break :bone try made.ensureBoneTrack(gpa, path.items, model.nodes[channel.node].name, @tagName(boneChannel(channel.path)));
             } else node: {
                 try entityPath(gpa, model, parents, channel.node, &path);
@@ -444,7 +450,155 @@ fn animationsOf(gpa: Allocator, source: []const u8, model: *const gltf.Model, pa
             track.keys.clearRetainingCapacity();
             try keysOf(gpa, channel, &track.keys);
         }
+        // Each bone hung from its parent bone through nodes that are not
+        // bones, that it or they move: its place from its parent each time
+        // they and it are, through them.
+        for (model.skins, 0..) |skin, skin_at| for (skin.joints) |joint| {
+            if (boneSkin(model, joint).? != skin_at) continue;
+            if (try betweenBones(gpa, model, parents, @intCast(skin_at), joint, &between) == 0) continue;
+            if (!movesAny(given, joint, between.items)) continue;
+            try entityPath(gpa, model, parents, skeletonNode(skin, parents), &path);
+            try bakeBone(gpa, made, path.items, model, given, joint, between.items);
+        };
     }
+}
+
+/// The nodes between `joint` and the bone - or the skeleton's node - its
+/// place is from, into `into`, the one nearest the top first: what is
+/// folded into its place. How many.
+fn betweenBones(gpa: Allocator, model: *const gltf.Model, parents: []const ?u32, skin_at: u32, joint: u32, into: *std.ArrayList(u32)) !usize {
+    into.clearRetainingCapacity();
+    const skin = model.skins[skin_at];
+    const owner = skeletonNode(skin, parents);
+    var up = parents[joint];
+    while (up) |node| : (up = parents[node]) {
+        if (jointIndex(skin, node) != null) break;
+        if (owner != null and node == owner.?) break;
+        // No deeper than the nodes are many, should a broken file go round.
+        if (into.items.len > model.nodes.len) break;
+        try into.append(gpa, node);
+    }
+    std.mem.reverse(u32, into.items);
+    return into.items.len;
+}
+
+/// Whether `given` moves `joint` or one of `nodes`.
+fn movesAny(given: gltf.Animation, joint: u32, nodes: []const u32) bool {
+    for (given.channels) |channel| {
+        if (channel.node == joint) return true;
+        for (nodes) |node| if (channel.node == node) return true;
+    }
+    return false;
+}
+
+/// `joint`'s place from its parent bone through `nodes` each time `given`
+/// moves it or them, and thirty times a second between, as three tracks
+/// of the bone.
+fn bakeBone(gpa: Allocator, made: *animation.Animation, target: []const u8, model: *const gltf.Model, given: gltf.Animation, joint: u32, nodes: []const u32) !void {
+    var times: std.ArrayList(f32) = .empty;
+    defer times.deinit(gpa);
+    for (given.channels) |channel| {
+        const moved = channel.node == joint or for (nodes) |node| {
+            if (channel.node == node) break true;
+        } else false;
+        if (moved) try times.appendSlice(gpa, channel.times);
+    }
+    if (times.items.len == 0) return;
+    std.mem.sort(f32, times.items, {}, std.sort.asc(f32));
+    const first = times.items[0];
+    const last = times.items[times.items.len - 1];
+    const steps: usize = @intFromFloat(@ceil((last - first) * 30));
+    for (1..steps) |step| try times.append(gpa, first + (last - first) * @as(f32, @floatFromInt(step)) / @as(f32, @floatFromInt(steps)));
+    std.mem.sort(f32, times.items, {}, std.sort.asc(f32));
+
+    const name = model.nodes[joint].name;
+    const position = try made.ensureBoneTrack(gpa, target, name, "position");
+    position.keys.clearRetainingCapacity();
+    const rotation = try made.ensureBoneTrack(gpa, target, name, "rotation");
+    rotation.keys.clearRetainingCapacity();
+    const scale = try made.ensureBoneTrack(gpa, target, name, "scale");
+    scale.keys.clearRetainingCapacity();
+    var previous: ?f32 = null;
+    for (times.items) |time| {
+        if (previous) |was| if (time - was < animation.same_time) continue;
+        previous = time;
+        var place = math.Mat4.identity;
+        for (nodes) |node| place = place.mul(nodeAt(model, given, node, time).toMat4());
+        const placed = math.Transform.fromMat4(place.mul(nodeAt(model, given, joint, time).toMat4()));
+        try position.keys.append(gpa, .{ .time = time, .value = .{ .vec3 = placed.translation.array() } });
+        try rotation.keys.append(gpa, .{ .time = time, .value = .{ .quat = .{ placed.rotation.x, placed.rotation.y, placed.rotation.z, placed.rotation.w } } });
+        try scale.keys.append(gpa, .{ .time = time, .value = .{ .vec3 = placed.scale.array() } });
+    }
+}
+
+/// `node`'s place, turn and size `time` seconds into `given`: its own where
+/// no channel moves them.
+fn nodeAt(model: *const gltf.Model, given: gltf.Animation, node: u32, time: f32) math.Transform {
+    var out = model.nodes[node].transform;
+    for (given.channels) |channel| {
+        if (channel.node != node) continue;
+        const value = sampleChannel(channel, time);
+        switch (channel.path) {
+            .translation => out.translation = .init(value[0], value[1], value[2]),
+            .rotation => out.rotation = (math.Quat{ .x = value[0], .y = value[1], .z = value[2], .w = value[3] }).norm(),
+            .scale => out.scale = .init(value[0], value[1], value[2]),
+        }
+    }
+    return out;
+}
+
+/// What a channel says `time` seconds in, as glTF says it is read: held
+/// before its first key and after its last, and between two the way its
+/// interpolation goes.
+fn sampleChannel(channel: gltf.Channel, time: f32) [4]f32 {
+    const width = channel.width();
+    const times = channel.times;
+    const per_key: usize = if (channel.interpolation == .cubic) 3 else 1;
+    // Where a key's value is among the numbers: after its tangent in, on a
+    // cubic spline.
+    const value_at = if (channel.interpolation == .cubic) width else 0;
+    var out: [4]f32 = .{ 0, 0, 0, 1 };
+    if (times.len == 0) return out;
+    const OrderOf = struct {
+        fn order(at: f32, key: f32) std.math.Order {
+            return std.math.order(at, key);
+        }
+    };
+    const after = std.sort.upperBound(f32, times, time, OrderOf.order);
+    if (after == 0 or after >= times.len) {
+        const key = if (after == 0) 0 else times.len - 1;
+        @memcpy(out[0..width], channel.values[key * per_key * width + value_at ..][0..width]);
+        return out;
+    }
+    const before = after - 1;
+    const here = channel.values[before * per_key * width ..][0 .. per_key * width];
+    const next = channel.values[after * per_key * width ..][0 .. per_key * width];
+    const span = times[after] - times[before];
+    const t: f32 = if (span > 0) (time - times[before]) / span else 1;
+    switch (channel.interpolation) {
+        .step => @memcpy(out[0..width], here[0..width]),
+        .linear => if (channel.path == .rotation) {
+            const from: math.Quat = .{ .x = here[0], .y = here[1], .z = here[2], .w = here[3] };
+            const to: math.Quat = .{ .x = next[0], .y = next[1], .z = next[2], .w = next[3] };
+            const turn = math.Quat.slerp(from.norm(), to.norm(), t);
+            out = .{ turn.x, turn.y, turn.z, turn.w };
+        } else {
+            for (0..width) |c| out[c] = here[c] + (next[c] - here[c]) * t;
+        },
+        .cubic => {
+            const t2 = t * t;
+            const t3 = t2 * t;
+            for (0..width) |c| {
+                out[c] = (2 * t3 - 3 * t2 + 1) * here[width + c] + span * (t3 - 2 * t2 + t) * here[2 * width + c] +
+                    (-2 * t3 + 3 * t2) * next[width + c] + span * (t3 - t2) * next[c];
+            }
+            if (channel.path == .rotation) {
+                const turn = (math.Quat{ .x = out[0], .y = out[1], .z = out[2], .w = out[3] }).norm();
+                out = .{ turn.x, turn.y, turn.z, turn.w };
+            }
+        },
+    }
+    return out;
 }
 
 /// A name no longer than `limit` - what a player holds - cut where a
