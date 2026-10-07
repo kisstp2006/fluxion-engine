@@ -1305,10 +1305,7 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   `emission_texture` - for the light it gives off; `transparency` to lay it
   over what is behind it by its alpha, or to cut it where the alpha is under
   `alpha_scissor_threshold`; `cull` for which side of its triangles is left
-  out; `unshaded` for its colour as it is; `texture_filter` for how its
-  pictures are read - smoothly through their levels and sharp at a slant,
-  `linear`, the default; texel by texel for pixel art, `nearest`; or as each
-  picture is sampled, `texture` -; and a `shader` of its own - see
+  out; `unshaded` for its colour as it is; and a `shader` of its own - see
   below. Its pictures are read through a chain of levels, each half the one
   above, made on the GPU the first time they are drawn on a surface - before
   the next frame - so that a surface far off does not shimmer; a model's
@@ -1518,8 +1515,6 @@ app.world.get(wall, fx.Material3D).?.material = brick;
   of the bone, any other node's a track of its `Transform3D`. A step's
   channel jumps, a cubic spline is made straight keys thirty a second, and
   a morph target's weights are left out. A bone hung from its parent bone
-  through nodes that are not bones is baked with them: its place through
-  them at each of their keys and its, and thirty times a second between. A bone hung from its parent bone
   through nodes that are not bones is baked with them: its place through
   them at each of their keys and its, and thirty times a second between.
 - **`<model>.import` beside it says how it is brought in**: `{ "scale": 0.01 }`
