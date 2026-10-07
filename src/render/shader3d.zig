@@ -85,6 +85,16 @@ pub const cookie_slot = 7;
 /// and the probes' samples, `Probes`, the block at this one.
 pub const lightmap_slot = 8;
 pub const probes_slot = 5;
+/// For a mesh a skeleton bends: its bones, `Skin`, are the block at this
+/// slot, and each vertex's bones and weights are a third vertex buffer.
+pub const skin_slot = 6;
+
+/// What a skinned mesh is bent by, as the shader's `Skin` block says: each
+/// bone's place now times its inverse bind matrix, as the first three rows
+/// of that matrix - three `vec4`s a bone, `mesh.max_bones` of them.
+pub const Skin = extern struct {
+    bones: [mesh.max_bones * 3][4]f32,
+};
 
 /// The most probe samples a frame holds: one each for the meshes that move
 /// through a lightmap's probes, nearest the camera first.
@@ -602,7 +612,11 @@ const engine_part =
     \\}
     \\
     \\vertex {
-    \\    vec4 world = MODEL_0 * VERTEX_POSITION.x + MODEL_1 * VERTEX_POSITION.y + MODEL_2 * VERTEX_POSITION.z + MODEL_3;
+    \\    vec3 here = VERTEX_POSITION;
+    \\    vec3 facing = VERTEX_NORMAL;
+    \\    vec3 along = VERTEX_TANGENT.xyz;
+    \\    // A mesh a skeleton bends is bent here.
+    \\    vec4 world = MODEL_0 * here.x + MODEL_1 * here.y + MODEL_2 * here.z + MODEL_3;
     \\    WORLD_POSITION = world.xyz;
     \\    // The normal turned by the model's inverse turned over: its columns'
     \\    // crossings, which are that times how much it grows - one way, or
@@ -610,9 +624,9 @@ const engine_part =
     \\    vec3 a = MODEL_0.xyz;
     \\    vec3 b = MODEL_1.xyz;
     \\    vec3 c = MODEL_2.xyz;
-    \\    vec3 turned = cross(b, c) * VERTEX_NORMAL.x + cross(c, a) * VERTEX_NORMAL.y + cross(a, b) * VERTEX_NORMAL.z;
+    \\    vec3 turned = cross(b, c) * facing.x + cross(c, a) * facing.y + cross(a, b) * facing.z;
     \\    WORLD_NORMAL = turned * sign(dot(a, cross(b, c)));
-    \\    vec3 tangent = MODEL_0.xyz * VERTEX_TANGENT.x + MODEL_1.xyz * VERTEX_TANGENT.y + MODEL_2.xyz * VERTEX_TANGENT.z;
+    \\    vec3 tangent = MODEL_0.xyz * along.x + MODEL_1.xyz * along.y + MODEL_2.xyz * along.z;
     \\    WORLD_TANGENT = vec4(tangent, VERTEX_TANGENT.w);
     \\    UV = VERTEX_UV * UV_PLACE.xy + UV_PLACE.zw;
     \\    COLOR = mix(vec4(1.0), vec4(toLinear(VERTEX_COLOR.rgb), VERTEX_COLOR.a), FEEL.y) * TINT;
@@ -629,6 +643,54 @@ const engine_part =
     \\}
     \\
 ;
+
+/// What a skinned variant's engine part has after its attributes: each
+/// vertex's bones and weights, and the bones.
+const skin_head =
+    \\attribute vec4 SKIN_JOINTS : 14;
+    \\attribute vec4 SKIN_WEIGHTS : 15;
+    \\
+    \\// Each bone's place now times its inverse bind matrix: the first three
+    \\// rows of it, three in a row a bone.
+    \\uniform Skin : 6 {
+    \\    vec4 BONES[768];
+    \\}
+    \\
+;
+
+/// Where a skinned variant's engine part says what is above.
+/// What bends a vertex of a skinned mesh: the rows of its four bones'
+/// matrices, weighted, times its place, its normal and its tangent.
+const skin_bend =
+    \\    vec4 bones = SKIN_JOINTS * 255.0 + vec4(0.5);
+    \\    int b0 = int(bones.x) * 3;
+    \\    int b1 = int(bones.y) * 3;
+    \\    int b2 = int(bones.z) * 3;
+    \\    int b3 = int(bones.w) * 3;
+    \\    vec4 w = SKIN_WEIGHTS;
+    \\    vec4 row0 = BONES[b0] * w.x + BONES[b1] * w.y + BONES[b2] * w.z + BONES[b3] * w.w;
+    \\    vec4 row1 = BONES[b0 + 1] * w.x + BONES[b1 + 1] * w.y + BONES[b2 + 1] * w.z + BONES[b3 + 1] * w.w;
+    \\    vec4 row2 = BONES[b0 + 2] * w.x + BONES[b1 + 2] * w.y + BONES[b2 + 2] * w.z + BONES[b3 + 2] * w.w;
+    \\    vec4 corner = vec4(here, 1.0);
+    \\    here = vec3(dot(row0, corner), dot(row1, corner), dot(row2, corner));
+    \\    facing = vec3(dot(row0.xyz, facing), dot(row1.xyz, facing), dot(row2.xyz, facing));
+    \\    along = vec3(dot(row0.xyz, along), dot(row1.xyz, along), dot(row2.xyz, along));
+    \\
+;
+
+/// Where the vertex stage bends a skinned mesh.
+const skin_bend_at = "    // A mesh a skeleton bends is bent here.\n";
+
+/// The engine's part, for a skinned mesh or not.
+fn enginePart(skinned: bool) []const u8 {
+    if (!skinned) return engine_part;
+    return comptime blk: {
+        @setEvalBranchQuota(100_000);
+        const head_at = std.mem.indexOf(u8, engine_part, "attribute vec4 GI : 13;\n").? + "attribute vec4 GI : 13;\n".len;
+        const bend_at = std.mem.indexOf(u8, engine_part, skin_bend_at).? + skin_bend_at.len;
+        break :blk engine_part[0..head_at] ++ skin_head ++ engine_part[head_at..bend_at] ++ skin_bend ++ engine_part[bend_at..];
+    };
+}
 
 /// What the fragment stage starts with: the surface as the material says.
 /// One line, written after the stage's `{`.
@@ -717,6 +779,12 @@ pub fn whole(gpa: Allocator, text: []const u8) Allocator.Error!Whole {
 /// `whole` for `variant`: a caster's stage ends by leaving out what its alpha
 /// does, and writes nothing.
 pub fn wholeAs(gpa: Allocator, text: []const u8, variant: Variant) Allocator.Error!Whole {
+    return wholeOf(gpa, text, variant, false);
+}
+
+/// `wholeAs` for a mesh a skeleton bends, or not: a skinned one's engine
+/// part reads each vertex's bones and the `Skin` block, and bends it.
+pub fn wholeOf(gpa: Allocator, text: []const u8, variant: Variant, skinned: bool) Allocator.Error!Whole {
     var failure: shader.lex.Failure = undefined;
     const tokens = shader.lex.tokenize(gpa, text, &failure) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -776,7 +844,7 @@ pub fn wholeAs(gpa: Allocator, text: []const u8, variant: Variant) Allocator.Err
     } else w.writeAll(text) catch return error.OutOfMemory;
     w.writeAll("\n") catch return error.OutOfMemory;
     out.engine_line = std.mem.count(u8, full.written(), "\n") + 1;
-    w.writeAll(engine_part) catch return error.OutOfMemory;
+    w.writeAll(enginePart(skinned)) catch return error.OutOfMemory;
     out.source = full.toOwnedSlice() catch return error.OutOfMemory;
     return out;
 }
@@ -829,6 +897,16 @@ pub const Compiled = struct {
     /// Whether the file reads `TIME`: then what it casts may change while
     /// nothing moves, and a shadow it is in is drawn again every time.
     reads_time: bool = false,
+    /// Whether it is the variant that bends a mesh a skeleton bends.
+    skin: bool = false,
+    /// That variant of it, compiled the first time a skinned mesh is drawn
+    /// with it; see `skinnedOf`.
+    skinned: ?*Compiled = null,
+    skin_refused: bool = false,
+    /// What it was compiled from, for that.
+    gpa: Allocator,
+    text: []u8 = &.{},
+    label: []u8 = &.{},
 
     /// The caster variant, and its pipelines by the side culled.
     pub const Caster = struct {
@@ -839,6 +917,12 @@ pub const Compiled = struct {
     };
 
     pub fn deinit(self: *Compiled, device: *rhi.Device) void {
+        if (self.skinned) |held| {
+            held.deinit(device);
+            self.gpa.destroy(held);
+        }
+        self.gpa.free(self.text);
+        self.gpa.free(self.label);
         for (self.pipelines) |row| for (row) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
         for (self.caster.pipelines) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
         device.destroyShader(self.gpu);
@@ -848,6 +932,26 @@ pub const Compiled = struct {
         self.* = undefined;
     }
 
+    /// The variant that bends a mesh a skeleton bends: compiled the first
+    /// time it is asked for, or null where it does not compile - such a
+    /// mesh is then drawn as it was made.
+    pub fn skinnedOf(self: *Compiled, device: *rhi.Device) ?*Compiled {
+        if (self.skin) return self;
+        if (self.skinned) |held| return held;
+        if (self.skin_refused) return null;
+        var problems: std.Io.Writer.Allocating = .init(self.gpa);
+        defer problems.deinit();
+        const made = self.gpa.create(Compiled) catch return null;
+        made.* = compileWith(self.gpa, device, self.text, self.label, true, &problems.writer) catch {
+            self.gpa.destroy(made);
+            self.skin_refused = true;
+            log.err("a 3D shader's skinned variant did not compile: {s}", .{problems.written()});
+            return null;
+        };
+        self.skinned = made;
+        return made;
+    }
+
     /// The pipeline it is drawn with into `color_format` and `depth_format`,
     /// with `samples` a pixel, `way`.
     pub fn pipelineOf(self: *Compiled, device: *rhi.Device, color_format: rhi.Format, depth_format: rhi.Format, samples: u32, way: Way) !rhi.Pipeline {
@@ -855,7 +959,7 @@ pub const Compiled = struct {
         const held = &self.pipelines[row][way.index()];
         if (!held.isNone()) return held.*;
         const see_through = way.blend;
-        held.* = makePipeline(device, &self.module, self.gpu, .{
+        held.* = makePipeline(device, &self.module, self.gpu, self.skin, .{
             .blend = if (see_through) .alpha else .solid,
             // See-through meshes are tested against the solid ones and
             // write no depth: one behind another still shows through.
@@ -879,7 +983,7 @@ pub const Compiled = struct {
     pub fn casterPipelineOf(self: *Compiled, device: *rhi.Device, depth_format: rhi.Format, cull: Material3DData.Cull) !rhi.Pipeline {
         const held = &self.caster.pipelines[@intFromEnum(cull)];
         if (!held.isNone()) return held.*;
-        held.* = makePipeline(device, &self.caster.module, self.caster.gpu, .{
+        held.* = makePipeline(device, &self.caster.module, self.caster.gpu, self.skin, .{
             .depth = .{ .test_enabled = true, .write = true, .compare = .less, .slope_bias = caster_slope_bias },
             .cull = cullOf(cull),
             .color_format = null,
@@ -908,9 +1012,9 @@ const PipelineWay = struct {
     label: []const u8,
 };
 
-fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, way: PipelineWay) !rhi.Pipeline {
+fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, skinned: bool, way: PipelineWay) !rhi.Pipeline {
     var attributes: [16]rhi.VertexAttribute = undefined;
-    var strides: [2]u32 = @splat(0);
+    var strides: [3]u32 = @splat(0);
     for (module.attributes, 0..) |a, i| {
         const buffer = bufferOf(a.name);
         const format = vertexFormat(a.name, a.ty).?;
@@ -919,13 +1023,16 @@ fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, wa
     }
     std.debug.assert(strides[0] == @sizeOf(mesh.Vertex));
     std.debug.assert(strides[1] == @sizeOf(Instance));
+    std.debug.assert(strides[2] == if (skinned) @as(u32, @sizeOf(mesh.SkinVertex)) else 0);
+    const buffers = [_]rhi.VertexBufferLayout{
+        .{ .stride = strides[0] },
+        .{ .stride = strides[1], .step = .instance },
+        .{ .stride = strides[2] },
+    };
     return device.createPipeline(.{
         .shader = gpu,
         .attributes = attributes[0..module.attributes.len],
-        .buffers = &.{
-            .{ .stride = strides[0] },
-            .{ .stride = strides[1], .step = .instance },
-        },
+        .buffers = buffers[0..if (skinned) 3 else 2],
         .topology = .triangles,
         .blend = way.blend,
         .depth = way.depth,
@@ -944,7 +1051,7 @@ fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, wa
 /// block there, which the device binds nothing to.
 fn blockNames(module: *shader.Module) ![]const [:0]const u8 {
     const arena = module.arena.allocator();
-    const names = try arena.alloc([:0]const u8, @max(shadows_slot, probes_slot) + 1);
+    const names = try arena.alloc([:0]const u8, @max(@max(shadows_slot, probes_slot), skin_slot) + 1);
     @memset(names, "");
     for (module.blocks) |block| names[block.slot] = try arena.dupeZ(u8, block.name);
     return names;
@@ -958,15 +1065,18 @@ fn cullOf(cull: Material3DData.Cull) rhi.CullMode {
     };
 }
 
-/// Which attributes are the mesh's own; the rest are per instance.
+/// Which attributes are the mesh's own, which its skin's - a third buffer -
+/// and which per instance.
 fn bufferOf(name: []const u8) u32 {
-    return if (std.mem.startsWith(u8, name, "VERTEX_")) 0 else 1;
+    if (std.mem.startsWith(u8, name, "VERTEX_")) return 0;
+    if (std.mem.startsWith(u8, name, "SKIN_")) return 2;
+    return 1;
 }
 
-/// What an attribute is read as: its type's floats, but a vertex's colour,
-/// which is four bytes.
+/// What an attribute is read as: its type's floats, but a vertex's colour
+/// and its bones, which are four bytes.
 fn vertexFormat(name: []const u8, ty: shader.Type) ?rhi.VertexFormat {
-    if (std.mem.eql(u8, name, "VERTEX_COLOR")) return .ubyte4_norm;
+    if (std.mem.eql(u8, name, "VERTEX_COLOR") or std.mem.eql(u8, name, "SKIN_JOINTS")) return .ubyte4_norm;
     return switch (ty) {
         .float => .float,
         .vec2 => .float2,
@@ -981,13 +1091,25 @@ fn vertexFormat(name: []const u8, ty: shader.Type) ?rhi.VertexFormat {
 /// `problems`, at the file's own lines, and is `error.ShaderFailed`.
 /// Its pipelines are made when it is first drawn.
 pub fn compile(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []const u8, problems: *std.Io.Writer) (error{ShaderFailed} || Allocator.Error || rhi.Error)!Compiled {
-    var lit = try compileAs(gpa, device, text, label, .lit, problems);
+    return compileWith(gpa, device, text, label, false, problems);
+}
+
+/// `compile`, as the variant that bends a mesh a skeleton bends or not.
+fn compileWith(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []const u8, skinned: bool, problems: *std.Io.Writer) (error{ShaderFailed} || Allocator.Error || rhi.Error)!Compiled {
+    var lit = try compileAs(gpa, device, text, label, .lit, skinned, problems);
     errdefer {
         device.destroyShader(lit.gpu);
         lit.module.deinit();
     }
     // The caster is the same file: what is wrong with it was said above.
-    const caster = try compileAs(gpa, device, text, label, .caster, problems);
+    var caster = try compileAs(gpa, device, text, label, .caster, skinned, problems);
+    errdefer {
+        device.destroyShader(caster.gpu);
+        caster.module.deinit();
+    }
+    const own_text = try gpa.dupe(u8, text);
+    errdefer gpa.free(own_text);
+    const own_label = try gpa.dupe(u8, label);
     return .{
         .module = lit.module,
         .gpu = lit.gpu,
@@ -995,6 +1117,10 @@ pub fn compile(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []c
         .writes_normal_map = lit.writes_normal_map,
         .caster = .{ .module = caster.module, .gpu = caster.gpu },
         .reads_time = std.mem.indexOf(u8, text, "TIME") != null,
+        .skin = skinned,
+        .gpa = gpa,
+        .text = own_text,
+        .label = own_label,
     };
 }
 
@@ -1005,8 +1131,8 @@ const Variant3D = struct {
     writes_normal_map: bool,
 };
 
-fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []const u8, variant: Variant, problems: *std.Io.Writer) (error{ShaderFailed} || Allocator.Error || rhi.Error)!Variant3D {
-    const built = try wholeAs(gpa, text, variant);
+fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []const u8, variant: Variant, skinned: bool, problems: *std.Io.Writer) (error{ShaderFailed} || Allocator.Error || rhi.Error)!Variant3D {
+    const built = try wholeOf(gpa, text, variant, skinned);
     defer gpa.free(built.source);
     if (try built.trespassMessage(gpa, text)) |message| {
         defer gpa.free(message);
@@ -1027,7 +1153,7 @@ fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []con
     // One block of its own, at its slot, and no textures but the engine's.
     var params: ?shader.Block = null;
     for (module.blocks) |block| {
-        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot) continue;
+        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot or (skinned and block.slot == skin_slot)) continue;
         if (block.slot != params_slot or params != null) {
             problems.print("a 3D shader's own numbers are one uniform block, at slot {d}: `{s}` is at {d}\n", .{ params_slot, block.name, block.slot }) catch {};
             return error.ShaderFailed;
@@ -1039,6 +1165,7 @@ fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []con
         return error.ShaderFailed;
     }
     checkLayout(&module);
+    if (skinned) std.debug.assert(module.block("Skin").?.size == @sizeOf(Skin));
 
     const gpu = device.createShader(.{
         .glsl = .{ .vertex = module.glsl.vertex, .fragment = module.glsl.fragment },
@@ -1101,7 +1228,42 @@ test "the blocks and an instance are laid out as the shader reads them" {
     try testing.expectEqual(@as(usize, 128), @sizeOf(Instance));
     try testing.expectEqual(@as(usize, 60), @sizeOf(mesh.Vertex));
     try testing.expect(@sizeOf(Probes) <= 16384);
+    // As many bones as a vertex names, and under the sixteen kilobytes too.
+    try testing.expectEqual(@as(usize, 12288), @sizeOf(Skin));
+    try testing.expectEqual(@as(usize, 20), @sizeOf(mesh.SkinVertex));
     for (0..Way.count) |at| try testing.expectEqual(at, Way.of(at).index());
+}
+
+test "a shader's skinned variant is compiled when first asked for, for every backend, and kept" {
+    var device = try rhi.Device.init(testing.allocator, .{ .backend = .none });
+    defer device.deinit();
+    var problems: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer problems.deinit();
+    var own = try compile(testing.allocator, &device, plain, "plain", &problems.writer);
+    defer own.deinit(&device);
+    try testing.expect(own.skinned == null);
+
+    const skinned = own.skinnedOf(&device).?;
+    try testing.expect(skinned.skin);
+    try testing.expectEqual(skinned, own.skinnedOf(&device).?);
+    try testing.expectEqual(skinned, skinned.skinnedOf(&device).?);
+    // Its bones at the last two places, and its block at its slot.
+    var found: u32 = 0;
+    for (skinned.module.attributes) |a| {
+        if (std.mem.eql(u8, a.name, "SKIN_JOINTS")) found += @intFromBool(a.location == 14);
+        if (std.mem.eql(u8, a.name, "SKIN_WEIGHTS")) found += @intFromBool(a.location == 15);
+    }
+    try testing.expectEqual(@as(u32, 2), found);
+    try testing.expectEqual(@as(u32, skin_slot), skinned.module.block("Skin").?.slot);
+    for ([_][]const u8{ skinned.module.glsl.vertex, skinned.module.glsl_es.vertex, skinned.module.hlsl.vertex }) |source| {
+        try testing.expect(std.mem.indexOf(u8, source, "BONES") != null);
+    }
+    try testing.expect(skinned.module.spirv.vertex.len > 0);
+    try testing.expect(skinned.caster.module.block("Skin") != null);
+    // Its pipelines take the third buffer; the plain ones do not.
+    _ = try skinned.pipelineOf(&device, .rgba16_float, .depth32_float, 1, .{ .cull = .back, .blend = false });
+    _ = try skinned.casterPipelineOf(&device, .depth32_float, .back);
+    _ = try own.pipelineOf(&device, .rgba16_float, .depth32_float, 1, .{ .cull = .back, .blend = false });
 }
 
 test "the engine's own shader and a file's compile for every backend, with the file's own numbers" {

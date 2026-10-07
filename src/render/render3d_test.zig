@@ -379,3 +379,46 @@ test "a surface's pictures are given a chain of levels, before the frame after t
     try app.assets.setTexturePixels(brick, 16, 16, &bigger);
     try testing.expectEqual(@as(u32, 5), (try app.device.textureInfo(app.assets.get(brick).?.gpu)).mip_levels);
 }
+
+test "a mesh a skeleton bends is drawn in the skeleton's space with its bones, and culled where they are" {
+    const app = try headless();
+    defer app.destroy();
+    const skeleton_table = @import("skeleton.zig");
+    const math = @import("fluxion_math");
+    // Two bones, the second one up; a box whose top hangs from the second.
+    const binds = [_]math.Mat4{ .identity, .fromTranslation(.init(0, -0.5, 0)) };
+    var bones = [_]skeleton_table.Bone{
+        .{ .name = "Low" },
+        .{ .name = "High", .parent = 0, .rest = .{ .translation = .init(0, 0.5, 0) }, .inverse_bind = binds[1] },
+    };
+    const skeleton = try app.addSkeleton("bones", try skeleton_table.Skeleton.init(app.gpa, &bones));
+    var bent = try mesh.box(app.gpa, .init(1, 1, 1));
+    bent.skin = try app.gpa.alloc(mesh.SkinVertex, bent.vertices.len);
+    for (bent.vertices, bent.skin) |v, *on| on.* = .{ .joints = .{ if (v.position[1] > 0) 1 else 0, 0, 0, 0 } };
+    bent.bone_bounds = try mesh.boneBounds(app.gpa, bent.vertices, bent.skin, &binds);
+    const handle = try app.addMesh("bent", bent);
+
+    _ = try looking(app);
+    const body = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), components.Skeleton3D{ .skeleton = skeleton } });
+    // Its own place is not where it is drawn: the skeleton's is.
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 50), MeshInstance3D{ .mesh = handle, .skeleton = body } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.drawn);
+    try testing.expectEqual(@as(usize, 1), app.renderer3d.skins.items.len);
+    const item = app.renderer3d.items.items[0];
+    try testing.expect(item.compiled.skin);
+    try testing.expectEqual(@as(u32, 0), item.skin);
+    // The second bone at rest: its place times its inverse bind is nothing moved.
+    try testing.expectEqual([4]f32{ 0, 1, 0, 0 }, app.renderer3d.skins.items[0].bones[3 * 1 + 1]);
+
+    // The top lifted: the bones are written anew, and the box goes with them.
+    app.setBonePosition(body, 1, .init(0, 2.5, 0));
+    _ = try app.step();
+    try testing.expectEqual([4]f32{ 0, 1, 0, 2 }, app.renderer3d.skins.items[0].bones[3 * 1 + 1]);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.drawn);
+    // Both bones behind the camera: the mesh is left out, wherever its own place says.
+    app.setBonePosition(body, 0, .init(0, 0, 40));
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.renderer3d.drawn);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.culled);
+}

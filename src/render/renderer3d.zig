@@ -110,6 +110,8 @@ fn toLinear(v: f32) f32 {
 }
 
 const no_params = std.math.maxInt(u32);
+/// What an item that no skeleton bends has for its skin.
+const no_skin = std.math.maxInt(u32);
 
 /// The flat normal map: what a material with none is read with.
 const flat_normal = [4]u8{ 128, 128, 255, 255 };
@@ -133,6 +135,8 @@ const Item = struct {
     depth: f32,
     /// Where its `Instance` is in `gathered`.
     instance: u32,
+    /// The bones it is bent by, among this draw's skins, or `no_skin`.
+    skin: u32 = no_skin,
 
     /// Solid ones first, grouped by how they are drawn and then nearest
     /// first; see-through ones after, furthest first.
@@ -155,12 +159,13 @@ const Item = struct {
         return .eq;
     }
 
-    fn keysOf(item: Item) [12]u64 {
+    fn keysOf(item: Item) [13]u64 {
         return .{
             item.way,                 @intFromPtr(item.compiled),              item.textures[0].toInt(),
             item.textures[1].toInt(), item.textures[2].toInt(),                item.textures[3].toInt(),
             item.textures[4].toInt(), item.sampler.toInt(),                    item.gpu.vertices.toInt(),
             item.first_index,         @as(u64, item.look) << 32 | item.params, item.index_count,
+            item.skin,
         };
     }
 
@@ -289,6 +294,13 @@ pub const Renderer3D = struct {
     /// shader's.
     look_offsets: std.ArrayList(u32) = .empty,
     param_offsets: std.ArrayList(u32) = .empty,
+    /// This draw's skeletons' bones, each skeleton once - the `Skin` block of
+    /// every mesh it bends - with its pose's revision, for what a shadow
+    /// keeps; by the skeleton's entity; and where each is in `blocks`.
+    skins: std.ArrayList(shader3d.Skin) = .empty,
+    skin_revisions: std.ArrayList(u64) = .empty,
+    skin_found: std.AutoHashMapUnmanaged(ecs.Entity, u32) = .empty,
+    skin_offsets: std.ArrayList(u32) = .empty,
 
     /// Every shadow's numbers, as the shader's `Shadows` block says.
     shadows: rhi.Buffer,
@@ -469,6 +481,10 @@ pub const Renderer3D = struct {
         if (self.post) |*held| held.deinit(gpa);
         if (self.plain) |*held| held.deinit(device);
         self.blocks.deinit(gpa, device);
+        self.skins.deinit(gpa);
+        self.skin_revisions.deinit(gpa);
+        self.skin_found.deinit(gpa);
+        self.skin_offsets.deinit(gpa);
         self.look_offsets.deinit(gpa);
         self.param_offsets.deinit(gpa);
         device.destroyBuffer(self.frame);
@@ -622,6 +638,7 @@ pub const Renderer3D = struct {
             try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
+            try self.bindSkin(list, first);
             try list.setIndexBuffer(first.gpu.indices, .u32);
             try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
             self.draw_calls += 1;
@@ -840,6 +857,9 @@ pub const Renderer3D = struct {
         self.param_bytes.clearRetainingCapacity();
         self.param_sets.clearRetainingCapacity();
         self.param_found.clearRetainingCapacity();
+        self.skins.clearRetainingCapacity();
+        self.skin_revisions.clearRetainingCapacity();
+        self.skin_found.clearRetainingCapacity();
         const alpha = app.time.alpha();
         const forward = view.forward();
         const plain = &self.plain.?;
@@ -855,9 +875,11 @@ pub const Renderer3D = struct {
                 else
                     app.meshes.keptOf(instance.mesh) orelse continue;
                 if (kept.mesh.indices.len == 0) continue;
-                const placed = hierarchy.resolve3D(&app.world, &app.snapshots3d, entity, local, alpha) orelse continue;
-                const model = placed.matrix();
-                const bounds = kept.mesh.bounds.transformed(model);
+                // A mesh a skeleton bends is drawn in the skeleton's space,
+                // its box made from its bones' as they are now.
+                const bent: ?Bent = if (!instance.skeleton.isNone() and kept.mesh.skin.len > 0) try self.bentBy(app, instance.skeleton, &kept.mesh, alpha) else null;
+                const model = if (bent) |held| held.model else (hierarchy.resolve3D(&app.world, &app.snapshots3d, entity, local, alpha) orelse continue).matrix();
+                const bounds = if (bent) |held| kept.mesh.bentBounds(held.bones).transformed(model) else kept.mesh.bounds.transformed(model);
                 const seen = frustum.testAabb(bounds) != .outside;
                 const casts = casting and instance.cast_shadow;
                 if (!seen) self.culled += 1;
@@ -879,6 +901,13 @@ pub const Renderer3D = struct {
                     const look = materialOf(app, chosen);
                     var compiled = if (look.shader.isNone()) plain else app.shaders.compiled3DOf(look.shader) orelse plain;
                     if (compiled.refused) compiled = plain;
+                    // Bent with the shader's skinned variant: where that
+                    // does not compile, the mesh is drawn as it was made.
+                    var skin: u32 = no_skin;
+                    if (bent) |held| if (compiled.skinnedOf(self.device)) |skinned| {
+                        compiled = skinned;
+                        skin = held.skin;
+                    };
                     // Between levels too: a surface's pictures are asked for
                     // their chains, and read from them once they have them.
                     var sampler = app.assets.mipSamplerFor(.linear, .repeat);
@@ -905,6 +934,7 @@ pub const Renderer3D = struct {
                         .params = try self.paramSetOf(app, compiled, chosen, entity),
                         .depth = depth,
                         .instance = at,
+                        .skin = skin,
                     };
                     if (seen) try self.items.append(gpa, item);
                     // What is laid over what is behind it casts no shadow.
@@ -912,6 +942,36 @@ pub const Renderer3D = struct {
                 }
             }
         }
+    }
+
+    /// Where a mesh a skeleton bends is drawn: in the skeleton's entity's
+    /// space, with its bones there now - and which of this draw's skins they
+    /// are, made the first time the skeleton bends a mesh in it.
+    const Bent = struct { model: math.Mat4, bones: []const math.Mat4, skin: u32 };
+
+    /// Where the skeleton of `skeleton`'s `Skeleton3D` bends `bent`, or null
+    /// where it has none, or fewer bones than the mesh names.
+    fn bentBy(self: *Renderer3D, app: *App, skeleton: ecs.Entity, bent: *const mesh.Mesh, alpha: f32) !?Bent {
+        const bones = app.poses.globalsOf(app, skeleton) orelse return null;
+        if (bones.len < bent.bone_bounds.len) return null;
+        const placed = hierarchy.resolveEntity3D(&app.world, &app.snapshots3d, skeleton, alpha) orelse return null;
+        const found = try self.skin_found.getOrPut(app.gpa, skeleton);
+        if (!found.found_existing) {
+            const pose = app.poses.of(app, skeleton).?;
+            const held = app.skeletons.get(pose.skeleton).?;
+            found.value_ptr.* = @intCast(self.skins.items.len);
+            const skin = try self.skins.addOne(app.gpa);
+            skin.* = .{ .bones = @splat(@splat(0)) };
+            for (bones, held.bones, 0..) |place, bone, at| {
+                if (at >= mesh.max_bones) break;
+                // The first three rows of the bone's place times its
+                // inverse bind matrix.
+                const bend = place.mul(bone.inverse_bind);
+                for (0..3) |row| skin.bones[at * 3 + row] = .{ bend.cols[0].array()[row], bend.cols[1].array()[row], bend.cols[2].array()[row], bend.cols[3].array()[row] };
+            }
+            try self.skin_revisions.append(app.gpa, @as(u64, pose.revision) << 32 | skeleton.index);
+        }
+        return .{ .model = placed.matrix(), .bones = bones, .skin = found.value_ptr.* };
     }
 
     /// Each visible `DirectionalLight3D`, up to `shader3d.most_suns`, and
@@ -1035,6 +1095,7 @@ pub const Renderer3D = struct {
             hash.update(std.mem.asBytes(&[_]u32{ item.first_index, item.index_count, item.way }));
             hash.update(std.mem.asBytes(&item.textures[0]));
             hash.update(std.mem.asBytes(&self.looks.items[item.look]));
+            if (item.skin != no_skin) hash.update(std.mem.asBytes(&self.skin_revisions.items[item.skin]));
             if (item.params != no_params) {
                 const set = self.param_sets.items[item.params];
                 hash.update(self.param_bytes.items[set.start..][0..set.len]);
@@ -1155,6 +1216,7 @@ pub const Renderer3D = struct {
             try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast((first_instance + start) * @sizeOf(Instance)));
+            try self.bindSkin(list, first);
             try list.setIndexBuffer(first.gpu.indices, .u32);
             try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
             self.shadow_draws += 1;
@@ -1233,6 +1295,13 @@ pub const Renderer3D = struct {
     }
 
     /// What the cookie atlas is read with: smoothly, kept inside it.
+    /// A bent item's bones and each vertex's, where its shader reads them.
+    fn bindSkin(self: *const Renderer3D, list: *rhi.CommandList, item: Item) !void {
+        if (item.skin == no_skin or !item.compiled.skin) return;
+        try list.setUniformBufferRange(shader3d.skin_slot, self.blocks.buffer.?, self.skin_offsets.items[item.skin], @sizeOf(shader3d.Skin));
+        try list.setVertexBuffer(2, item.gpu.skin, 0);
+    }
+
     fn cookieSampler(self: *const Renderer3D) rhi.Sampler {
         return if (self.cookie_copy) |copy| copy.sampler else self.reading;
     }
@@ -1294,6 +1363,8 @@ pub const Renderer3D = struct {
         self.param_offsets.clearRetainingCapacity();
         for (self.looks.items) |*look| try self.look_offsets.append(gpa, try self.blocks.place(gpa, device, std.mem.asBytes(look)));
         for (self.param_sets.items) |set| try self.param_offsets.append(gpa, try self.blocks.place(gpa, device, self.param_bytes.items[set.start..][0..set.len]));
+        self.skin_offsets.clearRetainingCapacity();
+        for (self.skins.items) |*skin| try self.skin_offsets.append(gpa, try self.blocks.place(gpa, device, std.mem.asBytes(skin)));
         try self.blocks.upload(device);
     }
 };
