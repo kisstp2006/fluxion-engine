@@ -230,7 +230,7 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
             try app.assets.setTexturePixels(held, picture.width, picture.height, picture.pixels);
             out.* = held;
         } else {
-            out.* = try app.assets.adoptTexture(named, picture.width, picture.height, picture.pixels, .{ .filter = if (nearest[at]) .nearest else .linear, .wrap = .repeat });
+            out.* = try app.assets.adoptTexture(named, picture.width, picture.height, picture.pixels, .{ .filter = if (nearest[at]) .nearest else .linear, .wrap = .repeat, .mips = true });
         }
     }
 

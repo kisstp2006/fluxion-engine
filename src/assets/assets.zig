@@ -55,6 +55,14 @@ pub const Texture = struct {
     /// from the bottom: a picture of it is turned over to be shown. See
     /// `addRenderTexture`.
     upside_down: bool = false,
+    /// A chain of levels below the picture, each half the one above, made
+    /// on the GPU: what a sampler that filters between levels reads where
+    /// the picture is drawn small - a 3D surface far off - so that it does
+    /// not shimmer. See `LoadOptions.mips` and `wantMips`.
+    mips: bool = false,
+    /// Asked for a chain once already - given it, or with no file to make
+    /// it from - so not asked again.
+    mips_asked: bool = false,
 };
 
 /// What a `Sprite` holds: eight bytes, safe in a component or a save file.
@@ -177,6 +185,9 @@ pub const LoadOptions = struct {
     filter: ?rhi.Filter = null,
     wrap: rhi.Wrap = .clamp_to_edge,
     label: []const u8 = "",
+    /// A chain of levels below the picture, for one drawn small: a 3D
+    /// surface's. See `Texture.mips`.
+    mips: bool = false,
 };
 
 gpa: Allocator,
@@ -218,6 +229,12 @@ default_filter: rhi.Filter = .nearest,
 images_made: u32 = 0,
 
 samplers: Samplers,
+/// The same, filtering between the levels of a chain as well: what a
+/// texture with `mips` is drawn with.
+mip_samplers: Samplers,
+/// The textures `wantMips` asked a chain for, made before the next frame
+/// is drawn.
+mips_wanted: std.ArrayListUnmanaged(TextureHandle) = .empty,
 
 pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io, project: *Project) Error!Assets {
     var self: Assets = .{
@@ -226,6 +243,7 @@ pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io, project: *Project)
         .io = io,
         .project = project,
         .samplers = .initFill(.initFill(.none)),
+        .mip_samplers = .initFill(.initFill(.none)),
     };
     errdefer self.deinit();
 
@@ -238,6 +256,13 @@ pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io, project: *Project)
             self.samplers.getPtr(filter).set(wrap, try device.createSampler(.{
                 .min_filter = filter,
                 .mag_filter = filter,
+                .wrap_u = made,
+                .wrap_v = made,
+            }));
+            self.mip_samplers.getPtr(filter).set(wrap, try device.createSampler(.{
+                .min_filter = filter,
+                .mag_filter = filter,
+                .mip_filter = if (filter == .linear) .linear else .nearest,
                 .wrap_u = made,
                 .wrap_v = made,
             }));
@@ -284,9 +309,12 @@ pub fn deinit(self: *Assets) void {
         self.gpa.destroy(font);
     }
     self.fonts.deinit(self.gpa);
-    for (self.samplers.values) |by_wrap| {
-        for (by_wrap.values) |sampler| self.device.destroySampler(sampler);
+    for ([_]Samplers{ self.samplers, self.mip_samplers }) |samplers| {
+        for (samplers.values) |by_wrap| {
+            for (by_wrap.values) |sampler| if (!sampler.isNone()) self.device.destroySampler(sampler);
+        }
     }
+    self.mips_wanted.deinit(self.gpa);
     self.* = undefined;
 }
 
@@ -310,22 +338,80 @@ fn addTexture(
     options: LoadOptions,
     source: []const u8,
 ) Error!TextureHandle {
-    const gpu = try self.device.createTexture(.{
-        .width = width,
-        .height = height,
-        .data = rgba,
-        .label = options.label,
-    });
-    errdefer self.device.destroyTexture(gpu);
+    const made = try self.makeTexture(width, height, rgba, options.label, options.mips);
+    errdefer self.device.destroyTexture(made.gpu);
 
     return .fromId(try self.textures.add(self.gpa, .{
-        .gpu = gpu,
+        .gpu = made.gpu,
         .width = width,
         .height = height,
         .filter = options.filter orelse self.default_filter,
         .wrap = options.wrap,
         .source = source,
+        .mips = made.mips,
+        .mips_asked = options.mips,
     }));
+}
+
+/// A texture of `rgba`, with a chain of levels below it if `mips` asks and
+/// the device can make one - a texel has none below it.
+fn makeTexture(self: *Assets, width: u32, height: u32, rgba: []const u8, label: []const u8, mips: bool) Error!struct { gpu: rhi.Texture, mips: bool } {
+    const chain = mips and (width > 1 or height > 1) and self.device.caps().formatSupport(.rgba8_unorm).generate_mips;
+    const gpu = try self.device.createTexture(.{
+        .width = width,
+        .height = height,
+        .data = rgba,
+        .label = label,
+        .mip_levels = if (chain) 0 else 1,
+    });
+    errdefer self.device.destroyTexture(gpu);
+    if (chain) try self.fillMips(gpu);
+    return .{ .gpu = gpu, .mips = chain };
+}
+
+/// Every level below the first, made from it on the GPU. Between frames:
+/// a submit of its own.
+fn fillMips(self: *Assets, gpu: rhi.Texture) Error!void {
+    const list = self.device.begin();
+    try list.generateMips(gpu);
+    try self.device.submit();
+}
+
+/// Ask for a chain of levels below `handle`'s picture, if it has none: what
+/// the 3D renderer asks of a surface's pictures. Made before the next frame
+/// is drawn (`makeWantedMips`), from its file read again; one made from
+/// pixels in memory, or drawn into, keeps the one level it has. Asked once.
+pub fn wantMips(self: *Assets, handle: TextureHandle) void {
+    const held = self.textures.get(handle.toId()) orelse return;
+    if (held.mips_asked) return;
+    held.mips_asked = true;
+    self.mips_wanted.append(self.gpa, handle) catch {};
+}
+
+/// The chains `wantMips` asked for, each texture made again under its
+/// handle with its levels. Between frames, as the engine does before it
+/// draws one.
+pub fn makeWantedMips(self: *Assets) void {
+    defer self.mips_wanted.clearRetainingCapacity();
+    for (self.mips_wanted.items) |handle| {
+        self.giveMips(handle) catch |err| log.warn("the levels of a texture were not made: {t}", .{err});
+    }
+}
+
+fn giveMips(self: *Assets, handle: TextureHandle) !void {
+    const held = self.textures.get(handle.toId()) orelse return;
+    if (held.mips or held.upside_down or held.source.len == 0) return;
+    // A picture with no file of its own - one of a model's - keeps what it has.
+    const bytes = self.project.readFileAlloc(self.gpa, held.source, .limited(picture_limit)) catch return;
+    defer self.gpa.free(bytes);
+    var decoded = try image.decode(self.gpa, bytes);
+    defer decoded.deinit(self.gpa);
+    const made = try self.makeTexture(decoded.width, decoded.height, decoded.pixels, held.source, true);
+    self.device.destroyTexture(held.gpu);
+    held.gpu = made.gpu;
+    held.width = decoded.width;
+    held.height = decoded.height;
+    held.mips = made.mips;
 }
 
 /// A texture to draw into, `width` by `height` and cleared: what a
@@ -392,6 +478,7 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
             .filter = options.filter orelse self.default_filter,
             .wrap = options.wrap,
             .label = if (options.label.len == 0) source else options.label,
+            .mips = options.mips,
         },
         source,
     );
@@ -407,23 +494,27 @@ pub fn adoptTexture(self: *Assets, path: []const u8, width: u32, height: u32, rg
         .filter = options.filter orelse self.default_filter,
         .wrap = options.wrap,
         .label = if (options.label.len == 0) source else options.label,
+        .mips = options.mips,
     }, source);
 }
 
 /// Give a texture new pixels, `width` by `height`, top row first: written in
-/// place for the same size, made anew under the same handle for another.
+/// place for the same size, made anew under the same handle for another -
+/// and its chain of levels, if it has one, made again from them.
 pub fn setTexturePixels(self: *Assets, handle: TextureHandle, width: u32, height: u32, rgba: []const u8) !void {
     const held = self.get(handle) orelse return error.NoSuchTexture;
     if (held.width == width and held.height == height and !held.upside_down) {
         try self.device.updateTexture(held.gpu, rgba, 0);
+        if (held.mips) try self.fillMips(held.gpu);
         return;
     }
-    const gpu = try self.device.createTexture(.{ .width = width, .height = height, .data = rgba, .label = held.source });
+    const made = try self.makeTexture(width, height, rgba, held.source, held.mips);
     self.device.destroyTexture(held.gpu);
-    held.gpu = gpu;
+    held.gpu = made.gpu;
     held.width = width;
     held.height = height;
     held.upside_down = false;
+    held.mips = made.mips;
 }
 
 /// The texture already read from `path`, if one was: the same file, however
@@ -843,6 +934,12 @@ pub fn sizeOf(self: *Assets, handle: TextureHandle) ?struct { width: f32, height
 /// The sampler a texture asked for.
 pub fn samplerFor(self: *const Assets, filter: rhi.Filter, wrap: rhi.Wrap) rhi.Sampler {
     return self.samplers.get(filter).get(wrap);
+}
+
+/// The same, reading between the levels of a chain with `filter` too: for
+/// a texture with `mips`, and harmless for one without.
+pub fn mipSamplerFor(self: *const Assets, filter: rhi.Filter, wrap: rhi.Wrap) rhi.Sampler {
+    return self.mip_samplers.get(filter).get(wrap);
 }
 
 /// How many textures are loaded, not counting the white texel and the glow.

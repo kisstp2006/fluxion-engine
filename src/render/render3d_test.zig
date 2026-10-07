@@ -25,6 +25,8 @@ const SpotLight3D = components.SpotLight3D;
 const Environment = components.Environment;
 const RenderView = components.RenderView;
 const renderer3d = @import("renderer3d.zig");
+const helpers = @import("../test_helpers.zig");
+const image = @import("fluxion_image");
 
 fn headless() !*App {
     return App.create(testing.allocator, .{ .headless = true, .width = 64, .height = 64, .io = testing.io });
@@ -345,4 +347,35 @@ test "the 3D components keep what they hold through a scene round trip" {
     const shiny_back = copy.find("shiny").?;
     try testing.expect(copy.world.get(shiny_back, Material3D).?.material.eql(shiny_material));
     try testing.expectEqualSlices(f32, &.{ 1, 2 }, copy.shader_params.get(shiny_back, "speed").?);
+}
+
+test "a surface's pictures are given a chain of levels, before the frame after the one that drew them" {
+    var files: helpers.Files = try .init();
+    defer files.tmp.cleanup();
+    var path: [192]u8 = undefined;
+    var pixels: [8 * 8 * 4]u8 = @splat(200);
+    try image.png.writeFile(testing.allocator, testing.io, try std.fmt.bufPrint(&path, "{s}/art/brick.png", .{try files.at()}), .{ .width = 8, .height = 8, .pixels = &pixels, .row_pitch = 8 * 4 }, .{});
+    const app = try files.app();
+    defer app.destroy();
+
+    const brick = try app.assets.loadTexture("res://art/brick.png", .{});
+    const loose = try app.assets.textureFromPixels(4, 4, pixels[0 .. 4 * 4 * 4], .{});
+    try testing.expect(!app.assets.get(brick).?.mips);
+    const surface = try app.addMaterial("brick", .{ .albedo_texture = brick, .emission_texture = loose });
+    _ = try looking(app);
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .material = surface } });
+    // Drawn, and asked for; made before the next frame is drawn.
+    _ = try app.step();
+    _ = try app.step();
+    const held = app.assets.get(brick).?;
+    try testing.expect(held.mips);
+    try testing.expectEqual(@as(u32, 4), (try app.device.textureInfo(held.gpu)).mip_levels);
+    // One made from pixels in memory has no file to make it from, and keeps its one level.
+    try testing.expect(!app.assets.get(loose).?.mips);
+    try testing.expectEqual(@as(u32, 1), (try app.device.textureInfo(app.assets.get(loose).?.gpu)).mip_levels);
+
+    // New pixels, of another size, keep a chain.
+    var bigger: [16 * 16 * 4]u8 = @splat(9);
+    try app.assets.setTexturePixels(brick, 16, 16, &bigger);
+    try testing.expectEqual(@as(u32, 5), (try app.device.textureInfo(app.assets.get(brick).?.gpu)).mip_levels);
 }

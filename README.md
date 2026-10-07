@@ -1297,7 +1297,11 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   over what is behind it by its alpha, or to cut it where the alpha is under
   `alpha_scissor_threshold`; `cull` for which side of its triangles is left
   out; `unshaded` for its colour as it is; and a `shader` of its own - see
-  below.
+  below. Its pictures are read through a chain of levels, each half the one
+  above, made on the GPU the first time they are drawn on a surface - before
+  the next frame - so that a surface far off does not shimmer; a model's
+  pictures come with theirs. A picture made from pixels in memory keeps its
+  one level. `LoadOptions.mips` asks for a chain when a picture is loaded.
 - **It is lit as a real surface is**, by how much of it is metal and how
   rough it is - the model a glTF material is written for. Colours are made
   linear as they are read, a picture's and a material's alike, and light adds

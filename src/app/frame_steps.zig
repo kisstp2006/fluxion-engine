@@ -121,6 +121,7 @@ pub const order = [_]Step{
     .{ .pass = debugViews },
     .{ .pass = freshInherited },
     .{ .pass = layOut },
+    .{ .pass = textureMips },
     .{ .pass = draw },
 };
 
@@ -356,6 +357,12 @@ fn scriptsEndOfFrame(app: *App) anyerror!void {
 
 fn forgetTheDead(app: *App) anyerror!void {
     app.forgetTheDead();
+}
+
+/// The chains of levels the last frame's 3D surfaces asked their pictures
+/// for, made between frames. See `Assets.wantMips`.
+fn textureMips(app: *App) anyerror!void {
+    app.assets.makeWantedMips();
 }
 
 fn debugViews(app: *App) anyerror!void {

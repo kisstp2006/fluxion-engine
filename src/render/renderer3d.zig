@@ -879,13 +879,16 @@ pub const Renderer3D = struct {
                     const look = materialOf(app, chosen);
                     var compiled = if (look.shader.isNone()) plain else app.shaders.compiled3DOf(look.shader) orelse plain;
                     if (compiled.refused) compiled = plain;
-                    var sampler = app.assets.samplerFor(.linear, .repeat);
+                    // Between levels too: a surface's pictures are asked for
+                    // their chains, and read from them once they have them.
+                    var sampler = app.assets.mipSamplerFor(.linear, .repeat);
                     var textures: [5]rhi.Texture = .{ self.white, self.white, self.white, self.flat, self.white };
                     for ([_]@TypeOf(look.albedo_texture){ look.albedo_texture, look.emission_texture, look.metallic_roughness_texture, look.normal_texture, look.occlusion_texture }, 0..) |handle, slot| {
                         if (handle.isNone()) continue;
                         const held = app.assets.get(handle) orelse continue;
+                        app.assets.wantMips(handle);
                         textures[slot] = held.gpu;
-                        if (slot == 0) sampler = app.assets.samplerFor(held.filter, .repeat);
+                        if (slot == 0) sampler = app.assets.mipSamplerFor(held.filter, .repeat);
                     }
                     const blend = look.transparency == .alpha;
                     const way: Way = .{ .cull = look.cull, .blend = blend };
