@@ -179,6 +179,9 @@ pub const CharacterBody3D = extern struct {
     floor_snap_length: f32 = 0.1,
     /// Standing on a slope, it stays: it slides down only what it walks.
     floor_stop_on_slope: bool = true,
+    /// How high an edge it walks up onto from the floor - a kerb, a stair -
+    /// rather than stopping at it. Nought climbs only slopes.
+    max_step_height: f32 = 0.3,
     /// How far it keeps from what it touches.
     safe_margin: f32 = 0.001,
     /// How many times one move may stop and slide on.
@@ -202,6 +205,7 @@ pub const CharacterBody3D = extern struct {
         .floor_max_angle = .{ attr.Angle{}, attr.Doc{ .text = "The steepest slope that is still a floor" } },
         .floor_snap_length = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "How far below it a floor is kept to; nought never" } },
         .floor_stop_on_slope = .{attr.Doc{ .text = "Standing on a slope, it does not slide down it" }},
+        .max_step_height = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0, .max = 10 }, attr.Doc{ .text = "How high a kerb or a stair it walks up onto from the floor; nought climbs only slopes" } },
         .safe_margin = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "How far it keeps from what it touches" } },
         .on_floor = .{attr.ReadOnly{}},
         .on_wall = .{attr.ReadOnly{}},

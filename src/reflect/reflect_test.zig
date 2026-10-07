@@ -19,7 +19,7 @@ test "every engine component is described under the name a scene gives it" {
     const app = try App.create(testing.allocator, .{ .headless = true });
     defer app.destroy();
 
-    try testing.expectEqual(@as(usize, 70), app.scene_components.entries.items.len);
+    try testing.expectEqual(@as(usize, 72), app.scene_components.entries.items.len);
     for (app.scene_components.entries.items) |entry| {
         try testing.expectEqualStrings(entry.name, entry.type.name.slice());
         try testing.expect(app.types.find(entry.name).? == entry.type);

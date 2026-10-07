@@ -52,6 +52,8 @@ transforms: bool = false,
 sprites: bool = false,
 /// What the camera shows, and the area a camera fits.
 cameras: bool = false,
+/// Each navigation region's mesh, and each agent's way.
+navigation: bool = false,
 /// The frame's rate and length and what is in the world, in pixels at the
 /// top left.
 stats: bool = false,
@@ -80,6 +82,7 @@ pub fn draw(self: DebugViews, app: *App) !void {
         drawRayCasts3D(app, app.debug_3d);
     }
     if (self.bodies) drawBodies(app);
+    if (self.navigation) app.navigation.draw(app, app.debug_3d);
     if (self.transforms) try drawTransforms(app);
     if (self.sprites) try drawSprites(app);
     if (self.cameras) try drawCameras(app);

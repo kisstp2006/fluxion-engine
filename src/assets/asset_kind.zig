@@ -29,6 +29,7 @@ const shaders = @import("../render/shaders.zig");
 const mesh = @import("../render/mesh.zig");
 const materials = @import("../render/materials.zig");
 const lightmaps = @import("../render/lightmaps.zig");
+const navmeshes = @import("../navigation/navmeshes.zig");
 const skeletons = @import("../render/skeleton.zig");
 const models = @import("models.zig");
 const theme = @import("../ui/theme.zig");
@@ -49,6 +50,7 @@ pub const AssetKind = enum {
     mesh,
     material,
     lightmap,
+    navmesh,
     skeleton,
 
     /// What a person calls one.
@@ -68,6 +70,7 @@ pub const AssetKind = enum {
             .mesh => "mesh",
             .material => "material",
             .lightmap => "lightmap",
+            .navmesh => "navigation mesh",
             .skeleton => "skeleton",
         };
     }
@@ -89,6 +92,7 @@ pub const AssetKind = enum {
             .mesh => "Triangles a MeshInstance3D draws",
             .material => "How a 3D mesh looks",
             .lightmap => "The light from everywhere a LightmapGI baked",
+            .navmesh => "Where agents walk, as a NavigationRegion3D baked it",
             .skeleton => "The bones a Skeleton3D bends its meshes with",
         };
     }
@@ -110,6 +114,7 @@ pub const AssetKind = enum {
             .mesh => "res://models/crate.mesh",
             .material => "res://materials/brick.mat3d",
             .lightmap => "res://scenes/office.lightmap",
+            .navmesh => "res://scenes/office.navmesh",
             .skeleton => "res://models/robot.skeleton",
         };
     }
@@ -131,6 +136,7 @@ pub const AssetKind = enum {
             .mesh => &.{mesh.extension},
             .material => &.{materials.extension},
             .lightmap => &.{lightmaps.extension},
+            .navmesh => &.{navmeshes.extension},
             .skeleton => &.{skeletons.extension},
         };
     }
@@ -166,6 +172,7 @@ pub const AssetKind = enum {
             .mesh => mesh.MeshHandle,
             .material => materials.MaterialHandle,
             .lightmap => lightmaps.LightmapHandle,
+            .navmesh => navmeshes.NavMeshHandle,
             .skeleton => skeletons.SkeletonHandle,
         };
     }
@@ -179,7 +186,7 @@ pub const AssetKind = enum {
     }
 
     /// Every kind a component can hold a file of: the ones with a handle.
-    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio, .animation, .frames, .shader, .mesh, .material, .lightmap, .skeleton };
+    pub const handled = [_]AssetKind{ .texture, .font, .scene, .script, .tileset, .theme, .data, .audio, .animation, .frames, .shader, .mesh, .material, .lightmap, .navmesh, .skeleton };
 };
 
 test "a file's kind is its ending's, whatever its case, and a scene's JSON is not said by its name" {

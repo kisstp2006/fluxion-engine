@@ -24,6 +24,7 @@
   <a href="#-the-frame">The frame</a> ·
   <a href="#-the-2d-layer">The 2D layer</a> ·
   <a href="#-physics">Physics</a> ·
+  <a href="#-navigation">Navigation</a> ·
   <a href="#-scenes">Scenes</a> ·
   <a href="#-install">Install</a> ·
   <a href="#-examples">Examples</a> ·
@@ -50,6 +51,7 @@
 | `scene` | A world written down and read back, as JSON or as CBOR. |
 | `Bodies` | Which body is which entity's: the physics world kept in step with the components. |
 | `Bodies3D` | The same for the 3D world's bodies, areas and colliders. |
+| `Navigation` | Agents finding their way across the navigation regions; `navmesh`, the baker and the way across a mesh. |
 | `Clipboard` | Text copied and pasted: the system's, or the program's own with no window. |
 | `dialog` | The system's file and folder dialogs: what `app.openFileDialog` asks for, and the answer `app.input` holds for a frame. |
 | `Commands` | Spawns, despawns, adds and removes that wait for the system asking for them to return. |
@@ -2634,9 +2636,9 @@ fn spawn(app: *fx.App) !void {
   they are: `app.applyImpulse3D(self.entity, vec3(0, 5, 0))`, `for
   (app.contactsBegun3D()) |contact| { ... }`.
 - **A `CharacterBody3D` walks** with `app.moveAndSlide(entity)`, the same
-  call as in 2D: up slopes no steeper than `floor_max_angle`, along walls,
-  stopped by what is in the way and kept on the floor by
-  `floor_snap_length`. `on_floor`, `on_wall`, `on_ceiling` and their normals
+  call as in 2D: up slopes no steeper than `floor_max_angle` and onto kerbs
+  and stairs no higher than `max_step_height`, along walls, stopped by
+  what is in the way and kept on the floor by `floor_snap_length`. `on_floor`, `on_wall`, `on_ceiling` and their normals
   say what it met; `moveAndCollide3D(entity, motion)`, `slideCollision3D`
   and `lastSlideCollision3D` say more.
 - **An `Area3D` says what is in it** with the same signals as an `Area2D`,
@@ -2655,6 +2657,76 @@ Not here yet: joints in 3D, and a body's rolling slowing it by itself -
 
 Not here yet: polygon colliders, and joints as components. What the physics
 sees is drawn by `app.debug_views.colliders`: see [Debug drawing](#-debug-drawing).
+
+## 🧭 Navigation
+
+```zig
+fn level(app: *fx.App) !void {
+    const region = try app.world.spawnWith(.{ fx.Transform3D{}, fx.NavigationRegion3D{} });
+    // ... the floor, the walls and the furniture, hanging from the region ...
+    try app.bakeNavigationMesh(region, "res://levels/office.navmesh");
+    _ = try app.world.spawnWith(.{
+        fx.Transform3D.at(0, 0.9, -6), fx.CharacterBody3D{}, fx.Collider3D.capsule(0.4, 1.8),
+        fx.NavigationAgent3D{ .target_position = .init(4, 0, 6) },
+    });
+}
+
+fn walk(app: *fx.App) !void {                          // a .fixed system
+    if (app.isNavigationFinished(guard)) return;
+    var to = (try app.nextPathPosition(guard)).sub(app.globalPosition3D(guard).?);
+    to.y = 0;
+    app.world.get(guard, fx.CharacterBody3D).?.velocity = to.norm().scale(3);
+    _ = try app.moveAndSlide(guard);
+}
+```
+
+- **A `NavigationRegion3D` is where agents walk**: a navigation mesh, baked
+  by `app.bakeNavigationMesh(region, path)` from the meshes and still
+  colliders that hang from it - or, with `scope = .scene`, the whole
+  scene's - and kept as a `.navmesh` in the region's own space, so the
+  floor moves with the region. Without a path it is kept in memory.
+- **A bake lays the world in columns of cells** - `cell_size` across,
+  `cell_height` up - keeps the tops an agent can stand on, no steeper than
+  `agent_max_slope` and with `agent_height` of air over them, steps up
+  kerbs no higher than `agent_max_climb` - no higher than a
+  `CharacterBody3D`'s `max_step_height`, or what walks the way is stopped
+  there - wears what is left back from
+  walls and drops by `agent_radius`, and draws it as convex polygons of up
+  to six corners. A box, a ball, a capsule, a cylinder and a convex collider
+  are solid; any other mesh is only its surface, so a closed mesh standing
+  on the floor can leave an island inside it that nothing reaches. What
+  moves - a rigid body, a character, an area, and what hangs from one - is
+  left out. The baker is a module of its own, `fx.navmesh`, built for
+  speed whatever the engine is built as: a level a hundred metres across
+  bakes in a few dozen milliseconds.
+- **The way across is A* from polygon to polygon**, pulled tight through
+  the doorways between them: `app.navigationPath(from, to)` gives its
+  corners, `app.closestNavigationPoint(point)` the nearest point of the
+  map. A way is found on the region nearest its start and does not cross
+  into another; a target off it is gone towards as near as it reaches.
+- **A `NavigationAgent3D` finds its own way** to `target_position`:
+  `app.nextPathPosition(agent)` is the corner to head for, the way found
+  again when the target moves or the agent strays further than
+  `path_max_distance`. Within `path_desired_distance` of a corner it heads
+  for the next, and within `target_desired_distance` of the end it has
+  finished - `isNavigationFinished`, `isTargetReached`, and the signals
+  `path_changed`, `target_reached` and `navigation_finished`. The corners
+  are on the floor: what walks to them flattens the way, its middle being
+  above it.
+- **Avoidance**: an agent with `avoidance_enabled` says the velocity it
+  wants with `app.setAgentVelocity(agent, velocity)`, and after the
+  game's `.fixed` systems is given in `velocity_computed` the nearest that
+  keeps out of the other agents' way for `time_horizon` seconds - each of
+  two turning half of the way - before the physics step, so a character
+  moved by it moves in the same step.
+- **From a script all of it is there**: `app.nextPathPosition(self.entity)`,
+  `app.navigationPath(a, b).len`, `agent.velocity_computed.connect(...)`.
+  `app.debug_views.navigation` draws each region's mesh and each agent's way.
+
+Not here yet: ways from one region into another, links across gaps and
+jumps, obstacles that move, and heights inside a polygon truer than its
+corners - one reaching from a floor up a ramp is only as high in the
+middle as its corners say.
 
 ## 📁 The project's files
 

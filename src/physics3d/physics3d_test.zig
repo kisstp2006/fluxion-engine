@@ -171,6 +171,34 @@ test "a character walks up a ramp of triangles onto the ledge at its top, and st
     try testing.expect(body.on_floor and body.on_wall);
 }
 
+test "a character walks up onto a kerb no higher than its step, and stops at one higher" {
+    for ([_]f32{ 0.2, 0.5 }) |kerb| {
+        const app = try headless();
+        defer app.destroy();
+        _ = try floorOf(app);
+        _ = try app.world.spawnWith(.{ Transform3D.at(6, kerb / 2, 0), Collider3D.box(.init(4, kerb / 2, 4)) });
+        const player = try app.world.spawnWith(.{ Transform3D.at(0, 0.9, 0), CharacterBody3D{}, Collider3D.capsule(0.3, 1.8) });
+        app.time.source = .{ .fixed = dt };
+        for (0..120) |_| {
+            const body = app.world.get(player, CharacterBody3D).?;
+            body.velocity = .init(3, body.velocity.y - 9.8 * dt, 0);
+            _ = try app.moveAndSlide(player);
+            _ = try app.step();
+        }
+        const at = app.world.get(player, Transform3D).?.position;
+        if (kerb < 0.3) {
+            // Up on it and on along it.
+            try testing.expect(at.x > 4);
+            try testing.expectApproxEqAbs(@as(f32, 0.9 + kerb), at.y, 0.03);
+            try testing.expect(app.world.get(player, CharacterBody3D).?.on_floor);
+        } else {
+            // Against its edge at x = 2.
+            try testing.expectApproxEqAbs(@as(f32, 1.7), at.x, 0.03);
+            try testing.expectApproxEqAbs(@as(f32, 0.9), at.y, 0.03);
+        }
+    }
+}
+
 test "an area says a body came in and went out, and a ray says what is below it" {
     const app = try headless();
     defer app.destroy();

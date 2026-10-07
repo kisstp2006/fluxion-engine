@@ -162,6 +162,14 @@ pub fn moveAndSlide(app: *App, e: Entity) Error!bool {
                 if (out.velocity.dot(normal) < 0) out.velocity = out.velocity.sub(normal.scale(out.velocity.dot(normal)));
             },
             .wall => {
+                // A kerb, a stair: walked up onto from the floor.
+                if (state.motion_mode == .grounded and state.on_floor and state.max_step_height > 0) {
+                    if (try stepUp(app, e, body, rest, up, state)) |left| {
+                        out.on_floor = true;
+                        motion = left;
+                        continue;
+                    }
+                }
                 out.on_wall = true;
                 out.wall_normal = normal;
                 // A wall stops what goes into it - but not the fall along it.
@@ -196,6 +204,35 @@ pub fn moveAndSlide(app: *App, e: Entity) Error!bool {
 
     app.world.get(e, CharacterBody3D).?.* = out;
     return collided;
+}
+
+/// Up by the step height, on by `motion` along the ground, and down onto a
+/// floor: what is left of `motion` when that worked. Undone when there is
+/// no room above, the edge is higher than the step, or there is no floor
+/// past it.
+fn stepUp(app: *App, e: Entity, body: physics3d.BodyId, motion: Vec3, up: Vec3, state: CharacterBody3D) Error!?Vec3 {
+    const forward = motion.sub(up.scale(motion.dot(up)));
+    if (forward.lenSq() < 1e-10) return null;
+    const margin = state.safe_margin;
+    const lift = up.scale(state.max_step_height);
+    const raised = if (try cast(app, body, lift, margin)) |hit| lift.scale(hit.fraction) else lift;
+    if (raised.len() < state.max_step_height * 0.25) return null;
+    try moveBy(app, e, body, raised);
+    const ahead = try cast(app, body, forward, margin);
+    const went = if (ahead) |hit| forward.scale(hit.fraction) else forward;
+    if (went.len() < 1e-4) {
+        try moveBy(app, e, body, raised.neg());
+        return null;
+    }
+    try moveBy(app, e, body, went);
+    const drop = raised.neg().sub(up.scale(margin * 2));
+    const below = try cast(app, body, drop, margin);
+    if (below == null or kindOf(state, up, below.?.normal) != .floor) {
+        try moveBy(app, e, body, went.add(raised).neg());
+        return null;
+    }
+    try moveBy(app, e, body, drop.scale(below.?.fraction));
+    return forward.sub(went);
 }
 
 /// A wall's normal with its up part taken out, so stopping at a wall that

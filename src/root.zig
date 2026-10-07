@@ -221,6 +221,14 @@ pub const LightmapHandle = lightmaps.LightmapHandle;
 /// A bake on its way: see `App.bakeLightmap`.
 pub const LightmapBake = @import("render/lightmap_bake.zig").LightmapBake;
 pub const lightmap_uv = @import("render/lightmap_uv.zig");
+/// `.navmesh` files: what a `NavigationRegion3D` bakes. See
+/// `navigation/navmeshes.zig`.
+pub const navmeshes = @import("navigation/navmeshes.zig");
+pub const NavMeshHandle = navmeshes.NavMeshHandle;
+/// The agents' ways across the navigation regions: what `App.navigation` is.
+pub const Navigation = @import("navigation/Navigation.zig");
+/// The navigation mesh baker, the way across a mesh, and avoidance.
+pub const navmesh = @import("fluxion_navmesh");
 /// Models as scenes: glTF read by the engine, FBX and Blender files by way
 /// of an editor. See `assets/models.zig` and `assets/gltf.zig`.
 pub const models = @import("assets/models.zig");
@@ -265,6 +273,8 @@ pub const CharacterBody3D = components.CharacterBody3D;
 pub const Collider3D = components.Collider3D;
 pub const Area3D = components.Area3D;
 pub const RayCast3D = components.RayCast3D;
+pub const NavigationRegion3D = components.NavigationRegion3D;
+pub const NavigationAgent3D = components.NavigationAgent3D;
 pub const Drawing2D = @import("render/drawing.zig").Drawing2D;
 pub const drawing = @import("render/drawing.zig");
 
@@ -576,6 +586,8 @@ test {
     _ = @import("physics/areas_test.zig");
     _ = @import("physics/bodies_test.zig");
     _ = @import("physics3d/physics3d_test.zig");
+    _ = @import("navigation/navigation_test.zig");
+    _ = @import("navigation/sources.zig");
     _ = @import("physics/character_test.zig");
     _ = @import("physics/picking_test.zig");
     _ = @import("platform/window_test.zig");

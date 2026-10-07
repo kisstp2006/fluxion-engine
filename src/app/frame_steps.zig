@@ -136,6 +136,7 @@ pub const fixed_step = [_]Step{
     .{ .pass = fixedTimers },
     .{ .pass = scriptsFixed },
     .{ .stage = .fixed },
+    .{ .pass = navigationAvoidance },
     .{ .pass = physics },
     .{ .pass = fixedEdgesHeard },
 };
@@ -319,6 +320,14 @@ fn physics(app: *App) anyerror!void {
     try app.bodies3d.afterStep(app);
     try app.areas3d.update(app);
     try ray_casts3d.updateAll(app);
+}
+
+/// What the agents said they want this step, each given the velocity that
+/// keeps it out of the others' way - heard before the physics step, so a
+/// character moved by it moves in this step.
+fn navigationAvoidance(app: *App) anyerror!void {
+    if (app.paused) return;
+    try app.navigation.avoid(app, app.time.delta);
 }
 
 /// Seen, so gone: the next step hears only what comes after.

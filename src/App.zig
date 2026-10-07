@@ -127,6 +127,8 @@ const view_textures = @import("render/view_textures.zig");
 const mesh_table = @import("render/mesh.zig");
 const material_table = @import("render/materials.zig");
 const lightmap_table = @import("render/lightmaps.zig");
+const navmesh_table = @import("navigation/navmeshes.zig");
+const Navigation = @import("navigation/Navigation.zig");
 const lightmap_bake = @import("render/lightmap_bake.zig");
 const skeleton_table = @import("render/skeleton.zig");
 const models = @import("assets/models.zig");
@@ -412,6 +414,11 @@ materials: material_table.Materials = .{},
 /// Every `.lightmap` read or baked: see `render/lightmaps.zig` and
 /// `bakeLightmap`.
 lightmaps: lightmap_table.Lightmaps = .{},
+/// Every navigation mesh read or baked. See `navigation/navmeshes.zig`.
+navmeshes: navmesh_table.NavMeshes = .{},
+/// The agents' ways across the navigation regions. See
+/// `navigation/Navigation.zig`.
+navigation: Navigation = .{},
 /// Every skeleton read or made: see `render/skeleton.zig` and
 /// `loadSkeleton`.
 skeletons: skeleton_table.Skeletons = .{},
@@ -581,6 +588,7 @@ const entity_tables = .{
     .current_scene,    .tile_chunks, .bodies,             .areas,
     .picking,          .audio,       .control_tree,       .poses,
     .bodies3d,         .areas3d,     .slide_collisions3d, .picking3d,
+    .navigation,
 };
 
 /// The engine's own components: what every scene can hold from the start.
@@ -613,6 +621,8 @@ pub const engine_components = .{
     components.Collider3D,
     components.Area3D,
     components.RayCast3D,
+    components.NavigationRegion3D,
+    components.NavigationAgent3D,
     drawing.Drawing2D,
     particle_emitters.Particles2D,
     lights.PointLight2D,
@@ -675,11 +685,14 @@ const described_types = .{
     mesh_table.MeshHandle,
     material_table.MaterialHandle,
     lightmap_table.LightmapHandle,
+    navmesh_table.NavMeshHandle,
     skeleton_table.SkeletonHandle,
     components3d.GiMode,
     components3d.LightBake,
     components3d.LightmapGI.MaxSize,
     components3d.LightmapGI.Quality,
+    components.NavigationRegion3D.Source,
+    components.NavigationRegion3D.Scope,
     character.Collision,
     geometry.Vec2i,
     geometry.Rect2,
@@ -999,6 +1012,8 @@ pub fn destroy(self: *App) void {
     self.meshes.deinit(gpa, &self.device);
     self.materials.deinit(gpa);
     self.lightmaps.deinit(gpa, &self.device);
+    self.navmeshes.deinit(gpa);
+    self.navigation.deinit(gpa);
     self.poses.deinit(gpa);
     self.skeletons.deinit(gpa);
     self.screen_texture.deinit();
@@ -4222,6 +4237,7 @@ pub fn assetSource(self: *App, handle: anytype) ?[]const u8 {
         .mesh => self.meshes.sourceOf(handle),
         .material => self.materials.sourceOf(handle),
         .lightmap => self.lightmaps.sourceOf(handle),
+        .navmesh => self.navmeshes.sourceOf(handle),
         .skeleton => self.skeletons.sourceOf(handle),
     };
 }
@@ -4246,6 +4262,7 @@ pub fn loadAsset(self: *App, comptime H: type, path: []const u8) !H {
         .mesh => self.loadMesh(path),
         .material => self.loadMaterial(path),
         .lightmap => self.loadLightmap(path),
+        .navmesh => self.loadNavMesh(path),
         .skeleton => self.loadSkeleton(path),
     };
 }
@@ -4268,6 +4285,7 @@ pub fn findAsset(self: *App, comptime H: type, path: []const u8) ?H {
         .mesh => self.findMesh(path),
         .material => self.findMaterial(path),
         .lightmap => self.findLightmap(path),
+        .navmesh => self.findNavMesh(path),
         .skeleton => self.findSkeleton(path),
     };
 }
@@ -4663,6 +4681,158 @@ pub fn lightmapOf(self: *App, handle: lightmap_table.LightmapHandle) ?*const lig
 
 pub fn unloadLightmap(self: *App, handle: lightmap_table.LightmapHandle) void {
     self.lightmaps.unload(self.gpa, &self.device, handle);
+}
+
+// -------------------------------------------------------------------------
+// Navigation
+// -------------------------------------------------------------------------
+
+/// Read a `.navmesh` - what a `NavigationRegion3D` baked - or find the one
+/// read from there already.
+pub fn loadNavMesh(self: *App, path: []const u8) !navmesh_table.NavMeshHandle {
+    return self.navmeshes.load(self, path);
+}
+
+/// A navigation mesh made in code, kept under `name`: a name given before
+/// gets the new one and keeps its handle.
+pub fn addNavMesh(self: *App, name: []const u8, mesh: navmesh_table.NavMesh) !navmesh_table.NavMeshHandle {
+    return self.navmeshes.add(self.gpa, name, mesh);
+}
+
+pub fn findNavMesh(self: *App, path: []const u8) ?navmesh_table.NavMeshHandle {
+    return self.findSpelt(&self.navmeshes, path);
+}
+
+/// Read a navigation mesh's file again. Says whether it had one.
+pub fn reloadNavMesh(self: *App, handle: navmesh_table.NavMeshHandle) !bool {
+    return self.navmeshes.reload(self, handle);
+}
+
+/// What a navigation mesh holds: its corners and polygons, in its region's
+/// own space.
+pub fn navMeshOf(self: *App, handle: navmesh_table.NavMeshHandle) ?*const navmesh_table.NavMesh {
+    return self.navmeshes.get(handle);
+}
+
+pub fn unloadNavMesh(self: *App, handle: navmesh_table.NavMeshHandle) void {
+    self.navmeshes.unload(self.gpa, handle);
+}
+
+/// Write a navigation mesh to a `.navmesh` file at `path`.
+pub fn saveNavMesh(self: *App, handle: navmesh_table.NavMeshHandle, path: []const u8) !void {
+    const io = self.io orelse return error.NoIo;
+    const held = self.navmeshes.get(handle) orelse return error.NoSuchNavMesh;
+    const bytes = try held.write(self.gpa);
+    defer self.gpa.free(bytes);
+    const file = try self.project.osPath(self.gpa, path);
+    defer self.gpa.free(file);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes });
+}
+
+/// Bake the navigation mesh of the `NavigationRegion3D` on `region` from
+/// the meshes and still colliders it reaches, and give it the region. With
+/// a `path` - a `.navmesh` - it is written there and read back from the
+/// file; without, it is kept in memory under the region's name.
+pub fn bakeNavigationMesh(self: *App, region: ecs.Entity, path: ?[]const u8) !void {
+    var mesh = try Navigation.bake(self, region);
+    var kept = false;
+    errdefer if (!kept) mesh.deinit(self.gpa);
+    const handle = handle: {
+        const where = path orelse {
+            var buffer: [64]u8 = undefined;
+            const name = std.fmt.bufPrint(&buffer, "navmesh of {f}", .{region}) catch "navmesh";
+            kept = true;
+            break :handle try self.addNavMesh(name, mesh);
+        };
+        if (self.io == null) {
+            kept = true;
+            break :handle try self.addNavMesh(where, mesh);
+        }
+        const bytes = try mesh.write(self.gpa);
+        defer self.gpa.free(bytes);
+        const file = try self.project.osPath(self.gpa, where);
+        defer self.gpa.free(file);
+        try std.Io.Dir.cwd().writeFile(self.io.?, .{ .sub_path = file, .data = bytes });
+        mesh.deinit(self.gpa);
+        kept = true;
+        if (self.findNavMesh(where)) |known| {
+            _ = try self.reloadNavMesh(known);
+            break :handle known;
+        }
+        break :handle try self.loadNavMesh(where);
+    };
+    if (self.world.get(region, components.NavigationRegion3D)) |held| held.navigation_mesh = handle;
+}
+
+/// Turn one of `debug_views` on or off by its name - `colliders`,
+/// `navigation`, `stats` - as a script or a console can.
+pub fn setDebugView(self: *App, name: []const u8, on: bool) error{NoSuchView}!void {
+    inline for (std.meta.fields(DebugViews)) |field| {
+        if (std.mem.eql(u8, field.name, name)) {
+            @field(self.debug_views, field.name) = on;
+            return;
+        }
+    }
+    return error.NoSuchView;
+}
+
+/// Whether the debug view called `name` is on.
+pub fn isDebugViewOn(self: *const App, name: []const u8) bool {
+    inline for (std.meta.fields(DebugViews)) |field| {
+        if (std.mem.eql(u8, field.name, name)) return @field(self.debug_views, field.name);
+    }
+    return false;
+}
+
+/// Where the `NavigationAgent3D` on `agent` should head next: the next
+/// corner of its way to its `target_position`, found when the target moves
+/// or the agent strays. Once it has finished, where it is.
+pub fn nextPathPosition(self: *App, agent: ecs.Entity) !math.Vec3 {
+    return self.navigation.nextPathPosition(self, agent);
+}
+
+/// Whether the agent has stopped: there, or as near as the way goes.
+pub fn isNavigationFinished(self: *App, agent: ecs.Entity) bool {
+    return self.navigation.isFinished(self, agent);
+}
+
+/// Whether the agent got to its target.
+pub fn isTargetReached(self: *App, agent: ecs.Entity) bool {
+    if (!self.navigation.isFinished(self, agent)) return false;
+    const held = self.world.get(agent, components.NavigationAgent3D) orelse return false;
+    return held.target_reached;
+}
+
+/// How far the agent is from its target, straight.
+pub fn distanceToTarget(self: *App, agent: ecs.Entity) f32 {
+    const held = self.world.get(agent, components.NavigationAgent3D) orelse return 0;
+    const at = hierarchy.globalPosition3D(&self.world, agent) orelse return 0;
+    return held.target_position.sub(at).len();
+}
+
+/// The agent wants to go at `velocity`: the velocity that keeps it out of
+/// the other agents' way comes back in its `velocity_computed`, after this
+/// step's `.fixed` systems - the same one when it has no avoidance.
+pub fn setAgentVelocity(self: *App, agent: ecs.Entity, velocity: math.Vec3) Navigation.AgentError!void {
+    return self.navigation.setVelocity(self, agent, velocity);
+}
+
+/// The agent's way as it was found, its corners from where it was then.
+pub fn agentPath(self: *App, agent: ecs.Entity) []const math.Vec3 {
+    return self.navigation.pathOf(agent);
+}
+
+/// The way across the navigation regions from `from` to `to`, its corners
+/// from the start to the end, on the region nearest `from`: good until the
+/// next call. Empty with no region.
+pub fn navigationPath(self: *App, from: math.Vec3, to: math.Vec3) Allocator.Error![]const math.Vec3 {
+    return self.navigation.findPath(self, from, to);
+}
+
+/// The point of the navigation regions nearest `point`; `point` itself
+/// with no region.
+pub fn closestNavigationPoint(self: *App, point: math.Vec3) math.Vec3 {
+    return Navigation.closestPoint(self, point);
 }
 
 /// Read a `.skeleton` file, or find the one read from there already: what a
@@ -5893,6 +6063,18 @@ pub const reflect_methods = .{
     .castRay3D = .{ attr.Params{ .names = &.{ "from", "to", "mask", "hit_areas" } }, attr.defaults(.{ @as(u32, 0xFFFF_FFFF), false }) },
     .contactsBegun3D = .{},
     .contactsEnded3D = .{},
+    .setDebugView = .{attr.Params{ .names = &.{ "name", "on" } }},
+    .isDebugViewOn = .{attr.Params{ .names = &.{"name"} }},
+    // Navigation
+    .nextPathPosition = .{attr.Params{ .names = &.{"agent"} }},
+    .isNavigationFinished = .{attr.Params{ .names = &.{"agent"} }},
+    .isTargetReached = .{attr.Params{ .names = &.{"agent"} }},
+    .distanceToTarget = .{attr.Params{ .names = &.{"agent"} }},
+    .setAgentVelocity = .{attr.Params{ .names = &.{ "agent", "velocity" } }},
+    .agentPath = .{attr.Params{ .names = &.{"agent"} }},
+    .navigationPath = .{attr.Params{ .names = &.{ "from", "to" } }},
+    .closestNavigationPoint = .{attr.Params{ .names = &.{"point"} }},
+    .bakeNavigationMesh = .{ attr.Params{ .names = &.{ "region", "path" } }, attr.defaults(.{@as(?[]const u8, null)}) },
     // Characters
     .moveAndSlide = .{attr.Params{ .names = &.{"entity"} }},
     .moveAndCollide = .{attr.Params{ .names = &.{ "entity", "motion" } }},
