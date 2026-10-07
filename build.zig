@@ -240,7 +240,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     // The navigation mesh baker and the way across one: the same, for a bake
     // of a level is nearly all rasterizing.
     const navmesh = b.createModule(.{
-        .root_source_file = b.path("src/navmesh/navmesh.zig"),
+        .root_source_file = b.path("src/navmesh/root.zig"),
         .target = target,
         .optimize = .ReleaseFast,
         .single_threaded = single_threaded,
