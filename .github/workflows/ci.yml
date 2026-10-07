@@ -1,0 +1,29 @@
+# The tests on Linux and on Windows, for each push to master and each pull
+# request. Direct3D is built only for Windows, so the Linux job also builds
+# the runtime and the examples for Windows: a change that breaks that build
+# shows up there as well as on the Windows job.
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Test
+        run: zig build test --summary all
+      - name: Build for Windows from Linux
+        if: runner.os == 'Linux'
+        run: zig build -Dtarget=x86_64-windows --summary all
