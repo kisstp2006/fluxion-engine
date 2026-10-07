@@ -152,6 +152,10 @@ pub const scene = @import("scene/scene.zig");
 /// with `App.physics`.
 pub const Bodies = @import("physics/bodies.zig");
 
+/// The same in 3D: `RigidBody3D`, `CharacterBody3D`, `Area3D` and
+/// `Collider3D` kept in step with `App.physics3d`.
+pub const Bodies3D = @import("physics3d/bodies3d.zig");
+
 pub const render = struct {
     pub const sprite = @import("render/sprite.zig");
     /// What the camera sees, and where the pointer is in the world.
@@ -252,6 +256,15 @@ pub const Collider2D = components.Collider2D;
 /// pickup, a hurtbox.
 pub const Area2D = components.Area2D;
 pub const RayCast2D = components.RayCast2D;
+
+/// The 3D world's: something that falls, rolls and bounces; a body the game
+/// moves; the shape either collides with; a place that tells what is in
+/// it; a ray asked each step. In metres, `+y` up.
+pub const RigidBody3D = components.RigidBody3D;
+pub const CharacterBody3D = components.CharacterBody3D;
+pub const Collider3D = components.Collider3D;
+pub const Area3D = components.Area3D;
+pub const RayCast3D = components.RayCast3D;
 pub const Drawing2D = @import("render/drawing.zig").Drawing2D;
 pub const drawing = @import("render/drawing.zig");
 
@@ -507,6 +520,9 @@ pub const net = @import("fluxion_net");
 /// anything else a body can do.
 pub const physics = @import("fluxion_physics");
 
+/// Rigid bodies in space: what `App.physics3d` is.
+pub const physics3d = @import("fluxion_physics3d");
+
 /// Types read and written at run time: what `App.componentOf` hands out, what
 /// `App.types` holds, and what `App.callNamed` calls through.
 pub const reflect = @import("fluxion_reflect");
@@ -559,6 +575,7 @@ test {
     _ = @import("project/plugins_test.zig");
     _ = @import("physics/areas_test.zig");
     _ = @import("physics/bodies_test.zig");
+    _ = @import("physics3d/physics3d_test.zig");
     _ = @import("physics/character_test.zig");
     _ = @import("physics/picking_test.zig");
     _ = @import("platform/window_test.zig");

@@ -19,6 +19,7 @@ const physics = @import("fluxion_physics");
 const ecs = @import("fluxion_ecs");
 
 const scene = @import("../scene/scene.zig");
+const script = @import("../script/script.zig");
 
 /// Earth's pull at a hundred units to the metre, with nothing slowing a
 /// body down: what these tests' numbers were worked out for. The defaults
@@ -133,6 +134,46 @@ test "a sensor is heard and pushes nothing" {
     try testing.expect(heard);
     // It fell straight through.
     try testing.expect(app.world.get(stone, Transform2D).?.y > 300);
+}
+
+test "a script goes through the contacts that began and ended, and asks each for the other one" {
+    const app = try headless(1.0 / 60.0);
+    defer app.destroy();
+    try app.useScripts(.{});
+    const handle = try app.addScript("listener.flux",
+        \\var begun = 0;
+        \\var ended = 0;
+        \\var crate_met = false;
+        \\struct Listener {
+        \\    fn update(self, dt: float) {
+        \\        const floor = app.find("Floor") orelse return;
+        \\        for (app.contactsBegun()) |contact| {
+        \\            begun += 1;
+        \\            if (contact.other(floor)) |other| {
+        \\                if (other.name() == "Crate" and !contact.sensor) crate_met = true;
+        \\            }
+        \\        }
+        \\        ended += app.contactsEnded().len;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{script.Script.of(handle)});
+    const floor = try app.world.spawnWith(.{ Transform2D.at(0, 100), Collider2D.rectangle(200, 10) });
+    try app.setName(floor, "Floor");
+    const crate = try app.world.spawnWith(.{ Transform2D.at(0, 0), RigidBody2D{}, Collider2D.rectangle(10, 10) });
+    try app.setName(crate, "Crate");
+    try frames(app, 90);
+    // Gone, its contact ends.
+    app.world.despawn(crate);
+    try frames(app, 2);
+    const scripts = app.scripts.?;
+    try testing.expectEqual(@as(usize, 0), scripts.failures);
+    const module = scripts.moduleOf(handle).?;
+    // It may bounce before it rests; whatever began has ended once it is gone.
+    const begun = scripts.vm.get(module, "begun").?.asInt();
+    try testing.expect(begun >= 1);
+    try testing.expectEqual(begun, scripts.vm.get(module, "ended").?.asInt());
+    try testing.expect(scripts.vm.get(module, "crate_met").?.asBool());
 }
 
 test "a ray finds what it hits first, and a point what is under it" {

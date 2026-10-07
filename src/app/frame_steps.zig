@@ -29,6 +29,7 @@ const hierarchy = @import("../scene/hierarchy.zig");
 const layers = @import("../render/layers.zig");
 const particles = @import("../render/particles.zig");
 const ray_casts = @import("../physics/ray_casts.zig");
+const ray_casts3d = @import("../physics3d/ray_casts3d.zig");
 const sprite_frames = @import("../animation/sprite_frames.zig");
 const tile_chunks = @import("../tiles/tile_chunks.zig");
 const timer = @import("../time/timer.zig");
@@ -241,7 +242,11 @@ fn commands(app: *App) anyerror!void {
 /// move no body.
 fn bodiesBeforeTheSteps(app: *App) anyerror!void {
     app.bodies.beginFrame();
-    if (app.time.delta == 0 or app.paused) try app.bodies.sync(app);
+    app.bodies3d.beginFrame();
+    if (app.time.delta == 0 or app.paused) {
+        try app.bodies.sync(app);
+        try app.bodies3d.sync(app);
+    }
 }
 
 // The input.
@@ -275,6 +280,7 @@ fn pointerSpeed(app: *App) anyerror!void {
 /// first step.
 fn picking(app: *App) anyerror!void {
     try app.picking.update(app);
+    try app.picking3d.update(app);
 }
 
 // A fixed step.
@@ -308,6 +314,11 @@ fn physics(app: *App) anyerror!void {
     try app.bodies.afterStep(app);
     try app.areas.update(app);
     try ray_casts.updateAll(app);
+    try app.bodies3d.sync(app);
+    try app.physics3d.step(app.time.delta);
+    try app.bodies3d.afterStep(app);
+    try app.areas3d.update(app);
+    try ray_casts3d.updateAll(app);
 }
 
 /// Seen, so gone: the next step hears only what comes after.

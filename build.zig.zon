@@ -99,6 +99,13 @@
             .hash = "fluxion_physics-0.1.0-dovcrkI-CAA0f67bAIUbCQ5MA5VSBnNfJunUVyXCFgeP",
         },
 
+        // Rigid bodies in space, for the 3D world: stepped beside the 2D
+        // ones after each `.fixed` stage.
+        .fluxion_physics3d = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-physics3d#d67f4952cba8e154837e57b3e9267360026ac000",
+            .hash = "fluxion_physics3d-0.1.0-44tGdktcAwAbahY8dUXTLqpr8aECHXF_j9xBWkH1GE67",
+        },
+
         // The components and the engine's calls, described at run time: what
         // an editor's inspector reads and writes, and what a console calls by
         // name. Its fluxion-json is the one above, so its JSON is the scenes'.

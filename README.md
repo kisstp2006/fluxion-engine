@@ -49,6 +49,7 @@
 | `hierarchy` | Where a thing really is, once its parent has had its say. |
 | `scene` | A world written down and read back, as JSON or as CBOR. |
 | `Bodies` | Which body is which entity's: the physics world kept in step with the components. |
+| `Bodies3D` | The same for the 3D world's bodies, areas and colliders. |
 | `Clipboard` | Text copied and pasted: the system's, or the program's own with no window. |
 | `dialog` | The system's file and folder dialogs: what `app.openFileDialog` asks for, and the answer `app.input` holds for a frame. |
 | `Commands` | Spawns, despawns, adds and removes that wait for the system asking for them to return. |
@@ -2362,7 +2363,9 @@ fn jump(app: *fx.App) !void {                          // a .fixed system
   `contactsEnded()` list what touched and what parted in this frame's steps,
   each once however many steps ran; a `.fixed` system hears those of the
   step before. A sensor pushes nothing and is still heard. An ended contact
-  may name a despawned entity - often that is why it ended.
+  may name a despawned entity - often that is why it ended. A script goes
+  through them the same way: `for (app.contactsBegun()) |contact| { if
+  (contact.other(self.entity)) |thing| ... }`.
 - **The three questions, answered in entities**: `app.castRay(from, to,
   mask, hit_areas)` - the first thing on the line on the mask's layers, an
   area only when asked, as `collider` (the body or area) and `shape`, with
@@ -2582,6 +2585,74 @@ struct Lever {
 - **`event.position` is in the window's pixels**. `app.screenToWorld(x, y)`
   takes it into the world.
 
+### 🧊 3D physics
+
+```zig
+fn spawn(app: *fx.App) !void {
+    _ = try app.world.spawnWith(.{                     // a floor: a collider alone is a static body
+        fx.Transform3D.at(0, -0.25, 0),
+        fx.Collider3D.box(.init(10, 0.25, 10)),
+    });
+    _ = try app.world.spawnWith(.{                     // a crate that falls and tumbles
+        fx.Transform3D.at(0, 4, 0),
+        fx.MeshInstance3D{}, fx.PrimitiveMesh3D.of(.box), fx.Material3D{},
+        fx.RigidBody3D{},
+        fx.Collider3D.box(.init(0.5, 0.5, 0.5)),
+    });
+    _ = try app.world.spawnWith(.{                     // a level: its mesh's own triangles
+        fx.Transform3D{}, fx.MeshInstance3D{ .mesh = level }, fx.Material3D{},
+        fx.Collider3D{ .shape = .mesh },
+    });
+}
+```
+
+- **The same components, in 3D.** `RigidBody3D`, `CharacterBody3D`,
+  `Area3D`, `Collider3D` and `RayCast3D` are what their 2D namesakes are,
+  beside a `Transform3D`, in metres. The engine makes the bodies in
+  [Fluxion Physics 3D](https://github.com/kisstp2006/fluxion-physics3d), keeps
+  them in step with the components - `app.bodies3d` - and writes each moving
+  body's place back into its transform after every step.
+- **A `Collider3D` is a box, a sphere, a capsule or a cylinder** - `.box(half)`,
+  `.sphere(r)`, `.capsule(r, height)`, `.cylinder(r, height)`, a capsule and a
+  cylinder standing along `y` - with an `offset` and a `rotation` on its
+  entity, whose scale scales it. **`.convex`** is the hull round a mesh, for
+  what moves; **`.mesh`** is a mesh's own triangles, for what never moves - on
+  a body or an area it is left out with a warning. Both take the collider's
+  own `mesh`, or else the `MeshInstance3D` beside it, a primitive's included;
+  a mesh at a scale is made once and shared by every collider that has it.
+- **Compound bodies, layers and materials** are as in 2D: a collider on an
+  entity hanging from a body is part of it, two touch when either one's
+  `collision_mask` has the other's `collision_layer`, a pair's `friction` is
+  the smaller and its `bounce` the two added, and `density` gives a body its
+  mass and how it turns. `app.addCollisionExceptionWith` keeps two apart.
+- **The calls end in `3D`.** `app.applyImpulse3D(body, impulse, offset)`,
+  `applyForce3D`, `applyTorque3D` and `applyTorqueImpulse3D`;
+  `app.castRay3D(from, to, mask, hit_areas)`, which answers in entities as
+  `castRay` does; `contactsBegun3D()` and `contactsEnded3D()`, each a
+  `Contact3D` whose `other(entity)` names the one touching it - a body
+  despawned ends its contacts in the next step. A script calls them as
+  they are: `app.applyImpulse3D(self.entity, vec3(0, 5, 0))`, `for
+  (app.contactsBegun3D()) |contact| { ... }`.
+- **A `CharacterBody3D` walks** with `app.moveAndSlide(entity)`, the same
+  call as in 2D: up slopes no steeper than `floor_max_angle`, along walls,
+  stopped by what is in the way and kept on the floor by
+  `floor_snap_length`. `on_floor`, `on_wall`, `on_ceiling` and their normals
+  say what it met; `moveAndCollide3D(entity, motion)`, `slideCollision3D`
+  and `lastSlideCollision3D` say more.
+- **An `Area3D` says what is in it** with the same signals as an `Area2D`,
+  and `app.overlappingBodies` and the rest ask either kind. A `RayCast3D`
+  asks every step, and `app.forceRaycastUpdate` asks now.
+- **The pointer picks in 3D too**: through the current `Camera3D`, the
+  nearest `Area3D` - or `RigidBody3D` with `input_pickable` - under it hears
+  `input_event`, `mouse_entered`, `pressed`, `clicked` and the rest, and a
+  solid thing in front of it hides it.
+- **How the 3D world moves is the project's**: `physics_3d` in
+  `project.fluxion` - gravity 9.8 down `y`, damping 0.1 - and its layers'
+  names, `layer_names.physics_3d`. Everything else is `app.physics3d`.
+
+Not here yet: joints in 3D, and a body's rolling slowing it by itself -
+`angular_damp` does that.
+
 Not here yet: polygon colliders, and joints as components. What the physics
 sees is drawn by `app.debug_views.colliders`: see [Debug drawing](#-debug-drawing).
 
@@ -2675,7 +2746,7 @@ _ = try app.assets.reloadFile("res://art/hero.png");                 // changed 
   "application": { "name": "Meadow", "icon": "res://icon.png", "main_scene": "res://levels/meadow.json", "tags": ["2d"] },
   "display": { "width": 1600, "height": 900, "mode": "maximized", "vsync_mode": "adaptive", "stretch_mode": "canvas" },
   "physics_2d": { "default_gravity": 420 },
-  "layer_names": { "physics_2d": ["world", "player"] },
+  "layer_names": { "physics_2d": ["world", "player"], "physics_3d": ["world", "player"] },
   "gui": { "theme": "res://ui/game.theme" },
   "my_game": { "lives": 3 }
 }
@@ -2695,7 +2766,7 @@ const mine = try settings.section(MyGame, "my_game", arena);                    
   manager lists projects with `Project.readSettings`. A root without one
   starts as it always did, with `settings` null.
 - **Settings are data.** A section is a plain struct - `Application`,
-  `Display`, `Rendering`, `Physics2D`, `LayerNames`, `Gui` - and a setting
+  `Display`, `Rendering`, `Physics2D`, `Physics3D`, `LayerNames`, `Gui` - and a setting
   a field of it, with its default and its description in `reflect_fields`:
   `attr.Doc`, `attr.Range`, and `attr.ProjectFile`, `attr.Required`,
   `attr.Advanced` and `attr.Restart` for what a setting is besides its value.
@@ -3770,6 +3841,7 @@ it does not use; an engine uses all of it by definition.
 [Debug draw](https://github.com/kisstp2006/fluxion-debugdraw) ·
 [JSON](https://github.com/kisstp2006/fluxion-json) ·
 [Physics](https://github.com/kisstp2006/fluxion-physics) ·
+[Physics 3D](https://github.com/kisstp2006/fluxion-physics3d) ·
 [Reflect](https://github.com/kisstp2006/fluxion-reflect) ·
 [Script](https://github.com/kisstp2006/fluxion-script) ·
 [Audio](https://github.com/kisstp2006/fluxion-audio) ·

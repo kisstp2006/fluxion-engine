@@ -14,6 +14,7 @@ const math = @import("fluxion_math");
 const physics = @import("fluxion_physics");
 
 const App = @import("../App.zig");
+const attr = @import("../reflect/attr.zig");
 const components = @import("../scene/components.zig");
 const hierarchy = @import("../scene/hierarchy.zig");
 const sprite = @import("../render/sprite.zig");
@@ -47,6 +48,11 @@ pub const Contact = struct {
         if (self.b.eql(entity)) return self.a;
         return null;
     }
+
+    pub const reflect_name = "Contact";
+    pub const reflect_methods = .{
+        .other = .{attr.Params{ .names = &.{"entity"} }},
+    };
 };
 
 /// What a ray hit first.

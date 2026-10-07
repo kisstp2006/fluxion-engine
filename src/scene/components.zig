@@ -55,6 +55,11 @@ pub const CharacterBody2D = @import("../physics/physics_components.zig").Charact
 pub const Collider2D = @import("../physics/physics_components.zig").Collider2D;
 pub const Area2D = @import("../physics/physics_components.zig").Area2D;
 pub const RayCast2D = @import("../physics/physics_components.zig").RayCast2D;
+pub const RigidBody3D = @import("../physics3d/physics3d_components.zig").RigidBody3D;
+pub const CharacterBody3D = @import("../physics3d/physics3d_components.zig").CharacterBody3D;
+pub const Collider3D = @import("../physics3d/physics3d_components.zig").Collider3D;
+pub const Area3D = @import("../physics3d/physics3d_components.zig").Area3D;
+pub const RayCast3D = @import("../physics3d/physics3d_components.zig").RayCast3D;
 
 /// Where a thing is in 3D. See `scene/transform3d.zig`.
 pub const Transform3D = @import("transform3d.zig").Transform3D;
@@ -222,6 +227,11 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Camera2D);
     ecs.component.check(Text2D);
     ecs.component.check(RigidBody2D);
+    ecs.component.check(RigidBody3D);
+    ecs.component.check(CharacterBody3D);
+    ecs.component.check(Collider3D);
+    ecs.component.check(Area3D);
+    ecs.component.check(RayCast3D);
     ecs.component.check(Collider2D);
 }
 

@@ -356,6 +356,29 @@ pub const Rendering = struct {
     };
 };
 
+/// How the 3D world moves when nothing else says so. A game with no
+/// project file takes `App.Options.physics_3d`. Its fixed steps are the
+/// 2D world's: one clock for both.
+pub const Physics3D = struct {
+    default_gravity: f32 = 9.8,
+    default_gravity_vector: math.Vec3 = .init(0, -1, 0),
+    default_linear_damp: f32 = 0.1,
+    default_angular_damp: f32 = 0.1,
+
+    pub const reflect_attributes = .{attr.Label{ .text = "Physics 3D" }};
+    pub const reflect_fields = .{
+        .default_gravity = .{ attr.Range{ .min = 0, .max = 1000 }, attr.Unit{ .text = "m/s²" }, attr.Doc{ .text = "How hard everything falls, in metres a second each second: Earth's is 9.8." } },
+        .default_gravity_vector = .{attr.Doc{ .text = "Which way things fall: down." }},
+        .default_linear_damp = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How much of its speed a body loses a second, when its own linear damp is minus one." } },
+        .default_angular_damp = .{ attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How much of its spin a body loses a second, when its own angular damp is minus one: what stops a ball rolling for ever." } },
+    };
+
+    /// The gravity as the physics takes it: the vector, scaled.
+    pub fn gravity(self: Physics3D) math.Vec3 {
+        return (self.default_gravity_vector.tryNorm() orelse math.Vec3.init(0, -1, 0)).scale(self.default_gravity);
+    }
+};
+
 /// How a 2D world moves when nothing else says so, and how many fixed steps
 /// it takes a second. A game with no project file takes
 /// `App.Options.physics_2d`.
@@ -394,6 +417,8 @@ pub const LayerNames = struct {
     /// The 3D render layers: what a `MeshInstance3D` is on and a
     /// `Camera3D` sees.
     render_3d: []const []const u8 = &.{},
+    /// The 3D physics layers: what a `Collider3D` is on and looks for.
+    physics_3d: []const []const u8 = &.{},
 
     pub const max = 32;
 
@@ -417,11 +442,22 @@ pub const LayerNames = struct {
             attr.Range{ .min = 0, .max = max },
             attr.Doc{ .text = "A name for each 3D render layer, shown beside its toggle." },
         },
+        .physics_3d = .{
+            attr.Label{ .text = "3D Physics" },
+            attr.Layers{ .names = .physics_3d },
+            attr.Range{ .min = 0, .max = max },
+            attr.Doc{ .text = "A name for each 3D physics layer, shown beside its toggle." },
+        },
     };
 
     /// The name of the 2D physics layer numbered from 0, or `""`.
     pub fn physics2d(self: LayerNames, layer: usize) []const u8 {
         return if (layer < self.physics_2d.len) self.physics_2d[layer] else "";
+    }
+
+    /// The name of the 3D physics layer numbered from 0, or `""`.
+    pub fn physics3d(self: LayerNames, layer: usize) []const u8 {
+        return if (layer < self.physics_3d.len) self.physics_3d[layer] else "";
     }
 
     /// The name of the 2D render layer numbered from 0, or `""`.
@@ -567,6 +603,7 @@ pub const Settings = struct {
     display: Display = .{},
     rendering: Rendering = .{},
     physics_2d: Physics2D = .{},
+    physics_3d: Physics3D = .{},
     audio: Audio = .{},
     layer_names: LayerNames = .{},
     gui: Gui = .{},
@@ -645,6 +682,10 @@ pub fn parse(gpa: Allocator, bytes: []const u8, name: []const u8, diagnostics: ?
     if (diagnostics) |d| d.setFile(file);
     if (settings.layer_names.physics_2d.len > LayerNames.max) {
         if (diagnostics) |d| d.setMessage("there are 32 physics layers, and \"layer_names.physics_2d\" names more", .{});
+        return error.WrongType;
+    }
+    if (settings.layer_names.physics_3d.len > LayerNames.max) {
+        if (diagnostics) |d| d.setMessage("there are 32 physics layers, and \"layer_names.physics_3d\" names more", .{});
         return error.WrongType;
     }
     return settings;

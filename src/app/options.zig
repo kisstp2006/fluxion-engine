@@ -265,6 +265,15 @@ pub const Options = struct {
     /// of 98 where a unit is a pixel. A project file's `physics_2d` is
     /// taken instead.
     physics_2d: Project.Physics2D = .{},
+
+    /// The 3D physics' tolerances and solver, in metres. The engine keeps
+    /// the same rules as in 2D whatever this says, and gravity is
+    /// `physics_3d`'s.
+    physics3d: @import("fluxion_physics3d").Settings = .{},
+
+    /// How the 3D world moves - gravity, and what a body's damping of minus
+    /// one means - for a game with no project file.
+    physics_3d: Project.Physics3D = .{},
 };
 
 /// What the window, the frame and the clock are made with: the game's

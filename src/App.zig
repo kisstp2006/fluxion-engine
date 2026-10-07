@@ -31,6 +31,7 @@ const debugdraw = @import("fluxion_debugdraw");
 const debugdraw_rhi = @import("fluxion_debugdraw_rhi");
 const fluxion_ui = @import("fluxion_ui");
 const fluxion_physics = @import("fluxion_physics");
+const fluxion_physics3d = @import("fluxion_physics3d");
 const json = @import("fluxion_json");
 const reflect = @import("fluxion_reflect");
 const Uuid = @import("fluxion_id").Uuid;
@@ -97,6 +98,13 @@ const Picking = @import("physics/picking.zig");
 const character = @import("physics/character.zig");
 const ray_casts = @import("physics/ray_casts.zig");
 const forces = @import("physics/forces.zig");
+// physics in 3D
+const Bodies3D = @import("physics3d/bodies3d.zig");
+const Areas3D = @import("physics3d/areas3d.zig");
+const character3d = @import("physics3d/character3d.zig");
+const ray_casts3d = @import("physics3d/ray_casts3d.zig");
+const forces3d = @import("physics3d/forces3d.zig");
+const Picking3D = @import("physics3d/picking3d.zig");
 
 // audio
 const sound = @import("audio/audio.zig");
@@ -336,6 +344,23 @@ physics_object_picking: bool = true,
 physics_object_picking_sort: bool = true,
 /// Whether only the first of several under the pointer hears the event.
 physics_object_picking_first_only: bool = false,
+// Physics in 3D: `physics3d/`.
+/// Rigid bodies in space, stepped beside `physics` after each `.fixed`
+/// stage: one for every `RigidBody3D`, `CharacterBody3D`, `Area3D` and
+/// collider of its own.
+physics3d: fluxion_physics3d.World,
+/// How the 3D world moves: the project file's `physics_3d`, or
+/// `Options.physics_3d` with none.
+physics_3d: Project.Physics3D,
+/// Which 3D body is which entity's. See `physics3d/bodies3d.zig`.
+bodies3d: Bodies3D = .{},
+/// What is inside each `Area3D`. See `physics3d/areas3d.zig`.
+areas3d: Areas3D = .{},
+/// What each 3D character's last `moveAndSlide` met.
+slide_collisions3d: character3d.Slides = .{},
+/// What the pointer is over in the 3D world, seen through the current
+/// camera. See `physics3d/picking3d.zig`.
+picking3d: Picking3D = .{},
 /// What each character's last `moveAndSlide` met. See `physics/character.zig`.
 slide_collisions: character.Slides = .{},
 
@@ -555,6 +580,7 @@ const entity_tables = .{
     .shader_params,    .views,       .animation_players,  .signals,
     .current_scene,    .tile_chunks, .bodies,             .areas,
     .picking,          .audio,       .control_tree,       .poses,
+    .bodies3d,         .areas3d,     .slide_collisions3d, .picking3d,
 };
 
 /// The engine's own components: what every scene can hold from the start.
@@ -582,6 +608,11 @@ pub const engine_components = .{
     components.Collider2D,
     components.Area2D,
     components.RayCast2D,
+    components.RigidBody3D,
+    components.CharacterBody3D,
+    components.Collider3D,
+    components.Area3D,
+    components.RayCast3D,
     drawing.Drawing2D,
     particle_emitters.Particles2D,
     lights.PointLight2D,
@@ -680,6 +711,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .jobs = undefined,
         .physics = .init(gpa, Bodies.withEngineRules(options.physics)),
         .physics_2d = options.physics_2d,
+        .physics3d = .init(gpa, Bodies3D.withEngineRules(options.physics3d)),
+        .physics_3d = options.physics_3d,
         .bodies = .{},
         .tile_sets = .{},
         .themes = .{},
@@ -751,6 +784,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     errdefer self.commands.deinit();
     errdefer self.ui.deinit();
     errdefer self.physics.deinit();
+    errdefer self.physics3d.deinit();
 
     self.random_source = .init(options.random_seed orelse self.drawnSeed());
     self.project = try .init(gpa, options.io, options.root);
@@ -793,6 +827,8 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
     // The project's physics, or the game's with no project file.
     if (self.project.settings) |held| self.physics_2d = held.physics_2d;
     self.physics.gravity = self.physics_2d.gravity();
+    if (self.project.settings) |held| self.physics_3d = held.physics_3d;
+    self.physics3d.settings.gravity = self.physics_3d.gravity();
 
     // The window, the frame and the clock: what the game says, over what
     // the project says, over the engine's own.
@@ -942,6 +978,11 @@ pub fn destroy(self: *App) void {
     self.areas.deinit(gpa);
     self.picking.deinit(gpa);
     self.physics.deinit();
+    self.bodies3d.deinit(gpa);
+    self.areas3d.deinit(gpa);
+    self.slide_collisions3d.deinit(gpa);
+    self.picking3d.deinit(gpa);
+    self.physics3d.deinit();
     self.debug_renderer.deinit();
     if (self.debug_renderer_3d) |*held| held.deinit();
     self.debug_3d_frame.deinit();
@@ -3021,7 +3062,8 @@ pub fn castRay(self: *App, from: math.Vec2, to: math.Vec2, mask: u32, hit_areas:
 /// Ask a `RayCast2D` now rather than at the next physics step: after
 /// moving it, or turning it on.
 pub fn forceRaycastUpdate(self: *App, entity: ecs.Entity) void {
-    return ray_casts.update(self, entity);
+    ray_casts.update(self, entity);
+    ray_casts3d.update(self, entity);
 }
 
 /// Whether an entity stands on a floor: something facing up under the bottom
@@ -3069,12 +3111,14 @@ pub fn contactsEnded(self: *const App) []const Bodies.Contact {
 /// Keep two bodies from touching whatever their layers say. Each is a
 /// `RigidBody2D` or a collider that is a static body of its own. Counted, so two calls take two
 /// removals, and gone with either entity.
-pub fn addCollisionExceptionWith(self: *App, a: ecs.Entity, b: ecs.Entity) Bodies.ExceptionError!void {
+pub fn addCollisionExceptionWith(self: *App, a: ecs.Entity, b: ecs.Entity) (Bodies.ExceptionError || Bodies3D.ExceptionError)!void {
+    if (self.world.has(a, components.Transform3D)) return self.bodies3d.addException(self, a, b);
     return self.bodies.addException(self, a, b);
 }
 
 /// Take one `addCollisionExceptionWith` back.
 pub fn removeCollisionExceptionWith(self: *App, a: ecs.Entity, b: ecs.Entity) void {
+    if (self.world.has(a, components.Transform3D)) return self.bodies3d.removeException(self, a, b);
     self.bodies.removeException(self, a, b);
 }
 
@@ -3089,38 +3133,98 @@ pub fn collisionExceptionsOf(self: *App, body: ecs.Entity, found: []ecs.Entity) 
 /// that has, else its own entity, which is its own static body. Null for an
 /// entity that is neither.
 pub fn collisionObjectOf(self: *App, collider: ecs.Entity) ?ecs.Entity {
-    return Bodies.objectOf(&self.world, collider);
+    return Bodies.objectOf(&self.world, collider) orelse Bodies3D.objectOf(&self.world, collider);
 }
 
 /// The bodies inside `area` now: a list good until the next such question.
 /// Empty, with a word in the log, for an area that is not monitoring.
 pub fn overlappingBodies(self: *App, area: ecs.Entity) Allocator.Error![]const ecs.Entity {
+    if (self.world.has(area, components.Area3D)) return self.areas3d.overlappingList(self, area, false);
     return self.areas.overlappingList(self, area, false);
 }
 
 /// The other areas inside `area` now, good until the next such question.
 pub fn overlappingAreas(self: *App, area: ecs.Entity) Allocator.Error![]const ecs.Entity {
+    if (self.world.has(area, components.Area3D)) return self.areas3d.overlappingList(self, area, true);
     return self.areas.overlappingList(self, area, true);
 }
 
 /// Whether any body at all is inside `area`.
 pub fn hasOverlappingBodies(self: *App, area: ecs.Entity) bool {
+    if (self.world.has(area, components.Area3D)) return self.areas3d.any(self, area, false);
     return self.areas.any(self, area, false);
 }
 
 /// Whether another area is inside it.
 pub fn hasOverlappingAreas(self: *App, area: ecs.Entity) bool {
+    if (self.world.has(area, components.Area3D)) return self.areas3d.any(self, area, true);
     return self.areas.any(self, area, true);
 }
 
 /// Whether that body is inside it.
 pub fn overlapsBody(self: *App, area: ecs.Entity, body: ecs.Entity) bool {
+    if (self.world.has(area, components.Area3D)) return self.areas3d.overlaps(self, area, body);
     return self.areas.overlaps(self, area, body);
 }
 
 /// Whether that area is inside it.
 pub fn overlapsArea(self: *App, area: ecs.Entity, other: ecs.Entity) bool {
+    if (self.world.has(area, components.Area3D)) return self.areas3d.overlaps(self, area, other);
     return self.areas.overlaps(self, area, other);
+}
+
+/// The body an entity is, or is part of, in the 3D physics: its
+/// `RigidBody3D`'s, its `CharacterBody3D`'s or `Area3D`'s, or the one its
+/// `Collider3D` belongs to. Null until the bodies are made, at the top of
+/// each frame and before each fixed step.
+pub fn bodyOf3D(self: *App, entity: ecs.Entity) ?*fluxion_physics3d.Body {
+    return self.physics3d.body(self.bodies3d.idOf(entity) orelse return null);
+}
+
+/// A kick to a `RigidBody3D`: its velocity changed at once by `impulse`
+/// over its mass. At `offset` from its centre of mass, in the world's
+/// directions, it turns too.
+pub fn applyImpulse3D(self: *App, body: ecs.Entity, impulse: math.Vec3, offset: math.Vec3) forces3d.Error!void {
+    return forces3d.applyImpulse(self, body, impulse, offset);
+}
+
+/// A push for the next physics step, at `offset` from the centre of mass:
+/// given again every step it keeps pushing - from `fixed`.
+pub fn applyForce3D(self: *App, body: ecs.Entity, force: math.Vec3, offset: math.Vec3) forces3d.Error!void {
+    return forces3d.applyForce(self, body, force, offset);
+}
+
+/// A turning push for the next physics step, about the axis it points
+/// along.
+pub fn applyTorque3D(self: *App, body: ecs.Entity, torque: math.Vec3) forces3d.Error!void {
+    return forces3d.applyTorque(self, body, torque);
+}
+
+/// A turning kick: the spin changed at once.
+pub fn applyTorqueImpulse3D(self: *App, body: ecs.Entity, impulse: math.Vec3) forces3d.Error!void {
+    return forces3d.applyTorqueImpulse(self, body, impulse);
+}
+
+/// The first 3D collider on the line from `from` to `to` on one of the
+/// layers of `mask`; areas only with `hit_areas`.
+///
+/// ```zig
+/// const eye = app.globalPosition3D(guard).?;
+/// const seen = app.castRay3D(eye, app.globalPosition3D(player).?, 0xFFFF_FFFF, false);
+/// ```
+pub fn castRay3D(self: *App, from: math.Vec3, to: math.Vec3, mask: u32, hit_areas: bool) ?Bodies3D.RayHit {
+    return self.bodies3d.castRay(self, from, to, .{ .mask = mask, .sensors = hit_areas });
+}
+
+/// The 3D contacts that began in this frame's steps - or, in a `.fixed`
+/// system, in the step before this one.
+pub fn contactsBegun3D(self: *const App) []const Bodies3D.Contact {
+    return self.bodies3d.began(self.input.clock == .fixed);
+}
+
+/// The same for 3D contacts that ended.
+pub fn contactsEnded3D(self: *const App) []const Bodies3D.Contact {
+    return self.bodies3d.ended(self.input.clock == .fixed);
 }
 
 // -------------------------------------------------------------------------
@@ -3133,8 +3237,27 @@ pub fn overlapsArea(self: *App, area: ecs.Entity, other: ecs.Entity) bool {
 /// stopping at what it meets and sliding along it, and say what it stands
 /// on and is against in its fields after. Whether anything stopped it. See
 /// `physics/character.zig`.
-pub fn moveAndSlide(self: *App, entity: ecs.Entity) character.Error!bool {
+pub fn moveAndSlide(self: *App, entity: ecs.Entity) (character.Error || character3d.Error)!bool {
+    if (self.world.has(entity, components.CharacterBody3D)) return character3d.moveAndSlide(self, entity);
     return character.moveAndSlide(self, entity);
+}
+
+/// Move a `CharacterBody3D` once, by `motion`, stopping `safe_margin` short
+/// of the first thing in the way: what that was, or null for nothing.
+pub fn moveAndCollide3D(self: *App, entity: ecs.Entity, motion: math.Vec3) character3d.Error!?character3d.Collision {
+    return character3d.moveAndCollide(self, entity, motion);
+}
+
+/// What a 3D character's last `moveAndSlide` met `index`th, in order.
+pub fn slideCollision3D(self: *const App, entity: ecs.Entity, index: u32) ?character3d.Collision {
+    const met = self.slide_collisions3d.of(entity);
+    return if (index < met.len) met[index] else null;
+}
+
+/// The last a 3D character's last move met, or null for none.
+pub fn lastSlideCollision3D(self: *const App, entity: ecs.Entity) ?character3d.Collision {
+    const met = self.slide_collisions3d.of(entity);
+    return if (met.len > 0) met[met.len - 1] else null;
 }
 
 /// Move a `CharacterBody2D` once, by `motion`, stopping `safe_margin` short
@@ -3146,7 +3269,7 @@ pub fn moveAndCollide(self: *App, entity: ecs.Entity, motion: math.Vec2) charact
 /// How many things a character's last `moveAndSlide` met: a wall, then the
 /// floor it slid down onto.
 pub fn slideCollisionCount(self: *const App, entity: ecs.Entity) u32 {
-    return @intCast(self.slide_collisions.of(entity).len);
+    return @intCast(self.slide_collisions.of(entity).len + self.slide_collisions3d.of(entity).len);
 }
 
 /// The one it met `index`th, in order; null past the end. What a character
@@ -5761,12 +5884,24 @@ pub const reflect_methods = .{
     .hasOverlappingAreas = .{attr.Params{ .names = &.{"area"} }},
     .overlapsBody = .{attr.Params{ .names = &.{ "area", "body" } }},
     .overlapsArea = .{attr.Params{ .names = &.{ "area", "other" } }},
+    .contactsBegun = .{},
+    .contactsEnded = .{},
+    .applyImpulse3D = .{ attr.Params{ .names = &.{ "body", "impulse", "offset" } }, attr.defaults(.{math.Vec3.zero}) },
+    .applyForce3D = .{ attr.Params{ .names = &.{ "body", "force", "offset" } }, attr.defaults(.{math.Vec3.zero}) },
+    .applyTorque3D = .{attr.Params{ .names = &.{ "body", "torque" } }},
+    .applyTorqueImpulse3D = .{attr.Params{ .names = &.{ "body", "impulse" } }},
+    .castRay3D = .{ attr.Params{ .names = &.{ "from", "to", "mask", "hit_areas" } }, attr.defaults(.{ @as(u32, 0xFFFF_FFFF), false }) },
+    .contactsBegun3D = .{},
+    .contactsEnded3D = .{},
     // Characters
     .moveAndSlide = .{attr.Params{ .names = &.{"entity"} }},
     .moveAndCollide = .{attr.Params{ .names = &.{ "entity", "motion" } }},
     .slideCollisionCount = .{attr.Params{ .names = &.{"entity"} }},
     .slideCollision = .{attr.Params{ .names = &.{ "entity", "index" } }},
     .lastSlideCollision = .{attr.Params{ .names = &.{"entity"} }},
+    .moveAndCollide3D = .{attr.Params{ .names = &.{ "entity", "motion" } }},
+    .slideCollision3D = .{attr.Params{ .names = &.{ "entity", "index" } }},
+    .lastSlideCollision3D = .{attr.Params{ .names = &.{"entity"} }},
     // Sound
     .audioLength = .{attr.Params{ .names = &.{"clip"} }},
     .setBusVolumeDb = .{attr.Params{ .names = &.{ "name", "db" } }},

@@ -24,10 +24,12 @@ const testing = std.testing;
 const ecs = @import("fluxion_ecs");
 const math = @import("fluxion_math");
 const physics = @import("fluxion_physics");
+const physics3d = @import("fluxion_physics3d");
 const debugdraw = @import("fluxion_debugdraw");
 
 const App = @import("../App.zig");
 const components = @import("../scene/components.zig");
+const hierarchy = @import("../scene/hierarchy.zig");
 
 const Vec2 = math.Vec2;
 const Color = debugdraw.Color;
@@ -37,7 +39,8 @@ const Transform2D = components.Transform2D;
 const DebugViews = @This();
 
 /// Every collider's shape, in its body's colour: green static, blue
-/// kinematic, orange moving, grey asleep, and cyan for a sensor.
+/// kinematic, orange moving, grey asleep, and cyan for a sensor - the 3D
+/// ones' too, in the 3D world.
 colliders: bool = false,
 /// Each moving body's centre of mass, with an arrow as long as a tenth of a
 /// second of its travel.
@@ -71,7 +74,11 @@ pub fn any(self: DebugViews) bool {
 
 /// Draw the views that are on into `app.debug`, for this frame.
 pub fn draw(self: DebugViews, app: *App) !void {
-    if (self.colliders) drawColliders(app);
+    if (self.colliders) {
+        drawColliders(app);
+        drawColliders3D(app, app.debug_3d, .{});
+        drawRayCasts3D(app, app.debug_3d);
+    }
     if (self.bodies) drawBodies(app);
     if (self.transforms) try drawTransforms(app);
     if (self.sprites) try drawSprites(app);
@@ -113,6 +120,81 @@ fn drawColliders(app: *App) void {
                 }
             },
         }
+    }
+}
+
+/// What `drawColliders3D` leaves out.
+pub const Colliders3D = struct {
+    /// A mesh collider's triangles: a level's are many lines, which an
+    /// editor draws for the one picked.
+    meshes: bool = true,
+};
+
+/// Every 3D collider's shape with `pen`, where the physics holds it: what
+/// the colliders view draws, and an editor draws in its 3D view.
+pub fn drawColliders3D(app: *App, pen: debugdraw.Pen, options: Colliders3D) void {
+    var shapes = app.physics3d.shapes.iterator();
+    while (shapes.next()) |entry| {
+        if (!options.meshes and entry.value.def.geometry == .mesh) continue;
+        drawShape3D(app, pen, entry.value);
+    }
+}
+
+/// One 3D collider's shape with `pen` - the one on `entity`, if it has one
+/// the physics holds.
+pub fn drawCollider3D(app: *App, pen: debugdraw.Pen, entity: ecs.Entity) void {
+    const id = app.bodies3d.shapeOfEntity(entity) orelse return;
+    const shape = app.physics3d.shape(id) orelse return;
+    drawShape3D(app, pen, shape);
+}
+
+/// Each `RayCast3D` that is on, as a line: yellow to where it ends, or red
+/// to what it hit at the last fixed step.
+pub fn drawRayCasts3D(app: *App, pen: debugdraw.Pen) void {
+    var it = ecs.Query(.{ components.Transform3D, components.RayCast3D }).over(&app.world) catch return;
+    while (it.next()) |chunk| {
+        for (chunk.slice(components.RayCast3D), chunk.entities) |ray, e| {
+            if (!ray.enabled) continue;
+            const from = hierarchy.globalPosition3D(&app.world, e) orelse continue;
+            if (ray.colliding) {
+                pen.line(from, ray.point, .red);
+                pen.point(ray.point, 6, .red);
+            } else {
+                const to = hierarchy.toGlobal3D(&app.world, e, ray.target) orelse continue;
+                pen.line(from, to, .yellow);
+            }
+        }
+    }
+}
+
+fn drawShape3D(app: *App, pen: debugdraw.Pen, shape: *const physics3d.World.ShapeEntry) void {
+    const body = app.physics3d.bodyConst(shape.body) orelse return;
+    const xf = app.physics3d.shapeTransform(shape);
+    const colour: Color = if (shape.def.sensor) .cyan else switch (body.type) {
+        .static => .green,
+        .kinematic => .blue,
+        .dynamic => if (body.awake) .orange else .gray,
+    };
+    switch (shape.def.geometry) {
+        .sphere => |ball| pen.sphere(xf.position, ball.radius, colour),
+        .box => |box| pen.orientedBox(xf.position, box.half, xf.rotation, colour),
+        .capsule => |c| {
+            const axis = xf.turn(.init(0, c.half_height, 0));
+            pen.capsule(xf.position.sub(axis), xf.position.add(axis), c.radius, colour);
+        },
+        .cylinder => |c| {
+            const axis = xf.turn(.init(0, c.half_height, 0));
+            pen.cylinder(xf.position.sub(axis), xf.position.add(axis), c.radius, colour);
+        },
+        .hull => |hull| for (hull.edges) |edge| pen.line(xf.apply(hull.vertices[edge[0]]), xf.apply(hull.vertices[edge[1]]), colour),
+        .mesh => |mesh| for (mesh.triangles) |t| {
+            const a = xf.apply(mesh.vertices[t[0]]);
+            const b = xf.apply(mesh.vertices[t[1]]);
+            const c = xf.apply(mesh.vertices[t[2]]);
+            pen.line(a, b, colour);
+            pen.line(b, c, colour);
+            pen.line(c, a, colour);
+        },
     }
 }
 

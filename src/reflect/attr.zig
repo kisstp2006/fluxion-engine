@@ -75,6 +75,8 @@ pub const Layers = struct {
         none,
         /// `layer_names.physics_2d` in `project.fluxion`.
         physics_2d,
+        /// `layer_names.physics_3d`.
+        physics_3d,
         /// `layer_names.render_2d`.
         render_2d,
         /// `layer_names.render_3d`.

@@ -180,6 +180,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     const ui = b.dependency("fluxion_ui", .{ .target = target, .optimize = optimize });
     const json = b.dependency("fluxion_json", .{ .target = target, .optimize = optimize });
     const physics = b.dependency("fluxion_physics", .{ .target = target, .optimize = optimize });
+    const physics3d = b.dependency("fluxion_physics3d", .{ .target = target, .optimize = optimize });
     const reflect = b.dependency("fluxion_reflect", .{ .target = target, .optimize = optimize });
     const script = b.dependency("fluxion_script", .{ .target = target, .optimize = optimize });
     const audio = b.dependency("fluxion_audio", .{ .target = target, .optimize = optimize });
@@ -256,6 +257,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
             .{ .name = "fluxion_ui_rhi", .module = ui_rhi },
             .{ .name = "fluxion_json", .module = json.module("fluxion_json") },
             .{ .name = "fluxion_physics", .module = physics.module("fluxion_physics") },
+            .{ .name = "fluxion_physics3d", .module = physics3d.module("fluxion_physics3d") },
             .{ .name = "fluxion_reflect", .module = reflect.module("fluxion_reflect") },
             .{ .name = "fluxion_script", .module = script.module("fluxion_script") },
             .{ .name = "fluxion_audio", .module = audio.module("fluxion_audio") },
