@@ -3,7 +3,7 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = androidVersioned(b, b.standardTargetOptions(.{}));
     const optimize = b.standardOptimizeOption(.{});
     const e = engine(b, target, optimize, true);
     const mod = e.mod;
@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) void {
     };
     for (noticed) |entry| _ = notices.addCopyFile(entry[1].path("LICENSE"), b.fmt("{s}.txt", .{entry[0]}));
     _ = notices.addCopyFile(audio.namedLazyPath("stb_vorbis.txt"), "stb_vorbis.txt");
-    _ = notices.addCopyFile(.{ .cwd_relative = b.pathJoin(&.{ b.graph.zig_lib_directory.path orelse ".", "..", "LICENSE" }) }, "zig-standard-library.txt");
+    _ = notices.addCopyFile(.{ .cwd_relative = zigLicense(b) }, "zig-standard-library.txt");
     b.addNamedLazyPath("notices", notices.getDirectory());
 
     // zig build docs -> zig-out/docs
@@ -183,6 +183,14 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     const reflect = b.dependency("fluxion_reflect", .{ .target = target, .optimize = optimize });
     const script = b.dependency("fluxion_script", .{ .target = target, .optimize = optimize });
     const audio = b.dependency("fluxion_audio", .{ .target = target, .optimize = optimize });
+    if (target.result.abi.isAndroid()) {
+        // Its C imports read the NDK's headers, which want to know the
+        // Android they are for; Zig's own C front end does not say, as the
+        // NDK's compiler does from the target.
+        const level = b.fmt("{d}", .{target.result.os.version_range.linux.android});
+        audio.module("fluxion_audio").addCMacro("__ANDROID_API__", level);
+        audio.module("fluxion_audio").addCMacro("__ANDROID_MIN_SDK_VERSION__", level);
+    }
     const vfs = b.dependency("fluxion_vfs", .{ .target = target, .optimize = optimize });
     const net = b.dependency("fluxion_net", .{ .target = target, .optimize = optimize });
 
@@ -352,6 +360,34 @@ fn runtime(b: *std.Build, e: Engine, target: std.Build.ResolvedTarget, optimize:
 /// The lowest Android the runtime is for: 10. The platform's activity is
 /// compiled for it too.
 pub const android_api = 29;
+
+/// `target`, for Android with `android_api` as its version when it names
+/// none: newer NDKs' headers refuse a target without one.
+fn androidVersioned(b: *std.Build, target: std.Build.ResolvedTarget) std.Build.ResolvedTarget {
+    if (!target.result.abi.isAndroid() or target.query.android_api_level != null) return target;
+    var query = target.query;
+    query.android_api_level = android_api;
+    return b.resolveTargetQuery(query);
+}
+
+/// Zig's own licence, for the standard library built into the runtime:
+/// beside the `lib` folder in Zig's own download, and where a system's
+/// package of Zig keeps its licences.
+fn zigLicense(b: *std.Build) []const u8 {
+    const lib = b.graph.zig_lib_directory.path orelse ".";
+    const places = [_][]const u8{
+        b.pathJoin(&.{ lib, "..", "LICENSE" }),
+        b.pathJoin(&.{ lib, "..", "..", "share", "licenses", "zig", "LICENSE" }),
+        b.pathJoin(&.{ lib, "..", "..", "share", "doc", "zig", "LICENSE" }),
+        "/usr/share/licenses/zig/LICENSE",
+        "/usr/share/doc/zig/LICENSE",
+    };
+    for (places) |place| {
+        std.Io.Dir.cwd().access(b.graph.io, place, .{}) catch continue;
+        return place;
+    }
+    return places[0];
+}
 
 /// Build `library` against the Android NDK's C library and system
 /// libraries, for the Android it is compiled for. A build with no NDK to find
