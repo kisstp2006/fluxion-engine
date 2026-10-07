@@ -238,6 +238,7 @@ pub const LightmapGI = components.LightmapGI;
 pub const Skeleton3D = components.Skeleton3D;
 pub const BoneAttachment3D = components.BoneAttachment3D;
 pub const skeleton = render.skeleton;
+pub const SkeletonHandle = render.skeleton.SkeletonHandle;
 /// What a 3D camera sees: what `App.drawWorld3D` draws the world through.
 pub const View3D = render.view3d.View3D;
 

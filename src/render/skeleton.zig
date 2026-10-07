@@ -43,6 +43,7 @@ const ecs = @import("fluxion_ecs");
 const id = @import("fluxion_id");
 const json = @import("fluxion_json");
 const math = @import("fluxion_math");
+const debugdraw = @import("fluxion_debugdraw");
 
 const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
@@ -530,6 +531,41 @@ pub fn update(app: *App) !void {
             transform.scale = placed.scale;
         }
     }
+}
+
+/// Each skeleton whose `show_bones` is on drawn with the 3D debug pen,
+/// while the debug drawing is shown.
+pub fn drawBones(app: *App) !void {
+    if (!app.debug_visible) return;
+    var it = try ecs.Query(.{ Skeleton3D, Transform3D }).over(&app.world);
+    while (it.next()) |chunk| {
+        for (chunk.slice(Skeleton3D), chunk.entities) |held, entity| {
+            if (held.show_bones) drawBonesOf(app, app.debug_3d, entity, bone_color);
+        }
+    }
+}
+
+/// What a skeleton's bones are drawn in.
+pub const bone_color: debugdraw.Color = .hex(0xE8C27A);
+
+/// `entity`'s skeleton's bones as they are now drawn with `pen`, over
+/// everything: a line from each to its parent, and a dot at each.
+pub fn drawBonesOf(app: *App, pen: debugdraw.Pen, entity: Entity, color: debugdraw.Color) void {
+    const globals = app.poses.globalsOf(app, entity) orelse return;
+    const pose = app.poses.of(app, entity) orelse return;
+    const skeleton = app.skeletons.get(pose.skeleton) orelse return;
+    const placed = app.drawnTransform3D(entity) orelse return;
+    const within = pen.within(placed.matrix()).with(.{ .depth = .always });
+    for (skeleton.bones, globals) |bone, global| {
+        const at = placeOf(global);
+        if (bone.parent) |parent| within.with(.{ .width = 2 }).line(placeOf(globals[parent]), at, color);
+        within.point(at, 6, color);
+    }
+}
+
+fn placeOf(global: Mat4) math.Vec3 {
+    const column = global.cols[3];
+    return .init(column.x, column.y, column.z);
 }
 
 // -------------------------------------------------------------------------

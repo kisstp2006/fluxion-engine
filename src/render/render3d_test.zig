@@ -422,3 +422,23 @@ test "a mesh a skeleton bends is drawn in the skeleton's space with its bones, a
     try testing.expectEqual(@as(u32, 0), app.renderer3d.drawn);
     try testing.expectEqual(@as(u32, 1), app.renderer3d.culled);
 }
+
+test "a skeleton that shows its bones draws a line from each to its parent and a dot at each" {
+    const app = try headless();
+    defer app.destroy();
+    const skeleton_table = @import("skeleton.zig");
+    var bones = [_]skeleton_table.Bone{
+        .{ .name = "Low" },
+        .{ .name = "High", .parent = 0, .rest = .{ .translation = .init(0, 0.5, 0) } },
+    };
+    const skeleton = try app.addSkeleton("bones", try skeleton_table.Skeleton.init(app.gpa, &bones));
+    const body = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), components.Skeleton3D{ .skeleton = skeleton } });
+    _ = try app.step();
+    app.debug_3d_frame.clear();
+    try skeleton_table.drawBones(app);
+    try testing.expect(app.debug_3d_frame.isEmpty());
+    app.world.get(body, components.Skeleton3D).?.show_bones = true;
+    try skeleton_table.drawBones(app);
+    // One line, two dots.
+    try testing.expectEqual(@as(usize, 3), app.debug_3d_frame.lines.items.len);
+}

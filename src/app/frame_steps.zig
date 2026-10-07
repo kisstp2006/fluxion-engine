@@ -124,6 +124,7 @@ pub const order = [_]Step{
     .{ .pass = freshInherited },
     .{ .pass = layOut },
     .{ .pass = skeleton.update },
+    .{ .pass = skeleton.drawBones },
     .{ .pass = textureMips },
     .{ .pass = draw },
 };
