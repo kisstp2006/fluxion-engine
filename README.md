@@ -1034,7 +1034,7 @@ try app.signal(fade, fx.Tween, .finished).connectFn(closed, .{});
 // Keyed animations, made in the editor's Animation panel.
 const menu = try app.loadAnimations("res://ui/menu.anim");
 const ui = try app.world.spawnWith(.{ fx.Transform2D.at(0, 0), fx.AnimationPlayer{ .library = menu } });
-app.world.get(ui, fx.AnimationPlayer).?.play("open");
+app.world.get(ui, fx.AnimationPlayer).?.play("open", -1);
 
 // Pictures in turn, in the Sprite beside it.
 const hero = try app.loadSpriteFrames("res://art/hero.frames");
@@ -1071,16 +1071,25 @@ app.world.get(walker, fx.AnimatedSprite2D).?.play("run", 1, false);
   a loop - once, round again, or back and forth - and tracks. A track moves
   one property of the player's own entity, or of one under it by name or by
   path (`Panel/Title`), from key to key; each key says the curve it is got to
-  by, and a `discrete` track jumps to each key as it comes.
+  by, and a `discrete` track jumps to each key as it comes. Its keys are
+  found by halving, so a track of thousands costs a few looks. **A bone's
+  track** names a bone of its entity's `Skeleton3D` - `"bone": "Hips"` - and
+  moves its `position`, `rotation` or `scale`.
 - **An `AnimationPlayer` plays one**, and is data as an `AudioPlayer` is:
-  `library`, `autoplay`, `speed` and `paused`; `play(name)`, `stop()`,
+  `library`, `autoplay`, `speed`, `paused` and `default_blend`;
+  `play(name, blend)`, `stop()`,
   `seek(to)` and `queue(name)` - the one after this - ask the engine's pass,
   once a frame before the `.update` systems; `current`, `playing` and
   `position` say what it found. `playBackwards(name)` plays from the end to
   the start, `pause()` holds it and `play()` with no name goes on from
   there, `isPlaying()` says whether it plays, and `clearQueue()` forgets the
   next. `app.animationNames(player)`, `hasAnimation(player, name)` and
-  `animationLength(player, name)` say what its library holds. `animation_started` and
+  `animationLength(player, name)` say what its library holds. **A change of
+  animation fades** over `blend` seconds - `default_blend` where it is below
+  nought, and nought cuts: what played goes on as the new one comes in, each
+  bone and each property between the two, and a bone only one of them moves
+  between that one and its rest. A queued one fades in over `default_blend`.
+  Names in a player hold 56 bytes. `animation_started` and
   `animation_finished` say so with the animation's name. A frame with no
   time moves nothing: an editor poses a scene with `fx.animation.pose`.
 - **Sprite frames are a `.frames` file** of named animations, each a
@@ -1480,12 +1489,33 @@ app.world.get(wall, fx.Material3D).?.material = brick;
   where a game reads them under their own names. One no editor has turned is
   `error.NotImported`.
 - **What a model is made of is named after it**: `res://models/robot.glb#mesh/0`,
-  `#material/2`, `#image/1`. A scene or a script names a part as it names any
-  file, and the model is read first; a part has no UUID of its own.
+  `#material/2`, `#image/1`, `#skeleton/0`, `#animations`. A scene or a
+  script names a part as it names any file, and the model is read first; a
+  part has no UUID of its own.
+- **A skin is a skeleton, and its bones are not entities**: a `Skeleton3D`
+  on the entity its top bones hang from - Blender's armature - holds the
+  model's `Skeleton` and a pose of its own; the mesh it bends is a
+  `MeshInstance3D` whose `skeleton` names that entity, drawn in its space
+  and bent on the GPU, each vertex by up to four of up to 256 bones. Its
+  box comes from its bones' boxes as they are now, so it is culled where it
+  is. What hangs from a bone in the file hangs from an entity named after
+  the bone with a `BoneAttachment3D`, which the engine moves to the bone
+  every frame. `app.boneCount`, `findBone`, `boneName`, `boneParent`,
+  `bonePose`, `setBonePose`, `setBonePosition`, `setBoneRotation`,
+  `setBoneScale`, `boneGlobalPose`, `boneGlobalPosition` and `resetPose`
+  read and move the bones, from a script too, and `show_bones` draws them
+  with the debug drawing. A `.skeleton` file is a skeleton of its own, and
+  `app.addSkeleton` keeps one made in code.
+- **Its animations are one library**, `#animations`, which an
+  `AnimationPlayer` on the model's root plays: a bone's channel is a track
+  of the bone, any other node's a track of its `Transform3D`. A step's
+  channel jumps, a cubic spline is made straight keys thirty a second, and
+  a morph target's weights are left out.
 - **`<model>.import` beside it says how it is brought in**: `{ "scale": 0.01 }`
-  for a model made in centimetres, the root that much smaller, and
+  for a model made in centimetres, the root that much smaller,
   `"lightmap_uvs": true` for lightmap UVs worked out for the meshes that
-  bring none.
+  bring none, and `"loop_animations": true` for animations that go round -
+  one whose name ends in `loop` does either way.
 - **A `.mat3d` is a `Material3DData`**, written as a scene writes a
   component - only what is not as a material starts - with its shader's
   numbers under `params`, and kept under a `MaterialHandle`: `loadMaterial`,
@@ -4055,12 +4085,14 @@ trying to finish a game with what is here.
 ### 1. Light as it is
 
 Physically based shading, point and spot lights, an environment with fog,
-tone mapping and glow, and shadows are here. Baked light maps are next.
+tone mapping and glow, shadows, baked light maps, and models that move -
+skins bent on the GPU and their animations faded into each other - are here.
 
-### 2. Models that move
+### 2. Bodies in 3D
 
-A model's skins and animations: a skeleton drawn on the GPU, things hung from
-its bones, and its animations played and blended by the `AnimationPlayer`.
+Shapes that collide and rest in the 3D world, a character body to move
+through it, areas that say what is in them, and rays: what a 3D game stands
+on before it can walk anywhere.
 
 ## 💭 Not on the list yet
 

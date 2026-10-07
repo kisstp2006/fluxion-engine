@@ -41,6 +41,15 @@ test "a child is where its parent put it, and its own numbers stay local" {
     try testing.expectEqual(@as(f32, -12), local.y);
 }
 
+test "a 3D chain as deep as a model's nodes nest is placed whole" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
+    defer app.destroy();
+    // Thirty links, each a unit up from the one above.
+    var at = try app.world.spawnWith(.{components.Transform3D{}});
+    for (0..29) |_| at = try app.world.spawnWith(.{ components.Transform3D.at(0, 1, 0), components.Parent.of(at) });
+    try testing.expect(app.globalPosition3D(at).?.approxEql(.init(0, 29, 0)));
+}
+
 test "a grandchild is composed through the whole chain" {
     const app = try App.create(testing.allocator, .{ .headless = true, .frames = 1 });
     defer app.destroy();

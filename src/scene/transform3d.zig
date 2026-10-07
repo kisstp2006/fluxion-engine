@@ -56,8 +56,9 @@ pub const Transform3D = extern struct {
     /// `.fixed`. See `Transform2D.interpolate`.
     interpolate: bool = false,
 
-    /// How many links of a chain are followed before giving up.
-    pub const max_depth: u8 = 16;
+    /// How many links of a chain are followed before giving up: more than
+    /// a 2D chain's, for a model's nodes nest deep.
+    pub const max_depth: u8 = 32;
 
     pub const reflect_name = "Transform3D";
     pub const reflect_fields = .{
