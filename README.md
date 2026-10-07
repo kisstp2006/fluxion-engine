@@ -1311,6 +1311,10 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   the next frame - so that a surface far off does not shimmer; a model's
   pictures come with theirs. A picture made from pixels in memory keeps its
   one level. `LoadOptions.mips` asks for a chain when a picture is loaded.
+  `texture_filter` says how they are read: `linear`, by default, smoothly
+  through those levels and sharp seen at a slant; `nearest`, texel by texel,
+  for pixel art; or `texture`, as each picture itself is sampled. A glTF
+  material whose picture is nearest is nearest.
 - **It is lit as a real surface is**, by how much of it is metal and how
   rough it is - the model a glTF material is written for. Colours are made
   linear as they are read, a picture's and a material's alike, and light adds
@@ -1510,7 +1514,9 @@ app.world.get(wall, fx.Material3D).?.material = brick;
   `AnimationPlayer` on the model's root plays: a bone's channel is a track
   of the bone, any other node's a track of its `Transform3D`. A step's
   channel jumps, a cubic spline is made straight keys thirty a second, and
-  a morph target's weights are left out.
+  a morph target's weights are left out. A bone hung from its parent bone
+  through nodes that are not bones is baked with them: its place through
+  them at each of their keys and its, and thirty times a second between.
 - **`<model>.import` beside it says how it is brought in**: `{ "scale": 0.01 }`
   for a model made in centimetres, the root that much smaller,
   `"lightmap_uvs": true` for lightmap UVs worked out for the meshes that
@@ -3208,7 +3214,9 @@ app.reloadCurrentScene();                                              // the le
   so adding one at the top changes no other line of the file. A texture or a
   font is its file's `res://` path - `{ "file": ..., "member": 1 }` for a
   font of a collection past its first - and in `assets` its UUID and, for a
-  texture sampled otherwise than by default, how. Loading mints new
+  texture sampled otherwise than by default, how: a `filter` that is not the
+  project's `default_texture_filter`, which one of which nothing is said
+  takes - in a scene and in a `.mat3d` alike. Loading mints new
   entities, points every reference at them - in the scene first, then in the
   world, so one scene can name an entity another brought - and loads the
   files or finds them already loaded. A texture made from pixels has no
