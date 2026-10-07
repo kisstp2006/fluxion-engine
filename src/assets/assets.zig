@@ -229,8 +229,9 @@ default_filter: rhi.Filter = .nearest,
 images_made: u32 = 0,
 
 samplers: Samplers,
-/// The same, filtering between the levels of a chain as well: what a
-/// texture with `mips` is drawn with.
+/// The same, filtering between the levels of a chain as well, and a linear
+/// one anisotropically, as far as the device goes: what a 3D surface's
+/// pictures are drawn with.
 mip_samplers: Samplers,
 /// The textures `wantMips` asked a chain for, made before the next frame
 /// is drawn.
@@ -259,10 +260,13 @@ pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io, project: *Project)
                 .wrap_u = made,
                 .wrap_v = made,
             }));
+            // And along a stretched footprint where it filters linearly - a
+            // floor seen at a slant - as far as the device goes.
             self.mip_samplers.getPtr(filter).set(wrap, try device.createSampler(.{
                 .min_filter = filter,
                 .mag_filter = filter,
                 .mip_filter = if (filter == .linear) .linear else .nearest,
+                .max_anisotropy = if (filter == .linear) 16 else 1,
                 .wrap_u = made,
                 .wrap_v = made,
             }));
