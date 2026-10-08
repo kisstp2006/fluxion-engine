@@ -57,6 +57,12 @@ pub const MeshInstance3D = extern struct {
     /// drawn in that entity's space, as its bones are now - its own
     /// `Transform3D` is not used. None draws it as it was made.
     skeleton: Entity = .none,
+    /// How far from the camera it is drawn, in metres, to its nearest side:
+    /// past it, neither it nor its shadow is. Nought draws it however far.
+    visibility_range: f32 = 0,
+    /// How soon a dense mesh's coarser levels are drawn, times the project's
+    /// `lod_threshold`: two as soon again, nought always the whole mesh.
+    lod_bias: f32 = 1,
 
     pub const reflect_name = "MeshInstance3D";
     pub const reflect_fields = .{
@@ -65,6 +71,8 @@ pub const MeshInstance3D = extern struct {
         .cast_shadow = .{attr.Doc{ .text = "Whether it throws a shadow" }},
         .gi_mode = .{ attr.Group{ .name = "Global illumination" }, attr.Doc{ .text = "How it takes part in baked light: held in the lightmap and bouncing light, lit by the probes as it moves, or neither" } },
         .skeleton = .{ attr.Group{ .name = "Skeleton" }, attr.Doc{ .text = "The entity whose Skeleton3D bends its skin; it is drawn in that entity's space" } },
+        .visibility_range = .{ attr.Group{ .name = "Visibility" }, attr.Range{ .min = 0, .max = 100_000 }, attr.Unit{ .text = "m" }, attr.Doc{ .text = "How far from the camera it is drawn, to its nearest side; nought for however far" } },
+        .lod_bias = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How soon its coarser levels are drawn, times the project's lod_threshold; nought for the whole mesh always" } },
     };
 };
 

@@ -62,6 +62,7 @@ const Project = @import("../project/Project.zig");
 const file_table = @import("file_table.zig");
 const gltf = @import("gltf.zig");
 const mesh = @import("../render/mesh.zig");
+const lods = @import("../render/lods.zig");
 const SceneHandle = @import("scene_table.zig").SceneHandle;
 const MaterialHandle = @import("../render/materials.zig").MaterialHandle;
 const TextureHandle = @import("assets.zig").TextureHandle;
@@ -92,6 +93,42 @@ pub fn isModel(path: []const u8) bool {
 pub fn isConverted(path: []const u8) bool {
     const ending = std.fs.path.extension(path);
     return std.ascii.eqlIgnoreCase(ending, ".fbx") or std.ascii.eqlIgnoreCase(ending, ".blend");
+}
+
+/// Levels made on another thread's allocator, copied into `gpa`.
+fn copyLevels(gpa: Allocator, levels: []const mesh.Lod) Allocator.Error![]mesh.Lod {
+    const out = try gpa.alloc(mesh.Lod, levels.len);
+    var made: usize = 0;
+    errdefer {
+        for (out[0..made]) |*level| level.deinit(gpa);
+        gpa.free(out);
+    }
+    for (levels, out) |level, *copy| {
+        const indices = try gpa.dupe(u32, level.indices);
+        errdefer gpa.free(indices);
+        copy.* = .{ .indices = indices, .surfaces = try gpa.dupe(mesh.Surface, level.surfaces), .distance = level.distance };
+        made += 1;
+    }
+    return out;
+}
+
+/// Where an editor keeps the levels of detail it made of a model's meshes:
+/// `res://.fluxion/imported/<model>.lods`. See `render/lods.zig`. The
+/// caller's.
+pub fn lodsPath(gpa: Allocator, source: []const u8) Allocator.Error![]u8 {
+    const inside = if (std.mem.startsWith(u8, source, Project.scheme)) source[Project.scheme.len..] else source;
+    return std.mem.concat(gpa, u8, &.{ imported_folder, inside, ".lods" });
+}
+
+/// The file of a model's levels of detail, read; empty where there is
+/// none. The caller's.
+pub fn lodFileOf(gpa: Allocator, files: Project.Files, source: []const u8) Allocator.Error![]u8 {
+    const path = try lodsPath(gpa, source);
+    defer gpa.free(path);
+    return files.read(gpa, path, .limited(file_table.file_limit)) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => gpa.alloc(u8, 0),
+    };
 }
 
 /// The model a part's name is of - `res://robot.glb` of
@@ -177,8 +214,10 @@ pub const Prepared = struct {
 };
 
 /// Read and make all of the model at `file` - the system's path, or a
-/// pack's - on this thread.
-pub fn prepare(gpa: Allocator, files: Project.Files, file: []const u8) !Prepared {
+/// pack's - on this thread: the model `source` names, whose kept levels of
+/// detail it takes, and whose missing ones it makes - all of them, with
+/// none for `source`.
+pub fn prepare(gpa: Allocator, files: Project.Files, file: []const u8, source: ?[]const u8) !Prepared {
     const bytes = try files.read(gpa, file, .limited(file_table.file_limit));
     defer gpa.free(bytes);
     var beside: Beside = .{ .files = files, .folder = folderOf(file) };
@@ -186,8 +225,40 @@ pub fn prepare(gpa: Allocator, files: Project.Files, file: []const u8) !Prepared
     var model = try gltf.parse(gpa, bytes, beside.fetch());
     errdefer model.deinit();
     model.unwrap_lightmap = settings.lightmap_uvs;
+    if (source) |named| model.lod_file = try lodFileOf(gpa, files, named);
     try gltf.finish(&model);
     return .{ .model = model, .settings = settings };
+}
+
+/// Make the levels of detail of the model at `source` afresh and keep them
+/// in its file of them - `lodsPath` - for a game to read rather than make:
+/// what an editor does as it brings a model in, on a thread of its own if
+/// it likes - it asks nothing of an app. How many of its meshes have
+/// levels. A model with none has a file too, that says so: a game reads it
+/// rather than try to make them.
+pub fn makeLodFile(gpa: Allocator, files: Project.Files, source: []const u8) !usize {
+    const io = files.io;
+    const readable = try readablePath(gpa, source);
+    defer gpa.free(readable);
+    var prepared = try prepare(gpa, files, readable, null);
+    defer prepared.deinit();
+    const entries = try gpa.alloc(lods.Entry, prepared.model.meshes.len);
+    defer gpa.free(entries);
+    var with: usize = 0;
+    for (prepared.model.meshes, entries, 0..) |*held, *entry, at| {
+        if (!held.built) try gltf.buildMesh(&prepared.model, at);
+        entry.* = .{ .hash = lods.hashOf(held.vertices, held.indices), .levels = held.lods };
+        if (held.lods.len > 0) with += 1;
+    }
+    const path = try lodsPath(gpa, source);
+    defer gpa.free(path);
+    const os_path = try Project.underRoot(gpa, files.root, path);
+    defer gpa.free(os_path);
+    const bytes = try lods.write(gpa, entries);
+    defer gpa.free(bytes);
+    if (std.fs.path.dirname(os_path)) |folder| try std.Io.Dir.cwd().createDirPath(io, folder);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = os_path, .data = bytes });
+    return with;
 }
 
 /// Read the model at `path` now, on this thread, and keep what it made: its
@@ -218,7 +289,7 @@ fn prepareAt(app: *App, source: []const u8) !Prepared {
     else
         try app.project.osPath(app.gpa, readable);
     defer app.gpa.free(file);
-    return prepare(app.gpa, app.project.files(), file) catch |err| switch (err) {
+    return prepare(app.gpa, app.project.files(), file, source) catch |err| switch (err) {
         error.FileNotFound => if (isConverted(source)) error.NotImported else err,
         else => err,
     };
@@ -282,22 +353,27 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
     const same = model.gpa.ptr == gpa.ptr and model.gpa.vtable == gpa.vtable;
     for (model.meshes, 0..) |*held, at| {
         if (!held.built) try gltf.buildMesh(model, at);
-        const vertices, const indices, const surfaces, const skin = if (same) held.take() else .{
+        const vertices, const indices, const surfaces, const skin, const levels = if (same) held.take() else .{
             try gpa.dupe(mesh.Vertex, held.vertices),
             try gpa.dupe(u32, held.indices),
             try gpa.dupe(mesh.Surface, held.surfaces),
             try gpa.dupe(mesh.SkinVertex, held.skin),
+            try copyLevels(gpa, held.lods),
         };
-        for (surfaces, held.materials) |*surface, material| {
+        for (surfaces, held.materials, 0..) |*surface, material, which| {
             surface.material = if (material) |m| materials[m] else .none;
+            for (levels) |level| level.surfaces[which].material = surface.material;
         }
         var made = mesh.Mesh.adopt(vertices, indices, surfaces) catch |err| {
             gpa.free(vertices);
             gpa.free(indices);
             gpa.free(surfaces);
             gpa.free(skin);
+            for (levels) |*level| level.deinit(gpa);
+            gpa.free(levels);
             return err;
         };
+        made.lods = levels;
         made.uv2_texels = held.uv2_texels;
         // Bent by the skin of the first node that draws it with one, its
         // bones' boxes in that skin's bones' spaces; drawn as it was made

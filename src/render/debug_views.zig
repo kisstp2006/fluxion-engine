@@ -277,6 +277,8 @@ fn drawStats(app: *App) void {
         app.physics.awakeCount(),
     }, .white);
     pen.print2d(.init(12, 12 + 2 * line), "{d} sprites in {d} draws", .{ app.sprites.drawn, app.sprites.draw_calls }, .white);
+    const drew = app.renderer3d.last_frame;
+    pen.print2d(.init(12, 12 + 3 * line), "{d} meshes in {d} draws, {d} triangles, {d} culled, {d} shadow views drawn", .{ drew.meshes, drew.draw_calls, drew.triangles, drew.culled, drew.shadow_views_drawn }, .white);
 }
 
 /// Where a body is drawn: its entity's transform, between fixed steps as the

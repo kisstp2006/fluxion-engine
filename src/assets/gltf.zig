@@ -37,6 +37,7 @@ const math = @import("fluxion_math");
 const Color = @import("../math/color.zig").Color;
 const mesh = @import("../render/mesh.zig");
 const lightmap_uv = @import("../render/lightmap_uv.zig");
+const lods = @import("../render/lods.zig");
 const Material3D = @import("../render/render3d_components.zig").Material3DData;
 
 const Vec3 = math.Vec3;
@@ -107,21 +108,25 @@ pub const MeshData = struct {
     /// Its `Mesh.uv2_texels`: what its own second coordinates are laid out
     /// for, or what `lightmap_uv.unwrap` made; nought for none.
     uv2_texels: u32 = 0,
+    /// Its coarser levels: see `render/lods.zig`. Their surfaces' materials
+    /// are the mesh's own surfaces', in order.
+    lods: []mesh.Lod = &.{},
     /// Each vertex's bones, for a mesh a skin bends; empty for one that is
     /// not. See `mesh.SkinVertex`.
     skin: []mesh.SkinVertex = &.{},
     built: bool = false,
 
-    /// The vertices, indices, surfaces and skin, which are the caller's from
-    /// here.
-    pub fn take(self: *MeshData) struct { []mesh.Vertex, []u32, []mesh.Surface, []mesh.SkinVertex } {
+    /// The vertices, indices, surfaces, skin and levels, which are the
+    /// caller's from here.
+    pub fn take(self: *MeshData) struct { []mesh.Vertex, []u32, []mesh.Surface, []mesh.SkinVertex, []mesh.Lod } {
         defer {
             self.vertices = &.{};
             self.indices = &.{};
             self.surfaces = &.{};
             self.skin = &.{};
+            self.lods = &.{};
         }
-        return .{ self.vertices, self.indices, self.surfaces, self.skin };
+        return .{ self.vertices, self.indices, self.surfaces, self.skin, self.lods };
     }
 };
 
@@ -219,6 +224,11 @@ pub const Model = struct {
     /// Whether `buildMesh` works out lightmap UVs for a mesh that brings
     /// none, with `lightmap_uv.unwrap`.
     unwrap_lightmap: bool = false,
+    /// A file of the model's meshes' levels of detail, as an editor made it:
+    /// see `render/lods.zig`. The gpa's, freed with the model.
+    lod_file: []const u8 = &.{},
+    /// Whether `buildMesh` makes the levels of a mesh the file has none for.
+    make_lods: bool = true,
 
     pub fn deinit(self: *Model) void {
         for (self.meshes) |*held| {
@@ -227,7 +237,10 @@ pub const Model = struct {
             self.gpa.free(held.surfaces);
             self.gpa.free(held.materials);
             self.gpa.free(held.skin);
+            for (held.lods) |*level| level.deinit(self.gpa);
+            self.gpa.free(held.lods);
         }
+        self.gpa.free(self.lod_file);
         for (self.images) |held| self.gpa.free(held.pixels);
         self.arena.deinit();
         self.* = undefined;
@@ -992,12 +1005,21 @@ pub fn buildMesh(model: *Model, at: usize) Error!void {
         // and unwrapping would part vertices from their bones.
         try lightmap_uv.unwrap(gpa, &built);
     }
+    // Its levels: kept in the model's file of them for this very mesh, or
+    // made now.
+    const levels = (try lods.read(gpa, model.lod_file, at, lods.hashOf(built.vertices, built.indices), surfaces.items, built.vertices.len)) orelse
+        if (model.make_lods) try lods.make(gpa, built.vertices, built.indices, surfaces.items) else try gpa.alloc(mesh.Lod, 0);
+    errdefer {
+        for (levels) |*level| level.deinit(gpa);
+        gpa.free(levels);
+    }
     held.skin = try skin.toOwnedSlice(gpa);
     held.surfaces = try surfaces.toOwnedSlice(gpa);
     held.materials = try materials.toOwnedSlice(gpa);
     held.vertices = built.vertices;
     held.indices = built.indices;
     held.uv2_texels = built.uv2_texels;
+    held.lods = levels;
     held.built = true;
 }
 

@@ -39,6 +39,7 @@ const Uuid = @import("fluxion_id").Uuid;
 // What an app is made with, and the parts of it that are its own.
 const display = @import("app/display.zig");
 const frame_steps = @import("app/frame_steps.zig");
+const frame_stats_table = @import("app/frame_stats.zig");
 
 // core
 const Commands = @import("core/commands.zig");
@@ -409,6 +410,9 @@ drawings: drawing.Drawings = .{},
 particles: particle_emitters.Particles = .{},
 /// Each `Particles3D`'s particles: see `render/particles3d.zig`.
 particles3d: particles_3d.Emitters = .{},
+/// What each frame cost, while `Options.stats` asks: see
+/// `app/frame_stats.zig`.
+frame_stats: frame_stats_table.FrameStats = .{},
 /// The mesh each `CSGShape3D` at the top comes to: see
 /// `render/csg_shapes.zig` and `meshDrawnBy`.
 csg: csg_shapes.Shapes = .{},
@@ -806,6 +810,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .running = true,
         .close_pressed = false,
         .frames_left = options.frames,
+        .frame_stats = .{ .path = options.stats },
         .arguments = options.arguments,
         .page = options.page,
         .started = false,
@@ -967,6 +972,7 @@ pub fn destroy(self: *App) void {
     // What the game asked last - a session closed as it quit - is given a
     // moment to go.
     self.web.deinit(self);
+    self.frame_stats.deinit(gpa);
     self.input.deinit(gpa);
     self.schedule.deinit(gpa);
     self.states.deinit(gpa);
@@ -1108,6 +1114,7 @@ pub fn step(self: *App) anyerror!bool {
     self.resized = false;
 
     if (!try self.readWindows()) return false;
+    self.frame_stats.begin(self.io);
     try frame_steps.run(self, &frame_steps.news);
 
     // In the background - an Android app switched away from, a page hidden -
@@ -1118,6 +1125,21 @@ pub fn step(self: *App) anyerror!bool {
         return self.running;
     }
     try frame_steps.run(self, &frame_steps.order);
+    if (self.frame_stats.keeping()) {
+        const drew = self.renderer3d.last_frame;
+        self.frame_stats.end(self.gpa, self.io, self.time.unscaled_delta, self.schedule.frameTime(), .{
+            .frame_ms = 0,
+            .work_ms = 0,
+            .fixed_ms = 0,
+            .systems_ms = 0,
+            .draw_ms = 0,
+            .meshes = drew.meshes,
+            .draw_calls = drew.draw_calls,
+            .triangles = drew.triangles,
+            .culled = drew.culled,
+            .shadow_views_drawn = drew.shadow_views_drawn,
+        });
+    }
 
     if (self.frames_left) |left| {
         if (left <= 1) {
@@ -1207,6 +1229,7 @@ pub fn stop(self: *App) anyerror!void {
     // ask the web is given a moment to go before the app ends.
     if (self.scripts) |scripts| try scripts.calls.pass(scripts, .quitting);
     try self.schedule.run(.shutdown, self);
+    self.frame_stats.finish(self.gpa, self.io, @tagName(self.device.info().backend));
 }
 
 /// End the loop after this frame.

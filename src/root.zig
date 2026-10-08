@@ -208,6 +208,8 @@ pub const Camera2D = components.Camera2D;
 
 /// Meshes: what a `MeshInstance3D` draws, and the shapes made from numbers.
 pub const mesh = @import("render/mesh.zig");
+/// A dense mesh's coarser levels: see `render/lods.zig`.
+pub const lods = @import("render/lods.zig");
 pub const Mesh = mesh.Mesh;
 pub const MeshHandle = mesh.MeshHandle;
 /// `.mat3d` files: a `Material3DData` kept as a file with its shader's
@@ -593,6 +595,7 @@ test {
     _ = @import("animation/sprite_frames_test.zig");
     _ = @import("animation/tween_test.zig");
     _ = @import("app_test.zig");
+    _ = @import("app/frame_stats.zig");
     _ = @import("assets/images_test.zig");
     _ = @import("audio/audio_test.zig");
     _ = @import("core/signals_test.zig");
@@ -619,6 +622,7 @@ test {
     _ = @import("render/render3d_test.zig");
     _ = @import("render/csg_test.zig");
     _ = @import("render/mesh.zig");
+    _ = @import("render/lods.zig");
     _ = @import("render/lightmap_uv.zig");
     _ = @import("render/lightmaps.zig");
     _ = @import("render/skeleton.zig");

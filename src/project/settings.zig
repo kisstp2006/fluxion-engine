@@ -228,6 +228,64 @@ pub const Rendering = struct {
     /// How a shadow's edge is smoothed: hard reads the shadow once, soft
     /// more times for a smoother edge.
     shadow_filter: ShadowFilter = .soft_medium,
+    /// How many pixels a dense mesh's coarser level may differ from the
+    /// whole on screen before the finer one is drawn: more draws coarser
+    /// levels nearer. Nought draws every mesh whole. See `render/lods.zig`.
+    lod_threshold: f32 = 1,
+    /// How large the 3D world is drawn against the picture it goes into,
+    /// from a quarter to twice: smaller is faster and softer, larger
+    /// sharper and slower. The interface and the 2D world are drawn as
+    /// they are.
+    scale_3d: f32 = 1,
+    /// Draw the solid surfaces' depth before their light: each pixel then
+    /// lit once, by the surface in front, however many are behind it - at
+    /// the price of their corners worked out twice. See `render/renderer3d.zig`.
+    depth_prepass: bool = false,
+    /// What a phone and a page in a browser draw the 3D world with, in place
+    /// of the settings above of the same names: their GPUs do less.
+    mobile: Mobile = .{},
+
+    /// The 3D world's settings on Android and in a browser, where `enabled`.
+    pub const Mobile = struct {
+        enabled: bool = true,
+        msaa_3d: Msaa = .disabled,
+        screen_space_aa: ScreenSpaceAa = .disabled,
+        shadow_atlas_size: ShadowAtlasSize = .x2048,
+        shadow_filter: ShadowFilter = .soft_low,
+        lod_threshold: f32 = 2,
+        scale_3d: f32 = 1,
+
+        pub const reflect_fields = .{
+            .enabled = .{attr.Doc{ .text = "Draw with these on Android and in a browser, in place of the settings above." }},
+            .msaa_3d = .{ attr.Label{ .text = "MSAA 3D" }, attr.Doc{ .text = "Samples a pixel of the 3D layer on a phone or in a browser." } },
+            .screen_space_aa = .{ attr.Label{ .text = "Screen space AA" }, attr.Doc{ .text = "The edge smoother over the 3D picture on a phone or in a browser." } },
+            .shadow_atlas_size = .{attr.Doc{ .text = "The shadows' picture's side on a phone or in a browser." }},
+            .shadow_filter = .{attr.Doc{ .text = "How a shadow's edge is smoothed on a phone or in a browser." }},
+            .lod_threshold = .{ attr.Label{ .text = "LOD threshold" }, attr.Range{ .min = 0, .max = 64 }, attr.Doc{ .text = "Pixels a dense mesh's coarser level may differ by on a phone or in a browser." } },
+            .scale_3d = .{ attr.Label{ .text = "Scale 3D" }, attr.Range{ .min = 0.25, .max = 2 }, attr.Doc{ .text = "How large the 3D world is drawn on a phone or in a browser, against the picture." } },
+        };
+    };
+
+    /// These settings where the game runs: on Android and in a browser,
+    /// `mobile`'s in place of their own, where it is enabled.
+    pub fn here(self: Rendering) Rendering {
+        const target = @import("builtin").target;
+        return self.forPhone(target.abi.isAndroid() or target.cpu.arch.isWasm());
+    }
+
+    /// These settings, `mobile`'s in place of their own on a phone or in a
+    /// browser - `phone` - where it is enabled.
+    pub fn forPhone(self: Rendering, phone: bool) Rendering {
+        if (!phone or !self.mobile.enabled) return self;
+        var out = self;
+        out.msaa_3d = self.mobile.msaa_3d;
+        out.screen_space_aa = self.mobile.screen_space_aa;
+        out.shadow_atlas_size = self.mobile.shadow_atlas_size;
+        out.shadow_filter = self.mobile.shadow_filter;
+        out.lod_threshold = self.mobile.lod_threshold;
+        out.scale_3d = self.mobile.scale_3d;
+        return out;
+    }
 
     pub const TextureFilter = enum { nearest, linear };
 
@@ -353,6 +411,10 @@ pub const Rendering = struct {
         .screen_space_aa = .{ attr.Label{ .text = "Screen space AA" }, attr.Doc{ .text = "An edge smoother run over the finished 3D picture: cheaper than more samples, and softer." } },
         .shadow_atlas_size = .{attr.Doc{ .text = "How large the one picture every 3D shadow is drawn into is, a side: larger is sharper, and more memory." }},
         .shadow_filter = .{attr.Doc{ .text = "How a 3D shadow's edge is smoothed: hard reads the shadow once, soft more times for a smoother edge." }},
+        .lod_threshold = .{ attr.Label{ .text = "LOD threshold" }, attr.Range{ .min = 0, .max = 64 }, attr.Doc{ .text = "How many pixels a dense mesh's coarser level may differ from the whole before the finer one is drawn; nought draws every mesh whole." } },
+        .scale_3d = .{ attr.Label{ .text = "Scale 3D" }, attr.Range{ .min = 0.25, .max = 2 }, attr.Doc{ .text = "How large the 3D world is drawn against the picture: smaller is faster and softer, larger sharper and slower." } },
+        .depth_prepass = .{ attr.Advanced{}, attr.Doc{ .text = "Draw the solid surfaces' depth before their light: each pixel lit once, by what is in front, for their corners worked out twice. Faster where many surfaces stand behind each other and the light is dear." } },
+        .mobile = .{attr.Doc{ .text = "What a phone and a page in a browser draw the 3D world with, in place of the settings above." }},
     };
 };
 
@@ -969,4 +1031,17 @@ test "a renderer's backends, best first, on each system" {
     try testing.expectEqual(@as(usize, 0), Renderer.modern.backends(.macos).len);
     try testing.expectEqual(@as(usize, 0), Renderer.modern.backends(.emscripten).len);
     try testing.expect(Renderer.modern.experimental() and !Renderer.compatibility.experimental());
+}
+
+test "on a phone or in a browser the mobile settings take the place of their own, where they are enabled" {
+    const desk: Rendering = .{ .msaa_3d = .x4, .shadow_atlas_size = .x4096, .scale_3d = 1.5, .lod_threshold = 1 };
+    const phone = desk.forPhone(true);
+    try std.testing.expectEqual(Rendering.Msaa.disabled, phone.msaa_3d);
+    try std.testing.expectEqual(Rendering.ShadowAtlasSize.x2048, phone.shadow_atlas_size);
+    try std.testing.expectEqual(@as(f32, 1), phone.scale_3d);
+    try std.testing.expectEqual(@as(f32, 2), phone.lod_threshold);
+    try std.testing.expectEqual(Rendering.Msaa.x4, desk.forPhone(false).msaa_3d);
+    var off = desk;
+    off.mobile.enabled = false;
+    try std.testing.expectEqual(Rendering.Msaa.x4, off.forPhone(true).msaa_3d);
 }

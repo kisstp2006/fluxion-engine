@@ -79,6 +79,100 @@ test "the boxes a camera sees are drawn together, and one behind it is left out"
     try testing.expectEqual(@as(u32, 5), app.renderer3d.drawn);
 }
 
+test "a mesh past its visibility range is not drawn, and every draw of a frame is counted together" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    // The camera is at z five: one box two metres off, one twenty.
+    const near = try boxAt(app, 0, 0, 3);
+    const far = try boxAt(app, 0, 0, -15);
+    app.world.get(near, MeshInstance3D).?.visibility_range = 10;
+    app.world.get(far, MeshInstance3D).?.visibility_range = 10;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.drawn);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.culled);
+    // A box is twelve triangles; the frame's totals hold the draw's.
+    try testing.expectEqual(@as(u64, 12), app.renderer3d.last_frame.triangles);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.last_frame.meshes);
+    // Nought draws it however far.
+    app.world.get(far, MeshInstance3D).?.visibility_range = 0;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 2), app.renderer3d.drawn);
+}
+
+test "a dense mesh far off is drawn at a coarser level, near it whole, and with no bias always whole" {
+    // A picture as large as a screen's: on a small one a level is chosen
+    // by what so few pixels show.
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 1920, .height = 1080, .io = testing.io });
+    defer app.destroy();
+    _ = try looking(app);
+    var dense = try mesh.sphere(testing.allocator, 1, 64, 96);
+    dense.lods = try @import("lods.zig").make(testing.allocator, dense.vertices, dense.indices, dense.surfaces);
+    try testing.expect(dense.lods.len >= 2);
+    const whole: u64 = dense.indices.len / 3;
+    const handle = try app.addMesh("dense", dense);
+    const ball = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), MeshInstance3D{ .mesh = handle } });
+    // Near: whole.
+    _ = try app.step();
+    try testing.expectEqual(whole, app.renderer3d.last_frame.triangles);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.lod_levels[0]);
+    // Far off: a coarser level, fewer triangles.
+    app.world.get(ball, Transform3D).?.position.z = -300;
+    _ = try app.step();
+    try testing.expect(app.renderer3d.last_frame.triangles * 2 < whole);
+    try testing.expectEqual(@as(u32, 0), app.renderer3d.lod_levels[0]);
+    // With no bias, whole however far.
+    app.world.get(ball, MeshInstance3D).?.lod_bias = 0;
+    _ = try app.step();
+    try testing.expectEqual(whole, app.renderer3d.last_frame.triangles);
+}
+
+test "the project's 3D scale draws the 3D world smaller than the picture it goes into, and stretches it to fill it" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const Project = @import("../project/Project.zig");
+    try Project.writeSettings(testing.allocator, testing.io, root, .{ .application = .{ .name = "Scaled" }, .rendering = .{ .scale_3d = 0.5 } });
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 64, .height = 64, .io = testing.io, .root = root });
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.drawn);
+    const targets = app.renderer3d.post.?.targets.items;
+    try testing.expectEqual(@as(usize, 1), targets.len);
+    try testing.expectEqual(@as(u32, 32), targets[0].width);
+    try testing.expectEqual(@as(u32, 32), targets[0].height);
+    // Its depth is not the picture's size: nothing is tested against it.
+    try testing.expect(app.renderer3d.last_depth == null);
+}
+
+test "with the depth drawn first, every solid surface's depth is drawn before its light, and a see-through one's is not" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const Project = @import("../project/Project.zig");
+    try Project.writeSettings(testing.allocator, testing.io, root, .{ .application = .{ .name = "Depth" }, .rendering = .{ .depth_prepass = true } });
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 64, .height = 64, .io = testing.io, .root = root });
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, -1, 0, 0);
+    _ = try boxAt(app, 1, 0, 0);
+    const glass = try app.addMaterial("glass", .{ .transparency = .alpha, .albedo_color = .rgba(1, 1, 1, 0.5) });
+    const pane = try boxAt(app, 0, 0, 1);
+    try app.world.add(pane, Material3D{ .material = glass });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 3), app.renderer3d.drawn);
+    var solid: usize = 0;
+    for (app.renderer3d.items.items) |item| {
+        try testing.expectEqual(!item.transparent, item.depth_first);
+        solid += @intFromBool(item.depth_first);
+    }
+    try testing.expectEqual(@as(usize, 2), solid);
+}
+
 test "a mesh made in code is drawn by its handle, and nothing once it is let go" {
     const app = try headless();
     defer app.destroy();

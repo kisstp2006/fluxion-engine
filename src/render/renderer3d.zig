@@ -125,12 +125,64 @@ const no_skin = std.math.maxInt(u32);
 /// The flat normal map: what a material with none is read with.
 const flat_normal = [4]u8{ 128, 128, 255, 255 };
 
+/// The coarsest level of `made` whose distance from the whole would cover
+/// no more than `threshold` pixels on `view`'s picture, where `bounds` is:
+/// null for the whole mesh.
+fn lodOf(made: *const mesh.Mesh, bounds: math.Aabb, model: math.Mat4, view: View3D, threshold: f32) ?usize {
+    if (made.lods.len == 0 or !(threshold > 0)) return null;
+    // Pixels a metre is there: nearest side of the box, for a box the
+    // camera is in drawn whole.
+    const per_metre = switch (view.projection) {
+        .perspective => per: {
+            const far = distanceTo(bounds, view.position);
+            if (!(far > 0)) return null;
+            break :per view.height / (2 * far * @tan(view.fov / 2));
+        },
+        .orthogonal => view.height / (2 * @max(view.size, 1e-6)),
+    };
+    // The mesh's units to metres: its largest scale.
+    const scale = @max(model.cols[0].xyz().len(), model.cols[1].xyz().len(), model.cols[2].xyz().len());
+    var chosen: ?usize = null;
+    for (made.lods, 0..) |level, at| {
+        if (level.distance * scale * per_metre > threshold) break;
+        chosen = at;
+    }
+    return chosen;
+}
+
+/// How far `point` is from the nearest side of `box`: nought inside it.
+fn distanceTo(box: math.Aabb, point: math.Vec3) f32 {
+    const nearest = point.max(box.min).min(box.max);
+    return nearest.sub(point).len();
+}
+
+/// What the draws of a frame drew together.
+pub const Totals = struct {
+    meshes: u32 = 0,
+    draw_calls: u32 = 0,
+    triangles: u64 = 0,
+    culled: u32 = 0,
+    shadow_views_drawn: u32 = 0,
+
+    fn add(self: *Totals, drew: *const Renderer3D) void {
+        self.meshes += drew.drawn;
+        self.draw_calls += drew.draw_calls;
+        self.triangles += drew.triangles;
+        self.culled += drew.culled;
+        self.shadow_views_drawn += drew.shadow_views_drawn;
+    }
+};
+
 /// What is drawn of one surface, before it is sorted.
 const Item = struct {
     way: u8,
     transparent: bool,
     compiled: *shader3d.Compiled,
     gpu: mesh.Gpu,
+    /// The whole mesh's indices, or a coarser level's.
+    index_buffer: rhi.Buffer,
+    /// Whether its depth was drawn before its light this draw.
+    depth_first: bool = false,
     first_index: u32,
     index_count: u32,
     /// Albedo, emission, metal and roughness, normal, occlusion.
@@ -168,13 +220,13 @@ const Item = struct {
         return .eq;
     }
 
-    fn keysOf(item: Item) [13]u64 {
+    fn keysOf(item: Item) [14]u64 {
         return .{
             item.way,                 @intFromPtr(item.compiled),              item.textures[0].toInt(),
             item.textures[1].toInt(), item.textures[2].toInt(),                item.textures[3].toInt(),
             item.textures[4].toInt(), item.sampler.toInt(),                    item.gpu.vertices.toInt(),
             item.first_index,         @as(u64, item.look) << 32 | item.params, item.index_count,
-            item.skin,
+            item.skin,                item.index_buffer.toInt(),
         };
     }
 
@@ -363,9 +415,17 @@ pub const Renderer3D = struct {
     /// The frame's numbers, as the last draw wrote them.
     frame_data: Frame = undefined,
 
-    /// What the last draw drew: meshes, and the draws they took.
+    /// What the last draw drew: meshes, the draws they took, and their
+    /// triangles; how many meshes were drawn whole, and at each coarser
+    /// level.
+    lod_levels: [mesh.max_lods + 1]u32 = @splat(0),
     drawn: u32 = 0,
     draw_calls: u32 = 0,
+    triangles: u64 = 0,
+    /// What every draw of the frame drew together - each render view's, and
+    /// the screen's - and of the frame before, which `tick` ends.
+    this_frame: Totals = .{},
+    last_frame: Totals = .{},
     /// The meshes it left out for being off the camera's frustum.
     culled: u32 = 0,
     /// The point and spot lights it kept, and the samples a pixel it drew
@@ -552,6 +612,8 @@ pub const Renderer3D = struct {
     /// One more frame: targets no draw has used for a few are let go - a
     /// window dragged bigger leaves every size it passed through.
     pub fn tick(self: *Renderer3D, gpa: Allocator) void {
+        self.last_frame = self.this_frame;
+        self.this_frame = .{};
         self.last_depth = null;
         if (self.post) |*held| held.tick();
         if (self.shadow_cache) |*cache| cache.frame += 1;
@@ -573,7 +635,10 @@ pub const Renderer3D = struct {
     pub fn draw(self: *Renderer3D, app: *App, into: rhi.RenderTarget, width: u32, height: u32, view: View3D, clear: ?Color, lighting: Lighting) !void {
         self.drawn = 0;
         self.draw_calls = 0;
+        self.triangles = 0;
+        self.lod_levels = @splat(0);
         self.culled = 0;
+        defer self.this_frame.add(self);
         self.lamps_kept = 0;
         self.shadow_views = 0;
         self.shadow_views_drawn = 0;
@@ -601,12 +666,20 @@ pub const Renderer3D = struct {
         };
 
         const frustum: math.Frustum = .fromViewProjection(view_projection, clip);
-        const rendering: Project.Rendering = if (app.project.settings) |held| held.rendering else .{};
+        const rendering: Project.Rendering = (if (app.project.settings) |held| held.rendering else Project.Rendering{}).here();
+        // At the project's scale, for the game's own picture: what is drawn,
+        // and what the frame's numbers say of it.
+        const scale = if (lighting.antialias) std.math.clamp(rendering.scale_3d, 0.25, 2) else 1;
+        const drawn_width: u32 = @max(1, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(width)) * scale))));
+        const drawn_height: u32 = @max(1, @as(u32, @intFromFloat(@round(@as(f32, @floatFromInt(height)) * scale))));
+        var drawn_view = view;
+        drawn_view.width = @floatFromInt(drawn_width);
+        drawn_view.height = @floatFromInt(drawn_height);
         try self.findBaked(app);
         try self.gatherLamps(app, view, frustum);
         try self.gatherSuns(app);
         try self.planShadows(gpa, view, rendering);
-        try self.gather(app, view, frustum, self.plan.views.items.len > 0);
+        try self.gather(app, drawn_view, frustum, self.plan.views.items.len > 0, rendering.lod_threshold);
         try self.gatherShadowItems(gpa);
         std.mem.sort(Item, self.items.items, {}, Item.before);
         self.staging.clearRetainingCapacity();
@@ -615,7 +688,7 @@ pub const Renderer3D = struct {
         for (self.shadow_items.items) |shadowed| self.staging.appendAssumeCapacity(self.gathered.items[shadowed.item.instance]);
         try self.upload(gpa);
         try self.placeCookies(gpa);
-        try self.uploadFrame(app, view, view_projection, environment, lighting);
+        try self.uploadFrame(app, drawn_view, view_projection, environment, lighting);
         const fog = try fog_volumes.gather(app, view, frustum, @floatCast(app.interface.seconds), self.worlds);
         self.fog_volumes_kept = @intFromFloat(fog.count[0]);
         try device.updateBuffer(self.fog, 0, std.mem.asBytes(&fog));
@@ -626,8 +699,9 @@ pub const Renderer3D = struct {
 
         const samples = if (lighting.antialias) post.samplesFor(rendering.msaa_3d.samples()) else 1;
         self.samples = samples;
-        const targets = try post.targetsAt(gpa, width, height, samples);
+        const targets = try post.targetsAt(gpa, drawn_width, drawn_height, samples);
         const list = device.begin();
+        const depth_first = rendering.depth_prepass and try self.drawDepthFirst(list, targets.depth, depth_format, samples, drawn_width, drawn_height, shadow_map);
         try list.beginPass(.{
             .color = .{
                 .target = .{ .texture = targets.drawnInto() },
@@ -635,9 +709,9 @@ pub const Renderer3D = struct {
                 .clear_color = if (background) |color| linear(color) else .{ 0, 0, 0, 0 },
                 .resolve = if (targets.multisampled != null) .{ .texture = targets.light } else null,
             },
-            .depth = .{ .texture = targets.depth },
+            .depth = .{ .texture = targets.depth, .load = if (depth_first) .load else .clear },
         });
-        try list.setViewport(.{ .width = @floatFromInt(width), .height = @floatFromInt(height) });
+        try list.setViewport(.{ .width = @floatFromInt(drawn_width), .height = @floatFromInt(drawn_height) });
         const pass: billboards.Billboards.Pass = .{
             .list = list,
             .frame = self.frame,
@@ -658,34 +732,23 @@ pub const Renderer3D = struct {
             if (first.transparent) try flat.drawFurtherThan(pass, first.depth);
             // A shader whose pipeline the device refuses is drawn as the
             // engine's own, and is not asked again.
-            const pipeline = first.compiled.pipelineOf(device, post.light_format, depth_format, samples, .of(first.way)) catch |err| blk: {
+            const pipeline = (if (first.depth_first)
+                first.compiled.afterDepthPipelineOf(device, post.light_format, depth_format, samples, .of(first.way))
+            else
+                first.compiled.pipelineOf(device, post.light_format, depth_format, samples, .of(first.way))) catch |err| blk: {
                 const plain = &self.plain.?;
                 if (first.compiled == plain) return err;
                 first.params = no_params;
-                break :blk try plain.pipelineOf(device, post.light_format, depth_format, samples, .of(first.way));
+                break :blk try if (first.depth_first)
+                    plain.afterDepthPipelineOf(device, post.light_format, depth_format, samples, .of(first.way))
+                else
+                    plain.pipelineOf(device, post.light_format, depth_format, samples, .of(first.way));
             };
             try list.setPipeline(pipeline);
-            try list.setUniformBuffer(0, self.frame);
-            try list.setUniformBufferRange(1, self.blocks.buffer.?, self.look_offsets.items[first.look], @sizeOf(Look));
-            try list.setUniformBuffer(2, self.lights);
-            if (first.params != no_params) {
-                const set = self.param_sets.items[first.params];
-                try list.setUniformBufferRange(shader3d.params_slot, self.blocks.buffer.?, self.param_offsets.items[first.params], set.len);
-            }
-            try list.setUniformBuffer(shader3d.shadows_slot, self.shadows);
-            for (first.textures, 0..) |texture, slot| try list.setTexture(@intCast(slot), texture, first.sampler);
-            try list.setTexture(shader3d.shadow_map_slot, shadow_map, self.comparing);
-            try list.setTexture(shader3d.shadow_depth_slot, shadow_map, self.reading);
-            try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
-            try list.setUniformBuffer(shader3d.probes_slot, self.probes);
-            try list.setUniformBuffer(fog_volumes.slot, self.fog);
-            try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
-            try list.setVertexBuffer(0, first.gpu.vertices, 0);
-            try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
-            try self.bindSkin(list, first);
-            try list.setIndexBuffer(first.gpu.indices, .u32);
+            try self.bindSurface(list, first, start, shadow_map);
             try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
             self.draw_calls += 1;
+            self.triangles += @as(u64, first.index_count / 3) * (end - start);
             start = end;
         }
         try flat.drawRest(pass);
@@ -693,8 +756,60 @@ pub const Renderer3D = struct {
         try device.submit();
         self.drawn = @intCast(items.len);
 
-        try post.finish(gpa, targets, into, .of(environment, lighting.antialias and rendering.screen_space_aa == .fxaa), clear == null);
-        self.last_depth = if (samples == 1) targets.depth else null;
+        try post.finish(gpa, targets, into, width, height, .of(environment, lighting.antialias and rendering.screen_space_aa == .fxaa), clear == null);
+        // What goes over it with a depth test reads its depth: where it is
+        // one sample a pixel, and as large as the picture.
+        self.last_depth = if (samples == 1 and drawn_width == width and drawn_height == height) targets.depth else null;
+    }
+
+    /// The solid surfaces' depth, drawn into `depth` before their light:
+    /// each by its shader's caster. Whether any was; a surface whose depth
+    /// pipeline the device refuses is drawn as ever after.
+    fn drawDepthFirst(self: *Renderer3D, list: *rhi.CommandList, depth: rhi.Texture, depth_format: rhi.Format, samples: u32, width: u32, height: u32, shadow_map: rhi.Texture) !bool {
+        const device = self.device;
+        const items = self.items.items;
+        if (items.len == 0 or items[0].transparent) return false;
+        try list.beginPass(.{ .depth = .{ .texture = depth } });
+        try list.setViewport(.{ .width = @floatFromInt(width), .height = @floatFromInt(height) });
+        var start: usize = 0;
+        while (start < items.len and !items[start].transparent) {
+            var end = start + 1;
+            while (end < items.len and Item.joins(items[start], items[end])) end += 1;
+            defer start = end;
+            const first = items[start];
+            const pipeline = first.compiled.depthFirstPipelineOf(device, depth_format, samples, Way.of(first.way).cull) catch continue;
+            for (items[start..end]) |*item| item.depth_first = true;
+            try list.setPipeline(pipeline);
+            try self.bindSurface(list, first, start, shadow_map);
+            try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
+        }
+        try list.endPass();
+        return true;
+    }
+
+    /// What a surface is drawn with, besides its pipeline: the frame, its
+    /// look, the lights and its pictures, its vertices and its instances
+    /// from `start`.
+    fn bindSurface(self: *Renderer3D, list: *rhi.CommandList, first: Item, start: usize, shadow_map: rhi.Texture) !void {
+        try list.setUniformBuffer(0, self.frame);
+        try list.setUniformBufferRange(1, self.blocks.buffer.?, self.look_offsets.items[first.look], @sizeOf(Look));
+        try list.setUniformBuffer(2, self.lights);
+        if (first.params != no_params) {
+            const set = self.param_sets.items[first.params];
+            try list.setUniformBufferRange(shader3d.params_slot, self.blocks.buffer.?, self.param_offsets.items[first.params], set.len);
+        }
+        try list.setUniformBuffer(shader3d.shadows_slot, self.shadows);
+        for (first.textures, 0..) |texture, slot| try list.setTexture(@intCast(slot), texture, first.sampler);
+        try list.setTexture(shader3d.shadow_map_slot, shadow_map, self.comparing);
+        try list.setTexture(shader3d.shadow_depth_slot, shadow_map, self.reading);
+        try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
+        try list.setUniformBuffer(shader3d.probes_slot, self.probes);
+        try list.setUniformBuffer(fog_volumes.slot, self.fog);
+        try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
+        try list.setVertexBuffer(0, first.gpu.vertices, 0);
+        try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
+        try self.bindSkin(list, first);
+        try list.setIndexBuffer(first.index_buffer, .u32);
     }
 
     /// The frame's numbers: the camera, the suns, the light from
@@ -895,7 +1010,7 @@ pub const Renderer3D = struct {
     /// What every surface of every mesh the camera sees is drawn as,
     /// unsorted - and with `casting`, what every mesh that casts a shadow
     /// casts it with.
-    fn gather(self: *Renderer3D, app: *App, view: View3D, frustum: math.Frustum, casting: bool) !void {
+    fn gather(self: *Renderer3D, app: *App, view: View3D, frustum: math.Frustum, casting: bool, lod_threshold: f32) !void {
         const gpa = app.gpa;
         self.gathered.clearRetainingCapacity();
         self.items.clearRetainingCapacity();
@@ -926,6 +1041,11 @@ pub const Renderer3D = struct {
                 const bent: ?Bent = if (!instance.skeleton.isNone() and kept.mesh.skin.len > 0) try self.bentBy(app, instance.skeleton, &kept.mesh, alpha) else null;
                 const model = if (bent) |held| held.model else (hierarchy.resolve3D(&app.world, &app.snapshots3d, entity, local, alpha) orelse continue).matrix();
                 const bounds = if (bent) |held| kept.mesh.bentBounds(held.bones).transformed(model) else kept.mesh.bounds.transformed(model);
+                // Past its range, neither it nor its shadow.
+                if (instance.visibility_range > 0 and distanceTo(bounds, view.position) > instance.visibility_range) {
+                    self.culled += 1;
+                    continue;
+                }
                 const seen = frustum.testAabb(bounds) != .outside;
                 const casts = casting and instance.cast_shadow;
                 if (!seen) self.culled += 1;
@@ -934,6 +1054,11 @@ pub const Renderer3D = struct {
                 const gpu = try kept.uploaded(self.device);
                 const depth = bounds.center().sub(view.position).dot(forward);
                 const own: MaterialHandle = if (app.world.get(entity, Material3D)) |held| held.material else .none;
+                // Far off, a coarser level in its place.
+                const level = lodOf(&kept.mesh, bounds, model, view, lod_threshold * @max(instance.lod_bias, 0));
+                const surfaces = if (level) |l| kept.mesh.lods[l].surfaces else kept.mesh.surfaces;
+                const index_buffer = if (level) |l| gpu.lods[l] else gpu.indices;
+                if (level) |l| self.lod_levels[l + 1] += 1 else self.lod_levels[0] += 1;
                 const at: u32 = @intCast(self.gathered.items.len);
                 try self.gathered.append(gpa, .{
                     .model = .{ model.cols[0].array(), model.cols[1].array(), model.cols[2].array(), model.cols[3].array() },
@@ -941,7 +1066,7 @@ pub const Renderer3D = struct {
                     .lights = if (seen) self.lampsFor(bounds) else @splat(@splat(-1)),
                     .gi = if (seen) self.giOf(app, entity, instance.gi_mode, bounds) else @splat(0),
                 });
-                for (kept.mesh.surfaces) |surface| {
+                for (surfaces) |surface| {
                     if (surface.index_count == 0) continue;
                     const chosen = if (!own.isNone() and app.materials.get(own) != null) own else surface.material;
                     const look = materialOf(app, chosen);
@@ -972,6 +1097,7 @@ pub const Renderer3D = struct {
                         .transparent = blend,
                         .compiled = compiled,
                         .gpu = gpu,
+                        .index_buffer = index_buffer,
                         .first_index = surface.first_index,
                         .index_count = surface.index_count,
                         .textures = textures,
@@ -1265,7 +1391,7 @@ pub const Renderer3D = struct {
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast((first_instance + start) * @sizeOf(Instance)));
             try self.bindSkin(list, first);
-            try list.setIndexBuffer(first.gpu.indices, .u32);
+            try list.setIndexBuffer(first.index_buffer, .u32);
             try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
             self.shadow_draws += 1;
             start = end;

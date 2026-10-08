@@ -245,6 +245,10 @@ pub const Options = struct {
     /// it needs this or a system that calls `quit`.
     frames: ?u32 = null,
 
+    /// Keep what each frame cost, and write it at the end to this path on the
+    /// machine as JSON: see `app/frame_stats.zig`.
+    stats: ?[]const u8 = null,
+
     /// Worker threads for parallel queries. Null is one fewer than the cores.
     workers: ?u32 = null,
 

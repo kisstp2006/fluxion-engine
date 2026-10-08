@@ -293,6 +293,90 @@ test "a GLB read in the background makes its picture and its mesh from its own b
     try testing.expect(app.findMesh("res://models/tri.glb#mesh/0") != null);
 }
 
+/// A ball of `slices` round and `stacks` down as a GLB: positions, normals
+/// and indices - dense enough for levels of detail.
+fn ballGlb(gpa: std.mem.Allocator, slices: u32, stacks: u32) ![]u8 {
+    var bin: std.ArrayList(u8) = .empty;
+    defer bin.deinit(gpa);
+    const row = slices + 1;
+    for (0..stacks + 1) |j| for (0..row) |i| {
+        const phi = @as(f32, @floatFromInt(j)) / @as(f32, @floatFromInt(stacks)) * std.math.pi;
+        const theta = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(slices)) * std.math.tau;
+        const r = 1 + 0.05 * @sin(theta * 5) * @sin(phi * 4);
+        const p = [3]f32{ r * @cos(theta) * @sin(phi), r * @cos(phi), -r * @sin(theta) * @sin(phi) };
+        try bin.appendSlice(gpa, std.mem.asBytes(&p));
+    };
+    const positions_len = bin.items.len;
+    for (0..stacks + 1) |j| for (0..row) |i| {
+        const phi = @as(f32, @floatFromInt(j)) / @as(f32, @floatFromInt(stacks)) * std.math.pi;
+        const theta = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(slices)) * std.math.tau;
+        const n = [3]f32{ @cos(theta) * @sin(phi), @cos(phi), -@sin(theta) * @sin(phi) };
+        try bin.appendSlice(gpa, std.mem.asBytes(&n));
+    };
+    const vertex_count = (stacks + 1) * row;
+    for (0..stacks) |j| for (0..slices) |i| {
+        const a: u32 = @intCast(j * row + i);
+        const b = a + row;
+        const six = [6]u32{ a, b, b + 1, a, b + 1, a + 1 };
+        try bin.appendSlice(gpa, std.mem.asBytes(&six));
+    };
+    const index_count = stacks * slices * 6;
+    const indices_at = 2 * positions_len;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    try text.print(gpa,
+        \\{{ "asset": {{ "version": "2.0" }}, "scenes": [{{ "nodes": [0] }}], "nodes": [{{ "name": "Ball", "mesh": 0 }}],
+        \\  "meshes": [{{ "primitives": [{{ "attributes": {{ "POSITION": 0, "NORMAL": 2 }}, "indices": 1 }}] }}],
+        \\  "accessors": [{{ "bufferView": 0, "componentType": 5126, "count": {d}, "type": "VEC3" }}, {{ "bufferView": 1, "componentType": 5125, "count": {d}, "type": "SCALAR" }}, {{ "bufferView": 2, "componentType": 5126, "count": {d}, "type": "VEC3" }}],
+        \\  "bufferViews": [{{ "buffer": 0, "byteLength": {d} }}, {{ "buffer": 0, "byteOffset": {d}, "byteLength": {d} }}, {{ "buffer": 0, "byteOffset": {d}, "byteLength": {d} }}],
+        \\  "buffers": [{{ "byteLength": {d} }}] }}
+    , .{ vertex_count, index_count, vertex_count, positions_len, indices_at, bin.items.len - indices_at, positions_len, positions_len, bin.items.len });
+    while (text.items.len % 4 != 0) try text.append(gpa, ' ');
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(gpa);
+    const total: u32 = @intCast(12 + 8 + text.items.len + 8 + bin.items.len);
+    try out.appendSlice(gpa, "glTF");
+    for ([_]u32{ 2, total, @intCast(text.items.len), 0x4E4F534A }) |word| try out.appendSlice(gpa, std.mem.asBytes(&word));
+    try out.appendSlice(gpa, text.items);
+    for ([_]u32{ @intCast(bin.items.len), 0x004E4942 }) |word| try out.appendSlice(gpa, std.mem.asBytes(&word));
+    try out.appendSlice(gpa, bin.items);
+    return out.toOwnedSlice(gpa);
+}
+
+test "a dense model's meshes get levels of detail as it is read, kept in a file an editor makes, read back from there" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const glb = try ballGlb(testing.allocator, 96, 48);
+    defer testing.allocator.free(glb);
+    try folder.put("models/ball.glb", glb);
+    const models = @import("models.zig");
+    const lods = @import("../render/lods.zig");
+    {
+        // No file of them: made as it is read.
+        const app = try appIn(&folder);
+        defer app.destroy();
+        _ = try app.loadScene("res://models/ball.glb");
+        const made = app.meshOf(app.findMesh("res://models/ball.glb#mesh/0").?).?;
+        try testing.expect(made.lods.len >= 2);
+        // Kept as an editor keeps them.
+        try testing.expectEqual(@as(usize, 1), try models.makeLodFile(testing.allocator, app.project.files(), "res://models/ball.glb"));
+        try testing.expect(folder.exists(".fluxion/imported/models/ball.glb.lods"));
+    }
+    // The first level's distance changed in the file: read from there, it
+    // has the file's.
+    const bytes = try folder.tmp.dir.readFileAlloc(testing.io, ".fluxion/imported/models/ball.glb.lods", testing.allocator, .limited(1 << 24));
+    defer testing.allocator.free(bytes);
+    const distance_at = lods.magic.len + 4 + 8 + 4;
+    std.mem.writeInt(u32, bytes[distance_at..][0..4], @bitCast(@as(f32, 123)), .little);
+    try folder.tmp.dir.writeFile(testing.io, .{ .sub_path = ".fluxion/imported/models/ball.glb.lods", .data = bytes });
+    const app = try appIn(&folder);
+    defer app.destroy();
+    _ = try app.loadScene("res://models/ball.glb");
+    const read = app.meshOf(app.findMesh("res://models/ball.glb#mesh/0").?).?;
+    try testing.expectEqual(@as(f32, 123), read.lods[0].distance);
+}
+
 test "an app let go of with loads under way and loads done but not taken frees them all" {
     var folder: Folder = undefined;
     try folder.init();

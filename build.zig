@@ -49,6 +49,11 @@ pub fn build(b: *std.Build) void {
         .root_module = e.csg,
     });
     test_step.dependOn(&b.addRunArtifact(csg_tests).step);
+    const simplify_tests = b.addTest(.{
+        .name = "fluxion-simplify-tests",
+        .root_module = e.simplify,
+    });
+    test_step.dependOn(&b.addRunArtifact(simplify_tests).step);
 
     const ndk = b.option([]const u8, "android-ndk", "The Android NDK, for a build for Android (default: ANDROID_NDK_HOME, then the newest in the Android SDK's ndk folder)");
     const program = runtime(b, e, target, optimize, ndk);
@@ -260,6 +265,14 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .single_threaded = single_threaded,
     });
 
+    // A mesh made of fewer triangles, for its levels of detail.
+    const simplify = b.createModule(.{
+        .root_source_file = b.path("src/simplify/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .single_threaded = single_threaded,
+    });
+
     // Nothing here is lazy, and that is the difference between an engine and
     // the libraries under it. A library keeps its window, its file reading
     // and its renderer behind `lazy` so a consumer never downloads what it
@@ -294,6 +307,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
             .{ .name = "fluxion_lightmapper", .module = lightmapper },
             .{ .name = "fluxion_navmesh", .module = navmesh },
             .{ .name = "fluxion_csg", .module = csg },
+            .{ .name = "fluxion_simplify", .module = simplify },
         },
     };
     const mod = if (exported) b.addModule("fluxion_engine", mod_options) else b.createModule(mod_options);
@@ -335,6 +349,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .lightmapper = lightmapper,
         .navmesh = navmesh,
         .csg = csg,
+        .simplify = simplify,
         .single_threaded = single_threaded,
     };
 }
@@ -356,6 +371,7 @@ const Engine = struct {
     lightmapper: *std.Build.Module,
     navmesh: *std.Build.Module,
     csg: *std.Build.Module,
+    simplify: *std.Build.Module,
     single_threaded: ?bool,
 };
 

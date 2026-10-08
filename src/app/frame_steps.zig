@@ -39,6 +39,8 @@ const tree = @import("../scene/tree.zig");
 const tween = @import("../animation/tween.zig");
 const web = @import("../net/web.zig");
 
+const FrameStats = @import("frame_stats.zig").FrameStats;
+
 const log = std.log.scoped(.fluxion_engine);
 
 /// One thing a frame does.
@@ -150,7 +152,11 @@ pub fn run(app: *App, steps: []const Step) anyerror!void {
             try app.signals.drain(app);
         },
         .stage => |stage| try app.schedule.run(stage, app),
-        .fixed_steps => |inner| try fixedSteps(app, inner),
+        .fixed_steps => |inner| {
+            const started = app.frame_stats.start(app.io);
+            defer app.frame_stats.fixed_ns += FrameStats.took(app.io, started);
+            try fixedSteps(app, inner);
+        },
     };
 }
 
@@ -425,6 +431,8 @@ fn layOut(app: *App) anyerror!void {
 /// The frame drawn, and the tool windows'. Nothing to draw on while the
 /// window is minimized, or while Android has taken the surface away.
 fn draw(app: *App) anyerror!void {
+    const started = app.frame_stats.start(app.io);
+    defer app.frame_stats.draw_ns += FrameStats.took(app.io, started);
     if (app.windowMode() != .minimized and !app.input.surface_lost) try layers.render(app);
     for (app.tool_windows.items) |tool| try tool.render(app);
     app.meshes.tick(app.gpa, &app.device);

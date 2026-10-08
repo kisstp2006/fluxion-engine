@@ -895,6 +895,9 @@ pub const Compiled = struct {
     /// By the count of samples it draws into - its power of two - and way:
     /// made the first time it is drawn so.
     pipelines: [sample_counts][Way.count]rhi.Pipeline = @splat(@splat(.none)),
+    /// The same for a solid surface whose depth a pass before drew: tested
+    /// against it as far as it and no further, and writing none.
+    after_depth: [sample_counts][Way.count]rhi.Pipeline = @splat(@splat(.none)),
     /// Whether the device refused a pipeline of it: then what names it is
     /// drawn as though it named none.
     refused: bool = false,
@@ -919,6 +922,9 @@ pub const Compiled = struct {
         module: shader.Module,
         gpu: rhi.Shader,
         pipelines: [3]rhi.Pipeline = @splat(.none),
+        /// Its depth drawn first into the picture's own depth, by samples
+        /// and side culled.
+        depth_first: [sample_counts][3]rhi.Pipeline = @splat(@splat(.none)),
         refused: bool = false,
     };
 
@@ -930,7 +936,9 @@ pub const Compiled = struct {
         self.gpa.free(self.text);
         self.gpa.free(self.label);
         for (self.pipelines) |row| for (row) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
+        for (self.after_depth) |row| for (row) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
         for (self.caster.pipelines) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
+        for (self.caster.depth_first) |row| for (row) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
         device.destroyShader(self.gpu);
         device.destroyShader(self.caster.gpu);
         self.module.deinit();
@@ -978,6 +986,48 @@ pub const Compiled = struct {
         }) catch |err| {
             self.refused = true;
             log.err("the graphics driver refused a 3D shader's pipeline: {s}", .{device.diagnostics()});
+            return err;
+        };
+        return held.*;
+    }
+
+    /// `pipelineOf` for a solid surface whose depth `depthFirstPipelineOf`
+    /// drew before: the depth test passes where it is that very depth, and
+    /// writes none. A see-through one's is its own.
+    pub fn afterDepthPipelineOf(self: *Compiled, device: *rhi.Device, color_format: rhi.Format, depth_format: rhi.Format, samples: u32, way: Way) !rhi.Pipeline {
+        if (way.blend) return self.pipelineOf(device, color_format, depth_format, samples, way);
+        const row = std.math.log2_int(u32, samples);
+        const held = &self.after_depth[row][way.index()];
+        if (!held.isNone()) return held.*;
+        held.* = makePipeline(device, &self.module, self.gpu, self.skin, .{
+            .depth = .{ .test_enabled = true, .write = false, .compare = .less_equal },
+            .cull = cullOf(way.cull),
+            .color_format = color_format,
+            .depth_format = depth_format,
+            .samples = samples,
+            .label = "3D after its depth",
+        }) catch |err| {
+            log.err("the graphics driver refused a 3D shader's pipeline: {s}", .{device.diagnostics()});
+            return err;
+        };
+        return held.*;
+    }
+
+    /// The pipeline a solid surface's depth is drawn with before its light,
+    /// into the picture's own depth: the caster's, with no push back.
+    pub fn depthFirstPipelineOf(self: *Compiled, device: *rhi.Device, depth_format: rhi.Format, samples: u32, cull: Material3DData.Cull) !rhi.Pipeline {
+        const row = std.math.log2_int(u32, samples);
+        const held = &self.caster.depth_first[row][@intFromEnum(cull)];
+        if (!held.isNone()) return held.*;
+        held.* = makePipeline(device, &self.caster.module, self.caster.gpu, self.skin, .{
+            .depth = .{ .test_enabled = true, .write = true, .compare = .less },
+            .cull = cullOf(cull),
+            .color_format = null,
+            .depth_format = depth_format,
+            .samples = samples,
+            .label = "3D depth first",
+        }) catch |err| {
+            log.err("the graphics driver refused a 3D shader's depth pipeline: {s}", .{device.diagnostics()});
             return err;
         };
         return held.*;

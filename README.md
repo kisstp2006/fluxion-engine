@@ -1321,6 +1321,32 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   time, and a bake unwraps it then.
   `app.csgMeshOf(top)` is the mesh itself, for an editor to bake into one
   of its own; `fx.csg` is the solids and how they are joined, for a tool.
+- **A dense mesh far off is drawn at a coarser level of detail.** A mesh of
+  more than two thousand triangles has levels of fewer and fewer - each
+  about half the one before, its corners moved onto their neighbours where
+  that changes the shape least, its vertices shared - and the coarsest whose
+  difference from the whole would cover no more than the project's
+  `lod_threshold` pixels is drawn, in its shadow too; `lod_bias` on the
+  `MeshInstance3D` brings them nearer or keeps the whole (nought). A model's
+  levels are made once by an editor as it brings it in and kept beside what
+  it made of it, `.fluxion/imported/<model>.lods`, which an export takes
+  along; with none they are made as the model is read. A `.mesh` file keeps
+  its mesh's levels; `fx.lods.make` makes them for a mesh made in code.
+  What would show is kept as it is: a corner on an open edge, on a seam of
+  the pictures or the normals, between surfaces.
+- **`visibility_range`** on a `MeshInstance3D` stops drawing it, and its
+  shadow, past that many metres from the camera.
+- **The 3D world is drawn at the project's `scale_3d`** of the picture it
+  goes into - from a quarter to twice - and stretched to fill it: smaller is
+  faster and softer. The interface and the 2D world are drawn as they are.
+- **`depth_prepass`** draws the solid surfaces' depth first, each by its
+  shader's caster, and then their light only where they are in front: a
+  pixel lit once however many surfaces stand behind each other, for their
+  corners worked out twice.
+- **On a phone and in a browser** the project's `rendering.mobile` settings
+  take the place of their own - MSAA, the edge smoother, the shadows'
+  picture and their smoothing, `lod_threshold` and `scale_3d` - where
+  `enabled`, as it is unless a project says otherwise.
 
   ```zig
   const wall = try app.world.spawnWith(.{
@@ -3975,6 +4001,22 @@ const app = try App.create(gpa, flags.apply(.{ .title = "game", .io = io }));
 `App.Flags` beside its own. `apply` lays the flags over the game's options,
 and makes a capture reproducible: every frame one fixed step, whatever the
 clock says, so the same flags draw the same picture on every machine.
+
+**What a frame costs** is kept with `--stats report.json`: each frame's time
+from the one before, its work - the wait for the next left out - its fixed
+steps, the game's systems and the draw, and what the 3D layer drew: meshes,
+draws, triangles, what was left out, shadow views drawn again. At the end it
+is written there as JSON - the mean, the middle, the 95th and 99th from the
+bottom and the slowest of each time, the first ten frames left out - and
+said in the log, for one backend, machine or change to be set beside
+another. `--vsync disabled` overrules the project's waiting for the
+refresh, to see the work rather than the screen's rate:
+
+```bash
+game --stats vulkan.json --vsync disabled --frames 600 --backend vulkan
+```
+
+The debug views' stats line says the same of the frame drawn last.
 
 ## 🗂️ Where the code is
 

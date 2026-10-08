@@ -167,6 +167,25 @@ pub const Surface = struct {
     material: MaterialHandle = .none,
 };
 
+/// The most coarser levels a mesh has: see `lods.zig`.
+pub const max_lods = 6;
+
+/// A coarser level of a mesh, drawn in its place when it is far off: its
+/// own triangles over the mesh's vertices, in surfaces as the mesh's are.
+pub const Lod = struct {
+    indices: []u32,
+    surfaces: []Surface,
+    /// How far its corners are from the whole mesh's surface at most, in
+    /// the mesh's own units: what its level is chosen by.
+    distance: f32,
+
+    pub fn deinit(self: *Lod, gpa: Allocator) void {
+        gpa.free(self.indices);
+        gpa.free(self.surfaces);
+        self.* = undefined;
+    }
+};
+
 /// Triangles: every three indices one, each naming a vertex, in surfaces.
 pub const Mesh = struct {
     vertices: []Vertex,
@@ -190,6 +209,9 @@ pub const Mesh = struct {
     /// Empty where there is no skin; a bone that moves nothing has an empty
     /// box. See `boneBounds`.
     bone_bounds: []Aabb = &.{},
+    /// Its coarser levels, each with fewer triangles than the one before;
+    /// none for most. See `lods.zig`.
+    lods: []Lod = &.{},
 
     /// A mesh of one surface, of copies of `vertices` and `indices`, their
     /// tangents worked out where none was given. `error.BadMesh` for an
@@ -226,6 +248,8 @@ pub const Mesh = struct {
         gpa.free(self.surfaces);
         gpa.free(self.skin);
         gpa.free(self.bone_bounds);
+        for (self.lods) |*level| level.deinit(gpa);
+        gpa.free(self.lods);
         self.* = undefined;
     }
 
@@ -538,7 +562,8 @@ pub fn capsule(gpa: Allocator, radius: f32, height: f32, rings: u32, segments: u
 /// A file of an earlier version - eight numbers a vertex and one surface,
 /// no tangents, no lightmap UVs, or no skin - is still read, its tangents
 /// worked out and its lightmap UVs and skin none.
-pub const magic = "FXMESH05";
+pub const magic = "FXMESH06";
+const magic_v5 = "FXMESH05";
 const magic_v1 = "FXMESH01";
 const magic_v2 = "FXMESH02";
 const magic_v3 = "FXMESH03";
@@ -561,9 +586,11 @@ const bone_bounds_size = 6 * 4;
 /// four bytes of colour, its tangent's four `f32`s and its lightmap UV's
 /// two; with a skin, each vertex's four bones as bytes and four weights as
 /// `f32`s; each index as a `u32`, each surface's first index and count as
-/// two `u32`s, and with a skin each bone's box as six `f32`s. Little-endian
-/// throughout. A surface's material is not written: what reads the file
-/// gives it one.
+/// two `u32`s, and with a skin each bone's box as six `f32`s; then how
+/// many coarser levels it has, and for each its distance as an `f32`, how
+/// many surfaces and each one's first index and count, how many indices
+/// and the indices. Little-endian throughout. A surface's material is not
+/// written: what reads the file gives it one.
 pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
     const bones: u32 = if (mesh.skin.len > 0) @intCast(mesh.bone_bounds.len) else 0;
     const skinned = mesh.skin.len > 0;
@@ -600,6 +627,20 @@ pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
             for (held.min.array() ++ held.max.array()) |number| appendInt(&out, @bitCast(number));
         }
     }
+    var lod_size: usize = 4;
+    for (mesh.lods) |level| lod_size += 12 + level.surfaces.len * 8 + level.indices.len * 4;
+    try out.ensureUnusedCapacity(gpa, lod_size);
+    appendInt(&out, @intCast(mesh.lods.len));
+    for (mesh.lods) |level| {
+        appendInt(&out, @bitCast(level.distance));
+        appendInt(&out, @intCast(level.surfaces.len));
+        for (level.surfaces) |surface| {
+            appendInt(&out, surface.first_index);
+            appendInt(&out, surface.index_count);
+        }
+        appendInt(&out, @intCast(level.indices.len));
+        for (level.indices) |index| appendInt(&out, index);
+    }
     return out.toOwnedSlice(gpa);
 }
 
@@ -618,7 +659,9 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     const second = std.mem.eql(u8, bytes[0..magic.len], magic_v2);
     const third = std.mem.eql(u8, bytes[0..magic.len], magic_v3);
     const fourth = std.mem.eql(u8, bytes[0..magic.len], magic_v4);
-    if (!first and !second and !third and !fourth and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadMesh;
+    const fifth = std.mem.eql(u8, bytes[0..magic.len], magic_v5);
+    const sixth = std.mem.eql(u8, bytes[0..magic.len], magic);
+    if (!first and !second and !third and !fourth and !fifth and !sixth) return error.BadMesh;
     const header: u64 = if (first) header_size_v1 else if (second or third) header_size_v3 else if (fourth) header_size_v4 else header_size;
     if (bytes.len < header) return error.BadMesh;
     var at: usize = magic.len;
@@ -631,7 +674,8 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     const each: u64 = if (first) 8 * 4 else if (second) vertex_size_v2 else if (third) vertex_size_v3 else vertex_size;
     const surfaces_size: u64 = if (first) 0 else @as(u64, surface_count) * 8;
     const skin_size: u64 = if (bone_count > 0) @as(u64, vertex_count) * skin_vertex_size + @as(u64, bone_count) * bone_bounds_size else 0;
-    if (bytes.len != header + @as(u64, vertex_count) * each + @as(u64, index_count) * 4 + surfaces_size + skin_size) return error.BadMesh;
+    const before_levels = header + @as(u64, vertex_count) * each + @as(u64, index_count) * 4 + surfaces_size + skin_size;
+    if (if (sixth) bytes.len < before_levels + 4 else bytes.len != before_levels) return error.BadMesh;
     at += 24;
     const vertices = try gpa.alloc(Vertex, vertex_count);
     errdefer gpa.free(vertices);
@@ -676,11 +720,56 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     if (first or second) computeTangents(vertices, indices);
     // Worked out again rather than trusted: a file edited by hand keeps
     // its picking and its culling right.
+    const lods = if (sixth) try readLevels(gpa, bytes, &at, vertex_count, surface_count) else try gpa.alloc(Lod, 0);
+    errdefer {
+        for (lods) |*level| level.deinit(gpa);
+        gpa.free(lods);
+    }
     var out = try Mesh.adopt(vertices, indices, surfaces);
     out.uv2_texels = uv2_texels;
     out.skin = skin;
     out.bone_bounds = bone_bounds;
+    out.lods = lods;
     return out;
+}
+
+/// A `.mesh` file's coarser levels, from `at` to its end: none past
+/// `max_lods`, every surface a run of its level's indices, and every index
+/// a vertex.
+fn readLevels(gpa: Allocator, bytes: []const u8, at: *usize, vertex_count: u32, surface_count: u32) (Allocator.Error || error{BadMesh})![]Lod {
+    if (bytes.len - at.* < 4) return error.BadMesh;
+    const count = takeInt(bytes, at);
+    if (count > max_lods) return error.BadMesh;
+    const lods = try gpa.alloc(Lod, count);
+    var made: usize = 0;
+    errdefer {
+        for (lods[0..made]) |*level| level.deinit(gpa);
+        gpa.free(lods);
+    }
+    for (lods) |*level| {
+        if (bytes.len - at.* < 8) return error.BadMesh;
+        const distance: f32 = @bitCast(takeInt(bytes, at));
+        const surfaces = takeInt(bytes, at);
+        if (surfaces != surface_count or bytes.len - at.* < @as(u64, surfaces) * 8 + 4) return error.BadMesh;
+        const level_surfaces = try gpa.alloc(Surface, surfaces);
+        errdefer gpa.free(level_surfaces);
+        for (level_surfaces) |*surface| surface.* = .{ .first_index = takeInt(bytes, at), .index_count = takeInt(bytes, at) };
+        const index_count = takeInt(bytes, at);
+        if (index_count % 3 != 0 or bytes.len - at.* < @as(u64, index_count) * 4) return error.BadMesh;
+        const level_indices = try gpa.alloc(u32, index_count);
+        errdefer gpa.free(level_indices);
+        for (level_indices) |*index| {
+            index.* = takeInt(bytes, at);
+            if (index.* >= vertex_count) return error.BadMesh;
+        }
+        for (level_surfaces) |surface| {
+            if (@as(u64, surface.first_index) + surface.index_count > index_count) return error.BadMesh;
+        }
+        level.* = .{ .indices = level_indices, .surfaces = level_surfaces, .distance = distance };
+        made += 1;
+    }
+    if (at.* != bytes.len) return error.BadMesh;
+    return lods;
 }
 
 fn takeInt(bytes: []const u8, at: *usize) u32 {
@@ -700,6 +789,8 @@ pub const Gpu = struct {
     /// Each vertex's bones, for a mesh a skeleton bends: the 3D shader's
     /// third buffer. None for one that is not bent.
     skin: rhi.Buffer = .none,
+    /// Each coarser level's indices; none past its last.
+    lods: [max_lods]rhi.Buffer = @splat(.none),
 
     fn of(device: *rhi.Device, mesh: Mesh, label: []const u8) rhi.Error!Gpu {
         // An empty mesh still has buffers, of one vertex and one triangle
@@ -728,13 +819,26 @@ pub const Gpu = struct {
             .data = std.mem.sliceAsBytes(mesh.skin),
             .label = label,
         }) else .none;
-        return .{ .vertices = vertex_buffer, .indices = index_buffer, .index_count = @intCast(mesh.indices.len), .skin = skin_buffer };
+        errdefer if (!skin_buffer.isNone()) device.destroyBuffer(skin_buffer);
+        var out: Gpu = .{ .vertices = vertex_buffer, .indices = index_buffer, .index_count = @intCast(mesh.indices.len), .skin = skin_buffer };
+        errdefer for (out.lods) |held| if (!held.isNone()) device.destroyBuffer(held);
+        if (mesh.vertices.len > 0) for (mesh.lods[0..@min(mesh.lods.len, max_lods)], 0..) |level, at| {
+            if (level.indices.len == 0) break;
+            out.lods[at] = try device.createBuffer(.{
+                .kind = .index,
+                .size = @intCast(level.indices.len * 4),
+                .data = std.mem.sliceAsBytes(level.indices),
+                .label = label,
+            });
+        };
+        return out;
     }
 
     pub fn deinit(self: Gpu, device: *rhi.Device) void {
         device.destroyBuffer(self.vertices);
         device.destroyBuffer(self.indices);
         if (!self.skin.isNone()) device.destroyBuffer(self.skin);
+        for (self.lods) |held| if (!held.isNone()) device.destroyBuffer(held);
     }
 };
 
@@ -1054,11 +1158,43 @@ test "a mesh's file reads back as it was written, and one that is not whole is r
 
     try testing.expectError(error.BadMesh, read(testing.allocator, bytes[0 .. bytes.len - 1]));
     try testing.expectError(error.BadMesh, read(testing.allocator, "FXMESH99"));
-    // A surface that is not the indices.
+    // A surface that is not the indices: its count, before the count of
+    // levels.
     const broken = try testing.allocator.dupe(u8, bytes);
     defer testing.allocator.free(broken);
-    std.mem.writeInt(u32, broken[broken.len - 4 ..][0..4], 99, .little);
+    std.mem.writeInt(u32, broken[broken.len - 8 ..][0..4], 99, .little);
     try testing.expectError(error.BadMesh, read(testing.allocator, broken));
+}
+
+test "a mesh's coarser levels go to its file and back, and a level naming no vertex is refused" {
+    const gpa = testing.allocator;
+    var made = try sphereOf(gpa);
+    defer made.deinit(gpa);
+    made.lods = try @import("lods.zig").make(gpa, made.vertices, made.indices, made.surfaces);
+    try testing.expect(made.lods.len >= 2);
+    const bytes = try write(gpa, made);
+    defer gpa.free(bytes);
+    var back = try read(gpa, bytes);
+    defer back.deinit(gpa);
+    try testing.expectEqual(made.lods.len, back.lods.len);
+    for (made.lods, back.lods) |a, b| {
+        try testing.expectEqualSlices(u32, a.indices, b.indices);
+        try testing.expectEqual(a.distance, b.distance);
+        try testing.expectEqual(a.surfaces[0].index_count, b.surfaces[0].index_count);
+    }
+    // The last level's last index past the vertices.
+    const broken = try gpa.dupe(u8, bytes);
+    defer gpa.free(broken);
+    std.mem.writeInt(u32, broken[broken.len - 4 ..][0..4], @intCast(made.vertices.len), .little);
+    try testing.expectError(error.BadMesh, read(gpa, broken));
+}
+
+/// A ball dense enough to have levels.
+fn sphereOf(gpa: Allocator) !Mesh {
+    var primitive: Primitive = .{ .shape = .sphere, .radius = 1, .rings = 64, .segments = 96 };
+    primitive.segments = @min(primitive.segments, max_segments);
+    primitive.rings = @min(primitive.rings, max_rings);
+    return primitive.build(gpa);
 }
 
 test "a mesh's file of the first version still reads, as one white surface" {
@@ -1145,7 +1281,8 @@ test "a mesh's file of the fourth version still reads, with no skin" {
     defer old.deinit(testing.allocator);
     try old.appendSlice(testing.allocator, "FXMESH04");
     try old.appendSlice(testing.allocator, bytes[magic.len .. magic.len + 16]);
-    try old.appendSlice(testing.allocator, bytes[magic.len + 20 ..]);
+    // And for the count of levels at its end.
+    try old.appendSlice(testing.allocator, bytes[magic.len + 20 .. bytes.len - 4]);
     var back = try read(testing.allocator, old.items);
     defer back.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), back.skin.len);

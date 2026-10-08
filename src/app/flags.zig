@@ -8,6 +8,7 @@ const std = @import("std");
 const Options = @import("options.zig").Options;
 const Backend = @import("options.zig").Backend;
 const WindowMode = @import("../platform/window.zig").Mode;
+const VsyncMode = @import("../platform/window.zig").VsyncMode;
 
 /// The command-line flags the engine understands, read with `parseFlags` and
 /// laid over a game's `Options` with `apply`. A flag that was not given
@@ -16,6 +17,7 @@ const WindowMode = @import("../platform/window.zig").Mode;
 /// ```bash
 /// game --backend d3d11 --width 1280 --height 720
 /// game --frames 300 --capture shot.png
+/// game --stats vulkan.json --vsync disabled --frames 600
 /// ```
 pub const Flags = struct {
     /// `--backend gl` or `--backend d3d11`.
@@ -36,6 +38,12 @@ pub const Flags = struct {
     /// `--capture shot.png`: where `saveCapture` puts the last frame. See
     /// `apply`.
     capture: ?[]const u8 = null,
+    /// `--stats report.json`: what each frame cost, written there at the
+    /// end. See `app/frame_stats.zig`.
+    stats: ?[]const u8 = null,
+    /// `--vsync disabled`: whether frames wait for the refresh - the
+    /// project's choice overruled, to measure a frame's work.
+    vsync: ?VsyncMode = null,
     /// `--root ../my-game`: the project's root, which `res://` paths are
     /// from.
     root: ?[]const u8 = null,
@@ -62,6 +70,8 @@ pub const Flags = struct {
         }
         if (self.frames) |frames| out.frames = frames;
         if (self.root) |root| out.root = root;
+        if (self.stats) |path| out.stats = path;
+        if (self.vsync) |mode| out.vsync_mode = mode;
         if (self.capture != null) {
             out.frames = out.frames orelse capture_frames;
             out.fixed_frame_time = true;

@@ -457,10 +457,12 @@ pub const Post3D = struct {
         }
     }
 
-    /// Turn the light in `targets` into a picture in `into`, `width` by
-    /// `height`: glow, tone and smoothing as `look` says. Over what `into`
-    /// holds by the light's alpha with `over`, or in place of it.
-    pub fn finish(self: *Post3D, gpa: Allocator, targets: *Targets, into: rhi.RenderTarget, look: Look, over: bool) !void {
+    /// Turn the light in `targets` into a picture in `into`, `out_width` by
+    /// `out_height` - larger or smaller than the targets where the 3D world
+    /// is drawn at a scale of its own: glow, tone and smoothing as `look`
+    /// says. Over what `into` holds by the light's alpha with `over`, or in
+    /// place of it.
+    pub fn finish(self: *Post3D, gpa: Allocator, targets: *Targets, into: rhi.RenderTarget, out_width: u32, out_height: u32, look: Look, over: bool) !void {
         const device = self.device;
         self.passes.clearRetainingCapacity();
         const flip = material.screenFlip(device);
@@ -479,17 +481,19 @@ pub const Post3D = struct {
             .label = "3D toned",
         });
         const tone_into: rhi.RenderTarget = if (smoothing) .{ .texture = targets.toned.? } else into;
+        const tone_width = if (smoothing) width else out_width;
+        const tone_height = if (smoothing) height else out_height;
         const curve: f32 = switch (look.tonemap) {
             .linear => 0,
             .reinhard => 1,
             .filmic => 2,
             .aces => 3,
         };
-        try self.queue(gpa, if (over and !smoothing) self.tone.over else self.tone.pipeline, tone_into, width, height, if (over and !smoothing) .load else .dont_care, &.{ targets.light, glow.texture }, .{
+        try self.queue(gpa, if (over and !smoothing) self.tone.over else self.tone.pipeline, tone_into, tone_width, tone_height, if (over and !smoothing) .load else .dont_care, &.{ targets.light, glow.texture }, .{
             .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
             .knobs = .{ look.exposure, look.white, curve, if (look.glow) look.glow_intensity / glow.weight else 0 },
         });
-        if (smoothing) try self.queue(gpa, if (over) self.smooth.over else self.smooth.pipeline, into, width, height, if (over) .load else .dont_care, &.{targets.toned.?}, .{
+        if (smoothing) try self.queue(gpa, if (over) self.smooth.over else self.smooth.pipeline, into, out_width, out_height, if (over) .load else .dont_care, &.{targets.toned.?}, .{
             .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
             .knobs = @splat(0),
         });

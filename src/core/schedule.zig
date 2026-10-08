@@ -242,6 +242,15 @@ pub const Schedule = struct {
         }
     }
 
+    /// How long every system took this frame, together, in nanoseconds.
+    pub fn frameTime(self: *const Schedule) i96 {
+        var sum: i96 = 0;
+        for (&self.stages) |*list| {
+            for (list.items) |entry| sum += entry.time_this_frame.nanoseconds;
+        }
+        return sum;
+    }
+
     pub fn systemsIn(self: *const Schedule, stage: Stage) []const Entry {
         return self.stages[@intFromEnum(stage)].items;
     }
