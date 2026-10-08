@@ -2,7 +2,7 @@
 
 //! One thing the player did, as one value of its own kind: a key, a mouse
 //! button, the pointer moving, the wheel turning, a finger on a touch screen
-//! and the gestures fingers make, a controller's button.
+//! and the gestures fingers make, a controller's button and its sticks.
 //! What a script's `input(self, event)` and `unhandled_input` are handed -
 //! asked which with `is`:
 //!
@@ -69,9 +69,11 @@ pub const KeyEvent = struct {
     key: platform.Key = .unknown,
     /// The key the player's layout names it: what "press E" means.
     virtual_key: platform.Key = .unknown,
+    /// Going down, or a repeat; false as it comes up.
     pressed: bool = false,
     /// Held long enough that the system repeats it. Down, as the first was.
     echo: bool = false,
+    /// The keys held with it: shift, control, alt, super, and the locks.
     mods: platform.Mods = .{},
 
     pub const reflect_name = "KeyEvent";
@@ -79,7 +81,9 @@ pub const KeyEvent = struct {
 
 /// A mouse button pressed or let go.
 pub const MouseButtonEvent = struct {
+    /// Which: `left`, `right`, `middle`, and the side buttons.
     button: platform.MouseButton = .left,
+    /// Going down; false as it comes up.
     pressed: bool = false,
     /// The second press of a double click, by the system's own rule.
     double_click: bool = false,
@@ -88,6 +92,7 @@ pub const MouseButtonEvent = struct {
     position: Vec2 = .zero,
     /// What is held after it.
     buttons: ButtonMask = .none,
+    /// The keys held with it: shift, control, alt, super, and the locks.
     mods: platform.Mods = .{},
 
     pub const reflect_name = "MouseButtonEvent";
@@ -97,9 +102,12 @@ pub const MouseButtonEvent = struct {
 pub const MouseMotionEvent = struct {
     /// In the game area's pixels.
     position: Vec2 = .zero,
-    /// How far it moved to get there.
+    /// How far it moved to get there: what turns a camera, the pointer
+    /// held still by `app.setCursor(.captured)`.
     relative: Vec2 = .zero,
+    /// The mouse buttons held while it moved: a drag.
     buttons: ButtonMask = .none,
+    /// The keys held with it: shift, control, alt, super, and the locks.
     mods: platform.Mods = .{},
 
     pub const reflect_name = "MouseMotionEvent";
@@ -111,7 +119,9 @@ pub const WheelEvent = struct {
     delta: Vec2 = .zero,
     /// Where the pointer is, in the game area's pixels.
     position: Vec2 = .zero,
+    /// The mouse buttons held as it turned.
     buttons: ButtonMask = .none,
+    /// The keys held with it: shift, control, alt, super, and the locks.
     mods: platform.Mods = .{},
 
     pub const reflect_name = "WheelEvent";
@@ -138,11 +148,13 @@ pub const TouchEvent = struct {
 /// A finger moved on a touch screen: one a frame for each finger, with its
 /// moving added up.
 pub const TouchMotionEvent = struct {
+    /// Which finger, as its `TouchEvent` said.
     finger: u32 = 0,
     /// In the game area's pixels.
     position: Vec2 = .zero,
     /// How far it moved to get there.
     relative: Vec2 = .zero,
+    /// How hard it presses, from nought to one.
     pressure: f32 = 1,
 
     pub const reflect_name = "TouchMotionEvent";
@@ -151,6 +163,7 @@ pub const TouchMotionEvent = struct {
 /// A finger touched and was lifted soon, near where it touched; or did it
 /// again soon after, near the last: `count` says how many in a row.
 pub const TapEvent = struct {
+    /// Which finger, as its `TouchEvent` said.
     finger: u32 = 0,
     /// Where it was lifted, in the game area's pixels.
     position: Vec2 = .zero,
@@ -162,7 +175,9 @@ pub const TapEvent = struct {
 
 /// A finger held still long enough: said once, while it is still down.
 pub const LongPressEvent = struct {
+    /// Which finger, as its `TouchEvent` said.
     finger: u32 = 0,
+    /// Where it is held, in the game area's pixels.
     position: Vec2 = .zero,
 
     pub const reflect_name = "LongPressEvent";
@@ -171,6 +186,7 @@ pub const LongPressEvent = struct {
 /// A finger flicked across the screen: lifted far from where it touched,
 /// while it was going fast.
 pub const SwipeEvent = struct {
+    /// Which finger, as its `TouchEvent` said.
     finger: u32 = 0,
     /// Where it touched.
     start: Vec2 = .zero,
@@ -201,6 +217,7 @@ pub const PinchEvent = struct {
 
 /// Two fingers moved across the screen together.
 pub const PanEvent = struct {
+    /// Halfway between them, in the game area's pixels.
     center: Vec2 = .zero,
     /// How far their middle moved.
     relative: Vec2 = .zero,
@@ -210,6 +227,7 @@ pub const PanEvent = struct {
 
 /// Two fingers turned about each other.
 pub const RotateEvent = struct {
+    /// Halfway between them, in the game area's pixels.
     center: Vec2 = .zero,
     /// Radians since the last one, clockwise on the screen positive.
     angle: f32 = 0,
@@ -221,12 +239,30 @@ pub const RotateEvent = struct {
 
 /// A controller's button pressed or let go.
 pub const PadButtonEvent = struct {
+    /// Which: `a`, `b`, the shoulders, the pad's arrows, `start`.
     button: platform.GamepadButton = .a,
     /// Which controller: its slot, from 0.
     pad: u8 = 0,
+    /// Going down; false as it comes up.
     pressed: bool = false,
 
     pub const reflect_name = "PadButtonEvent";
+};
+
+/// A controller's stick or trigger moved: one a frame for each that did,
+/// with where it is now. What a game that steers by a stick reads each
+/// frame anyway is `app.padAxis`.
+pub const PadAxisEvent = struct {
+    /// Which: a stick's `left_x` or `left_y`, `right_x`, `right_y`, or a
+    /// trigger.
+    axis: platform.GamepadAxis = .left_x,
+    /// Which controller: its slot, from 0.
+    pad: u8 = 0,
+    /// From -1 to 1 for a stick, left and up negative; from 0 to 1 for a
+    /// trigger. No dead zone: an action's `deadzone` is the actions'.
+    value: f32 = 0,
+
+    pub const reflect_name = "PadAxisEvent";
 };
 
 /// One thing the player did. See the top of the file.
@@ -244,6 +280,7 @@ pub const InputEvent = union(enum) {
     pan: PanEvent,
     rotate: RotateEvent,
     pad_button: PadButtonEvent,
+    pad_axis: PadAxisEvent,
 
     pub const reflect_name = "InputEvent";
     pub const reflect_methods = .{
@@ -253,6 +290,8 @@ pub const InputEvent = union(enum) {
         .describe = .{attr.Params{ .names = &.{"vm"} }},
         .isPressed = .{attr.Params{ .names = &.{"button"} }},
         .isReleased = .{attr.Params{ .names = &.{"button"} }},
+        .isKeyPressed = .{attr.Params{ .names = &.{"key"} }},
+        .isKeyReleased = .{attr.Params{ .names = &.{"key"} }},
     };
 
     /// Whether it is one of the action's inputs.
@@ -261,13 +300,16 @@ pub const InputEvent = union(enum) {
     }
 
     /// Whether it is one of the action's inputs going down - not a repeat.
+    /// A stick's motion is the action's, when it is pushed the way the action
+    /// binds, but goes neither down nor up: `app.actionJustPressed` says
+    /// when it went past the dead zone.
     pub fn isActionPressed(self: *const InputEvent, vm: *flux.Vm, action: []const u8) bool {
         return self.isDown() and !self.isEcho() and self.isAction(vm, action);
     }
 
     /// Whether it is one of the action's inputs coming up.
     pub fn isActionReleased(self: *const InputEvent, vm: *flux.Vm, action: []const u8) bool {
-        return self.binding() != null and !self.isDown() and self.isAction(vm, action);
+        return self.isButton() and !self.isDown() and self.isAction(vm, action);
     }
 
     /// What the player pressed, in words: `Space`, `Left Mouse`, `Pad A`.
@@ -290,9 +332,31 @@ pub const InputEvent = union(enum) {
         };
     }
 
+    /// Whether it is the mouse button `button` coming up.
     pub fn isReleased(self: *const InputEvent, button: platform.MouseButton) bool {
         return switch (self.*) {
             .mouse_button => |b| !b.pressed and b.button == button,
+            else => false,
+        };
+    }
+
+    /// Whether it is the key `key` going down - not a repeat: the key where
+    /// it sits, as `app.keyDown` asks.
+    ///
+    /// ```
+    /// if (event.isKeyPressed(Key.escape)) self.pause();
+    /// ```
+    pub fn isKeyPressed(self: *const InputEvent, key: platform.Key) bool {
+        return switch (self.*) {
+            .key => |k| k.pressed and !k.echo and k.key == key,
+            else => false,
+        };
+    }
+
+    /// Whether it is the key `key` coming up.
+    pub fn isKeyReleased(self: *const InputEvent, key: platform.Key) bool {
+        return switch (self.*) {
+            .key => |k| !k.pressed and k.key == key,
             else => false,
         };
     }
@@ -312,7 +376,7 @@ pub const InputEvent = union(enum) {
             .pinch => |p| p.center,
             .pan => |p| p.center,
             .rotate => |r| r.center,
-            .key, .pad_button => null,
+            .key, .pad_button, .pad_axis => null,
         };
     }
 
@@ -331,7 +395,7 @@ pub const InputEvent = union(enum) {
             .pinch => |*p| p.center = place,
             .pan => |*p| p.center = place,
             .rotate => |*r| r.center = place,
-            .key, .pad_button => {},
+            .key, .pad_button, .pad_axis => {},
         }
         return moved;
     }
@@ -363,7 +427,7 @@ pub const InputEvent = union(enum) {
             .mouse_button => |b| b.buttons,
             .mouse_motion => |m| m.buttons,
             .wheel => |w| w.buttons,
-            .key, .touch, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate, .pad_button => .none,
+            .key, .touch, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate, .pad_button, .pad_axis => .none,
         };
     }
 
@@ -373,18 +437,20 @@ pub const InputEvent = union(enum) {
             .mouse_button => |b| b.mods,
             .mouse_motion => |m| m.mods,
             .wheel => |w| w.mods,
-            .touch, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate, .pad_button => .{},
+            .touch, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate, .pad_button, .pad_axis => .{},
         };
     }
 
     /// The input it is, as an action binds it: what `app.bindAction` gives
-    /// the action. Null for motion, the wheel and a finger - a finger holds
-    /// an action through a `TouchButton`.
+    /// the action. A stick pushed at least halfway is the stick that way.
+    /// Null for motion, the wheel and a finger - a finger holds an action
+    /// through a `TouchButton`.
     pub fn binding(self: InputEvent) ?actions.Binding {
         return switch (self) {
             .key => |k| .keyOf(k.key),
             .mouse_button => |b| .mouseButtonOf(b.button),
             .pad_button => |p| .padButtonOf(p.button),
+            .pad_axis => |a| if (@abs(a.value) >= 0.5) .padAxisOf(a.axis, if (a.value < 0) .negative else .positive) else null,
             .mouse_motion, .wheel, .touch, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate => null,
         };
     }
@@ -395,7 +461,16 @@ pub const InputEvent = union(enum) {
             .mouse_button => |b| b.pressed,
             .pad_button => |p| p.pressed,
             .touch => |t| t.pressed,
-            .mouse_motion, .wheel, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate => false,
+            .mouse_motion, .wheel, .touch_motion, .tap, .long_press, .swipe, .pinch, .pan, .rotate, .pad_axis => false,
+        };
+    }
+
+    /// Whether it is something that goes down and comes up: a key, a mouse
+    /// button, a controller's button.
+    fn isButton(self: *const InputEvent) bool {
+        return switch (self.*) {
+            .key, .mouse_button, .pad_button => true,
+            else => false,
         };
     }
 
@@ -417,7 +492,9 @@ pub const InputEvent = union(enum) {
             .key => |held| self.* == .key and (if (held.physical) held.key == self.key.key else held.key == self.key.virtual_key),
             .mouse_button => |held| self.* == .mouse_button and held.button == self.mouse_button.button,
             .pad_button => |held| self.* == .pad_button and held.button == self.pad_button.button and (held.pad == null or held.pad.? == self.pad_button.pad),
-            .pad_axis => false,
+            .pad_axis => |held| self.* == .pad_axis and held.axis == self.pad_axis.axis and
+                (held.pad == null or held.pad.? == self.pad_axis.pad) and
+                (if (held.direction == .negative) self.pad_axis.value < 0 else self.pad_axis.value > 0),
         };
     }
 };

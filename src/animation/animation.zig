@@ -657,7 +657,10 @@ pub const AnimationPlayer = extern struct {
     pub const Request = enum(u8) { none, play, stop, seek };
 
     pub const signals = .{
+        // An animation began: from `play`, or the next of the queue.
         .animation_started = struct { name: []const u8 },
+        // An animation that does not loop got to its end - its start,
+        // played backwards - and stopped there.
         .animation_finished = struct { name: []const u8 },
     };
 

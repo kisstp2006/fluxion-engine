@@ -50,9 +50,10 @@ pub const Collision = struct {
     point: Vec3 = .zero,
     /// Out of what it hit, towards the body.
     normal: Vec3 = .zero,
-    /// How far it went before it stopped, and how far it had still to go,
-    /// in metres: along the motion it was given.
+    /// How far it went before it stopped, in metres along the motion it was
+    /// given: `motion.normalized() * travel` is the move it made.
     travel: f32 = 0,
+    /// How far it had still to go, in metres along the motion.
     remainder: f32 = 0,
 
     pub const reflect_name = "Collision3D";

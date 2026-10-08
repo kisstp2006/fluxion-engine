@@ -337,8 +337,8 @@ fn refind(self: *Navigation, app: *App, e: Entity, agent: *NavigationAgent3D, st
     state.next = @min(1, state.path.items.len);
     state.reached_said = false;
     state.finished_said = false;
-    agent.target_reached = false;
-    agent.navigation_finished = state.path.items.len == 0;
+    agent.reached = false;
+    agent.finished = state.path.items.len == 0;
     try app.signal(e, NavigationAgent3D, .path_changed).emit(.{});
 }
 
@@ -350,7 +350,7 @@ pub fn nextPathPosition(self: *Navigation, app: *App, e: Entity) !Vec3 {
     const state = try self.stateOf(app, e);
 
     var stale = !state.found or state.target.sub(agent.target_position).len() > 1e-4;
-    if (!stale and state.next > 0 and state.next < state.path.items.len and !agent.navigation_finished) {
+    if (!stale and state.next > 0 and state.next < state.path.items.len and !agent.finished) {
         stale = offLeg(at, state.path.items[state.next - 1], state.path.items[state.next]) > agent.path_max_distance;
     }
     // An obstacle that affects ways has moved: found again at once where
@@ -403,8 +403,8 @@ fn blocks(self: *Navigation, app: *App, state: *const Agent, at: Vec3, clearance
 fn finish(self: *Navigation, app: *App, e: Entity, agent: *NavigationAgent3D, state: *Agent, at: Vec3) !Vec3 {
     _ = self;
     const reached = ground(at, agent.target_position) <= agent.target_desired_distance;
-    agent.navigation_finished = true;
-    if (reached) agent.target_reached = true;
+    agent.finished = true;
+    if (reached) agent.reached = true;
     if (reached and !state.reached_said) {
         state.reached_said = true;
         try app.signal(e, NavigationAgent3D, .target_reached).emit(.{});
@@ -422,7 +422,7 @@ pub fn isFinished(self: *Navigation, app: *App, e: Entity) bool {
     const agent = app.world.get(e, NavigationAgent3D) orelse return true;
     const state = self.agents.getPtr(e) orelse return false;
     if (!state.found or state.target.sub(agent.target_position).len() > 1e-4) return false;
-    return agent.navigation_finished;
+    return agent.finished;
 }
 
 /// The agent's way as it is now, its corners from where it was when found.

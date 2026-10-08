@@ -149,14 +149,16 @@ pub const NavigationAgent3D = extern struct {
     /// How far ahead, in seconds, it keeps clear of the others.
     time_horizon: f32 = 1,
     /// Whether it has got there, and whether it has stopped looking - got
-    /// there, or no way there - as of the last `nextPathPosition`. A new
+    /// there, or no way there - as of the last `nextPathPosition`: what the
+    /// signals `target_reached` and `navigation_finished` said last. A new
     /// target is not finished. Read-only, and never saved.
-    target_reached: bool = false,
-    navigation_finished: bool = false,
+    reached: bool = false,
+    finished: bool = false,
 
     pub const signals = .{
         // A way was found: to a new target, or again after straying.
         .path_changed = struct {},
+        // It got to the target: within `target_desired_distance` of it.
         .target_reached = struct {},
         // It is there, or as near as the way goes.
         .navigation_finished = struct {},
@@ -178,8 +180,8 @@ pub const NavigationAgent3D = extern struct {
         .neighbor_distance = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "Others further than this are not looked at" } },
         .max_neighbors = .{attr.Doc{ .text = "How many of the nearest are looked at" }},
         .time_horizon = .{ attr.Unit{ .text = "s" }, attr.Doc{ .text = "How far ahead it keeps clear of the others" } },
-        .target_reached = .{ attr.ReadOnly{}, attr.Unsaved{} },
-        .navigation_finished = .{ attr.ReadOnly{}, attr.Unsaved{} },
+        .reached = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "Whether it got to the target, as of the last nextPathPosition" } },
+        .finished = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "Whether it stopped looking: got there, or no way there" } },
     };
 };
 

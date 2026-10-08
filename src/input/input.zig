@@ -243,6 +243,10 @@ surface_lost: bool = false,
 /// ended, kept as the dialogs' answers are.
 happened: std.EnumSet(Happening) = .initEmpty(),
 happened_seen: std.EnumSet(Happening) = .initEmpty(),
+/// `readPads` has run since the last `endFrame`: what it found is this
+/// frame's news, which `beginFrame` keeps - a test's controller, read
+/// between frames, as a key given between frames is.
+pads_fresh: bool = false,
 
 /// What the system says of the program as a whole, rather than of a key.
 pub const Happening = enum { suspended, resumed, low_memory };
@@ -841,10 +845,11 @@ pub fn beginFrame(self: *Input) void {
     self.button_pressed = .initEmpty();
     self.button_released = .initEmpty();
     self.button_double = .initEmpty();
-    for (&self.pads) |*state| {
+    if (!self.pads_fresh) for (&self.pads) |*state| {
         state.pressed = .initEmpty();
         state.released = .initEmpty();
-    }
+        state.axes_before = state.axes;
+    };
     self.pointer.dx = 0;
     self.pointer.dy = 0;
     self.wheel = .{};
@@ -901,6 +906,7 @@ pub fn endFrame(self: *Input) void {
     self.drops_seen = self.drops_len;
     self.pointer_events_seen = self.pointer_events_len;
     self.key_events_seen = self.key_events_len;
+    self.pads_fresh = false;
     for (self.fingers[0..self.finger_count]) |*held| held.seen = true;
     self.happened_seen = self.happened;
 }
@@ -936,6 +942,14 @@ pub fn endFixedStep(self: *Input) void {
 /// since the last frame's. Called by `Window.pump`. An unplugged controller
 /// lets go of everything it was holding.
 pub fn readPads(self: *Input, devices: []const platform.Gamepad) void {
+    // The first read since a frame ended: a new frame's edges, from where
+    // the buttons and the sticks were then.
+    if (!self.pads_fresh) for (&self.pads) |*state| {
+        state.pressed = .initEmpty();
+        state.released = .initEmpty();
+        state.axes_before = state.axes;
+    };
+    self.pads_fresh = true;
     for (&self.pads, 0..) |*state, slot| {
         const device: ?*const platform.Gamepad =
             if (slot < devices.len and devices[slot].connected) &devices[slot] else null;

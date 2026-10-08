@@ -155,6 +155,8 @@ pub const Particles2D = extern struct {
     pub const DrawOrder = enum(u8) { oldest_first, newest_first };
 
     pub const signals = .{
+        // A one-shot burst is over: the last of its particles is gone, and
+        // `emitting` is off again.
         .finished = struct {},
     };
 

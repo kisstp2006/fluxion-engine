@@ -351,6 +351,7 @@ pub const PinchEvent = input_event.PinchEvent;
 pub const PanEvent = input_event.PanEvent;
 pub const RotateEvent = input_event.RotateEvent;
 pub const PadButtonEvent = input_event.PadButtonEvent;
+pub const PadAxisEvent = input_event.PadAxisEvent;
 
 /// One finger on a touch screen, as a frame has it: `app.input.touches()`.
 pub const Touch = @import("input/input.zig").Touch;
@@ -589,6 +590,7 @@ test {
     _ = @import("physics/bodies_test.zig");
     _ = @import("physics3d/physics3d_test.zig");
     _ = @import("navigation/navigation_test.zig");
+    _ = @import("script/code_help_test.zig");
     _ = @import("navigation/sources.zig");
     _ = @import("physics/character_test.zig");
     _ = @import("physics/picking_test.zig");

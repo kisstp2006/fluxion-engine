@@ -7,6 +7,7 @@ const platform = @import("fluxion_platform");
 const flux = @import("fluxion_script");
 const App = @import("../App.zig");
 const attr = @import("../reflect/attr.zig");
+const reflect = @import("fluxion_reflect");
 const datetime = @import("../time/datetime.zig");
 const ClockHandle = @import("../time/game_clocks.zig").ClockHandle;
 
@@ -148,6 +149,17 @@ pub const ClockRef = struct {
     handle: ClockHandle,
 
     pub const signal_names = [3][]const u8{ "minute_passed", "hour_passed", "day_passed" };
+    pub const signal_docs = [3][]const u8{
+        "Said as the clock's minutes turn over, with how many did in the step: one, unless it runs fast.",
+        "Said as the clock's hours turn over, with how many did in the step.",
+        "Said as the clock's days turn over, at midnight, with how many did in the step.",
+    };
+    /// What each says: how many turned over in the step.
+    pub const signal_args = [3]*const reflect.Type{
+        reflect.typeOf(struct { minutes: i64 }),
+        reflect.typeOf(struct { hours: i64 }),
+        reflect.typeOf(struct { days: i64 }),
+    };
 
     pub const reflect_name = "Clock";
     pub const reflect_opaque = true;

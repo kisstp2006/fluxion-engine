@@ -1152,9 +1152,9 @@ fn richContent(self: *ControlTree, context: Context, entity: Entity, rich: *Rich
     const app = context.app;
     const words = app.textOf(entity, RichText, "text");
     if (rich.visible_characters >= 0 and context.interactive and app.time.delta > 0) {
-        rich.revealed += app.time.delta * @max(rich.reveal_speed, 0);
+        rich.reveal_at += app.time.delta * @max(rich.reveal_speed, 0);
         const total = characters(app.gpa, words);
-        const reached: usize = @intFromFloat(@max(0, @floor(rich.revealed)));
+        const reached: usize = @intFromFloat(@max(0, @floor(rich.reveal_at)));
         if (reached >= total) {
             rich.visible_characters = -1;
             try app.signal(entity, RichText, .revealed).emit(.{});

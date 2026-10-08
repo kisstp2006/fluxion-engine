@@ -74,7 +74,7 @@ pub const FileAccess = struct {
         .localPath = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of([]const u8) },
         .open = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
         .showInFolder = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
-        .choose = .{ attr.Params{ .names = &.{ "vm", "title", "extensions", "many" } }, attr.defaults(.{ "", flux.Value.null, false }), flux.Returns{ .builtin = .signal }, flux.GivesErrors{} },
+        .choose = .{ attr.Params{ .names = &.{ "vm", "title", "extensions", "many" } }, attr.defaults(.{ "", flux.Value.null, false }), flux.Takes.of("extensions", ?[]const []const u8), flux.Returns{ .builtin = .signal }, flux.GivesErrors{} },
         .dropped = .{ attr.Params{ .names = &.{"vm"} }, flux.Returns{ .builtin = .signal } },
     };
 

@@ -465,7 +465,7 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given, whose: Whose) Allocator.E
     for (named_types) |t| try vm.declareType(t);
     for (app.scene_components.entries.items) |*entry| {
         try vm.declareType(entry.type);
-        for (entry.signals) |decl| try vm.declareMember(.{ .of = entry.type, .name = decl.name, .type = .signal });
+        for (entry.signals) |decl| try vm.declareMember(.{ .of = entry.type, .name = decl.name, .type = .signal, .args = decl.args });
         for (entry.type.attributes.slice()) |a| if (a.as(attr.Text)) |text| {
             try vm.declareMember(.{ .of = entry.type, .name = text.name, .type = .string, .writable = true });
         };
@@ -475,10 +475,10 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given, whose: Whose) Allocator.E
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "position", .type = .vec2, .writable = true, .doc = "`x` and `y` as one vector: `t.position += velocity * delta`." });
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "scale", .type = .vec2, .writable = true, .doc = "`scale_x` and `scale_y` as one vector." });
     try vm.declareMember(.{ .of = reflect.typeOf(Transform3D), .name = "rotation_degrees", .type = .vec3, .writable = true, .doc = "The turn as pitch, yaw and roll in degrees: `t.rotation_degrees.y += 90.0`. `rotation` is the same turn as a `quat`." });
-    for (ClockRef.signal_names) |name| try vm.declareMember(.{ .of = reflect.typeOf(ClockRef), .name = name, .type = .signal });
+    for (ClockRef.signal_names, ClockRef.signal_args, ClockRef.signal_docs) |name, args, doc| try vm.declareMember(.{ .of = reflect.typeOf(ClockRef), .name = name, .type = .signal, .args = args, .doc = doc });
     for (WebResponse.fields) |f| try vm.declareMember(.{ .of = reflect.typeOf(WebResponse), .name = f.name, .type = f.type, .doc = f.doc });
-    try vm.declareMember(.{ .of = reflect.typeOf(App), .name = "focus_changed", .type = .signal, .doc = "Said when the game comes to the front or goes behind another program, with whether it is in front now: `app.focus_changed.connect(fn(front: bool) { ... })`." });
-    try vm.declareMember(.{ .of = reflect.typeOf(App), .name = "quitting", .type = .signal, .doc = "Said as the game ends, before its last frame is let go: what is asked of the web then is given a moment to go - a session closed, a score sent." });
+    try vm.declareMember(.{ .of = reflect.typeOf(App), .name = "focus_changed", .type = .signal, .args = reflect.typeOf(struct { front: bool }), .doc = "Said when the game comes to the front or goes behind another program, with whether it is in front now: `app.focus_changed.connect(fn(front: bool) { ... })`." });
+    try vm.declareMember(.{ .of = reflect.typeOf(App), .name = "quitting", .type = .signal, .args = reflect.typeOf(struct {}), .doc = "Said as the game ends, before its last frame is let go: what is asked of the web then is given a moment to go - a session closed, a score sent." });
     inline for (AssetKind.handled) |kind| {
         if (kind != .frames) try vm.declareType(reflect.typeOf(AssetRef(kind)));
         try vm.declareMember(.{ .of = reflect.typeOf(RefOf(kind)), .name = "resource_path", .type = .string, .doc = "The file it was read from, or \"\" for one made in memory and not saved yet." });

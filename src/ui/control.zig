@@ -136,8 +136,10 @@ pub const Control = extern struct {
 
     /// The pointer came over it, and went; it took the keys, and lost them.
     pub const signals = .{
+        // The pointer came over it, or went off it.
         .mouse_entered = struct {},
         .mouse_exited = struct {},
+        // It took the keys' focus, or gave it up.
         .focus_entered = struct {},
         .focus_exited = struct {},
     };
@@ -407,14 +409,27 @@ pub const Button = extern struct {
     };
     /// Pressed is a press let go over it; `button_down` and `button_up` are
     /// the button going down on it and coming up again.
-    pub const signals = .{ .pressed = struct {}, .toggled = struct { pressed: bool }, .button_down = struct {}, .button_up = struct {} };
+    pub const signals = .{
+        // Pressed and let go over it: a click or a tap. A toggle button says
+        // `toggled` first.
+        .pressed = struct {},
+        // A toggle button turned on or off, with which it is now.
+        .toggled = struct { pressed: bool },
+        // Held down, and let go: what a button held for as long as it is
+        // down listens to.
+        .button_down = struct {},
+        .button_up = struct {},
+    };
 };
 
 pub const CheckBox = extern struct {
     checked: bool = false,
     disabled: bool = false,
     pub const reflect_name = "CheckBox";
-    pub const signals = .{ .toggled = struct { checked: bool } };
+    pub const signals = .{
+        // Ticked or unticked, with which it is now.
+        .toggled = struct { checked: bool },
+    };
 };
 
 /// Words to type. What is typed, and what shows before anything is, are
@@ -431,7 +446,12 @@ pub const LineEdit = extern struct {
         attr.Text{ .name = "text", .multiline = true },
         attr.Text{ .name = "placeholder_text" },
     };
-    pub const signals = .{ .text_changed = struct {}, .text_submitted = struct {} };
+    pub const signals = .{
+        // The words in it changed as they were typed: `text` says them.
+        .text_changed = struct {},
+        // Enter was pressed in it: the words are done.
+        .text_submitted = struct {},
+    };
 };
 
 pub const Slider = extern struct {
@@ -442,7 +462,10 @@ pub const Slider = extern struct {
     vertical: bool = false,
     disabled: bool = false,
     pub const reflect_name = "Slider";
-    pub const signals = .{ .value_changed = struct { value: f32 } };
+    pub const signals = .{
+        // Moved to another value by the player, with the value.
+        .value_changed = struct { value: f32 },
+    };
 };
 
 pub const ProgressBar = extern struct {
@@ -520,20 +543,23 @@ pub const RichText = extern struct {
     /// font with an outline of their colour.
     bold_font: Assets.FontHandle = .none,
     /// How far the reveal has come, in characters.
-    revealed: f32 = 0,
+    reveal_at: f32 = 0,
 
     pub const reflect_name = "RichText";
     pub const reflect_attributes = .{attr.Text{ .name = "text", .multiline = true }};
     pub const reflect_fields = .{
         .reveal_speed = .{attr.Unit{ .text = "/s" }},
-        .revealed = .{attr.Hidden{}},
+        .reveal_at = .{ attr.Hidden{}, attr.Unsaved{} },
     };
     pub const reflect_methods = .{ .reveal = .{}, .showAll = .{} };
-    pub const signals = .{ .revealed = struct {} };
+    pub const signals = .{
+        // The last letter of a `reveal()` shows.
+        .revealed = struct {},
+    };
 
     /// Show the words from the first, one after another.
     pub fn reveal(self: *RichText) void {
-        self.revealed = 0;
+        self.reveal_at = 0;
         self.visible_characters = 0;
     }
 
@@ -564,7 +590,10 @@ pub const Popup = extern struct {
     pub const reflect_name = "Popup";
     pub const reflect_fields = .{ .was_open = .{attr.Hidden{}} };
     pub const reflect_methods = .{ .popup = .{}, .hide = .{} };
-    pub const signals = .{ .closed = struct {} };
+    pub const signals = .{
+        // It closed: by `hide`, a press outside it or `ui_cancel`.
+        .closed = struct {},
+    };
 
     pub fn popup(self: *Popup) void {
         self.open = true;
@@ -590,7 +619,10 @@ pub const TabContainer = extern struct {
     current: u16 = 0,
     separation: u16 = 4,
     pub const reflect_name = "TabContainer";
-    pub const signals = .{ .tab_changed = struct { index: u16 } };
+    pub const signals = .{
+        // Another tab was picked, with its index from 0.
+        .tab_changed = struct { index: u16 },
+    };
 };
 
 pub const TextureRect = extern struct {

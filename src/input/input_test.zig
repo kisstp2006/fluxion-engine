@@ -441,6 +441,7 @@ test "a controller press is this frame's buttons against the last" {
     var slots = emptySlots();
 
     hold(&slots[0], .a, true);
+    input.endFrame();
     input.beginFrame();
     input.readPads(&slots);
     try testing.expect(input.pad(0).connected());
@@ -448,12 +449,14 @@ test "a controller press is this frame's buttons against the last" {
     try testing.expect(input.pad(0).justPressed(.a));
 
     // Still held a frame later: down, and no longer an edge.
+    input.endFrame();
     input.beginFrame();
     input.readPads(&slots);
     try testing.expect(input.pad(0).down(.a));
     try testing.expect(!input.pad(0).justPressed(.a));
 
     hold(&slots[0], .a, false);
+    input.endFrame();
     input.beginFrame();
     input.readPads(&slots);
     try testing.expect(input.pad(0).justReleased(.a));
@@ -472,6 +475,7 @@ test "a controller unplugged lets go of everything it held" {
     input.readPads(&slots);
 
     slots[2] = .{};
+    input.endFrame();
     input.beginFrame();
     input.readPads(&slots);
 
@@ -546,11 +550,13 @@ test "a controller press reaches exactly one fixed step" {
     var slots = emptySlots();
 
     hold(&slots[0], .a, true);
+    input.endFrame();
     input.beginFrame();
     input.readPads(&slots);
 
     // A frame that ran no fixed step, and the next one, still held: no new
     // edge for the frame...
+    input.endFrame();
     input.beginFrame();
     input.readPads(&slots);
     try testing.expect(!input.pad(0).justPressed(.a));

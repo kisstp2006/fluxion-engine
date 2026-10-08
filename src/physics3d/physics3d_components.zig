@@ -62,11 +62,18 @@ pub const RigidBody3D = extern struct {
     /// What the pointer did over it, and which of its colliders it was
     /// over. A body is picked only with `input_pickable`.
     pub const signals = .{
+        // What the pointer did over it - a button, motion, the wheel - with
+        // the collider it was over: picked by a ray from the current camera.
         .input_event = struct { event: InputEvent, shape: Entity },
+        // The pointer came over it, or went off it.
         .mouse_entered = struct {},
         .mouse_exited = struct {},
+        // A mouse button went down over it.
         .pressed = struct { button: MouseButton },
+        // The button that went down over it came up, wherever the pointer
+        // is then.
         .released = struct { button: MouseButton },
+        // The button that went down over it came up over it: a click.
         .clicked = struct { button: MouseButton },
     };
 
@@ -236,20 +243,36 @@ pub const Area3D = extern struct {
     held: bool = false,
 
     pub const signals = .{
+        // A body came into it: the first of its colliders to touch.
         .body_entered = struct { body: Entity },
+        // A body left it: the last of its colliders in it went out.
         .body_exited = struct { body: Entity },
+        // One collider of a body, `body_shape`, came into one of its own,
+        // `local_shape`.
         .body_shape_entered = struct { body: Entity, body_shape: Entity, local_shape: Entity },
+        // One collider of a body went out of one of its own.
         .body_shape_exited = struct { body: Entity, body_shape: Entity, local_shape: Entity },
+        // Another area that is `monitorable` came into it.
         .area_entered = struct { area: Entity },
+        // Another area left it.
         .area_exited = struct { area: Entity },
+        // One collider of another area came into one of its own.
         .area_shape_entered = struct { area: Entity, area_shape: Entity, local_shape: Entity },
+        // One collider of another area went out of one of its own.
         .area_shape_exited = struct { area: Entity, area_shape: Entity, local_shape: Entity },
 
+        // What the pointer did over it - a button, motion, the wheel - with
+        // the collider it was over: picked by a ray from the current camera.
         .input_event = struct { event: InputEvent, shape: Entity },
+        // The pointer came over it, or went off it.
         .mouse_entered = struct {},
         .mouse_exited = struct {},
+        // A mouse button went down over it.
         .pressed = struct { button: MouseButton },
+        // The button that went down over it came up, wherever the pointer
+        // is then.
         .released = struct { button: MouseButton },
+        // The button that went down over it came up over it: a click.
         .clicked = struct { button: MouseButton },
     };
 

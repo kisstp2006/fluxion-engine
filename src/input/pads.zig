@@ -29,6 +29,9 @@ pub const PadState = struct {
     /// With no dead zone: a stick from -1 to 1 on each axis, up negative, and
     /// a trigger from 0 to 1.
     axes: [platform.GamepadAxis.count]f32 = @splat(0),
+    /// Where they were as the frame began: what a script's `PadAxisEvent`
+    /// is told by.
+    axes_before: [platform.GamepadAxis.count]f32 = @splat(0),
 };
 
 /// Which of a controller's two sticks.

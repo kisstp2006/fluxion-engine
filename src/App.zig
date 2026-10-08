@@ -1887,6 +1887,8 @@ pub fn globalPosition(self: *App, entity: ecs.Entity) ?math.Vec2 {
     return hierarchy.globalPosition(&self.world, entity);
 }
 
+/// Put the entity at `position` in the world, whatever its parents are:
+/// its own position is worked out from theirs.
 pub fn setGlobalPosition(self: *App, entity: ecs.Entity, position: math.Vec2) PlaceError!void {
     return hierarchy.setGlobalPosition(&self.world, entity, position);
 }
@@ -1896,6 +1898,7 @@ pub fn globalRotation(self: *App, entity: ecs.Entity) ?f32 {
     return hierarchy.globalRotation(&self.world, entity);
 }
 
+/// Turn the entity to `radians` in the world, whatever its parents' turn.
 pub fn setGlobalRotation(self: *App, entity: ecs.Entity, radians: f32) PlaceError!void {
     return hierarchy.setGlobalRotation(&self.world, entity, radians);
 }
@@ -1905,6 +1908,7 @@ pub fn globalScale(self: *App, entity: ecs.Entity) ?math.Vec2 {
     return hierarchy.globalScale(&self.world, entity);
 }
 
+/// Size the entity to `scale` in the world, whatever its parents' size.
 pub fn setGlobalScale(self: *App, entity: ecs.Entity, scale: math.Vec2) PlaceError!void {
     return hierarchy.setGlobalScale(&self.world, entity, scale);
 }
@@ -1994,6 +1998,8 @@ pub fn globalPosition3D(self: *App, entity: ecs.Entity) ?math.Vec3 {
     return hierarchy.globalPosition3D(&self.world, entity);
 }
 
+/// Put the entity at `position` in the world, whatever its parents are:
+/// its own position is worked out from theirs.
 pub fn setGlobalPosition3D(self: *App, entity: ecs.Entity, position: math.Vec3) PlaceError!void {
     return hierarchy.setGlobalPosition3D(&self.world, entity, position);
 }
@@ -2003,6 +2009,7 @@ pub fn globalRotation3D(self: *App, entity: ecs.Entity) ?math.Quat {
     return hierarchy.globalRotation3D(&self.world, entity);
 }
 
+/// Turn the entity to `rotation` in the world, whatever its parents' turn.
 pub fn setGlobalRotation3D(self: *App, entity: ecs.Entity, rotation: math.Quat) PlaceError!void {
     return hierarchy.setGlobalRotation3D(&self.world, entity, rotation);
 }
@@ -2012,6 +2019,7 @@ pub fn globalScale3D(self: *App, entity: ecs.Entity) ?math.Vec3 {
     return hierarchy.globalScale3D(&self.world, entity);
 }
 
+/// Size the entity to `scale` in the world, whatever its parents' size.
 pub fn setGlobalScale3D(self: *App, entity: ecs.Entity, scale: math.Vec3) PlaceError!void {
     return hierarchy.setGlobalScale3D(&self.world, entity, scale);
 }
@@ -2245,6 +2253,7 @@ pub fn removeFromGroup(self: *App, entity: ecs.Entity, group: []const u8) void {
     return self.groups.remove(entity, group);
 }
 
+/// Whether the entity is in the group: `app.isInGroup(body, "enemies")`.
 pub fn isInGroup(self: *const App, entity: ecs.Entity, group: []const u8) bool {
     return self.groups.has(entity, group);
 }
@@ -2296,6 +2305,7 @@ pub fn setPaused(self: *App, paused: bool) void {
     self.schedule.paused = paused;
 }
 
+/// Whether the game is paused: see `setPaused`.
 pub fn isPaused(self: *const App) bool {
     return self.paused;
 }
@@ -2541,6 +2551,7 @@ pub fn setTimeScale(self: *App, scale: f32) void {
     self.time.scale = @max(scale, 0);
 }
 
+/// How fast the game's time runs: 1 as it is, 0.5 at half speed.
 pub fn timeScale(self: *const App) f32 {
     return self.time.scale;
 }
@@ -2574,6 +2585,8 @@ pub fn setMaxPhysicsStepsPerFrame(self: *App, steps: u32) void {
     self.time.max_fixed_steps = @max(steps, 1);
 }
 
+/// How many fixed steps one frame runs at most, catching up after a slow
+/// one.
 pub fn maxPhysicsStepsPerFrame(self: *const App) u32 {
     return self.time.max_fixed_steps;
 }
@@ -2584,6 +2597,7 @@ pub fn setPhysicsTicksPerSecond(self: *App, ticks: u32) void {
     if (self.time.source == .fixed) self.time.source = .{ .fixed = self.time.fixed_delta };
 }
 
+/// How many fixed steps a second the physics runs.
 pub fn physicsTicksPerSecond(self: *const App) u32 {
     return @intFromFloat(@round(1.0 / self.time.fixed_delta));
 }
@@ -2845,6 +2859,7 @@ pub fn setMouseFromTouch(self: *App, on: bool) void {
     self.input.mouse_from_touch = on;
 }
 
+/// Whether a finger is a mouse too: see `setMouseFromTouch`.
 pub fn mouseFromTouch(self: *const App) bool {
     return self.input.mouse_from_touch;
 }
@@ -2856,6 +2871,7 @@ pub fn setTouchFromMouse(self: *App, on: bool) void {
     self.input.touch_from_mouse = on;
 }
 
+/// Whether the mouse is a finger too: see `setTouchFromMouse`.
 pub fn touchFromMouse(self: *const App) bool {
     return self.input.touch_from_mouse;
 }
@@ -2867,6 +2883,7 @@ pub fn setPinchFromCtrlWheel(self: *App, on: bool) void {
     self.input.pinch_from_ctrl_wheel = on;
 }
 
+/// Whether Ctrl and the wheel pinch: see `setPinchFromCtrlWheel`.
 pub fn pinchFromCtrlWheel(self: *const App) bool {
     return self.input.pinch_from_ctrl_wheel;
 }
@@ -2943,6 +2960,8 @@ pub fn actionJustPressed(self: *const App, name: []const u8) bool {
     return self.input.actionJustPressed(name);
 }
 
+/// `input.actionJustReleased`: whether it came up this frame, or since the
+/// last fixed step inside `fixed`.
 pub fn actionJustReleased(self: *const App, name: []const u8) bool {
     return self.input.actionJustReleased(name);
 }
@@ -2968,6 +2987,7 @@ pub fn pressAction(self: *App, name: []const u8, strength: f32) error{NoSuchActi
     return self.input.pressAction(name, strength);
 }
 
+/// Let go of an action `pressAction` held, as if its key came up.
 pub fn releaseAction(self: *App, name: []const u8) error{NoSuchAction}!void {
     return self.input.releaseAction(name);
 }
@@ -3325,10 +3345,13 @@ pub fn busVolumeDb(self: *App, name: []const u8) f32 {
     return self.audio.busVolumeDb(name) orelse sound.silent_db;
 }
 
+/// Silence a bus, or let it be heard again, keeping its volume. False
+/// for no bus of that name.
 pub fn setBusMute(self: *App, name: []const u8, mute: bool) bool {
     return self.audio.setBusMute(name, mute);
 }
 
+/// Whether a bus is silenced: see `setBusMute`.
 pub fn isBusMuted(self: *App, name: []const u8) bool {
     return self.audio.isBusMuted(name);
 }
@@ -3340,6 +3363,8 @@ pub fn linearToDb(self: *const App, linear: f32) f32 {
     return sound.linearToDb(linear);
 }
 
+/// A volume in decibels as a number to multiply by: 0 dB is 1, -6 dB about
+/// a half.
 pub fn dbToLinear(self: *const App, db: f32) f32 {
     _ = self;
     return sound.dbToLinear(db);
@@ -3786,6 +3811,7 @@ pub fn setStretchMode(self: *App, mode: stretching.Mode) void {
     self.refitStretch();
 }
 
+/// How the game's picture fits the window: see `setStretchMode`.
 pub fn stretchMode(self: *const App) stretching.Mode {
     return self.stretch.mode;
 }
@@ -3796,6 +3822,8 @@ pub fn setStretchAspect(self: *App, aspect: stretching.Aspect) void {
     self.refitStretch();
 }
 
+/// How the game keeps its shape as the window's changes: see
+/// `setStretchAspect`.
 pub fn stretchAspect(self: *const App) stretching.Aspect {
     return self.stretch.aspect;
 }
@@ -3807,6 +3835,7 @@ pub fn setStretchScale(self: *App, scale: f32) void {
     self.refitStretch();
 }
 
+/// How much bigger everything is drawn: see `setStretchScale`.
 pub fn stretchScale(self: *const App) f32 {
     return self.stretch.scale;
 }
@@ -3817,6 +3846,7 @@ pub fn setStretchScaleMode(self: *App, mode: stretching.ScaleMode) void {
     self.refitStretch();
 }
 
+/// Whether the stretch goes in whole steps: see `setStretchScaleMode`.
 pub fn stretchScaleMode(self: *const App) stretching.ScaleMode {
     return self.stretch.scale_mode;
 }
@@ -4334,6 +4364,8 @@ pub fn loadProgress(self: *App, path: []const u8) f32 {
 /// why when it is taken, and `none` when nothing is reading it.
 pub const LoadStatus = background_load.LoadStatus;
 
+/// How a file being read in the background is getting on: `loading`,
+/// `done`, `failed`, or `none`.
 pub fn loadStatus(self: *App, path: []const u8) LoadStatus {
     return background_load.status(self, path);
 }
@@ -4802,7 +4834,7 @@ pub fn isNavigationFinished(self: *App, agent: ecs.Entity) bool {
 pub fn isTargetReached(self: *App, agent: ecs.Entity) bool {
     if (!self.navigation.isFinished(self, agent)) return false;
     const held = self.world.get(agent, components.NavigationAgent3D) orelse return false;
-    return held.target_reached;
+    return held.reached;
 }
 
 /// How far the agent is from its target, straight.
@@ -4934,30 +4966,41 @@ pub fn setBonePose(self: *App, entity: ecs.Entity, bone: u32, placed: math.Trans
     pose.moved();
 }
 
+/// Where a bone of the entity's skeleton is now, against its parent bone:
+/// the pose an animation left it in, or a script's.
 pub fn bonePosition(self: *App, entity: ecs.Entity, bone: u32) math.Vec3 {
     return if (self.bonePose(entity, bone)) |held| held.translation else .zero;
 }
 
+/// How a bone of the entity's skeleton is turned now, against its parent
+/// bone.
 pub fn boneRotation(self: *App, entity: ecs.Entity, bone: u32) math.Quat {
     return if (self.bonePose(entity, bone)) |held| held.rotation else .identity;
 }
 
+/// How a bone of the entity's skeleton is sized now, against its parent
+/// bone.
 pub fn boneScale(self: *App, entity: ecs.Entity, bone: u32) math.Vec3 {
     return if (self.bonePose(entity, bone)) |held| held.scale else .one;
 }
 
+/// Move a bone of the entity's skeleton, against its parent bone: an
+/// animation playing moves it again.
 pub fn setBonePosition(self: *App, entity: ecs.Entity, bone: u32, position: math.Vec3) void {
     var held = self.bonePose(entity, bone) orelse return;
     held.translation = position;
     self.setBonePose(entity, bone, held);
 }
 
+/// Turn a bone of the entity's skeleton, against its parent bone: a head
+/// turned to look at something.
 pub fn setBoneRotation(self: *App, entity: ecs.Entity, bone: u32, rotation: math.Quat) void {
     var held = self.bonePose(entity, bone) orelse return;
     held.rotation = rotation.norm();
     self.setBonePose(entity, bone, held);
 }
 
+/// Size a bone of the entity's skeleton, against its parent bone.
 pub fn setBoneScale(self: *App, entity: ecs.Entity, bone: u32, scale: math.Vec3) void {
     var held = self.bonePose(entity, bone) orelse return;
     held.scale = scale;
@@ -5725,6 +5768,8 @@ pub fn setDefaultCursorShape(self: *App, shape: CursorShape) void {
     self.cursors.default_shape = shape;
 }
 
+/// The pointer's shape where nothing asks for another: see
+/// `setDefaultCursorShape`.
 pub fn defaultCursorShape(self: *const App) CursorShape {
     return self.cursors.default_shape;
 }

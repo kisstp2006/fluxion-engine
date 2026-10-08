@@ -1457,6 +1457,9 @@ pub const Scripts = struct {
                 if (went_down) try events.append(gpa, .{ .pad_button = .{ .button = @enumFromInt(i), .pad = @intCast(slot), .pressed = true } });
                 if (came_up) try events.append(gpa, .{ .pad_button = .{ .button = @enumFromInt(i), .pad = @intCast(slot), .pressed = false } });
             }
+            for (state.axes, state.axes_before, 0..) |now, before, i| {
+                if (now != before) try events.append(gpa, .{ .pad_axis = .{ .axis = @enumFromInt(i), .pad = @intCast(slot), .value = now } });
+            }
         }
     }
 
@@ -1499,7 +1502,7 @@ pub const Scripts = struct {
                 const finger = app.input.touchOf(event.finger().?) orelse return false;
                 return finger.on_button or (finger.mouse and app.input.mouse_from_touch and (app.input.isHandled() or app.ui.wantsPointer()));
             },
-            .pad_button => false,
+            .pad_button, .pad_axis => false,
         };
     }
 

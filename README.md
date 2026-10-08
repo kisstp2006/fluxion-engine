@@ -2732,7 +2732,7 @@ fn walk(app: *fx.App) !void {                          // a .fixed system
   for the next, and within `target_desired_distance` of the end it has
   finished - `isNavigationFinished`, `isTargetReached`, and the signals
   `path_changed`, `target_reached`, `navigation_finished` and
-  `link_reached`. The corners
+  `link_reached` - and the read-only fields `reached` and `finished`. The corners
   are on the floor: what walks to them flattens the way, its middle being
   above it.
 - **Avoidance**: an agent with `avoidance_enabled` says the velocity it
@@ -3705,6 +3705,9 @@ struct Door {
   `app.scriptSetup()` gives the language service's `flux.service.Options`
   with `app`, `files`, `time` and `self.entity` declared. This is for completions and
   diagnostics, and it needs no `useScripts`.
+  - Every call of `app`'s, every component's fields, methods and signals and every kind of input event is offered after its `.`, with its type and what it is: `script/code_help_test.zig` holds the engine to that.
+  - A signal shows what it says - `signal Area3D.body_entered(body: Entity)` - and a lambda given to its `connect` or `once` has those types: inside `area.body_entered.connect(fn(body) { body. })` the calls of an `Entity` are offered, and `fn(hours) { const s: string = hours; }` on a clock's `hour_passed` is a mistake.
+  - Where the engine takes any value but means one kind - `images.toTexture(image)`, `picture.blit(source, x, y)`, `web.cancel(task)` - the editor says the kind, and checks it.
 - **The engine's types are the scripts'.** A component, an input event,
   `Entity`, `Files`, `Image`, `DateTime` are named in a type -
   `var body: CharacterBody2D`, `fn aim(at: Entity)` - where a value goes -
@@ -3816,14 +3819,14 @@ struct Guard {
   - `app.exportedFields(entity, &buffer)` lists the fields, made or not, with what each holds - and a list's items, a map's keys and values, the enum or the engine's type they are of - its default, doc comment and annotations (`@range`, `@multiline`, `@group`, `@file`, `@entity`, …): what an editor draws.
   - `script.jsonOf` writes a default as a scene would.
 - **Input, as events.** `input(self, event: InputEvent)` hears each key,
-  mouse button, motion of the pointer, turn of the wheel and pad button of
-  the frame, before the game's `.input` systems; `unhandled_input(self,
+  mouse button, motion of the pointer, turn of the wheel, pad button and
+  move of a stick or a trigger of the frame, before the game's `.input` systems; `unhandled_input(self,
   event: InputEvent)` hears what nothing took - not a script's
   `app.setInputAsHandled()`, and not the interface, which takes a key while
   a field has the keys and the pointer over what it draws.
-  - Each kind is a type of its own, asked for with `is`: a `KeyEvent` has `key`, `virtual_key`, `pressed`, `echo` and `mods`; a `MouseButtonEvent` `button`, `pressed`, `double_click`, `position`, `buttons` and `mods`; a `MouseMotionEvent` `position`, `relative`, `buttons` and `mods`; a `WheelEvent` `delta`, `position`, `buttons` and `mods`; a `TouchEvent` `finger`, `pressed`, `canceled`, `position` and `pressure`; a `TouchMotionEvent` `finger`, `position`, `relative` and `pressure`; the gestures - `TapEvent`, `LongPressEvent`, `SwipeEvent`, `PinchEvent`, `PanEvent`, `RotateEvent` - as under "Fingers on a touch screen"; a `PadButtonEvent` `button`, `pad` and `pressed`. `mods` has `shift`, `control`, `alt` and `super`.
+  - Each kind is a type of its own, asked for with `is`: a `KeyEvent` has `key`, `virtual_key`, `pressed`, `echo` and `mods`; a `MouseButtonEvent` `button`, `pressed`, `double_click`, `position`, `buttons` and `mods`; a `MouseMotionEvent` `position`, `relative`, `buttons` and `mods`; a `WheelEvent` `delta`, `position`, `buttons` and `mods`; a `TouchEvent` `finger`, `pressed`, `canceled`, `position` and `pressure`; a `TouchMotionEvent` `finger`, `position`, `relative` and `pressure`; the gestures - `TapEvent`, `LongPressEvent`, `SwipeEvent`, `PinchEvent`, `PanEvent`, `RotateEvent` - as under "Fingers on a touch screen"; a `PadButtonEvent` `button`, `pad` and `pressed`; a `PadAxisEvent` `axis`, `pad` and `value`, one a frame for each stick or trigger that moved. `mods` has `shift`, `control`, `alt` and `super`.
   - Inside `if (event is KeyEvent)`, after an `and`, and past an `if (!(event is KeyEvent)) return;`, the event is a `KeyEvent`. A field only some kinds have is a mistake elsewhere, and the compiler names the kinds that have it.
-  - Every kind has `isAction("jump")`, `isActionPressed`, `isActionReleased` and `describe()`, by the project's actions.
+  - Every kind has `isAction("jump")`, `isActionPressed`, `isActionReleased` and `describe()`, by the project's actions; a stick's move is the action's when it is pushed the way the action binds. `isKeyPressed(Key.escape)` and `isKeyReleased` ask for a key where it sits, `isPressed(.left)` and `isReleased` for a mouse button, without an `is` first.
   - `app.bindAction("jump", event)` binds what was pressed to an action, and `app.clearAction("jump")` unbinds it: a key-remapping screen, saved with `app.saveInputMap()`.
 
 ### Data files

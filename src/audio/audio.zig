@@ -125,7 +125,10 @@ pub const AudioPlayer = extern struct {
 
     pub const Request = enum(u8) { none, play, stop, seek };
 
-    pub const signals = .{ .finished = struct {} };
+    pub const signals = .{
+        // The clip played to its end, and does not loop.
+        .finished = struct {},
+    };
 
     pub const reflect_name = "AudioPlayer";
     pub const reflect_fields = .{

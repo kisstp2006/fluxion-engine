@@ -68,9 +68,9 @@ pub const WebAccess = struct {
         .postForm = .{ attr.Params{ .names = &.{ "vm", "url", "values", "timeout" } }, attr.defaults(.{30.0}), answer },
         .request = .{ attr.Params{ .names = &.{ "vm", "method", "url", "headers", "body", "timeout" } }, attr.defaults(.{ "", 30.0 }), answer },
         .download = .{ attr.Params{ .names = &.{ "vm", "url", "path", "timeout" } }, attr.defaults(.{0.0}), bytes },
-        .progress = .{attr.Params{ .names = &.{ "vm", "task" } }},
-        .received = .{attr.Params{ .names = &.{ "vm", "task" } }},
-        .cancel = .{attr.Params{ .names = &.{ "vm", "task" } }},
+        .progress = .{ attr.Params{ .names = &.{ "vm", "task" } }, flux.Takes.builtin("task", .task) },
+        .received = .{ attr.Params{ .names = &.{ "vm", "task" } }, flux.Takes.builtin("task", .task) },
+        .cancel = .{ attr.Params{ .names = &.{ "vm", "task" } }, flux.Takes.builtin("task", .task) },
     };
 
     /// Ask for the page at `url`, giving up after `timeout` seconds.

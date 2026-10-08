@@ -37,7 +37,10 @@ const log = std.log.scoped(.fluxion_engine);
 
 /// Two colliders that began or stopped touching.
 pub const Contact = struct {
+    /// One of the two that touch: a body, or a collider's own static body.
+    /// `other(self.entity)` is whichever is not this one.
     a: Entity,
+    /// The other.
     b: Entity,
     /// One of them is a sensor: seen, not pushed.
     sensor: bool,
@@ -62,6 +65,7 @@ pub const RayHit = struct {
     collider: Entity,
     /// The collider it hit; `.none` for a shape the engine did not make.
     shape: Entity,
+    /// Where it hit, in the world.
     point: Vec2,
     /// Out of the surface it hit.
     normal: Vec2,

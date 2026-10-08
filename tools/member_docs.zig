@@ -6,6 +6,11 @@
 //! and type, keyed `Type.member` - a type by its `reflect_name`, or its own
 //! name - and sorted by key, as `flux.Vm.Options.docs` wants.
 //!
+//! A component's signals are in a tuple, where Zig has no doc comments:
+//! the plain comment just above each, `// Said when ...`, is its doc - and
+//! the doc of those right under it, with no comment or blank line between,
+//! as a pair `mouse_entered` and `mouse_exited` is said by one.
+//!
 //! `member_docs <out.zig> <source.zig>...`
 
 const std = @import("std");
@@ -62,6 +67,10 @@ fn container(arena: Allocator, tree: Ast, owner: ?[]const u8, members: []const A
     for (members) |node| {
         if (tree.fullVarDecl(node)) |v| {
             const init_node = v.ast.init_node.unwrap() orelse continue;
+            if (owner) |type_name| if (std.mem.eql(u8, tree.tokenSlice(v.ast.mut_token + 1), "signals")) {
+                try signals(arena, tree, type_name, init_node, out);
+                continue;
+            };
             var buffer: [2]Ast.Node.Index = undefined;
             const inner = tree.fullContainerDecl(&buffer, init_node) orelse continue;
             const declared = tree.tokenSlice(v.ast.mut_token + 1);
@@ -86,6 +95,56 @@ fn container(arena: Allocator, tree: Ast, owner: ?[]const u8, members: []const A
             }
         }
     }
+}
+
+/// Each signal of `pub const signals = .{ .name = struct { ... }, ... }`
+/// with a comment just above it.
+fn signals(arena: Allocator, tree: Ast, type_name: []const u8, init_node: Ast.Node.Index, out: *std.ArrayList(Entry)) !void {
+    var buffer: [2]Ast.Node.Index = undefined;
+    const listed = tree.fullStructInit(&buffer, init_node) orelse return;
+    var last: ?[]const u8 = null;
+    for (listed.ast.fields) |field| {
+        // `.name = value`: the value's first token, after the dot, the
+        // name and the `=`.
+        const dot = tree.firstToken(field) - 3;
+        const name = tree.tokenSlice(dot + 1);
+        const own = try lineCommentBefore(arena, tree, dot);
+        last = own orelse if (blankBefore(tree, dot)) null else last;
+        const text = last orelse continue;
+        try out.append(arena, .{ .key = try std.fmt.allocPrint(arena, "{s}.{s}", .{ type_name, name }), .text = text });
+    }
+}
+
+/// Whether a blank line comes between the token `at` and the one before.
+fn blankBefore(tree: Ast, at: Ast.TokenIndex) bool {
+    const begin = tree.tokenStart(at - 1) + tree.tokenSlice(at - 1).len;
+    const between = tree.source[begin..tree.tokenStart(at)];
+    var lines = std.mem.splitScalar(u8, between, '\n');
+    _ = lines.next();
+    while (lines.next()) |line| {
+        if (lines.peek() == null) break;
+        if (std.mem.trim(u8, line, " \t\r").len == 0) return true;
+    }
+    return false;
+}
+
+/// The `//` lines just above the token `at`, with no blank line between,
+/// joined: what the tokenizer passes over.
+fn lineCommentBefore(arena: Allocator, tree: Ast, at: Ast.TokenIndex) !?[]const u8 {
+    const end = tree.tokenStart(at);
+    const begin = tree.tokenStart(at - 1) + tree.tokenSlice(at - 1).len;
+    var lines: std.ArrayList([]const u8) = .empty;
+    var rest = std.mem.trimEnd(u8, tree.source[begin..end], " \t\r\n");
+    while (rest.len > 0) {
+        const cut = if (std.mem.lastIndexOfScalar(u8, rest, '\n')) |n| n + 1 else 0;
+        const line = std.mem.trim(u8, rest[cut..], " \t\r");
+        if (!std.mem.startsWith(u8, line, "//") or std.mem.startsWith(u8, line, "///")) break;
+        try lines.append(arena, std.mem.trim(u8, line["//".len..], " "));
+        rest = if (cut == 0) "" else rest[0 .. cut - 1];
+    }
+    if (lines.items.len == 0) return null;
+    std.mem.reverse([]const u8, lines.items);
+    return try std.mem.join(arena, "\n", lines.items);
 }
 
 /// The name a container's `reflect_name` gives it, without the file it is

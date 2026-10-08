@@ -39,8 +39,8 @@ pub const ImagesAccess = struct {
         .read = .{ attr.Params{ .names = &.{ "vm", "path" } }, flux.Returns.of(ImageRef), flux.GivesErrors{} },
         .capture = .{ attr.Params{ .names = &.{"vm"} }, flux.Returns.of(ImageRef), flux.GivesErrors{} },
         .fromTexture = .{ attr.Params{ .names = &.{ "vm", "texture" } }, flux.Returns.of(ImageRef), flux.GivesErrors{} },
-        .toTexture = .{ attr.Params{ .names = &.{ "vm", "image" } }, flux.GivesErrors{} },
-        .updateTexture = .{ attr.Params{ .names = &.{ "vm", "texture", "image" } }, flux.GivesErrors{} },
+        .toTexture = .{ attr.Params{ .names = &.{ "vm", "image" } }, flux.Takes.of("image", ImageRef), flux.GivesErrors{} },
+        .updateTexture = .{ attr.Params{ .names = &.{ "vm", "texture", "image" } }, flux.Takes.of("image", ImageRef), flux.GivesErrors{} },
     };
 
     /// One `width` by `height`, every pixel `color`: see-through when none
@@ -110,8 +110,8 @@ pub const ImageRef = struct {
         .fill = .{attr.Params{ .names = &.{"color"} }},
         .fillRect = .{attr.Params{ .names = &.{ "x", "y", "width", "height", "color" } }},
         .region = .{ attr.Params{ .names = &.{ "vm", "x", "y", "width", "height" } }, flux.Returns.of(ImageRef) },
-        .blit = .{attr.Params{ .names = &.{ "vm", "source", "x", "y" } }},
-        .blend = .{attr.Params{ .names = &.{ "vm", "source", "x", "y" } }},
+        .blit = .{ attr.Params{ .names = &.{ "vm", "source", "x", "y" } }, flux.Takes.of("source", ImageRef) },
+        .blend = .{ attr.Params{ .names = &.{ "vm", "source", "x", "y" } }, flux.Takes.of("source", ImageRef) },
         .resize = .{ attr.Params{ .names = &.{ "vm", "width", "height", "smooth" } }, attr.defaults(.{true}) },
         .flipX = .{},
         .flipY = .{},

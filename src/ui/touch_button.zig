@@ -60,7 +60,12 @@ pub const TouchButton = extern struct {
         touchscreen_only,
     };
 
-    pub const signals = .{ .pressed = struct {}, .released = struct {} };
+    pub const signals = .{
+        // A finger went down on it, and its action is held.
+        .pressed = struct {},
+        // The finger came up, and the action is let go.
+        .released = struct {},
+    };
 
     pub const reflect_name = "TouchButton";
     pub const reflect_fields = .{

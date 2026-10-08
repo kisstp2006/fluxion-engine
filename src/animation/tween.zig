@@ -60,7 +60,10 @@ pub const Tween = extern struct {
     /// Played through the last time: it goes at the next pass.
     done: bool = false,
 
-    pub const signals = .{ .finished = struct {} };
+    pub const signals = .{
+        // Every step played, every loop of them: the tween is done.
+        .finished = struct {},
+    };
 
     pub const reflect_name = "Tween";
     pub const reflect_fields = .{

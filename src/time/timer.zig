@@ -59,7 +59,11 @@ pub const Timer = extern struct {
         update,
     };
 
-    pub const signals = .{ .timeout = struct {} };
+    pub const signals = .{
+        // The time ran out: once for a one-shot timer, every `wait_time`
+        // seconds for one that goes round.
+        .timeout = struct {},
+    };
 
     pub const reflect_name = "Timer";
     pub const reflect_fields = .{

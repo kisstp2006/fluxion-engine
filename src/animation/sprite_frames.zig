@@ -730,10 +730,16 @@ pub const AnimatedSprite2D = extern struct {
     told_frames: bool = false,
 
     pub const signals = .{
+        // Another animation was set: by `play`, or by a write to `animation`.
         .animation_changed = struct {},
+        // An animation that does not loop showed its last frame and stopped.
         .animation_finished = struct {},
+        // A looping animation went round from its last frame to its first,
+        // or one that goes back and forth turned round.
         .animation_looped = struct {},
+        // Another frame shows.
         .frame_changed = struct {},
+        // Other sprite frames were given it.
         .sprite_frames_changed = struct {},
     };
 

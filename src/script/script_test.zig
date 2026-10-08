@@ -2090,6 +2090,58 @@ test "a script hears the player's input, takes it from the scripts after it, and
     try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
 }
 
+test "a script hears a controller's buttons and its sticks as they move, and a key asked by name" {
+    const platform = @import("fluxion_platform");
+    // Read between frames, as `Window.pump` reads it at a frame's start.
+    var slots: [@import("../input/input.zig").max_pads]platform.Gamepad = @splat(.{});
+    slots[0].connected = true;
+    const app = try scripted(.{});
+    defer app.destroy();
+    try app.input.actions.add(testing.allocator, .{ .name = "left", .bindings = &.{.padAxisOf(.left_x, .negative)} });
+    const player = try app.addScript("player.flux",
+        \\var pressed = 0;
+        \\var moves = 0;
+        \\var last = 0.0;
+        \\var lefts = 0;
+        \\var escapes = 0;
+        \\struct Player {
+        \\    fn input(self, event: InputEvent) {
+        \\        if (event is PadButtonEvent and event.pressed and event.button == .a) pressed += 1;
+        \\        if (event is PadAxisEvent and event.axis == .left_x and event.pad == 0) {
+        \\            moves += 1;
+        \\            last = event.value;
+        \\        }
+        \\        if (event.isAction("left")) lefts += 1;
+        \\        if (event.isKeyPressed(Key.escape)) escapes += 1;
+        \\        if (event.isKeyReleased(Key.escape)) escapes += 10;
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{Script.of(player)});
+    _ = try app.step();
+
+    slots[0].state.buttons[@intFromEnum(platform.GamepadButton.a)] = true;
+    slots[0].state.axes[@intFromEnum(platform.GamepadAxis.left_x)] = -0.75;
+    app.input.readPads(&slots);
+    _ = try app.step();
+    // Held still: no news.
+    app.input.readPads(&slots);
+    _ = try app.step();
+    slots[0].state.axes[@intFromEnum(platform.GamepadAxis.left_x)] = 0.25;
+    app.input.readPads(&slots);
+    app.input.apply(keyed(.escape, .press));
+    _ = try app.step();
+    app.input.apply(keyed(.escape, .release));
+    _ = try app.step();
+
+    try testing.expectEqual(@as(i64, 1), global(app, player, "pressed").asInt());
+    try testing.expectEqual(@as(i64, 2), global(app, player, "moves").asInt());
+    try testing.expectApproxEqAbs(@as(f64, 0.25), global(app, player, "last").asFloat(), 1e-6);
+    try testing.expectEqual(@as(i64, 1), global(app, player, "lefts").asInt());
+    try testing.expectEqual(@as(i64, 11), global(app, player, "escapes").asInt());
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+}
+
 test "a script hears every finger, and asks the frame's fingers where they are" {
     const app = try scripted(.{});
     defer app.destroy();
