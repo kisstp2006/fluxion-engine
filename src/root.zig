@@ -245,6 +245,11 @@ pub const DirectionalLight3D = components.DirectionalLight3D;
 pub const PointLight3D = components.PointLight3D;
 pub const SpotLight3D = components.SpotLight3D;
 pub const Environment = components.Environment;
+pub const FogVolume = components.FogVolume;
+pub const World3D = components.World3D;
+pub const Sprite3D = components.Sprite3D;
+pub const Label3D = components.Label3D;
+pub const Particles3D = components.Particles3D;
 pub const LightmapGI = components.LightmapGI;
 /// Skeletons and the meshes they bend: see `render/skeleton.zig`.
 pub const Skeleton3D = components.Skeleton3D;
@@ -283,6 +288,10 @@ pub const drawing = @import("render/drawing.zig");
 /// Sparks, smoke, rain: many small pictures an entity lets go of.
 pub const Particles2D = particles.Particles2D;
 pub const particles = @import("render/particles.zig");
+pub const particles3d = @import("render/particles3d.zig");
+pub const billboards = @import("render/billboards.zig");
+pub const fog_volumes = @import("render/fog_volumes.zig");
+pub const worlds3d = @import("render/worlds3d.zig");
 
 /// Light in the 2D world, and the shadows it casts: see `lights.zig`.
 pub const lights = @import("render/lights.zig");
@@ -446,6 +455,8 @@ pub const SpriteFramesHandle = sprite_frames.SpriteFramesHandle;
 pub const AudioPlayer = audio.AudioPlayer;
 pub const AudioSpatial2D = audio.AudioSpatial2D;
 pub const AudioListener2D = audio.AudioListener2D;
+pub const AudioSpatial3D = audio.AudioSpatial3D;
+pub const AudioListener3D = audio.AudioListener3D;
 pub const AudioClipHandle = audio.AudioClipHandle;
 pub const scenes = @import("assets/scene_table.zig");
 pub const SceneHandle = scenes.SceneHandle;

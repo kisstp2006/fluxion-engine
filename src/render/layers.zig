@@ -144,7 +144,9 @@ pub fn drawWorldWithoutDebug(app: *App, into: rhi.Texture, view: View) !void {
 /// first, with `debug_3d` over it: an editor's view of a 3D scene, through
 /// a camera of its own. The 2D world is not drawn.
 pub fn drawWorld3D(app: *App, into: rhi.Texture, view: View3D, lighting: Lighting) !void {
-    try draw3D(app, .{ .texture = into }, @intFromFloat(@max(view.width, 1)), @intFromFloat(@max(view.height, 1)), view, app.clear_color, lighting);
+    var seen = view;
+    seen.every_world = true;
+    try draw3D(app, .{ .texture = into }, @intFromFloat(@max(view.width, 1)), @intFromFloat(@max(view.height, 1)), seen, app.clear_color, lighting);
 }
 
 /// The 3D world into a target `width` by `height`, and `debug_3d` over it,

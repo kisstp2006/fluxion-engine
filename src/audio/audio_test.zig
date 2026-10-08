@@ -8,6 +8,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const ecs = @import("fluxion_ecs");
+const math = @import("fluxion_math");
 const sound = @import("fluxion_audio");
 
 const App = @import("../App.zig");
@@ -220,6 +221,54 @@ test "a player in the world is quieter far from the listener, and panned to its 
     _ = try app.step();
     try testing.expectApproxEqAbs(@as(f32, 0.75), app.audio.voices.get(right).?.gain, 0.001);
     try testing.expectApproxEqAbs(@as(f32, 0.5), app.audio.voices.get(right).?.pan, 0.001);
+}
+
+test "a player in the 3D world falls off past its unit size, is silent past its reach, and is panned by the listener's right" {
+    const app = try quarterSecondApp();
+    defer app.destroy();
+    const clip = try clipOf(app, "beep.wav", 4);
+    const Transform3D = components.Transform3D;
+    // The listener looks down -z, its right +x.
+    const ear = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), audio.AudioListener3D{} });
+    const spatial: audio.AudioSpatial3D = .{ .unit_size = 2, .max_distance = 40 };
+    const near = try app.world.spawnWith(.{ Transform3D.at(0, 0, -1), AudioPlayer{ .clip = clip, .autoplay = true }, spatial });
+    const right = try app.world.spawnWith(.{ Transform3D.at(8, 0, 0), AudioPlayer{ .clip = clip, .autoplay = true }, spatial });
+    const gone = try app.world.spawnWith(.{ Transform3D.at(0, 0, 50), AudioPlayer{ .clip = clip, .autoplay = true }, spatial });
+    _ = try app.step();
+    _ = try app.step();
+    try testing.expectApproxEqAbs(@as(f32, 1), app.audio.voices.get(near).?.gain, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0), app.audio.voices.get(near).?.pan, 0.001);
+    // Four times the unit size: a quarter, as one over the distance.
+    try testing.expectApproxEqAbs(@as(f32, 0.25), app.audio.voices.get(right).?.gain, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 1), app.audio.voices.get(right).?.pan, 0.001);
+    try testing.expectEqual(@as(f32, 0), app.audio.voices.get(gone).?.gain);
+
+    // The listener turned to face +x: what was on its right is in front.
+    app.world.get(ear, Transform3D).?.rotation = .of(math.Quat.fromAxisAngle(.unit_y, -std.math.pi / 2.0));
+    _ = try app.step();
+    try testing.expectApproxEqAbs(@as(f32, 0), app.audio.voices.get(right).?.pan, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, -1), app.audio.voices.get(near).?.pan, 0.001);
+
+    // Each falloff, and the fade at the edge.
+    const square: audio.AudioSpatial3D = .{ .unit_size = 1, .max_distance = 100, .falloff = .inverse_square };
+    try testing.expectApproxEqAbs(@as(f32, 0.25), square.gainAt(2), 1e-5);
+    const even: audio.AudioSpatial3D = .{ .unit_size = 0, .max_distance = 10, .falloff = .linear };
+    try testing.expectApproxEqAbs(@as(f32, 0.5), even.gainAt(5), 0.01);
+    try testing.expect(spatial.gainAt(39.9) < 0.01);
+    try testing.expectEqual(@as(f32, 0), spatial.gainAt(40));
+}
+
+test "with no listener, the 3D world is heard from the current camera" {
+    const app = try quarterSecondApp();
+    defer app.destroy();
+    const clip = try clipOf(app, "beep.wav", 4);
+    const Transform3D = components.Transform3D;
+    _ = try app.world.spawnWith(.{ Transform3D.at(10, 0, 0), components.Camera3D{} });
+    const left = try app.world.spawnWith(.{ Transform3D.at(6, 0, 0), AudioPlayer{ .clip = clip, .autoplay = true }, audio.AudioSpatial3D{} });
+    _ = try app.step();
+    _ = try app.step();
+    try testing.expectApproxEqAbs(@as(f32, -1), app.audio.voices.get(left).?.pan, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0.25), app.audio.voices.get(left).?.gain, 0.001);
 }
 
 test "a scene writes a player's clip as its file, and reads it back" {

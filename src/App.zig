@@ -121,6 +121,7 @@ const cameras = @import("render/cameras.zig");
 const drawn_corners = @import("render/drawn_corners.zig");
 const drawing = @import("render/drawing.zig");
 const particle_emitters = @import("render/particles.zig");
+const particles_3d = @import("render/particles3d.zig");
 const lights = @import("render/lights.zig");
 const shading = @import("render/shaders.zig");
 const view_textures = @import("render/view_textures.zig");
@@ -405,6 +406,8 @@ views: view_textures.Views = .{},
 drawings: drawing.Drawings = .{},
 /// Each `Particles2D`'s particles: see `render/particles.zig`.
 particles: particle_emitters.Particles = .{},
+/// Each `Particles3D`'s particles: see `render/particles3d.zig`.
+particles3d: particles_3d.Emitters = .{},
 /// Every mesh read or made, and the meshes primitives come to: see
 /// `render/mesh.zig` and `addMesh`.
 meshes: mesh_table.Meshes = .{},
@@ -588,7 +591,7 @@ const entity_tables = .{
     .current_scene,    .tile_chunks, .bodies,             .areas,
     .picking,          .audio,       .control_tree,       .poses,
     .bodies3d,         .areas3d,     .slide_collisions3d, .picking3d,
-    .navigation,
+    .navigation,       .particles3d,
 };
 
 /// The engine's own components: what every scene can hold from the start.
@@ -609,6 +612,11 @@ pub const engine_components = .{
     components3d.SpotLight3D,
     components3d.Environment,
     components3d.LightmapGI,
+    components3d.FogVolume,
+    components3d.World3D,
+    components3d.Sprite3D,
+    components3d.Label3D,
+    particles_3d.Particles3D,
     skeleton_table.Skeleton3D,
     skeleton_table.BoneAttachment3D,
     components.RigidBody2D,
@@ -635,6 +643,8 @@ pub const engine_components = .{
     sound.AudioPlayer,
     sound.AudioSpatial2D,
     sound.AudioListener2D,
+    sound.AudioSpatial3D,
+    sound.AudioListener3D,
     tweening.Tween,
     animation.AnimationPlayer,
     sprite_animation.AnimatedSprite2D,
@@ -963,6 +973,7 @@ pub fn destroy(self: *App) void {
     self.slide_collisions.deinit(gpa);
     self.drawings.deinit(gpa);
     self.particles.deinit(gpa);
+    self.particles3d.deinit(gpa);
     self.inherited.deinit(gpa);
     self.instances.deinit(gpa);
     self.current_scene.deinit(gpa);
@@ -3521,25 +3532,125 @@ pub fn queueRedraw(self: *App, entity: ecs.Entity) DrawError!void {
 }
 
 // -------------------------------------------------------------------------
+// Debug shapes
+// -------------------------------------------------------------------------
+//
+// Lines, shapes and words a game draws to see what it does - a ray it cast,
+// where an enemy is headed - over the world, for one frame or `seconds`
+// long: `debug_3d` in the 3D world, hidden behind what is in front of them,
+// and `debug` in the 2D one. Shown while `debug_visible`, which the
+// project's debug key flips. Drawn from `fixed`, a 2D shape lasts until the
+// next step; give a 3D one `seconds` to last as long.
+
+/// A 3D debug pen, `seconds` long.
+fn pen3D(self: *App, seconds: f32) debugdraw.Pen {
+    return self.debug_3d.with(.{ .seconds = @max(seconds, 0) });
+}
+
+/// A 2D debug pen in the world, `seconds` long.
+fn pen2D(self: *App, seconds: f32) debugdraw.Pen {
+    return self.debug.with(.{ .seconds = @max(seconds, 0) });
+}
+
+/// The engine's colour as a debug shape's: four bytes.
+fn debugColorOf(c: Color) debugdraw.Color {
+    const byte = struct {
+        fn of(v: f32) u8 {
+            return @intFromFloat(@round(std.math.clamp(if (std.math.isNan(v)) 0 else v, 0, 1) * 255));
+        }
+    }.of;
+    return .{ .r = byte(c.r), .g = byte(c.g), .b = byte(c.b), .a = byte(c.a) };
+}
+
+/// A line in the 3D world, from `from` to `to`.
+pub fn debugLine3D(self: *App, from: math.Vec3, to: math.Vec3, color: Color, seconds: f32) void {
+    self.pen3D(seconds).line(from, to, debugColorOf(color));
+}
+
+/// An arrow in the 3D world, its head at `to`: a ray, a velocity.
+pub fn debugArrow3D(self: *App, from: math.Vec3, to: math.Vec3, color: Color, seconds: f32) void {
+    self.pen3D(seconds).arrow(from, to, debugColorOf(color));
+}
+
+/// A mark in the 3D world: three lines through `at`, `size` long.
+pub fn debugPoint3D(self: *App, at: math.Vec3, size: f32, color: Color, seconds: f32) void {
+    self.pen3D(seconds).cross(at, size, debugColorOf(color));
+}
+
+/// A ball's outline in the 3D world: three circles round `center`.
+pub fn debugSphere3D(self: *App, center: math.Vec3, radius: f32, color: Color, seconds: f32) void {
+    self.pen3D(seconds).sphere(center, radius, debugColorOf(color));
+}
+
+/// A box's edges in the 3D world, `size` big round `center`, along the
+/// world's axes.
+pub fn debugBox3D(self: *App, center: math.Vec3, size: math.Vec3, color: Color, seconds: f32) void {
+    const half = size.scale(0.5);
+    self.pen3D(seconds).box(.{ .min = center.sub(half), .max = center.add(half) }, debugColorOf(color));
+}
+
+/// An entity's own axes where it is in the 3D world, `length` long: `x`
+/// red, `y` green, `z` blue. Nothing for one with no `Transform3D`.
+pub fn debugAxes3D(self: *App, entity: ecs.Entity, length: f32, seconds: f32) void {
+    const placed = self.worldTransform3D(entity) orelse return;
+    self.pen3D(seconds).axes(placed.matrix(), length);
+}
+
+/// Words at a point of the 3D world, the same size however far away.
+pub fn debugText3D(self: *App, at: math.Vec3, text: []const u8, color: Color, seconds: f32) void {
+    self.pen3D(seconds).text(at, text, debugColorOf(color));
+}
+
+/// A line in the 2D world, from `from` to `to`.
+pub fn debugLine(self: *App, from: math.Vec2, to: math.Vec2, color: Color, seconds: f32) void {
+    self.pen2D(seconds).line2d(from, to, debugColorOf(color));
+}
+
+/// An arrow in the 2D world, its head at `to`.
+pub fn debugArrow(self: *App, from: math.Vec2, to: math.Vec2, color: Color, seconds: f32) void {
+    self.pen2D(seconds).arrow2d(from, to, debugColorOf(color));
+}
+
+/// A circle's edge in the 2D world.
+pub fn debugCircle(self: *App, center: math.Vec2, radius: f32, color: Color, seconds: f32) void {
+    self.pen2D(seconds).circle2d(center, radius, debugColorOf(color));
+}
+
+/// A box's edges in the 2D world, from `position`, `size` big.
+pub fn debugRect(self: *App, position: math.Vec2, size: math.Vec2, color: Color, seconds: f32) void {
+    self.pen2D(seconds).rect2d(position, size, debugColorOf(color));
+}
+
+/// Words at a point of the 2D world, the same size however the camera is
+/// zoomed.
+pub fn debugText(self: *App, at: math.Vec2, text: []const u8, color: Color, seconds: f32) void {
+    self.pen2D(seconds).text2d(at, text, debugColorOf(color));
+}
+
+// -------------------------------------------------------------------------
 // Particles
 // -------------------------------------------------------------------------
 //
 // See `render/particles.zig`.
 
 /// Start an emitter's cycle again from its beginning, every particle gone,
-/// and emitting: a one-shot's burst again. See `render/particles.zig`.
+/// and emitting: a one-shot's burst again. A `Particles2D`'s or a
+/// `Particles3D`'s. See `render/particles.zig`.
 pub fn restartParticles(self: *App, emitter: ecs.Entity) particle_emitters.Error!void {
+    if (self.world.has(emitter, particles_3d.Particles3D)) return particles_3d.restart(self, emitter);
     try particle_emitters.restart(self, emitter);
 }
 
 /// `count` particles let go of at once, over and above an emitter's cycle:
 /// the sparks of a hit.
 pub fn emitParticles(self: *App, emitter: ecs.Entity, count: u32) particle_emitters.Error!void {
+    if (self.world.has(emitter, particles_3d.Particles3D)) return particles_3d.burst(self, emitter, count);
     try particle_emitters.burst(self, emitter, count);
 }
 
 /// How many of an emitter's particles are alive now.
 pub fn particleCount(self: *App, emitter: ecs.Entity) u32 {
+    if (self.particles3d.get(emitter)) |held| return @intCast(held.aliveCount());
     const held = self.particles.get(emitter) orelse return 0;
     return @intCast(held.aliveCount());
 }
@@ -6177,6 +6288,18 @@ pub const reflect_methods = .{
     .drawText = .{ attr.Params{ .names = &.{ "entity", "text", "position", "color", "size", "font" } }, attr.defaults(.{ Color.white, @as(f32, 16), Assets.FontHandle.none }) },
     .clearDrawing = .{attr.Params{ .names = &.{"entity"} }},
     .queueRedraw = .{attr.Params{ .names = &.{"entity"} }},
+    .debugLine3D = .{ attr.Params{ .names = &.{ "from", "to", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
+    .debugArrow3D = .{ attr.Params{ .names = &.{ "from", "to", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
+    .debugPoint3D = .{ attr.Params{ .names = &.{ "at", "size", "color", "seconds" } }, attr.defaults(.{ @as(f32, 0.25), Color.white, @as(f32, 0) }) },
+    .debugSphere3D = .{ attr.Params{ .names = &.{ "center", "radius", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
+    .debugBox3D = .{ attr.Params{ .names = &.{ "center", "size", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
+    .debugAxes3D = .{ attr.Params{ .names = &.{ "entity", "length", "seconds" } }, attr.defaults(.{ @as(f32, 1), @as(f32, 0) }) },
+    .debugText3D = .{ attr.Params{ .names = &.{ "at", "text", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
+    .debugLine = .{ attr.Params{ .names = &.{ "from", "to", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
+    .debugArrow = .{ attr.Params{ .names = &.{ "from", "to", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
+    .debugCircle = .{ attr.Params{ .names = &.{ "center", "radius", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
+    .debugRect = .{ attr.Params{ .names = &.{ "position", "size", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
+    .debugText = .{ attr.Params{ .names = &.{ "at", "text", "color", "seconds" } }, attr.defaults(.{ Color.white, @as(f32, 0) }) },
     // Particles
     .restartParticles = .{attr.Params{ .names = &.{"emitter"} }},
     .emitParticles = .{attr.Params{ .names = &.{ "emitter", "count" } }},

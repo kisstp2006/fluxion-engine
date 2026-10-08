@@ -29,6 +29,12 @@
 //! `current`, or with none the middle of what the camera shows - and panned
 //! to the side it is on.
 //!
+//! **In the 3D world**, with an `AudioSpatial3D` beside it and a
+//! `Transform3D`, the same in metres: full within `unit_size`, falling off
+//! as its `falloff` says, silent past `max_distance` - heard from the
+//! `AudioListener3D` that is `current`, or with none the current
+//! `Camera3D`, and panned by how far to the listener's right or left it is.
+//!
 //! **Buses** are the project's `audio.buses`: each with its volume, muted or
 //! not, and sending into another; `Master` is always there, and everything
 //! ends in it. A game turns them up and down with `setBusVolumeDb`, from Zig
@@ -56,6 +62,7 @@ const fixed_text = @import("../reflect/fixed_text.zig");
 
 const Entity = ecs.Entity;
 const Vec2 = math.Vec2;
+const Vec3 = math.Vec3;
 const log = std.log.scoped(.fluxion_engine);
 
 /// A clip read: see `Audio`. What a player names its sound by.
@@ -217,6 +224,58 @@ pub const AudioListener2D = extern struct {
     current: bool = true,
 
     pub const reflect_name = "AudioListener2D";
+};
+
+/// Beside an `AudioPlayer` and a `Transform3D`: the player is quieter the
+/// farther it is from the listener, and panned to the side it is on - a
+/// footstep down the corridor, a fan in the next room.
+pub const AudioSpatial3D = extern struct {
+    /// Within this many metres it is heard at its own volume.
+    unit_size: f32 = 1,
+    /// Past this many metres it is not heard at all.
+    max_distance: f32 = 30,
+    /// How it falls off past `unit_size`: as one over the distance, as one
+    /// over its square - faster, as sound in the open does - or evenly to
+    /// nothing at `max_distance`.
+    falloff: Falloff = .inverse,
+    /// How far to the side it is panned, from none to all the way.
+    panning: f32 = 1,
+
+    pub const Falloff = enum(u8) { inverse, inverse_square, linear };
+
+    pub const reflect_name = "AudioSpatial3D";
+    pub const reflect_fields = .{
+        .unit_size = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0.01, .max = 1000 } },
+        .max_distance = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0.01, .max = 100000 } },
+        .panning = .{attr.Range{ .min = 0, .max = 1 }},
+    };
+
+    /// How loud it is heard `distance` metres away, from nought to one.
+    pub fn gainAt(self: AudioSpatial3D, distance: f32) f32 {
+        const reach = @max(self.max_distance, 0.01);
+        if (!(distance < reach)) return 0;
+        const unit = std.math.clamp(self.unit_size, 0.01, reach);
+        const near = @max(distance, unit);
+        const gain = switch (self.falloff) {
+            .inverse => unit / near,
+            .inverse_square => (unit / near) * (unit / near),
+            .linear => 1 - (near - unit) / @max(reach - unit, 0.01),
+        };
+        // The last tenth of the way fades to nothing, so it does not stop
+        // all at once at the edge.
+        const edge = std.math.clamp((reach - distance) / (reach * 0.1), 0, 1);
+        return std.math.clamp(gain, 0, 1) * edge;
+    }
+};
+
+/// Where the sounds of the 3D world are heard from, beside a `Transform3D`:
+/// the first found that is `current`. With none, the current `Camera3D`.
+pub const AudioListener3D = extern struct {
+    /// Whether it is the one the sounds are heard from: the first found that
+    /// is.
+    current: bool = true,
+
+    pub const reflect_name = "AudioListener3D";
 };
 
 // -------------------------------------------------------------------------
@@ -570,7 +629,7 @@ pub const Audio = struct {
     pub fn update(self: *Audio, app: *App) !void {
         if (self.silent) try self.mixSilently(app.time.unscaled_delta);
         const flowing = app.time.delta > 0;
-        const listener = listenerOf(app);
+        const listener: Listener = .{ .flat = listenerOf(app), .ear = earOf(app) };
         self.ended.clearRetainingCapacity();
 
         var it = ecs.Query(.{AudioPlayer}).over(&app.world) catch |err| switch (err) {
@@ -584,7 +643,7 @@ pub const Audio = struct {
         for (self.ended.items) |e| try app.emit(e, AudioPlayer, .finished, .{});
     }
 
-    fn hear(self: *Audio, app: *App, e: Entity, player: *AudioPlayer, flowing: bool, listener: Vec2) !void {
+    fn hear(self: *Audio, app: *App, e: Entity, player: *AudioPlayer, flowing: bool, listener: Listener) !void {
         // A clip let go of, or another put in its place, stops the sound.
         if (self.voices.get(e)) |playing| {
             if (self.get(playing.clip) == null or !playing.clip.eql(player.clip)) {
@@ -673,7 +732,7 @@ pub const Audio = struct {
         }
     }
 
-    fn start(self: *Audio, app: *App, e: Entity, player: *AudioPlayer, from: f32, listener: Vec2) !void {
+    fn start(self: *Audio, app: *App, e: Entity, player: *AudioPlayer, from: f32, listener: Listener) !void {
         self.stopOf(e);
         const held_clip = self.get(player.clip) orelse {
             player.playing = false;
@@ -759,19 +818,69 @@ fn speedOf(player: *const AudioPlayer) f32 {
 
 const Heard = struct { gain: f32, pan: f32 };
 
-/// How loud and how far to the side a player is heard, its `AudioSpatial2D`
-/// counted.
-fn heardAs(app: *App, e: Entity, player: *const AudioPlayer, listener: Vec2) Heard {
+/// Where the world is heard from: in 2D, and in 3D where there is
+/// somewhere to hear it from.
+const Listener = struct {
+    flat: Vec2,
+    ear: ?Ear,
+};
+
+/// Where the 3D world is heard from, and which way is right there.
+pub const Ear = struct {
+    position: Vec3,
+    right: Vec3,
+};
+
+/// How loud and how far to the side a player is heard, its `AudioSpatial3D`
+/// or `AudioSpatial2D` counted.
+fn heardAs(app: *App, e: Entity, player: *const AudioPlayer, listener: Listener) Heard {
     var heard: Heard = .{ .gain = dbToLinear(player.volume_db), .pan = 0 };
+    if (app.world.getConst(e, AudioSpatial3D)) |spatial| {
+        const ear = listener.ear orelse return heard;
+        const at = app.globalPosition3D(e) orelse return heard;
+        const spread = spatialAt(spatial.*, ear, at);
+        heard.gain *= spread.gain;
+        heard.pan = spread.pan;
+        return heard;
+    }
     const spatial = app.world.getConst(e, AudioSpatial2D) orelse return heard;
     const at = app.globalPosition(e) orelse return heard;
     const reach = @max(spatial.max_distance, 1);
-    const dx = at.x - listener.x;
-    const dy = at.y - listener.y;
+    const dx = at.x - listener.flat.x;
+    const dy = at.y - listener.flat.y;
     const near = std.math.clamp(1 - @sqrt(dx * dx + dy * dy) / reach, 0, 1);
     heard.gain *= std.math.pow(f32, near, @max(spatial.attenuation, 0.01));
     heard.pan = std.math.clamp(dx / (reach * 0.5), -1, 1) * std.math.clamp(spatial.panning, 0, 1);
     return heard;
+}
+
+/// How loud, from nought to one, and how far to the side a sound at `at`
+/// is heard from `ear`.
+pub fn spatialAt(spatial: AudioSpatial3D, ear: Ear, at: Vec3) Heard {
+    const offset = at.sub(ear.position);
+    const distance = offset.len();
+    const side = if (distance > 1e-4) std.math.clamp(offset.dot(ear.right) / distance, -1, 1) else 0;
+    return .{ .gain = spatial.gainAt(distance), .pan = side * std.math.clamp(spatial.panning, 0, 1) };
+}
+
+/// Where the 3D world is heard from: the current `AudioListener3D`, or the
+/// current `Camera3D`; null for neither.
+pub fn earOf(app: *App) ?Ear {
+    var it = ecs.Query(.{AudioListener3D}).over(&app.world) catch return cameraEar(app);
+    while (it.next()) |chunk| {
+        for (chunk.entities, chunk.slice(AudioListener3D)) |e, listener| {
+            if (!listener.current) continue;
+            const placed = app.worldTransform3D(e) orelse continue;
+            return .{ .position = placed.position, .right = placed.right() };
+        }
+    }
+    return cameraEar(app);
+}
+
+fn cameraEar(app: *App) ?Ear {
+    const camera = app.currentCamera3D() orelse return null;
+    const placed = app.worldTransform3D(camera) orelse return null;
+    return .{ .position = placed.position, .right = placed.right() };
 }
 
 /// Where the world is heard from: the current `AudioListener2D`, or the

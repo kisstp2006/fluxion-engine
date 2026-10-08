@@ -31,6 +31,7 @@ const components = @import("../scene/components.zig");
 const hierarchy = @import("../scene/hierarchy.zig");
 const View = @import("view.zig").View;
 const View3D = @import("view3d.zig").View3D;
+const worlds3d = @import("worlds3d.zig");
 const Camera3D = @import("render3d_components.zig").Camera3D;
 const Transform3D = @import("../scene/transform3d.zig").Transform3D;
 
@@ -99,6 +100,7 @@ pub fn drawAll(app: *App) !void {
             const height = @max(view.height, 1);
             var through: View3D = .of(camera, placed, @floatFromInt(width), @floatFromInt(height));
             through.render_view = entity;
+            through.world = worlds3d.worldOf(app, entity);
             try app.renderer3d.draw(app, .{ .texture = gpu }, width, height, through, view.clear_color, .{ .antialias = true });
         }
     }

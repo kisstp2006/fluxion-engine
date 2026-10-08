@@ -26,6 +26,7 @@ const Environment = components.Environment;
 const RenderView = components.RenderView;
 const renderer3d = @import("renderer3d.zig");
 const helpers = @import("../test_helpers.zig");
+const Assets = @import("../assets/assets.zig");
 const image = @import("fluxion_image");
 
 fn headless() !*App {
@@ -461,4 +462,124 @@ test "a surface's pictures are read as its material says: smoothly, texel by tex
     app.materialOf(material).?.texture_filter = .texture;
     _ = try app.step();
     try testing.expect(app.renderer3d.items.items[0].sampler.eql(app.assets.mipSamplerFor(.nearest, .repeat)));
+}
+
+test "a World3D is a world of its own: seen by a camera in it, lit by its own lights, and by no other camera" {
+    const app = try headless();
+    defer app.destroy();
+    const World3D = components.World3D;
+    const Parent = components.Parent;
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 2, 0), PointLight3D{} });
+    // The arcade's world: two boxes, a lamp and a camera drawing a picture.
+    const arcade = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), World3D{} });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0.5, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Parent.of(arcade) });
+    _ = try app.world.spawnWith(.{ Transform3D.at(-0.5, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Parent.of(arcade) });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 2, 1), PointLight3D{}, Parent.of(arcade) });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 2, -1), PointLight3D{}, Parent.of(arcade) });
+    var eye: Transform3D = .at(0, 0, 5);
+    eye.lookAt(.zero, .unit_y);
+    const screen_in_game = try app.world.spawnWith(.{ eye, Camera3D{ .current = true }, RenderView{ .width = 16, .height = 16 }, Parent.of(arcade) });
+
+    // The render view draws first, then the screen: the last draw is the
+    // screen's, which sees the main world alone.
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.drawn);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.lamps_kept);
+    try testing.expect(app.views.textureOf(screen_in_game) != null);
+    // A current camera in the arcade is not the screen's.
+    try testing.expect(!app.currentCamera3D().?.eql(screen_in_game));
+
+    // Its own view sees its own world.
+    var through = app.cameraView3D(screen_in_game).?;
+    through.world = arcade;
+    const texture = try app.device.createTexture(.{ .width = 16, .height = 16, .usage = .{ .sampled = true, .render_target = true }, .label = "test" });
+    defer app.device.destroyTexture(texture);
+    try app.renderer3d.draw(app, .{ .texture = texture }, 16, 16, through, .black, .{});
+    try testing.expectEqual(@as(u32, 2), app.renderer3d.drawn);
+    try testing.expectEqual(@as(u32, 2), app.renderer3d.lamps_kept);
+
+    // An editor sees them all; turned off, the arcade is the main world's.
+    try app.drawWorld3D(texture, through, .{});
+    try testing.expectEqual(@as(u32, 3), app.renderer3d.drawn);
+    app.world.get(arcade, World3D).?.enabled = false;
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 3), app.renderer3d.drawn);
+}
+
+test "the fog volumes a camera sees are kept, nearest first, eight at most, and those of another world are not" {
+    const app = try headless();
+    defer app.destroy();
+    const FogVolume = components.FogVolume;
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    for (0..10) |i| _ = try app.world.spawnWith(.{ Transform3D.at(@floatFromInt(i), 0, 0), FogVolume{} });
+    // Behind the camera, and with no density: not walked through.
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 40), FogVolume{} });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, -2), FogVolume{ .density = 0 } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 8), app.renderer3d.fog_volumes_kept);
+
+    // Moved into a world of their own: the camera sees none.
+    const arcade = try app.world.spawnWith(.{ Transform3D{}, components.World3D{} });
+    var fogs: std.ArrayList(@import("fluxion_ecs").Entity) = .empty;
+    defer fogs.deinit(testing.allocator);
+    var it = try @import("fluxion_ecs").Query(.{FogVolume}).over(&app.world);
+    while (it.next()) |chunk| try fogs.appendSlice(testing.allocator, chunk.entities);
+    for (fogs.items) |fog| try app.setParent(fog, arcade, false);
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), app.renderer3d.fog_volumes_kept);
+}
+
+test "sprites, labels and particles are drawn as quads in the 3D pass, those of another world and those behind the camera left out" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 64, .height = 64, .io = threaded.io() });
+    defer app.destroy();
+    const Sprite3D = components.Sprite3D;
+    const Label3D = components.Label3D;
+    const Particles3D = components.Particles3D;
+    _ = try looking(app);
+    // A sign: its picture, and two words over it - in a font of its own
+    // atlas, which they fill and which is made room in.
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), Sprite3D{ .texture = app.assets.white, .pixel_size = 1 } });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, -40), Sprite3D{ .texture = app.assets.white } });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 9), Sprite3D{ .texture = app.assets.white } });
+    const loaded = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 64 });
+    const sign = try app.world.spawnWith(.{ Transform3D.at(0, 1, 0), Label3D{ .billboard = .enabled, .size = 48 } });
+    try app.setText(sign, Label3D, "text", "Exit");
+    // A burst of eight sparks.
+    const sparks = try app.world.spawnWith(.{ Transform3D.at(0, -1, 0), Particles3D{ .amount = 8, .explosiveness = 1, .one_shot = true, .lifetime = 0.5, .gravity = .zero, .blend = .additive } });
+
+    app.time.source = .{ .fixed = 1.0 / 60.0 };
+    _ = try app.step();
+    const flat = &app.renderer3d.billboards.?;
+    const letters: u32 = if (loaded) |_| 4 else |_| 0;
+    // The sign's picture, its letters and the sparks; the far one is there,
+    // the one behind the camera is not.
+    try testing.expectEqual(@as(u32, 2 + letters + 8), flat.quads);
+    try testing.expectEqual(@as(usize, 8), app.particleCount(sparks));
+
+    // A burst over, `finished` said and the sparks gone.
+    for (0..40) |_| _ = try app.step();
+    try testing.expect(!app.world.get(sparks, Particles3D).?.emitting);
+    try testing.expectEqual(@as(u32, 2 + letters), flat.quads);
+    try app.restartParticles(sparks);
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 8), app.particleCount(sparks));
+    try app.emitParticles(sparks, 5);
+    try testing.expectEqual(@as(usize, 13), app.particleCount(sparks));
+
+    // In a world of their own, the screen's camera sees none of them.
+    const arcade = try app.world.spawnWith(.{ Transform3D{}, components.World3D{} });
+    var flats: std.ArrayList(@import("fluxion_ecs").Entity) = .empty;
+    defer flats.deinit(testing.allocator);
+    inline for (.{ Sprite3D, Label3D, Particles3D }) |C| {
+        var it = try @import("fluxion_ecs").Query(.{C}).over(&app.world);
+        while (it.next()) |chunk| try flats.appendSlice(testing.allocator, chunk.entities);
+    }
+    for (flats.items) |entity| try app.setParent(entity, arcade, true);
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 0), flat.quads);
 }

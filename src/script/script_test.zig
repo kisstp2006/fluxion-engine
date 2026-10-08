@@ -2981,3 +2981,36 @@ test "the project says how strict the compiler is with an error nothing handles:
         try testing.expectEqual(@as(u32, 1), a.diagnostics.errors);
     }
 }
+
+test "a script draws debug shapes in the 3D world and the 2D one, for a frame or as long as it says" {
+    const app = try scripted(.{});
+    defer app.destroy();
+    const file = try app.addScript("marks.flux",
+        \\struct Marks {
+        \\    fn ready(self) {
+        \\        app.debugLine3D(vec3(0, 0, 0), vec3(1, 0, 0));
+        \\        app.debugArrow3D(vec3(0, 0, 0), vec3(0, 2, 0), color(1, 0, 0), 0.5);
+        \\        app.debugSphere3D(vec3(0, 1, 0), 0.5, color("royalblue"));
+        \\        app.debugBox3D(vec3(0, 0, 0), vec3(2, 1, 2));
+        \\        app.debugPoint3D(vec3(3, 0, 0));
+        \\        app.debugText3D(vec3(0, 2, 0), "here");
+        \\        self.entity.debugAxes3D(2.0);
+        \\        app.debugLine(vec2(0, 0), vec2(10, 10), color(0, 1, 0));
+        \\        app.debugCircle(vec2(5, 5), 3.0);
+        \\        app.debugRect(vec2(0, 0), vec2(4, 4));
+        \\        app.debugArrow(vec2(0, 0), vec2(0, 8));
+        \\        app.debugText(vec2(0, 0), "there");
+        \\    }
+        \\}
+    );
+    _ = try app.world.spawnWith(.{ components.Transform3D{}, Script.of(file) });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 0), app.scripts.?.failures);
+    try testing.expect(!app.debug_3d_frame.isEmpty());
+    try testing.expect(!app.debug_frame.isEmpty());
+    // The arrow lasts half a second; the rest, the frame.
+    app.debug_3d_frame.advance(0.1);
+    try testing.expect(!app.debug_3d_frame.isEmpty());
+    app.debug_3d_frame.advance(0.5);
+    try testing.expect(app.debug_3d_frame.isEmpty());
+}

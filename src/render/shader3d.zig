@@ -63,6 +63,7 @@ const shader = @import("fluxion_shader");
 const material = @import("material.zig");
 const mesh = @import("mesh.zig");
 const shadows3d = @import("shadows3d.zig");
+const fog_volumes = @import("fog_volumes.zig");
 const Material3DData = @import("render3d_components.zig").Material3DData;
 
 const log = std.log.scoped(.fluxion_engine);
@@ -194,7 +195,9 @@ pub const Probes = extern struct {
     energy: [4]f32,
 };
 
-const engine_part =
+const engine_part = engine_head ++ fog_volumes.shader_part ++ engine_tail;
+
+const engine_head =
     \\// The engine's part: what a 3D shader's file reads, and the vertex stage.
     \\
     \\attribute vec3 VERTEX_POSITION : 0;
@@ -578,8 +581,11 @@ const engine_part =
     \\    return AMBIENT.rgb;
     \\}
     \\
+;
+
+const engine_tail =
     \\// A surface lit: by the suns, its lamps and the light from everywhere,
-    \\// with what it gives off, in the fog.
+    \\// with what it gives off, in the fog and the fog volumes.
     \\vec3 lit(vec3 albedo, float metallic, float roughness, vec3 emission, vec3 normal_map, float ao,
     \\        vec3 p, vec3 normal, vec4 tangent, vec4 lamps_0, vec4 lamps_1, vec4 gi_at) {
     \\    vec3 v = normalize(mix(CAMERA_POSITION.xyz - p, -CAMERA_FORWARD.xyz, CAMERA_FORWARD.w));
@@ -608,7 +614,7 @@ const engine_part =
     \\    float far = length(p - CAMERA_POSITION.xyz);
     \\    float thick = FOG_COLOR.w + max(FOG_HEIGHT.x - p.y, 0.0) * FOG_HEIGHT.y;
     \\    float fog = (1.0 - exp(-thick * far)) * FOG_HEIGHT.z;
-    \\    return clamp(mix(color, FOG_COLOR.rgb, clamp(fog, 0.0, 1.0)), vec3(0.0), vec3(1024.0));
+    \\    return clamp(fogVolumes(mix(color, FOG_COLOR.rgb, clamp(fog, 0.0, 1.0)), p), vec3(0.0), vec3(1024.0));
     \\}
     \\
     \\vertex {
@@ -1051,7 +1057,7 @@ fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, sk
 /// block there, which the device binds nothing to.
 fn blockNames(module: *shader.Module) ![]const [:0]const u8 {
     const arena = module.arena.allocator();
-    const names = try arena.alloc([:0]const u8, @max(@max(shadows_slot, probes_slot), skin_slot) + 1);
+    const names = try arena.alloc([:0]const u8, @max(@max(@max(shadows_slot, probes_slot), skin_slot), fog_volumes.slot) + 1);
     @memset(names, "");
     for (module.blocks) |block| names[block.slot] = try arena.dupeZ(u8, block.name);
     return names;
@@ -1153,7 +1159,7 @@ fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []con
     // One block of its own, at its slot, and no textures but the engine's.
     var params: ?shader.Block = null;
     for (module.blocks) |block| {
-        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot or (skinned and block.slot == skin_slot)) continue;
+        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot or block.slot == fog_volumes.slot or (skinned and block.slot == skin_slot)) continue;
         if (block.slot != params_slot or params != null) {
             problems.print("a 3D shader's own numbers are one uniform block, at slot {d}: `{s}` is at {d}\n", .{ params_slot, block.name, block.slot }) catch {};
             return error.ShaderFailed;

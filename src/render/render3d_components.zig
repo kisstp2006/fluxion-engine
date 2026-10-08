@@ -35,6 +35,7 @@ const LightmapHandle = @import("lightmaps.zig").LightmapHandle;
 const MaterialHandle = @import("materials.zig").MaterialHandle;
 const shaders = @import("shaders.zig");
 const Entity = @import("fluxion_ecs").Entity;
+const Region = @import("render_components.zig").Region;
 
 /// A mesh drawn where its `Transform3D` is: the one `mesh` names, or the
 /// shape a `PrimitiveMesh3D` beside it says. How each of its surfaces looks
@@ -524,6 +525,190 @@ pub const LightmapGI = extern struct {
         .denoise = .{attr.Doc{ .text = "Whether what is baked is smoothed where few rays leave it grainy" }},
         .probe_spacing = .{ attr.Range{ .min = 0.25, .max = 64 }, attr.Doc{ .text = "How far apart the probes that light what moves are" } },
     };
+};
+
+/// A box - or a ball - of fog in the 3D world, beside a `Transform3D`: mist
+/// in a room, smoke down a corridor, haze over water. What is seen through
+/// it fades into its colour, more the more of it is in the way; its edges
+/// are soft, and with noise it hangs in clumps that drift with its wind.
+/// Only a surface is seen through it - the empty background is not - and
+/// the eight nearest the camera are drawn. See `render/fog_volumes.zig`.
+pub const FogVolume = extern struct {
+    /// Its whole size along its own axes, in metres, before its transform's
+    /// scale.
+    size: math.Vec3 = .init(4, 2, 4),
+    /// A box, or a ball inside that box.
+    shape: Shape = .box,
+    /// How thick it is: how much of what is behind it a metre of it hides.
+    density: f32 = 0.5,
+    /// The fog's colour.
+    color: Color = .{ .r = 0.75, .g = 0.78, .b = 0.82, .a = 1 },
+    /// How far in from its sides it thickens to the whole of it, as a part of
+    /// its half size: nought for a hard edge.
+    edge_fade: f32 = 0.25,
+    /// How big its clumps are, in metres; nought for none.
+    noise_scale: f32 = 1.5,
+    /// How much it thins between its clumps: nought for even fog, one for
+    /// clumps with gaps between them.
+    noise_strength: f32 = 0,
+    /// Which way its clumps drift, and how fast, in metres a second.
+    wind: math.Vec3 = .zero,
+
+    pub const Shape = enum(u8) { box, ellipsoid };
+
+    pub const reflect_name = "FogVolume";
+    pub const reflect_fields = .{
+        .size = .{attr.Unit{ .text = "m" }},
+        .density = .{attr.Range{ .min = 0, .max = 16 }},
+        .edge_fade = .{attr.Range{ .min = 0, .max = 1 }},
+        .noise_scale = .{ attr.Group{ .name = "Noise" }, attr.Unit{ .text = "m" }, attr.Range{ .min = 0, .max = 100 } },
+        .noise_strength = .{attr.Range{ .min = 0, .max = 1 }},
+        .wind = .{attr.Unit{ .text = "m/s" }},
+    };
+};
+
+/// How a picture in the 3D world faces: turned as its entity is, always at
+/// the camera, or at the camera turning only about its up - a tree, a lamp
+/// post, what stands upright.
+pub const Billboard = enum(u8) { disabled, enabled, y_only };
+
+/// A picture in the 3D world, beside a `Transform3D`: a sign, a poster, a
+/// flat tree, a glow. Its texels are `pixel_size` metres each; its pivot
+/// sits on its transform. With a `ViewTexture` beside it, it shows what a
+/// `RenderView` draws - a monitor showing a security camera's picture. It
+/// is not lit, but it is in the fog; see-through, it is drawn with the
+/// other see-through surfaces, the furthest first. See
+/// `render/billboards.zig`.
+pub const Sprite3D = extern struct {
+    /// The picture it shows.
+    texture: assets.TextureHandle = .none,
+    /// A colour the picture is multiplied by.
+    tint: Color = .white,
+    /// Which part of the texture it shows, from nought to one each way.
+    region: Region = .full,
+    /// How many frames the region holds across, for a sheet of them.
+    frames_across: u16 = 1,
+    /// How many frames the region holds down.
+    frames_down: u16 = 1,
+    /// Which frame shows, counted across from the top left.
+    frame: u32 = 0,
+    /// How big one of its texels is in the world, in metres.
+    pixel_size: f32 = 0.01,
+    /// Which point of it sits on the transform across, from nought at its
+    /// left to one at its right: its middle by default.
+    pivot_x: f32 = 0.5,
+    /// Which point of it sits on the transform down, from nought at its top
+    /// to one at its bottom.
+    pivot_y: f32 = 0.5,
+    /// Mirrored left to right.
+    flip_h: bool = false,
+    /// Mirrored top to bottom.
+    flip_v: bool = false,
+    /// Whether it faces the camera, rather than the way it is turned.
+    billboard: Billboard = .disabled,
+    /// How it goes onto what is behind it: mixed by its alpha, added for a
+    /// glow, taken away, or multiplied.
+    blend: Blend = .alpha,
+    /// Texels whose alpha is below this are not drawn at all, and the rest
+    /// hide what is behind them as a solid surface does; nought draws every
+    /// texel see-through.
+    alpha_cut: f32 = 0,
+    /// Both its sides shown; off, only its front, which its `+z` faces.
+    double_sided: bool = true,
+    /// Drawn over everything, whatever is in front of it.
+    no_depth_test: bool = false,
+    /// The render layers it is on: a camera whose `cull_mask` has none of
+    /// them does not see it.
+    layers: u32 = 1,
+
+    pub const Blend = enum(u8) { alpha, additive, subtractive, multiply };
+
+    pub const reflect_name = "Sprite3D";
+    pub const reflect_fields = .{
+        .frames_across = .{ attr.Group{ .name = "Frames" }, attr.Range{ .min = 1, .max = 256 } },
+        .frames_down = .{attr.Range{ .min = 1, .max = 256 }},
+        .pixel_size = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0.0001, .max = 128 } },
+        .pivot_x = .{attr.Range{ .min = 0, .max = 1 }},
+        .pivot_y = .{attr.Range{ .min = 0, .max = 1 }},
+        .alpha_cut = .{ attr.Group{ .name = "Drawing" }, attr.Range{ .min = 0, .max = 1 } },
+        .layers = .{attr.Layers{ .names = .render_3d }},
+    };
+};
+
+/// Words in the 3D world, beside a `Transform3D`: a sign over a door, a
+/// name over a head, a number on a wall. Laid out as a `Text2D`'s are - its
+/// font, size, wrapping and outline - each of the font's pixels
+/// `pixel_size` metres; its pivot sits on its transform. Its words are the
+/// app's, as a label's are: see `component_texts.zig`. Not lit, but in the
+/// fog. See `render/billboards.zig`.
+pub const Label3D = extern struct {
+    /// The font it is set in: the first one loaded for none.
+    font: assets.FontHandle = .none,
+    /// How big its letters are drawn into the font's atlas, in pixels: more
+    /// is sharper close up.
+    size: f32 = 32,
+    /// How big one of those pixels is in the world, in metres.
+    pixel_size: f32 = 0.005,
+    /// The colour of the letters.
+    color: Color = .white,
+    /// How the lines line up with each other.
+    alignment: Alignment = .center,
+    /// Lines this many times the font's own height apart.
+    line_spacing: f32 = 1,
+    /// Lines broken between words to fit this many pixels; nought only
+    /// where the words break.
+    wrap_width: f32 = 0,
+    /// How far an outline reaches out from the letters, in the same pixels;
+    /// nought for none.
+    outline_size: f32 = 0,
+    /// The colour of the outline.
+    outline_color: Color = .black,
+    /// Whether `{color=red|...}`, `{b|...}` and the other tags are read.
+    markup: bool = false,
+    /// Which point of the words sits on the transform across, from nought
+    /// at their left to one at their right: their middle by default.
+    pivot_x: f32 = 0.5,
+    /// Which point of the words sits on the transform down, from nought at
+    /// their top to one at their bottom.
+    pivot_y: f32 = 0.5,
+    /// Whether it faces the camera, rather than the way it is turned.
+    billboard: Billboard = .disabled,
+    /// Both its sides shown; off, only its front, which its `+z` faces.
+    double_sided: bool = true,
+    /// Drawn over everything, whatever is in front of it.
+    no_depth_test: bool = false,
+    /// The render layers it is on: a camera whose `cull_mask` has none of
+    /// them does not see it.
+    layers: u32 = 1,
+
+    pub const Alignment = enum(u8) { left, center, right };
+
+    pub const reflect_name = "Label3D";
+    pub const reflect_attributes = .{attr.Text{ .name = "text", .multiline = true }};
+    pub const reflect_fields = .{
+        .size = .{ attr.Unit{ .text = "px" }, attr.Range{ .min = 1, .max = 256 } },
+        .pixel_size = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0.0001, .max = 16 } },
+        .wrap_width = .{attr.Unit{ .text = "px" }},
+        .outline_size = .{ attr.Group{ .name = "Outline" }, attr.Unit{ .text = "px" } },
+        .pivot_x = .{ attr.Group{ .name = "Placing" }, attr.Range{ .min = 0, .max = 1 } },
+        .pivot_y = .{attr.Range{ .min = 0, .max = 1 }},
+        .layers = .{attr.Layers{ .names = .render_3d }},
+    };
+};
+
+/// Everything under it is a 3D world of its own: a minigame on a screen in
+/// the game, a room seen through a window that is somewhere else. Only a
+/// `Camera3D` under it sees it - one with a `RenderView`, whose picture a
+/// sprite or a control shows - and only its own lights, `Environment` and
+/// fog light it; the screen's camera, and every camera outside it, does
+/// not see it. Its physics, its sounds and its scripts are the game's, as
+/// any entity's are.
+pub const World3D = extern struct {
+    /// Whether it is a world of its own; off, what is under it is in the
+    /// world round it.
+    enabled: bool = true,
+
+    pub const reflect_name = "World3D";
 };
 
 /// What surrounds the 3D world: the colour behind it, the light that comes

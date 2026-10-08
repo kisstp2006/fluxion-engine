@@ -40,6 +40,13 @@
 //! several samples a pixel, as many as the device has up to it - and its
 //! `screen_space_aa`.
 //!
+//! **Worlds.** A draw sees the world its camera is in: everything under a
+//! `World3D` is one of its own - its meshes, lights, environment and fog -
+//! and the rest is the main world. See `worlds3d.zig`.
+//!
+//! **Fog volumes.** The eight `FogVolume`s nearest the camera are walked
+//! through on the way to each pixel of a surface: see `fog_volumes.zig`.
+//!
 //! A surface's material is, first found: the material of a `Material3D`
 //! beside the `MeshInstance3D`, the surface's own, or plain. A material
 //! that names a `.shader3d` is drawn with it - see `shader3d.zig` - given
@@ -68,6 +75,9 @@ const shaders = @import("shaders.zig");
 const shadows3d = @import("shadows3d.zig");
 const UniformBlocks = @import("uniform_blocks.zig").UniformBlocks;
 const View3D = @import("view3d.zig").View3D;
+const fog_volumes = @import("fog_volumes.zig");
+const worlds3d = @import("worlds3d.zig");
+const billboards = @import("billboards.zig");
 
 const MeshInstance3D = components3d.MeshInstance3D;
 const MaterialHandle = @import("materials.zig").MaterialHandle;
@@ -373,6 +383,14 @@ pub const Renderer3D = struct {
     /// The meshes the last draw lit from the lightmap, and from the probes.
     gi_lightmapped: u32 = 0,
     gi_probed: u32 = 0,
+    /// The fog volumes the last draw walked through.
+    fog_volumes_kept: u32 = 0,
+    /// The fog volumes' block, and the world the draw sees.
+    fog: rhi.Buffer,
+    /// The sprites, labels and particles: see `billboards.zig`. Null where
+    /// nothing 3D is drawn.
+    billboards: ?billboards.Billboards = null,
+    worlds: worlds3d.Filter = .{ .asks = false, .world = .none },
 
     const initial_capacity = 64;
     /// Draws an atlas no light has needed is kept for.
@@ -397,6 +415,8 @@ pub const Renderer3D = struct {
         errdefer device.destroyBuffer(shadow_block);
         const probes = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(shader3d.Probes), .dynamic = true, .label = "3D probes" });
         errdefer device.destroyBuffer(probes);
+        const fog = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(fog_volumes.Block), .dynamic = true, .label = "3D fog volumes" });
+        errdefer device.destroyBuffer(fog);
         const lightmap_sampler = try device.createSampler(.{});
         errdefer device.destroySampler(lightmap_sampler);
         const atlas_format = atlasFormat(device);
@@ -422,6 +442,7 @@ pub const Renderer3D = struct {
             .flat = flat,
             .shadows = shadow_block,
             .probes = probes,
+            .fog = fog,
             .lightmap_sampler = lightmap_sampler,
             .atlas_format = atlas_format,
             .no_shadow = no_shadow,
@@ -441,6 +462,8 @@ pub const Renderer3D = struct {
         };
         errdefer self.plain.?.deinit(device);
         self.post = try .init(gpa, device, depth_format);
+        errdefer self.post.?.deinit(gpa);
+        self.billboards = try .init(gpa, device);
         return self;
     }
 
@@ -478,6 +501,7 @@ pub const Renderer3D = struct {
 
     pub fn deinit(self: *Renderer3D, gpa: Allocator) void {
         const device = self.device;
+        if (self.billboards) |*held| held.deinit(gpa);
         if (self.post) |*held| held.deinit(gpa);
         if (self.plain) |*held| held.deinit(device);
         self.blocks.deinit(gpa, device);
@@ -494,6 +518,7 @@ pub const Renderer3D = struct {
         device.destroyTexture(self.flat);
         device.destroyBuffer(self.shadows);
         device.destroyBuffer(self.probes);
+        device.destroyBuffer(self.fog);
         device.destroySampler(self.lightmap_sampler);
         if (self.atlas) |atlas| device.destroyTexture(atlas);
         if (self.shadow_cache) |*cache| cache.deinit(gpa);
@@ -557,18 +582,20 @@ pub const Renderer3D = struct {
         self.shadow_draws = 0;
         self.gi_lightmapped = 0;
         self.gi_probed = 0;
+        self.fog_volumes_kept = 0;
         if (width == 0 or height == 0) return;
         const gpa = app.gpa;
         const device = self.device;
         const clip = device.clip();
         const view_projection = view.matrix(clip);
+        self.worlds = .of(app, view);
 
         const depth_format = self.depth_format orelse {
             if (clear) |color| try clearOnly(device, into, color);
             return;
         };
         const post = &self.post.?;
-        const environment = environmentOf(app);
+        const environment = environmentIn(app, self.worlds);
         var background = clear;
         if (environment) |held| if (clear != null and held.background == .color) {
             background = held.background_color;
@@ -590,6 +617,11 @@ pub const Renderer3D = struct {
         try self.upload(gpa);
         try self.placeCookies(gpa);
         try self.uploadFrame(app, view, view_projection, environment, lighting);
+        const fog = try fog_volumes.gather(app, view, frustum, @floatCast(app.interface.seconds), self.worlds);
+        self.fog_volumes_kept = @intFromFloat(fog.count[0]);
+        try device.updateBuffer(self.fog, 0, std.mem.asBytes(&fog));
+        const flat = &self.billboards.?;
+        try flat.gather(app, view, frustum, self.worlds);
         try self.drawShadows(gpa);
         const shadow_map = if (self.shadow_views > 0) self.atlas.? else self.no_shadow;
 
@@ -607,12 +639,24 @@ pub const Renderer3D = struct {
             .depth = .{ .texture = targets.depth },
         });
         try list.setViewport(.{ .width = @floatFromInt(width), .height = @floatFromInt(height) });
+        const pass: billboards.Billboards.Pass = .{
+            .list = list,
+            .frame = self.frame,
+            .fog = self.fog,
+            .color_format = post.light_format,
+            .depth_format = depth_format,
+            .samples = samples,
+        };
         const items = self.items.items;
         var start: usize = 0;
         while (start < items.len) {
             var end = start + 1;
             while (end < items.len and Item.joins(items[start], items[end])) end += 1;
             var first = items[start];
+            // The pictures cut by their alpha after the solid surfaces, and
+            // the see-through ones among the see-through, the furthest
+            // first.
+            if (first.transparent) try flat.drawFurtherThan(pass, first.depth);
             // A shader whose pipeline the device refuses is drawn as the
             // engine's own, and is not asked again.
             const pipeline = first.compiled.pipelineOf(device, post.light_format, depth_format, samples, .of(first.way)) catch |err| blk: {
@@ -635,6 +679,7 @@ pub const Renderer3D = struct {
             try list.setTexture(shader3d.shadow_depth_slot, shadow_map, self.reading);
             try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
             try list.setUniformBuffer(shader3d.probes_slot, self.probes);
+            try list.setUniformBuffer(fog_volumes.slot, self.fog);
             try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
@@ -644,6 +689,7 @@ pub const Renderer3D = struct {
             self.draw_calls += 1;
             start = end;
         }
+        try flat.drawRest(pass);
         try list.endPass();
         try device.submit();
         self.drawn = @intCast(items.len);
@@ -722,6 +768,7 @@ pub const Renderer3D = struct {
         while (it.next()) |chunk| {
             for (chunk.slice(LightmapGI), chunk.entities) |gi, entity| {
                 if (gi.data.isNone()) continue;
+                if (!self.worlds.admits(app, entity)) continue;
                 if (!app.inherited.of(app.gpa, &app.world, entity).visible) continue;
                 const held = app.lightmaps.get(gi.data) orelse continue;
                 self.baked = held;
@@ -761,6 +808,7 @@ pub const Renderer3D = struct {
                 for (chunk.slice(PointLight3D), chunk.entities) |light, entity| {
                     // Baked whole: its light is in the lightmap.
                     if (light.bake == .all and self.baked != null) continue;
+                    if (!self.worlds.admits(app, entity)) continue;
                     const placed = placedLight(app, entity) orelse continue;
                     var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
                     lamp.entity = entity.toInt();
@@ -784,6 +832,7 @@ pub const Renderer3D = struct {
             while (it.next()) |chunk| {
                 for (chunk.slice(SpotLight3D), chunk.entities) |light, entity| {
                     if (light.bake == .all and self.baked != null) continue;
+                    if (!self.worlds.admits(app, entity)) continue;
                     const placed = placedLight(app, entity) orelse continue;
                     var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
                     lamp.entity = entity.toInt();
@@ -868,6 +917,7 @@ pub const Renderer3D = struct {
         while (it.next()) |chunk| {
             for (chunk.slice(Transform3D), chunk.slice(MeshInstance3D), chunk.entities) |local, instance, entity| {
                 if (instance.layers & view.cull_mask == 0) continue;
+                if (!self.worlds.admits(app, entity)) continue;
                 const looks = app.inherited.of(gpa, &app.world, entity);
                 if (!looks.visible) continue;
                 const kept: *mesh.Kept = if (app.world.get(entity, PrimitiveMesh3D)) |shape|
@@ -983,6 +1033,7 @@ pub const Renderer3D = struct {
             for (chunk.slice(DirectionalLight3D), chunk.entities) |light, entity| {
                 if (self.suns.items.len == shader3d.most_suns) return;
                 if (light.bake == .all and self.baked != null) continue;
+                if (!self.worlds.admits(app, entity)) continue;
                 const placed = placedLight(app, entity) orelse continue;
                 const toward = placed.back().tryNorm() orelse continue;
                 const c = linear(light.color);
@@ -1213,6 +1264,7 @@ pub const Renderer3D = struct {
             try list.setTexture(shader3d.shadow_depth_slot, self.no_shadow, self.reading);
             try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
             try list.setUniformBuffer(shader3d.probes_slot, self.probes);
+            try list.setUniformBuffer(fog_volumes.slot, self.fog);
             try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
             try list.setVertexBuffer(0, first.gpu.vertices, 0);
             try list.setVertexBuffer(1, self.instances, @intCast((first_instance + start) * @sizeOf(Instance)));
@@ -1654,10 +1706,16 @@ fn lightsMore(_: void, a: shadows3d.Lamp, b: shadows3d.Lamp) bool {
 
 /// The first visible `Environment`, if there is one.
 pub fn environmentOf(app: *App) ?Environment {
+    return environmentIn(app, .of(app, .{}));
+}
+
+/// The first visible `Environment` in the world `worlds` sees.
+pub fn environmentIn(app: *App, worlds: worlds3d.Filter) ?Environment {
     var it = ecs.Query(.{Environment}).over(&app.world) catch return null;
     while (it.next()) |chunk| {
         for (chunk.slice(Environment), chunk.entities) |held, entity| {
             if (!app.inherited.of(app.gpa, &app.world, entity).visible) continue;
+            if (!worlds.admits(app, entity)) continue;
             return held;
         }
     }

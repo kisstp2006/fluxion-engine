@@ -24,6 +24,7 @@ const Camera3D = @import("render3d_components.zig").Camera3D;
 const RenderView = @import("render_components.zig").RenderView;
 const Transform3D = @import("../scene/transform3d.zig").Transform3D;
 const hierarchy = @import("../scene/hierarchy.zig");
+const worlds3d = @import("worlds3d.zig");
 
 const Vec2 = math.Vec2;
 const Vec3 = math.Vec3;
@@ -51,6 +52,11 @@ pub const View3D = struct {
     cull_mask: u32 = 0xFFFF_FFFF,
     /// The `RenderView` this is drawn for, if it is one's.
     render_view: ecs.Entity = .none,
+    /// The `World3D` it sees, `.none` for the main world: the one its
+    /// camera is in.
+    world: ecs.Entity = .none,
+    /// Whether it sees every world at once: an editor's view of a scene.
+    every_world: bool = false,
 
     /// Through `camera`, from where `placed` - all parents applied - is.
     pub fn of(camera: Camera3D, placed: Transform3D, width: f32, height: f32) View3D {
@@ -186,14 +192,16 @@ pub const View3D = struct {
 };
 
 /// The camera the screen is seen through in 3D: of the cameras that draw no
-/// picture of their own, the one that is `current`, or with none any - or
-/// null when there is none.
+/// picture of their own and are in the main world, the one that is
+/// `current`, or with none any - or null when there is none.
 pub fn currentCamera(app: *App) ?ecs.Entity {
     var any: ?ecs.Entity = null;
+    const worlds = worlds3d.anyWorld(app);
     var it = ecs.Query(.{ Transform3D, Camera3D }).over(&app.world) catch return null;
     while (it.next()) |chunk| {
         for (chunk.slice(Camera3D), chunk.entities) |camera, entity| {
             if (app.world.has(entity, RenderView)) continue;
+            if (worlds and !worlds3d.worldOf(app, entity).isNone()) continue;
             if (camera.current) return entity;
             if (any == null) any = entity;
         }

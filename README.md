@@ -1011,6 +1011,15 @@ _ = app.setBusVolumeDb("Music", app.linearToDb(0.5));            // a settings s
   the farther it is from the listener, to silence at `max_distance`, and
   panned to its side. The listener is the `AudioListener2D` that is
   `current`, or the middle of what the camera shows.
+- **In the 3D world**, with an `AudioSpatial3D` beside it and a
+  `Transform3D`, in metres: full within `unit_size`, falling off past it as
+  one over the distance (`inverse`), over its square (`inverse_square`) or
+  evenly (`linear`), fading to silence over the last tenth of the way to
+  `max_distance`, and panned by how far to the listener's right or left it
+  is, as much as `panning` says. The listener is the `AudioListener3D` that
+  is `current`, or the current `Camera3D`: a footstep down the corridor is
+  heard from where the player looks. The sound card is told the volume and
+  the pan; `app.audio.voices` holds what each voice was told.
 - **Buses** are the project file's `audio.buses`: each with its volume in
   decibels, muted or not, and the bus it sends into; `Master` is always there
   and everything ends in it. `setBusVolumeDb`, `busVolumeDb`, `setBusMute`,
@@ -1435,6 +1444,55 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   the meshes and hidden where a mesh is in front of them - unless their
   style says `.depth = .always`, or the layer was drawn with several samples
   a pixel, whose depth they cannot be tested against: then they are over it.
+- **Pictures, words and particles in the 3D world** - `Sprite3D`, `Label3D`
+  and `Particles3D` - are quads made on the CPU each frame and drawn in the
+  same pass with a shader of their own: not lit, but in the environment's
+  fog and the fog volumes. Each is turned as its entity is, faces the
+  camera (`billboard = .enabled`), or faces it turning only about its up
+  (`.y_only`): a tree, a lamp post. What is cut by its alpha is drawn after
+  the solid meshes and hides what is behind it; what is see-through is
+  drawn among the see-through meshes, the furthest first - a sprite, a
+  label or an emitter at a time - so a glass pane in front of a sign is
+  over it and one behind it under it. `app.renderer3d.billboards.?.quads`
+  and `draw_calls` say what the last draw did.
+  - A `Sprite3D` shows its texture's `region`, a frame of a sheet of
+    `frames_across` by `frames_down`, each texel `pixel_size` metres; its
+    pivot sits on its transform; it is mixed by its alpha, added, taken away
+    or multiplied; `alpha_cut` cuts it; `no_depth_test` puts it over
+    everything. With a `ViewTexture` beside it, it shows a `RenderView`'s
+    picture: a monitor showing a security camera.
+  - A `Label3D` is laid out as a `Text2D` is - its font, `size`, alignment,
+    wrapping, outline and tags - into the same fonts' atlases, each pixel
+    `pixel_size` metres. Its words are the app's: `app.setText(sign,
+    fx.Label3D, "text", "EXIT")`, `sign.get(Label3D).text = "EXIT"` from a
+    script.
+  - A `Particles3D` is a `Particles2D` in metres: places started over a
+    cycle, `one_shot`, `emitParticles` and `restartParticles`, `finished`;
+    starting at a point, in a sphere or on it, in a box or on a ring; going
+    along `direction` within a cone of `spread`, pulled by `gravity`, pushed
+    along their way, away or round. Each is a quad `size` metres across,
+    turned by its angle - or, with `align_to_velocity`, along the way it
+    goes and `stretch` times its speed longer: rain. An editor moves them
+    with `fx.particles3d.update(app, dt, .preview)`.
+- **A `FogVolume` is fog in a box** - or a ball inside it - beside a
+  `Transform3D`: mist in a room, smoke down a corridor. The way from the
+  camera to each pixel of a surface is cut to the eight volumes nearest the
+  camera and walked in eight steps; the fog met hides what is behind it in
+  its `color`, `density` a metre, thinning over `edge_fade` at its sides,
+  in clumps `noise_scale` metres big where it has `noise_strength`, which
+  drift with its `wind`. Only a surface is seen through it: the empty
+  background shows as it is, so a fog volume goes where there are walls or
+  a floor behind it. `app.renderer3d.fog_volumes_kept` says how many the
+  last draw walked through.
+- **A `World3D` is a world of its own** for everything under it: seen only
+  by a `Camera3D` under it - one with a `RenderView`, whose picture a
+  `Sprite3D`, a sprite or a texture rect shows - and lit only by its own
+  lights, `Environment`, lightmap and fog volumes. The screen's camera is
+  never one in it, and no camera outside it sees it: the minigame in an
+  arcade cabinet, a room seen on a monitor. Its physics, sounds and
+  scripts are the game's, as any entity's are. An editor's view, through
+  `app.drawWorld3D`, sees every world at once; `fx.worlds3d.worldOf(app,
+  entity)` says which one a thing is in.
 
 ### 🖌️ A surface's own shader
 
@@ -2254,6 +2312,13 @@ fn watchBall(app: *fx.App) !void {
   pass of its own on a frame it holds nothing.
 - **Drawing never fails.** No `try`: a shape there is no memory for is
   counted and dropped rather than stopping the frame.
+- **From a script**, the same in the world, for a frame or `seconds` long:
+  `app.debugLine3D(from, to, color, seconds)`, `debugArrow3D`,
+  `debugPoint3D(at, size)`, `debugSphere3D(center, radius)`,
+  `debugBox3D(center, size)`, `debugText3D(at, text)` and
+  `self.entity.debugAxes3D(length)` in 3D; `app.debugLine`, `debugArrow`,
+  `debugCircle`, `debugRect` and `debugText` in 2D. Drawn from `fixed`, a 2D
+  shape lasts until the next step; give a 3D one `seconds` to last as long.
 - **It has its own font**, ASCII at a fixed size in pixels, so a number on
   the screen needs nothing loaded. It is drawn wherever the world is - over
   the interface on screen, and into the texture `drawWorld` draws - and with
@@ -4170,7 +4235,10 @@ Here, and checked by the tests:
   into a render view; the sun; solid, see-through and cut-out materials,
   glowing or unlit, both sides or one, in `.mat3d` files of their own;
   instances of a mesh in one draw, and what is off the frustum left out; the
-  same picture on Direct3D 11 and 12, Vulkan and OpenGL.
+  same picture on Direct3D 11 and 12, Vulkan and OpenGL. Pictures, words and
+  particles in it, facing the camera or not, among the see-through surfaces
+  the furthest first; fog in boxes and balls, drifting in clumps; worlds of
+  their own seen through a render view; sounds heard from where they are.
 - Models: glTF read as a scene of meshes, materials, pictures, cameras and
   the sun, its parts named after it; FBX and Blender files read as the glTF
   an editor's Blender made of them; read in the background, a step on each
@@ -4259,17 +4327,22 @@ In order, and the order is an argument rather than a wish list: each of these
 either unblocks the one after it or is the thing most missed by somebody
 trying to finish a game with what is here.
 
-### 1. Light as it is
+Light as it is, models that move, bodies in 3D, navigation, and the rest of
+the 3D world - pictures, words, particles, fog volumes, worlds of their own
+and sounds heard from where they are - are here. Next:
 
-Physically based shading, point and spot lights, an environment with fog,
-tone mapping and glow, shadows, baked light maps, and models that move -
-skins bent on the GPU and their animations faded into each other - are here.
+### 1. Building a level in the editor
 
-### 2. Bodies in 3D
+Constructive shapes - boxes, cylinders and balls added to, cut from or met
+with each other into one mesh and its collider - and an editor that changes
+its whole layout and its tools for the work at hand: a game, a map, a
+cutscene.
 
-Shapes that collide and rest in the 3D world, a character body to move
-through it, areas that say what is in them, and rays: what a 3D game stands
-on before it can walk anywhere.
+### 2. Many things at once
+
+A depth pass before the light, what is far or small left out, and dense
+models made lighter as they are read: what a whole building full of detail
+needs, on a phone and in a browser too.
 
 ## 💭 Not on the list yet
 

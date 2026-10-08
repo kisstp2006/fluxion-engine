@@ -1274,6 +1274,47 @@ pub const Renderer = struct {
         }
     }
 
+    /// One label's letters as quads in its own space - its first line's top
+    /// left at the origin, `y` down, in its `size`'s pixels - laid out as a
+    /// `Text2D`'s are and kept under `key` until what it is laid out from
+    /// changes: what a `Label3D` draws in the 3D world. Null where its font
+    /// is not there. `error.AtlasFull` where a font's atlas has no room
+    /// left: `makeRoom` makes some, and the words are asked for again.
+    pub fn wordsOf(self: *Renderer, gpa: Allocator, assets: *Assets, label: Text2D, run: []const u8, key: u64) !?Words {
+        if (!std.unicode.utf8ValidateSlice(run)) return null;
+        const faces = Faces.of(assets, label) orelse return null;
+        const found = try self.laid.getOrPut(gpa, key);
+        if (!found.found_existing) found.value_ptr.* = .{};
+        const laid = found.value_ptr;
+        laid.used = self.text_clock;
+        const hash = layoutHash(faces, label, run);
+        if (laid.hash != hash or !laid.whole) {
+            try self.letters.make(gpa, faces, label, run);
+            laid.hash = hash;
+            laid.width = self.letters.width;
+            laid.height = self.letters.height;
+            laid.overhang = self.letters.overhang + outlineOf(label);
+            laid.whole = false;
+            try self.layLetters(gpa, faces, label, laid);
+        }
+        return .{ .glyphs = laid.glyphs.items, .faces = faces, .width = laid.width, .height = laid.height };
+    }
+
+    /// After `wordsOf` said `error.AtlasFull`: the full font's atlas emptied
+    /// - every label in it laid out again when next asked for - or, where it
+    /// was emptied once already, which `emptied` holds, grown. False where it
+    /// is as big as it goes, and there is no more room.
+    pub fn makeRoom(self: *Renderer, gpa: Allocator, assets: *Assets, emptied: *std.ArrayList(*Assets.Font)) !bool {
+        const face = self.full orelse return false;
+        self.full = null;
+        if (std.mem.indexOfScalar(*Assets.Font, emptied.items, face) == null) {
+            face.atlas.clear();
+            try emptied.append(gpa, face);
+            return true;
+        }
+        return assets.growAtlas(face);
+    }
+
     /// Each letter of the layout just made as quads in its label's space,
     /// with where each is in its font's atlas, drawing into the atlas what is
     /// not there yet: the shadows first, then the outline, then the letters,
@@ -1598,7 +1639,7 @@ const Laid = struct {
 
 /// A quad of a label, in the label's space: its top left, its size, where
 /// it is in which of its fonts' atlases, and what colours it.
-const LaidGlyph = struct {
+pub const LaidGlyph = struct {
     x: f32,
     y: f32,
     width: f32,
@@ -1613,7 +1654,16 @@ const LaidGlyph = struct {
     /// An emoji in its own colours, which only the alpha tints.
     colored: bool = false,
 
-    const Kind = enum { shadow, outline, letter };
+    pub const Kind = enum { shadow, outline, letter };
+};
+
+/// One label's letters, as `Renderer.wordsOf` lays them out.
+pub const Words = struct {
+    glyphs: []const LaidGlyph,
+    faces: Faces,
+    /// Its box, in its own space.
+    width: f32,
+    height: f32,
 };
 
 /// What a label is laid out from: its words, everything that places or
