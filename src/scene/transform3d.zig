@@ -42,8 +42,10 @@ pub const Rotation = extern struct {
 };
 
 pub const Transform3D = extern struct {
+    /// Where it is in its parent's space, in metres: y up.
     position: Vec3 = .zero,
     rotation: Rotation = .identity,
+    /// How much bigger than itself it is along each of its own axes.
     scale: Vec3 = .one,
 
     /// Whether this turns with its parent. Its offset turns either way.

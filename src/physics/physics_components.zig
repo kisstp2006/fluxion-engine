@@ -43,7 +43,9 @@ pub const RigidBody2D = extern struct {
     angular_damp: f32 = -1,
     /// Zero floats, minus one rises.
     gravity_scale: f32 = 1,
+    /// It moves but never turns.
     fixed_rotation: bool = false,
+    /// Whether it may stop being worked out while it lies still.
     can_sleep: bool = true,
     /// Continuous collision detection. Off, a fast body is still
     /// stopped by the level; on, by the other moving bodies too.
@@ -104,6 +106,7 @@ pub const RigidBody2D = extern struct {
 /// `collision_layer`. A pair's friction is the smaller of the two, and its
 /// bounce the two added, no more than one.
 pub const Collider2D = extern struct {
+    /// A rectangle, a circle, or a capsule standing along y.
     shape: Shape = .rectangle,
     /// Half a rectangle's width and height, before the transform's scale.
     /// Zero takes the sprite's size, and centres the shape on the sprite. A
@@ -116,6 +119,7 @@ pub const Collider2D = extern struct {
     offset: math.Vec2 = .zero,
     /// A rectangle's turn on the entity.
     rotation: f32 = 0,
+    /// How much it grips what slides on it, from nought for ice to one.
     friction: f32 = 1,
     /// How much of the speed a hit gives back: zero a beanbag, one a
     /// superball.
@@ -200,11 +204,14 @@ pub const CharacterBody2D = extern struct {
     max_slides: u32 = 4,
     /// What the last move found.
     on_floor: bool = false,
+    /// Whether the last move ran it into a wall.
     on_wall: bool = false,
+    /// Whether the last move ran it into a ceiling.
     on_ceiling: bool = false,
     /// Out of the floor it stands on, and the wall it is against, when it
     /// is.
     floor_normal: math.Vec2 = .zero,
+    /// Out of the wall it is against, when it is.
     wall_normal: math.Vec2 = .zero,
 
     /// Grounded: floors, walls and ceilings, for a game seen from the side.
@@ -316,6 +323,7 @@ pub const Area2D = extern struct {
 /// guard and the player. Beside a `Transform2D`; `target` turns and scales
 /// with it.
 pub const RayCast2D = extern struct {
+    /// Whether it casts its ray each step.
     enabled: bool = true,
     /// Where the ray ends, in the entity's own space.
     target: math.Vec2 = .init(0, 50),

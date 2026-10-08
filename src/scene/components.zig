@@ -110,11 +110,15 @@ pub const Parent = extern struct {
 /// `Parent` - and `App.worldTransform` gives the world's. A parent with no
 /// `Transform2D` places nothing: the numbers are the world's.
 pub const Transform2D = extern struct {
+    /// Where it is across, in its parent's space: pixels in the world.
     x: f32 = 0,
+    /// Where it is down, in its parent's space.
     y: f32 = 0,
     /// Radians. Positive turns `+x` towards `+y`: clockwise on screen.
     rotation: f32 = 0,
+    /// How much wider than itself it is drawn: negative mirrors it.
     scale_x: f32 = 1,
+    /// How much taller than itself it is drawn: negative mirrors it.
     scale_y: f32 = 1,
 
     /// Whether this turns with its parent. Its offset turns either way; off is

@@ -691,7 +691,9 @@ pub const AnimatedSprite2D = extern struct {
     centered: bool = true,
     /// Moves the picture from where `centered` puts it, in texels.
     offset: math.Vec2 = .zero,
+    /// Mirrored left to right.
     flip_h: bool = false,
+    /// Mirrored top to bottom.
     flip_v: bool = false,
     /// The frame it shows, counted from nought.
     frame: i32 = 0,

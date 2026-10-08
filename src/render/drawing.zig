@@ -51,6 +51,7 @@ pub const Drawing2D = extern struct {
     layer: i16 = 0,
     /// Where it sits within its layer, as a sprite's `order`.
     order: f32 = 0,
+    /// Whether what it draws shows.
     visible: bool = true,
 
     pub const reflect_name = "Drawing2D";

@@ -190,6 +190,7 @@ pub const NavigationAgent3D = extern struct {
 /// navigation mesh, within `search_radius`; an agent's way may go along it,
 /// and the agent hears `link_reached` at its start, to make the jump.
 pub const NavigationLink3D = extern struct {
+    /// Whether agents' ways may go along it.
     enabled: bool = true,
     /// Both ways, or only from the start to the end - a drop.
     bidirectional: bool = true,

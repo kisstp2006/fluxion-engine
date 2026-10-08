@@ -37,17 +37,22 @@ pub const TileMap = extern struct {
     /// What the cells name their tiles in. Without one a map draws its cells
     /// as white squares its tint colours, and stops nothing.
     tile_set: TileSetHandle = .none,
+    /// A colour every tile is multiplied by.
     tint: Color = .white,
     /// Drawn with the sprites of this layer.
     layer: i16 = 0,
     /// Sorted by this inside the layer, as a `Sprite` is.
     order: f32 = 0,
+    /// Whether it is drawn.
     visible: bool = true,
     /// The layers its solid tiles are on, and those they stop. A map's own,
     /// kept on the TileMap rather than on each tile.
     collision_layer: u32 = 1,
+    /// The layers its solid tiles are on, and those they stop.
     collision_mask: u32 = 1,
+    /// How much its solid tiles grip what slides on them.
     friction: f32 = 0.5,
+    /// How much what hits its solid tiles bounces off.
     bounce: f32 = 0,
     /// Whether its solid tiles - the shapes its tile set gives them - cast
     /// the shadows of the lights that have them.
@@ -123,6 +128,7 @@ pub const TileChunk = extern struct {
     /// Which chunk of the map, in chunks from its origin. Negative to the
     /// left of it and above it.
     x: i32 = 0,
+    /// Which chunk of the map, down, in chunks from its origin.
     y: i32 = 0,
     /// Stepped whenever a cell changes, so the physics knows to build the
     /// chunk's body again. Never zero.

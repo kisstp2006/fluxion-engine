@@ -89,6 +89,8 @@ pub const Sprite = extern struct {
     /// Which point of the sprite sits on the transform, from zero to one. The
     /// middle by default, so it turns about itself.
     pivot_x: f32 = 0.5,
+    /// Which point of the sprite sits on the transform, down, from nought to
+    /// one.
     pivot_y: f32 = 0.5,
 
     /// What is drawn over what: higher is nearer. A sort key, not a depth -
@@ -100,6 +102,8 @@ pub const Sprite = extern struct {
     /// the entity between archetypes.
     visible: bool = true,
 
+    /// How it goes onto what is under it: mixed by its alpha, added, taken
+    /// away, or multiplied.
     blend: Blend = .alpha,
 
     /// Drawn mirrored, left to right or top to bottom, in the same place: a
@@ -176,6 +180,7 @@ pub const Text2D = extern struct {
     /// when rasterised.
     size: f32 = 16,
 
+    /// The colour of the letters.
     color: Color = .white,
 
     /// Where the transform sits along the line.
@@ -191,6 +196,7 @@ pub const Text2D = extern struct {
     /// How far the outline reaches out from the letters, in the same units
     /// as `size`; nought for none.
     outline_size: f32 = 0,
+    /// The colour of the outline round the letters.
     outline_color: Color = .black,
 
     /// Whether tags in the words are read rather than shown.
@@ -201,8 +207,10 @@ pub const Text2D = extern struct {
 
     /// The same sort keys as a `Sprite`'s: text and sprites are one list.
     layer: i16 = 0,
+    /// Sorted by this inside the layer, as a `Sprite` is.
     order: f32 = 0,
 
+    /// Whether it shows.
     visible: bool = true,
 
     pub const Alignment = enum(u8) { left, center, right };
@@ -241,6 +249,8 @@ pub const Camera2D = extern struct {
     /// depend on.
     priority: i16 = 0,
 
+    /// Whether it may be looked through: of the active ones, the highest
+    /// `priority` is.
     active: bool = true,
 
     /// The render layers it sees: what an `Appearance` puts on layers it
@@ -334,7 +344,9 @@ pub const Camera2D = extern struct {
 /// `TextureRect`, or by `App.viewTexture` from code: drawn every frame
 /// before the screen is, so what shows it shows this frame's.
 pub const RenderView = extern struct {
+    /// The picture's width in pixels.
     width: u32 = 320,
+    /// The picture's height in pixels.
     height: u32 = 180,
     clear_color: Color = .black,
     /// Nearest keeps a small picture's pixels square when it is shown

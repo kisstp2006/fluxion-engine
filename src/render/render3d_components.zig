@@ -95,6 +95,8 @@ pub const LightBake = enum(u8) {
 /// a box, a ball, a floor, a tube, a capsule. Its mesh is made once for its
 /// numbers and shared by every shape that has them.
 pub const PrimitiveMesh3D = extern struct {
+    /// What it is: a box, a sphere, a plane, a cylinder or a capsule, sized by
+    /// the fields it has.
     shape: Shape = .box,
     /// A box's width, height and depth; a plane's width and depth on `x`
     /// and `z`.
@@ -272,6 +274,8 @@ pub const Material3DData = extern struct {
 /// its `-z` with `+y` up. Of the cameras that draw no picture of their own,
 /// the one that is `current` is looked through - or, with none, any.
 pub const Camera3D = extern struct {
+    /// `perspective`, far things smaller; or `orthogonal`, every distance the
+    /// same size.
     projection: Projection = .perspective,
     /// From the bottom of the picture to the top, in radians: a perspective
     /// camera's.

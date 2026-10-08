@@ -97,6 +97,7 @@ pub const bus_name_len = 32;
 
 /// A sound its entity plays. See the top of this file.
 pub const AudioPlayer = extern struct {
+    /// The sound it plays.
     clip: AudioClipHandle = .none,
     /// 0 plays the clip as loud as it is; -6 about half as loud.
     volume_db: f32 = 0,
@@ -211,6 +212,8 @@ pub const AudioSpatial2D = extern struct {
 /// the first found that is `current`. With none, the middle of what the
 /// camera shows.
 pub const AudioListener2D = extern struct {
+    /// Whether it is the one the sounds are heard from: the first found that
+    /// is.
     current: bool = true,
 
     pub const reflect_name = "AudioListener2D";

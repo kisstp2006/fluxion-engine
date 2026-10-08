@@ -50,6 +50,7 @@ pub const RigidBody3D = extern struct {
     gravity_scale: f32 = 1,
     /// It moves but never turns.
     lock_rotation: bool = false,
+    /// Whether it may stop being worked out while it lies still.
     can_sleep: bool = true,
     /// Whether the pointer can pick it: false on a body by default, and
     /// true on an `Area3D`.
@@ -118,6 +119,7 @@ pub const Collider3D = extern struct {
     offset: math.Vec3 = .zero,
     /// Its turn on the entity.
     rotation: Rotation = .identity,
+    /// How much it grips what slides on it, from nought for ice to one.
     friction: f32 = 0.6,
     /// How much of the speed a hit gives back: nought a beanbag, one a
     /// superball.
@@ -195,9 +197,13 @@ pub const CharacterBody3D = extern struct {
     max_slides: u32 = 4,
     /// What the last move found.
     on_floor: bool = false,
+    /// Whether the last move ran it into a wall.
     on_wall: bool = false,
+    /// Whether the last move ran it into a ceiling.
     on_ceiling: bool = false,
+    /// Out of the floor it stands on, when it does.
     floor_normal: math.Vec3 = .zero,
+    /// Out of the wall it is against, when it is.
     wall_normal: math.Vec3 = .zero,
 
     /// Grounded: floors, walls and ceilings. Floating: everything it meets
@@ -291,6 +297,7 @@ pub const Area3D = extern struct {
 /// guard and the player. Beside a `Transform3D`; `target` turns and scales
 /// with it.
 pub const RayCast3D = extern struct {
+    /// Whether it casts its ray each step.
     enabled: bool = true,
     /// Where the ray ends, in the entity's own space.
     target: math.Vec3 = .init(0, -1, 0),

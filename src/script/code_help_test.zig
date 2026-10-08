@@ -65,13 +65,14 @@ test "every call of app's is offered after `app.`, with its signature and what i
     }
 }
 
-test "every component's members are offered after `get(C).`: its fields typed, its signals with what they say, none hidden behind another of its name" {
+test "every component's members are offered after `get(C).`: its fields typed and said what they are, its signals with what they say, none hidden behind another of its name" {
     const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
     defer app.destroy();
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    var undocumented: usize = 0;
     for (app.scene_components.entries.items) |*entry| {
         const name = entry.name;
         const where = try std.fmt.allocPrint(arena, "get({s}).", .{name});
@@ -98,8 +99,13 @@ test "every component's members are offered after `get(C).`: its fields typed, i
                 std.debug.print("{s} is untyped\n", .{item.detail});
                 return error.Untyped;
             }
+            if (item.doc == null) {
+                std.debug.print("`{s}` says nothing of what it is\n", .{item.detail});
+                undocumented += 1;
+            }
         }
     }
+    try testing.expectEqual(@as(usize, 0), undocumented);
 }
 
 test "every kind of input event is told apart with `is`, and offers its fields and the event's calls, each said what it is" {

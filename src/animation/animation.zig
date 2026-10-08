@@ -618,6 +618,7 @@ pub const name_len = Value.name_len;
 /// Plays the animations of a library on its entity and the ones under it.
 /// See the top of this file.
 pub const AnimationPlayer = extern struct {
+    /// The animations it plays: an `.anim` library, or a model's `#animations`.
     library: AnimationLibraryHandle = .none,
     /// The animation it starts with the first time the game runs its entity;
     /// empty for none.
@@ -628,6 +629,7 @@ pub const AnimationPlayer = extern struct {
     paused: bool = false,
     /// The animation it plays, or played last.
     current: [name_len]u8 = @splat(0),
+    /// Whether it is playing now. Read-only.
     playing: bool = false,
     /// Seconds into `current`.
     position: f32 = 0,

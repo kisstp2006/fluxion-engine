@@ -64,9 +64,12 @@ pub const Particles2D = extern struct {
     amount: u32 = 16,
     /// How long a particle lives, and so how long a cycle is, in seconds.
     lifetime: f32 = 1,
+    /// One burst of `amount` and no more: `emitting` goes off, and `finished`
+    /// is said.
     one_shot: bool = false,
     /// Seconds run through before it is first shown: a fire already burning.
     preprocess: f32 = 0,
+    /// How fast its time runs: faster above one, slower below.
     speed_scale: f32 = 1,
     /// How far the places' starts are bunched at the start of the cycle.
     explosiveness: f32 = 0,
@@ -79,6 +82,7 @@ pub const Particles2D = extern struct {
     seed: u32 = 0,
 
     emission_shape: EmissionShape = .point,
+    /// How far from the middle a particle starts, for a `circle` or its edge.
     emission_radius: f32 = 16,
     /// Half the box's size.
     emission_extents: Vec2 = .init(16, 16),
@@ -87,52 +91,70 @@ pub const Particles2D = extern struct {
     direction: Vec2 = .init(0, -1),
     /// How far either way from `direction` a particle may go.
     spread: f32 = 0.5,
+    /// How fast a particle starts, at random between these, in units a second.
     speed_min: f32 = 40,
+    /// How fast a particle starts, at random between these, in units a second.
     speed_max: f32 = 80,
     gravity: Vec2 = .init(0, 40),
     /// Along its way: forward for more than nought, back for less.
     linear_accel_min: f32 = 0,
+    /// Along its way: forward for more than nought, back for less.
     linear_accel_max: f32 = 0,
     /// Away from the emitter for more than nought, towards it for less.
     radial_accel_min: f32 = 0,
+    /// Away from the emitter for more than nought, towards it for less.
     radial_accel_max: f32 = 0,
     /// Round the emitter, clockwise on screen for more than nought.
     tangential_accel_min: f32 = 0,
+    /// Round the emitter, clockwise on screen for more than nought.
     tangential_accel_max: f32 = 0,
     /// Speed lost each second.
     damping_min: f32 = 0,
+    /// Speed lost each second.
     damping_max: f32 = 0,
     /// How it is turned when it starts.
     angle_min: f32 = 0,
+    /// How it is turned when it starts.
     angle_max: f32 = 0,
     /// How fast it turns.
     spin_min: f32 = 0,
+    /// How fast it turns.
     spin_max: f32 = 0,
     /// Turned the way it goes, its `x` along its path: a streak of rain.
     align_to_velocity: bool = false,
 
     /// None is a soft round dot, eight units across.
     texture: Assets.TextureHandle = .none,
+    /// How many frames its texture holds across, for an animated particle.
     frames_across: u16 = 1,
+    /// How many frames its texture holds down.
     frames_down: u16 = 1,
     /// How many times its frames play through over a particle's life; for
     /// nought, each shows one frame of its own, picked at random.
     frame_speed: f32 = 1,
+    /// How big a particle starts, at random between these.
     scale_min: f32 = 1,
+    /// How big a particle starts, at random between these.
     scale_max: f32 = 1,
     /// What its scale is multiplied by at the end of its life.
     scale_end: f32 = 1,
+    /// How its scale goes from the start to `scale_end`.
     scale_curve: Curve = .linear,
+    /// Its colour as it starts.
     color: Color = .white,
     /// A particle's colour starts somewhere between `color` and this.
     color_random: Color = .white,
     /// What its colour is multiplied by at the end of its life: an alpha of
     /// nought fades it out.
     color_end: Color = .{ .r = 1, .g = 1, .b = 1, .a = 0 },
+    /// How its colour goes from `color` to `color_end`.
     color_curve: Curve = .linear,
+    /// How it goes onto what is under it: mixed by its alpha, added for a glow,
+    /// taken away, or multiplied.
     blend: Sprite.Blend = .alpha,
     layer: i16 = 0,
     order: f32 = 0,
+    /// Which of them is drawn over the others: the oldest first, or the newest.
     draw_order: DrawOrder = .oldest_first,
 
     pub const EmissionShape = enum(u8) { point, circle, circle_edge, rectangle };

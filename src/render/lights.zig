@@ -51,7 +51,9 @@ const Transform2D = components.Transform2D;
 pub const Blend = enum(u8) { add, subtract };
 
 pub const PointLight2D = extern struct {
+    /// Whether it shines.
     enabled: bool = true,
+    /// The colour of its light.
     color: Color = .white,
     /// How strong it is: one adds its colour where it is brightest.
     energy: f32 = 1,
@@ -60,6 +62,8 @@ pub const PointLight2D = extern struct {
     /// How it falls off, stretched over its reach and turned with its
     /// entity; none is a soft round glow.
     texture: Assets.TextureHandle = .none,
+    /// How its light goes onto what it falls on: added, or taken away for a
+    /// patch of dark.
     blend: Blend = .add,
     shadows: bool = false,
     /// What it is multiplied by where an occluder hides it; its alpha is how
@@ -82,9 +86,13 @@ pub const PointLight2D = extern struct {
 };
 
 pub const DirectionalLight2D = extern struct {
+    /// Whether it shines.
     enabled: bool = true,
+    /// The colour of its light.
     color: Color = .white,
+    /// How bright: one for its colour as it is.
     energy: f32 = 0.5,
+    /// How its light goes onto what it falls on: added, or taken away.
     blend: Blend = .add,
     shadows: bool = false,
     shadow_color: Color = .{ .r = 0, .g = 0, .b = 0, .a = 1 },
@@ -117,7 +125,9 @@ pub const AmbientLight2D = extern struct {
 /// A shape a light with `shadows` does not get past: sized as a
 /// `Collider2D` is.
 pub const LightOccluder2D = extern struct {
+    /// Whether it casts a shadow.
     enabled: bool = true,
+    /// A rectangle, a circle, or a capsule standing along y, as a collider's.
     shape: Shape = .rectangle,
     /// Half a rectangle's width and height, before the transform's scale.
     /// Zero takes the sprite's size, and centres the shape on the sprite. A
