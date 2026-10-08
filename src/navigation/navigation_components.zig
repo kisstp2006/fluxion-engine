@@ -55,6 +55,16 @@ pub const NavigationRegion3D = extern struct {
     /// the cells, in cells.
     edge_max_length: f32 = 12,
     edge_max_error: f32 = 1.3,
+    /// How far apart the heights sampled inside each polygon are; nought
+    /// samples none.
+    detail_sample_distance: f32 = 0.5,
+    /// A box on the ground, in the region's space, the mesh is cut to: none
+    /// while its size is nought. What is round it is still looked at, so
+    /// the mesh reaches its sides rather than being worn back from them,
+    /// and two regions cut along one line meet there - with `scope` the
+    /// whole scene, so each sees the other's floor.
+    bake_bounds_center: math.Vec3 = .zero,
+    bake_bounds_size: math.Vec3 = .zero,
 
     pub const Source = enum(u8) { meshes_and_colliders, meshes, colliders };
     /// What hangs from the region, or everything in the scene.
@@ -75,6 +85,9 @@ pub const NavigationRegion3D = extern struct {
         .min_region_area = .{ attr.Unit{ .text = "m²" }, attr.Doc{ .text = "Pieces of floor smaller than this are left out" } },
         .edge_max_length = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "How long an edge along a wall may be; nought for any" } },
         .edge_max_error = .{attr.Doc{ .text = "How far, in cells, an edge along a wall may stray from them" }},
+        .detail_sample_distance = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "How far apart the heights sampled inside each polygon are; nought for none" } },
+        .bake_bounds_center = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "The middle of the box the mesh is cut to, in the region's space" } },
+        .bake_bounds_size = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "The box the mesh is cut to; nought for none. Cut, it meets the next region's" } },
     };
 
     /// What the bake is told.
@@ -89,6 +102,11 @@ pub const NavigationRegion3D = extern struct {
             .min_region_area = self.min_region_area,
             .edge_max_length = self.edge_max_length,
             .edge_max_error = self.edge_max_error,
+            .detail_sample_distance = self.detail_sample_distance,
+            .bounds = if (self.bake_bounds_size.x > 0 and self.bake_bounds_size.z > 0) .{
+                .{ self.bake_bounds_center.x - self.bake_bounds_size.x / 2, self.bake_bounds_center.y - self.bake_bounds_size.y / 2, self.bake_bounds_center.z - self.bake_bounds_size.z / 2 },
+                .{ self.bake_bounds_center.x + self.bake_bounds_size.x / 2, self.bake_bounds_center.y + self.bake_bounds_size.y / 2, self.bake_bounds_center.z + self.bake_bounds_size.z / 2 },
+            } else null,
         };
     }
 };
@@ -144,6 +162,8 @@ pub const NavigationAgent3D = extern struct {
         .navigation_finished = struct {},
         // The velocity that keeps out of the others' way.
         .velocity_computed = struct { safe_velocity: math.Vec3 },
+        // At the start of a link: a jump to make, a drop, a ladder.
+        .link_reached = struct { start: math.Vec3, end: math.Vec3 },
     };
 
     pub const reflect_name = "NavigationAgent3D";
@@ -160,5 +180,60 @@ pub const NavigationAgent3D = extern struct {
         .time_horizon = .{ attr.Unit{ .text = "s" }, attr.Doc{ .text = "How far ahead it keeps clear of the others" } },
         .target_reached = .{ attr.ReadOnly{}, attr.Unsaved{} },
         .navigation_finished = .{ attr.ReadOnly{}, attr.Unsaved{} },
+    };
+};
+
+/// A way between two places the mesh does not join: a jump across a gap,
+/// a drop off a ledge, a ladder. Its ends are found on the nearest
+/// navigation mesh, within `search_radius`; an agent's way may go along it,
+/// and the agent hears `link_reached` at its start, to make the jump.
+pub const NavigationLink3D = extern struct {
+    enabled: bool = true,
+    /// Both ways, or only from the start to the end - a drop.
+    bidirectional: bool = true,
+    /// Its two ends, in the entity's own space.
+    start_position: math.Vec3 = .init(-1, 0, 0),
+    end_position: math.Vec3 = .init(1, 0, 0),
+    /// Going along it costs its length times `travel_cost`, and
+    /// `enter_cost` besides: what makes a way take it, or not.
+    enter_cost: f32 = 0,
+    travel_cost: f32 = 1,
+    /// How far from a mesh its ends may be.
+    search_radius: f32 = 1,
+
+    pub const reflect_name = "NavigationLink3D";
+    pub const reflect_fields = .{
+        .bidirectional = .{attr.Doc{ .text = "Both ways, or only from the start to the end: a drop" }},
+        .start_position = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "Where it starts, in the entity's own space" } },
+        .end_position = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "Where it ends, in the entity's own space" } },
+        .enter_cost = .{attr.Doc{ .text = "Added to what a way along it costs" }},
+        .travel_cost = .{attr.Doc{ .text = "What its length is counted as, times" }},
+        .search_radius = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "How far from a mesh its ends may be" } },
+    };
+};
+
+/// Something in the way that moves on its own - a cart, a rolling boulder,
+/// a guard who is not an agent: a disc `radius` wide, `height` tall from
+/// the entity up. Agents with avoidance keep out of its way, taking all of
+/// the turning away, as it does not turn for them. With `affect_paths`, a
+/// way does not go through a doorway of the mesh it stands in - one wide
+/// enough is narrowed to beside it - and agents find their way again when
+/// it has moved.
+pub const NavigationObstacle3D = extern struct {
+    radius: f32 = 0.5,
+    height: f32 = 1,
+    avoidance_enabled: bool = true,
+    affect_paths: bool = false,
+    /// How fast it is going, from where it was a step before. Read-only,
+    /// and never saved.
+    velocity: math.Vec3 = .zero,
+
+    pub const reflect_name = "NavigationObstacle3D";
+    pub const reflect_fields = .{
+        .radius = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How wide it is from its middle" } },
+        .height = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0, .max = 100 }, attr.Doc{ .text = "How tall it is from the entity up" } },
+        .avoidance_enabled = .{attr.Doc{ .text = "Agents with avoidance keep out of its way" }},
+        .affect_paths = .{attr.Doc{ .text = "Ways do not go through what it stands in, and are found again as it moves" }},
+        .velocity = .{ attr.ReadOnly{}, attr.Unsaved{} },
     };
 };

@@ -623,6 +623,8 @@ pub const engine_components = .{
     components.RayCast3D,
     components.NavigationRegion3D,
     components.NavigationAgent3D,
+    components.NavigationLink3D,
+    components.NavigationObstacle3D,
     drawing.Drawing2D,
     particle_emitters.Particles2D,
     lights.PointLight2D,
@@ -4831,8 +4833,8 @@ pub fn navigationPath(self: *App, from: math.Vec3, to: math.Vec3) Allocator.Erro
 
 /// The point of the navigation regions nearest `point`; `point` itself
 /// with no region.
-pub fn closestNavigationPoint(self: *App, point: math.Vec3) math.Vec3 {
-    return Navigation.closestPoint(self, point);
+pub fn closestNavigationPoint(self: *App, point: math.Vec3) Allocator.Error!math.Vec3 {
+    return self.navigation.closestPoint(self, point);
 }
 
 /// Read a `.skeleton` file, or find the one read from there already: what a

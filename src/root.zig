@@ -275,6 +275,8 @@ pub const Area3D = components.Area3D;
 pub const RayCast3D = components.RayCast3D;
 pub const NavigationRegion3D = components.NavigationRegion3D;
 pub const NavigationAgent3D = components.NavigationAgent3D;
+pub const NavigationLink3D = components.NavigationLink3D;
+pub const NavigationObstacle3D = components.NavigationObstacle3D;
 pub const Drawing2D = @import("render/drawing.zig").Drawing2D;
 pub const drawing = @import("render/drawing.zig");
 

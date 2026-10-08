@@ -33,6 +33,8 @@ fn headless() !*App {
     try app.addMethod("_reached", Heard.reached);
     try app.addMethod("_finished", Heard.finished);
     try app.addMethod("_safe", Heard.safe);
+    try app.addMethod("_link", Heard.link);
+    try app.addMethod("_changed", Heard.changed);
     Heard.reset();
     return app;
 }
@@ -41,11 +43,25 @@ const Heard = struct {
     var reached_count: usize = 0;
     var finished_count: usize = 0;
     var safe_count: usize = 0;
+    var link_count: usize = 0;
+    var changed_count: usize = 0;
 
     fn reset() void {
         reached_count = 0;
         finished_count = 0;
         safe_count = 0;
+        link_count = 0;
+        changed_count = 0;
+    }
+
+    /// At a link's start: over it at once, as a jump would take it.
+    fn link(app: *App, self: Entity, _: Vec3, end: Vec3) !void {
+        link_count += 1;
+        app.world.get(self, Transform3D).?.position = end.add(.init(0, 0.9, 0));
+    }
+
+    fn changed(_: *App, _: Entity) !void {
+        changed_count += 1;
     }
 
     fn reached(_: *App, _: Entity) !void {
@@ -104,11 +120,11 @@ test "a region baked from what hangs from it has a way round the pillar, and car
     try legsClear(way, 1.1);
 
     // Off the floor, the nearest point of it.
-    const near = app.closestNavigationPoint(.init(20, 3, 0));
+    const near = try app.closestNavigationPoint(.init(20, 3, 0));
     try testing.expect(near.x > 8 and near.x < 9.6);
     // Moved, its floor goes with it.
     app.world.get(region, Transform3D).?.position = .init(100, 0, 0);
-    const moved = app.closestNavigationPoint(.init(100, 1, -7));
+    const moved = try app.closestNavigationPoint(.init(100, 1, -7));
     try testing.expectApproxEqAbs(@as(f32, 100), moved.x, 0.01);
 }
 
@@ -267,4 +283,154 @@ test "a script bakes the region, walks its agent by the velocity that comes back
     try testing.expect(app.isTargetReached(walker));
     try testing.expect(app.isDebugViewOn("navigation"));
     try testing.expectError(error.NoSuchView, app.setDebugView("nothing", true));
+}
+
+const NavigationLink3D = components.NavigationLink3D;
+const NavigationObstacle3D = components.NavigationObstacle3D;
+
+/// Walk the agent on `walker` towards where it should head, at `speed`,
+/// for `seconds` or until it has finished.
+fn walk(app: *App, walker: Entity, speed: f32, seconds: f32) !f32 {
+    var t: f32 = 0;
+    while (t < seconds and !app.isNavigationFinished(walker)) : (t += dt) {
+        const next = try app.nextPathPosition(walker);
+        const at = app.world.get(walker, Transform3D).?.position;
+        var to = next.sub(at);
+        to.y = 0;
+        const body = app.world.get(walker, CharacterBody3D).?;
+        const flat = if (to.len() > 1e-4) to.scale(speed / to.len()) else Vec3.zero;
+        body.velocity = .init(flat.x, body.velocity.y - 9.8 * dt, flat.z);
+        _ = try app.moveAndSlide(walker);
+        _ = try app.step();
+    }
+    return t;
+}
+
+fn spawnWalker(app: *App, at: Vec3, target: Vec3) !Entity {
+    return app.world.spawnWith(.{
+        Transform3D.at(at.x, at.y + 0.9, at.z),
+        CharacterBody3D{},
+        Collider3D.capsule(0.4, 1.8),
+        NavigationAgent3D{ .target_position = target },
+    });
+}
+
+test "two regions cut along one line are one map, and a way crosses from one into the other" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, -0.5, 0), Collider3D.box(.init(8, 0.5, 3)) });
+    const left = try app.world.spawnWith(.{ Transform3D{}, NavigationRegion3D{ .scope = .scene, .bake_bounds_center = .init(-4, 0, 0), .bake_bounds_size = .init(8, 4, 8) } });
+    const right = try app.world.spawnWith(.{ Transform3D{}, NavigationRegion3D{ .scope = .scene, .bake_bounds_center = .init(4, 0, 0), .bake_bounds_size = .init(8, 4, 8) } });
+    try app.bakeNavigationMesh(left, null);
+    try app.bakeNavigationMesh(right, null);
+    // Each reaches the line it is cut at, worn back only at the floor's ends.
+    for ([_]Entity{ left, right }, [_]f32{ 1, -1 }) |region, side| {
+        const mesh = app.navMeshOf(app.world.get(region, NavigationRegion3D).?.navigation_mesh).?;
+        var nearest: f32 = 100;
+        for (mesh.vertices) |v| nearest = @min(nearest, @abs(v[0]));
+        try testing.expectApproxEqAbs(@as(f32, 0), nearest, 1e-3);
+        for (mesh.vertices) |v| try testing.expect(v[0] * side <= 1e-3);
+    }
+    const way = try app.navigationPath(.init(-6, 0, 1), .init(6, 0, -1));
+    try testing.expect(way.len >= 2);
+    try testing.expect(way[way.len - 1].sub(Vec3.init(6, 0, -1)).len() < 0.3);
+    // The map knows where they meet.
+    const map = (try app.navigation.mapOf(app)).?;
+    var doors: usize = 0;
+    for (map.links) |l| {
+        if (l.kind == .doorway) doors += 1;
+    }
+    try testing.expect(doors >= 2);
+}
+
+test "a link takes an agent over a trench the mesh does not cross, and it hears the link's start" {
+    const app = try headless();
+    defer app.destroy();
+    const region = try app.world.spawnWith(.{ Transform3D{}, NavigationRegion3D{} });
+    _ = try app.world.spawnWith(.{ Transform3D.at(-4.5, -0.5, 0), Collider3D.box(.init(3.5, 0.5, 3)), Parent.of(region) });
+    _ = try app.world.spawnWith(.{ Transform3D.at(4.5, -0.5, 0), Collider3D.box(.init(3.5, 0.5, 3)), Parent.of(region) });
+    try app.bakeNavigationMesh(region, null);
+    // No way across without a link.
+    try testing.expect((try app.navigationPath(.init(-6, 0, 0), .init(6, 0, 0)))[(try app.navigationPath(.init(-6, 0, 0), .init(6, 0, 0))).len - 1].x < 0);
+    _ = try app.world.spawnWith(.{ Transform3D{}, NavigationLink3D{ .start_position = .init(-1.6, 0, 0), .end_position = .init(1.6, 0, 0) } });
+    const across = try app.navigationPath(.init(-6, 0, 0), .init(6, 0, 0));
+    try testing.expect(across[across.len - 1].sub(Vec3.init(6, 0, 0)).len() < 0.3);
+
+    const agent = try spawnWalker(app, .init(-6, 0, 0.5), .init(6, 0, -0.5));
+    try app.signal(agent, NavigationAgent3D, .link_reached).connect(.method(agent, "_link"), .{});
+    app.time.source = .{ .fixed = dt };
+    _ = try walk(app, agent, 4, 10);
+    try testing.expectEqual(@as(usize, 1), Heard.link_count);
+    try testing.expect(app.isTargetReached(agent));
+}
+
+test "an obstacle standing in the doorway an agent's way goes through has it find the other" {
+    const app = try headless();
+    defer app.destroy();
+    const region = try app.world.spawnWith(.{ Transform3D{}, NavigationRegion3D{ .agent_radius = 0.4 } });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, -0.5, 0), Collider3D.box(.init(7, 0.5, 6)), Parent.of(region) });
+    // A wall across with a doorway at each side of the middle.
+    for ([_][2]f32{ .{ -5.5, 1.5 }, .{ 0, 2 }, .{ 5.5, 1.5 } }) |w| {
+        _ = try app.world.spawnWith(.{ Transform3D.at(w[0], 1, 0), Collider3D.box(.init(w[1], 1, 0.25)), Parent.of(region) });
+    }
+    try app.bakeNavigationMesh(region, null);
+    const agent = try spawnWalker(app, .init(0, 0, -4), .init(0, 0, 4));
+    try app.signal(agent, NavigationAgent3D, .path_changed).connect(.method(agent, "_changed"), .{});
+    app.time.source = .{ .fixed = dt };
+    _ = try app.nextPathPosition(agent);
+    const first = app.agentPath(agent);
+    // Through one of the two doorways.
+    var side: f32 = 0;
+    for (first) |p| {
+        if (@abs(p.z) < 1.0) side = p.x;
+    }
+    try testing.expect(@abs(side) > 1.5);
+    // Something that closes ways stands in it.
+    _ = try app.world.spawnWith(.{ Transform3D.at(if (side > 0) 3 else -3, 0, 0), NavigationObstacle3D{ .radius = 1, .affect_paths = true } });
+    _ = try app.step();
+    _ = try app.nextPathPosition(agent);
+    // Heard when the signals are next said.
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 2), Heard.changed_count);
+    var other: f32 = 0;
+    for (app.agentPath(agent)) |p| {
+        if (@abs(p.z) < 1.0) other = p.x;
+    }
+    try testing.expect(other * side < 0);
+}
+
+test "an agent with avoidance goes round an obstacle that crosses its way and does not turn for it" {
+    const app = try headless();
+    defer app.destroy();
+    const region = try app.world.spawnWith(.{ Transform3D{}, NavigationRegion3D{} });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, -0.5, 0), Collider3D.box(.init(10, 0.5, 6)), Parent.of(region) });
+    try app.bakeNavigationMesh(region, null);
+    const agent = try app.world.spawnWith(.{
+        Transform3D.at(-7, 0.9, 0),
+        CharacterBody3D{},
+        Collider3D.capsule(0.4, 1.8),
+        NavigationAgent3D{ .target_position = .init(7, 0, 0), .avoidance_enabled = true, .radius = 0.4, .max_speed = 3, .time_horizon = 2 },
+    });
+    try app.signal(agent, NavigationAgent3D, .velocity_computed).connect(.method(agent, "_safe"), .{});
+    const cart = try app.world.spawnWith(.{ Transform3D.at(0, 0, -4.5), NavigationObstacle3D{ .radius = 0.8 } });
+    app.time.source = .{ .fixed = dt };
+    var nearest: f32 = std.math.inf(f32);
+    for (0..420) |_| {
+        if (!app.isTargetReached(agent)) {
+            const next = try app.nextPathPosition(agent);
+            const at = app.world.get(agent, Transform3D).?.position;
+            var to = next.sub(at);
+            to.y = 0;
+            try app.setAgentVelocity(agent, if (to.len() > 1e-4) to.scale(2.5 / to.len()) else Vec3.zero);
+        }
+        // The cart rolls across at its own pace.
+        app.world.get(cart, Transform3D).?.position.z += 1.4 * dt;
+        _ = try app.step();
+        const a = app.world.get(agent, Transform3D).?.position;
+        const c = app.world.get(cart, Transform3D).?.position;
+        nearest = @min(nearest, Vec3.init(a.x - c.x, 0, a.z - c.z).len());
+    }
+    try testing.expect(nearest > 1.1);
+    try testing.expect(app.world.get(cart, NavigationObstacle3D).?.velocity.z > 1.3);
+    try testing.expect(app.isTargetReached(agent));
 }

@@ -12,6 +12,7 @@ const Allocator = std.mem.Allocator;
 
 const vec = @import("vec.zig");
 const Vec3 = vec.Vec3;
+const Map = @import("Map.zig");
 
 const NavMesh = @This();
 
@@ -34,11 +35,29 @@ pub const Agent = struct {
     max_slope: f32 = 0,
 };
 
+/// A polygon's heights inside it, sampled on a grid on the ground: what
+/// its corners alone cannot say where it reaches from a floor up a ramp to
+/// a platform.
+pub const Detail = struct {
+    /// The grid's low corner and its step, on the ground.
+    x: f32 = 0,
+    z: f32 = 0,
+    step: f32 = 0,
+    width: u16 = 0,
+    depth: u16 = 0,
+    /// Where its heights start in `detail_heights`, row by row; NaN where
+    /// no floor was found.
+    first: u32 = 0,
+};
+
 vertices: []Vec3,
 polygons: []Polygon,
 agent: Agent = .{},
 /// Each polygon's box, for asking.
 boxes: [][2]Vec3,
+/// One for each polygon, or none: then a polygon's height is its corners'.
+details: []Detail = &.{},
+detail_heights: []f32 = &.{},
 
 /// Takes the two slices, made with `gpa`.
 pub fn init(gpa: Allocator, vertices: []Vec3, polygons: []Polygon, agent: Agent) Allocator.Error!NavMesh {
@@ -53,10 +72,21 @@ pub fn init(gpa: Allocator, vertices: []Vec3, polygons: []Polygon, agent: Agent)
     return .{ .vertices = vertices, .polygons = polygons, .agent = agent, .boxes = boxes };
 }
 
+/// Give it heights sampled inside its polygons: `details` one for each,
+/// made with `gpa` as `heights` are, the mesh's from here.
+pub fn setDetail(self: *NavMesh, gpa: Allocator, details: []Detail, heights: []f32) void {
+    gpa.free(self.details);
+    gpa.free(self.detail_heights);
+    self.details = details;
+    self.detail_heights = heights;
+}
+
 pub fn deinit(self: *NavMesh, gpa: Allocator) void {
     gpa.free(self.vertices);
     gpa.free(self.polygons);
     gpa.free(self.boxes);
+    gpa.free(self.details);
+    gpa.free(self.detail_heights);
     self.* = undefined;
 }
 
@@ -68,12 +98,16 @@ pub fn corner(self: *const NavMesh, poly: u32, i: usize) Vec3 {
 // The file
 // -------------------------------------------------------------------------
 
-/// The version is the last two letters.
-pub const magic = "FXNAV001";
+/// The version is the last two letters. A file of the first version has
+/// no heights inside its polygons; it is still read.
+pub const magic = "FXNAV002";
+const magic_first = "FXNAV001";
 
 /// Little-endian: the magic; the agent's four numbers; how many vertices
 /// and polygons; each vertex's three floats; each polygon's count, area,
-/// corners and neighbours.
+/// corners and neighbours; then how many details - none, or one for each
+/// polygon - and heights, each detail's grid corner, step, size and first
+/// height, and the heights.
 pub fn write(self: *const NavMesh, gpa: Allocator) Allocator.Error![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     errdefer out.deinit();
@@ -90,6 +124,14 @@ pub fn write(self: *const NavMesh, gpa: Allocator) Allocator.Error![]u8 {
         for (p.vertices) |v| int(w, v);
         for (p.neighbours) |n| int(w, n);
     }
+    int(w, @intCast(self.details.len));
+    int(w, @intCast(self.detail_heights.len));
+    for (self.details) |d| {
+        for ([_]f32{ d.x, d.z, d.step }) |f| int(w, @bitCast(f));
+        int(w, @as(u32, d.width) | @as(u32, d.depth) << 16);
+        int(w, d.first);
+    }
+    for (self.detail_heights) |h| int(w, @bitCast(h));
     return out.toOwnedSlice() catch error.OutOfMemory;
 }
 
@@ -100,7 +142,9 @@ fn int(w: *std.Io.Writer, n: u32) void {
 pub const ReadError = Allocator.Error || error{BadNavMesh};
 
 pub fn read(gpa: Allocator, bytes: []const u8) ReadError!NavMesh {
-    if (bytes.len < magic.len or !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadNavMesh;
+    if (bytes.len < magic.len) return error.BadNavMesh;
+    const first_version = std.mem.eql(u8, bytes[0..magic.len], magic_first);
+    if (!first_version and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadNavMesh;
     var at: usize = magic.len;
     const head = try take(bytes, &at, 6);
     const agent: Agent = .{ .height = @bitCast(head[0]), .radius = @bitCast(head[1]), .max_climb = @bitCast(head[2]), .max_slope = @bitCast(head[3]) };
@@ -126,7 +170,27 @@ pub fn read(gpa: Allocator, bytes: []const u8) ReadError!NavMesh {
             if (k < p.count and p.neighbours[k] != none and p.neighbours[k] >= polygon_count) return error.BadNavMesh;
         }
     }
-    return init(gpa, vertices, polygons, agent);
+    var details: []Detail = &.{};
+    var heights: []f32 = &.{};
+    errdefer gpa.free(details);
+    errdefer gpa.free(heights);
+    if (!first_version) {
+        const counts = try take(bytes, &at, 2);
+        if (counts[0] != 0 and counts[0] != polygon_count) return error.BadNavMesh;
+        if (counts[1] > 1 << 26) return error.BadNavMesh;
+        details = try gpa.alloc(Detail, counts[0]);
+        for (details) |*d| {
+            const words = try take(bytes, &at, 5);
+            d.* = .{ .x = @bitCast(words[0]), .z = @bitCast(words[1]), .step = @bitCast(words[2]), .width = @truncate(words[3]), .depth = @truncate(words[3] >> 16), .first = words[4] };
+            if (@as(u64, d.first) + @as(u64, d.width) * d.depth > counts[1]) return error.BadNavMesh;
+        }
+        heights = try gpa.alloc(f32, counts[1]);
+        for (heights) |*h| h.* = @bitCast((try take(bytes, &at, 1))[0]);
+    }
+    var mesh = try init(gpa, vertices, polygons, agent);
+    mesh.details = details;
+    mesh.detail_heights = heights;
+    return mesh;
 }
 
 fn take(bytes: []const u8, at: *usize, comptime n: usize) error{BadNavMesh}![n]u32 {
@@ -148,13 +212,24 @@ pub const Nearest = struct {
     point: Vec3,
 };
 
+pub const Found = struct {
+    poly: u32,
+    point: Vec3,
+    /// Straight above or below `p`, rather than the nearest edge.
+    over: bool,
+};
+
 /// The point of the mesh nearest `p`: of the polygons straight above or
-/// below it, the one nearest in height - a polygon's height inside it is
-/// only as true as its corners, and one may reach from a floor up a ramp
-/// to a platform - and the nearest edge where none is. Null for an empty
-/// mesh.
+/// below it, the one nearest in height, and the nearest edge where none
+/// is. Null for an empty mesh.
 pub fn closestPoint(self: *const NavMesh, p: Vec3) ?Nearest {
-    var over: ?Nearest = null;
+    const found = self.closest(p) orelse return null;
+    return .{ .poly = found.poly, .point = found.point };
+}
+
+/// The same, saying whether it is straight above or below.
+pub fn closest(self: *const NavMesh, p: Vec3) ?Found {
+    var over: ?Found = null;
     var over_d: f32 = std.math.inf(f32);
     for (self.polygons, 0..) |_, i| {
         const box = self.boxes[i];
@@ -164,12 +239,12 @@ pub fn closestPoint(self: *const NavMesh, p: Vec3) ?Nearest {
         const d = @abs(h - p[1]);
         if (d < over_d) {
             over_d = d;
-            over = .{ .poly = poly, .point = .{ p[0], h, p[2] } };
+            over = .{ .poly = poly, .point = .{ p[0], h, p[2] }, .over = true };
         }
     }
     if (over) |found| return found;
 
-    var best: ?Nearest = null;
+    var best: ?Found = null;
     var best_d: f32 = std.math.inf(f32);
     for (self.polygons, 0..) |_, i| {
         const poly: u32 = @intCast(i);
@@ -182,7 +257,7 @@ pub fn closestPoint(self: *const NavMesh, p: Vec3) ?Nearest {
         const d = vec.dot(q - p, q - p);
         if (d < best_d) {
             best_d = d;
-            best = .{ .poly = poly, .point = q };
+            best = .{ .poly = poly, .point = q, .over = false };
         }
     }
     return best;
@@ -207,8 +282,17 @@ pub fn closestOnPolygon(self: *const NavMesh, poly: u32, p: Vec3) Vec3 {
     return best;
 }
 
-/// The polygon's height under `p`, if `p` is over it.
+/// The polygon's height under `p`, if `p` is over it: from the heights
+/// sampled inside it where it has them, else from its corners.
 pub fn heightAt(self: *const NavMesh, poly: u32, p: Vec3) ?f32 {
+    const planar = self.planarHeight(poly, p) orelse return null;
+    if (self.details.len > 0) if (self.sampled(poly, p)) |h| return h;
+    return planar;
+}
+
+/// The height under `p` of the polygon as its corners make it, if `p` is
+/// over it.
+pub fn planarHeight(self: *const NavMesh, poly: u32, p: Vec3) ?f32 {
     const count = self.polygons[poly].count;
     const a = self.corner(poly, 0);
     for (1..count - 1) |i| {
@@ -217,6 +301,34 @@ pub fn heightAt(self: *const NavMesh, poly: u32, p: Vec3) ?f32 {
         if (barycentric(a, b, c, p)) |w| return a[1] * w[0] + b[1] * w[1] + c[1] * w[2];
     }
     return null;
+}
+
+/// The height at `p` from the four samples round it, those that found a
+/// floor, weighted by nearness.
+fn sampled(self: *const NavMesh, poly: u32, p: Vec3) ?f32 {
+    const d = self.details[poly];
+    if (d.width == 0 or d.depth == 0 or d.step <= 0) return null;
+    const fx = std.math.clamp((p[0] - d.x) / d.step, 0, @as(f32, @floatFromInt(d.width - 1)));
+    const fz = std.math.clamp((p[2] - d.z) / d.step, 0, @as(f32, @floatFromInt(d.depth - 1)));
+    const ix: u32 = @intFromFloat(@floor(fx));
+    const iz: u32 = @intFromFloat(@floor(fz));
+    const tx = fx - @as(f32, @floatFromInt(ix));
+    const tz = fz - @as(f32, @floatFromInt(iz));
+    const heights = self.detail_heights[d.first..][0 .. @as(usize, d.width) * d.depth];
+    var sum: f32 = 0;
+    var weights: f32 = 0;
+    for ([_][3]f32{ .{ 0, 0, (1 - tx) * (1 - tz) }, .{ 1, 0, tx * (1 - tz) }, .{ 0, 1, (1 - tx) * tz }, .{ 1, 1, tx * tz } }) |corner_weight| {
+        const x = @min(ix + @as(u32, @intFromFloat(corner_weight[0])), d.width - 1);
+        const z = @min(iz + @as(u32, @intFromFloat(corner_weight[1])), d.depth - 1);
+        const h = heights[z * d.width + x];
+        if (std.math.isNan(h)) continue;
+        // A little for each, so a sample right beside a missing one counts.
+        const w = corner_weight[2] + 1e-4;
+        sum += h * w;
+        weights += w;
+    }
+    if (weights == 0) return null;
+    return sum / weights;
 }
 
 /// Where `p` falls in triangle `a b c` on the ground, as weights, if it is in it.
@@ -244,202 +356,16 @@ fn closestOnSegment(a: Vec3, b: Vec3, p: Vec3) Vec3 {
     return vec.lerp(a, b, t);
 }
 
-pub const Path = struct {
-    /// The corners to walk through, the start first and the end last.
-    points: std.ArrayList(Vec3) = .empty,
-    /// The polygons gone through.
-    corridor: std.ArrayList(u32) = .empty,
-    /// The end could not be reached: the path goes as near it as it can.
-    partial: bool = false,
-
-    pub fn deinit(self: *Path, gpa: Allocator) void {
-        self.points.deinit(gpa);
-        self.corridor.deinit(gpa);
-        self.* = undefined;
-    }
-
-    pub fn clear(self: *Path) void {
-        self.points.clearRetainingCapacity();
-        self.corridor.clearRetainingCapacity();
-        self.partial = false;
-    }
-};
+pub const Path = Map.Path;
 
 /// The way from `start` to `end`, each first moved to the nearest point of
 /// the mesh: through the polygons A* finds, pulled tight. Empty when the
-/// mesh is.
+/// mesh is. See `Map` for ways across several meshes, links and what
+/// stands in the way.
 pub fn findPath(self: *const NavMesh, gpa: Allocator, start: Vec3, end: Vec3, path: *Path) Allocator.Error!void {
-    path.clear();
-    const from = self.closestPoint(start) orelse return;
-    const to = self.closestPoint(end) orelse return;
-    try self.findCorridor(gpa, from, to, path);
-    var goal = to.point;
-    if (path.partial) goal = self.closestOnPolygon(path.corridor.items[path.corridor.items.len - 1], to.point);
-    try self.pullTight(gpa, from.point, goal, path);
-}
-
-const Node = struct {
-    /// Where it was entered: the middle of the edge crossed.
-    pos: Vec3,
-    cost: f32,
-    total: f32,
-    parent: u32,
-    open: bool,
-    closed: bool,
-};
-
-fn findCorridor(self: *const NavMesh, gpa: Allocator, from: Nearest, to: Nearest, path: *Path) Allocator.Error!void {
-    var nodes: std.AutoHashMapUnmanaged(u32, Node) = .empty;
-    defer nodes.deinit(gpa);
-    const Open = struct { poly: u32, total: f32 };
-    const order = struct {
-        fn less(_: void, a: Open, b: Open) std.math.Order {
-            return std.math.order(a.total, b.total);
-        }
-    };
-    var open: std.PriorityQueue(Open, void, order.less) = .initContext({});
-    defer open.deinit(gpa);
-
-    const h_scale = 0.999;
-    const start_h = vec.length(to.point - from.point) * h_scale;
-    try nodes.put(gpa, from.poly, .{ .pos = from.point, .cost = 0, .total = start_h, .parent = none, .open = true, .closed = false });
-    try open.push(gpa, .{ .poly = from.poly, .total = start_h });
-    var best = from.poly;
-    var best_h = start_h;
-
-    while (open.pop()) |top| {
-        const node = nodes.getPtr(top.poly).?;
-        if (node.closed or top.total > node.total) continue;
-        node.open = false;
-        node.closed = true;
-        if (top.poly == to.poly) {
-            best = to.poly;
-            break;
-        }
-        const here = node.*;
-        const poly = self.polygons[top.poly];
-        for (0..poly.count) |e| {
-            const nb = poly.neighbours[e];
-            if (nb == none or nb == here.parent) continue;
-            const a = self.corner(top.poly, e);
-            const b = self.corner(top.poly, (e + 1) % poly.count);
-            const pos = vec.lerp(a, b, 0.5);
-            var cost = here.cost + vec.length(pos - here.pos);
-            var h: f32 = 0;
-            if (nb == to.poly) {
-                cost += vec.length(to.point - pos);
-            } else h = vec.length(to.point - pos) * h_scale;
-            const total = cost + h;
-            const entry = try nodes.getOrPut(gpa, nb);
-            if (entry.found_existing) {
-                if (entry.value_ptr.closed and total >= entry.value_ptr.total) continue;
-                if (entry.value_ptr.open and total >= entry.value_ptr.total) continue;
-            }
-            entry.value_ptr.* = .{ .pos = pos, .cost = cost, .total = total, .parent = top.poly, .open = true, .closed = false };
-            try open.push(gpa, .{ .poly = nb, .total = total });
-            if (h < best_h) {
-                best_h = h;
-                best = nb;
-            }
-        }
-    }
-    path.partial = best != to.poly;
-    // Back from the last to the first.
-    var at = best;
-    while (at != none) : (at = nodes.get(at).?.parent) try path.corridor.append(gpa, at);
-    std.mem.reverse(u32, path.corridor.items);
-}
-
-/// The edge `from` shares with `to`, as its two ends seen walking from
-/// `from` into `to`: left and right.
-fn portal(self: *const NavMesh, from: u32, to: u32) ?[2]Vec3 {
-    const poly = self.polygons[from];
-    for (0..poly.count) |e| {
-        if (poly.neighbours[e] != to) continue;
-        return .{ self.corner(from, e), self.corner(from, (e + 1) % poly.count) };
-    }
-    return null;
-}
-
-/// Twice the signed area on the ground, as the funnel turns: positive when
-/// `c` is to the right of `a`-`b`, walking from `a` to `b`.
-fn turn(a: Vec3, b: Vec3, c: Vec3) f32 {
-    const abx = b[0] - a[0];
-    const abz = b[2] - a[2];
-    const acx = c[0] - a[0];
-    const acz = c[2] - a[2];
-    return acx * abz - abx * acz;
-}
-
-fn same(a: Vec3, b: Vec3) bool {
-    const d = a - b;
-    return vec.dot(d, d) < 1e-6 * 1e-6;
-}
-
-/// The corridor pulled tight from `start` to `goal`: a corner wherever the
-/// way has to turn round the edge of a doorway.
-fn pullTight(self: *const NavMesh, gpa: Allocator, start: Vec3, goal: Vec3, path: *Path) Allocator.Error!void {
-    const corridor = path.corridor.items;
-    var portals: std.ArrayList([2]Vec3) = .empty;
-    defer portals.deinit(gpa);
-    for (0..corridor.len -| 1) |i| {
-        try portals.append(gpa, self.portal(corridor[i], corridor[i + 1]) orelse .{ goal, goal });
-    }
-    try portals.append(gpa, .{ goal, goal });
-
-    try path.points.append(gpa, start);
-    var apex = start;
-    var portal_left = start;
-    var portal_right = start;
-    var apex_index: usize = 0;
-    var left_index: usize = 0;
-    var right_index: usize = 0;
-    var i: usize = 0;
-    while (i < portals.items.len) : (i += 1) {
-        const left = portals.items[i][0];
-        const right = portals.items[i][1];
-        // The right side of the funnel, narrowed.
-        if (turn(apex, portal_right, right) <= 0) {
-            if (same(apex, portal_right) or turn(apex, portal_left, right) > 0) {
-                portal_right = right;
-                right_index = i;
-            } else {
-                // Past the left side: the left side's corner is turned round.
-                apex = portal_left;
-                apex_index = left_index;
-                try appendPoint(gpa, path, apex);
-                portal_left = apex;
-                portal_right = apex;
-                left_index = apex_index;
-                right_index = apex_index;
-                i = apex_index;
-                continue;
-            }
-        }
-        // And the left.
-        if (turn(apex, portal_left, left) >= 0) {
-            if (same(apex, portal_left) or turn(apex, portal_right, left) < 0) {
-                portal_left = left;
-                left_index = i;
-            } else {
-                apex = portal_right;
-                apex_index = right_index;
-                try appendPoint(gpa, path, apex);
-                portal_left = apex;
-                portal_right = apex;
-                left_index = apex_index;
-                right_index = apex_index;
-                i = apex_index;
-                continue;
-            }
-        }
-    }
-    try appendPoint(gpa, path, goal);
-}
-
-fn appendPoint(gpa: Allocator, path: *Path, p: Vec3) Allocator.Error!void {
-    if (path.points.items.len > 0 and same(path.points.items[path.points.items.len - 1], p)) return;
-    try path.points.append(gpa, p);
+    const parts = [1]Map.Part{.{ .mesh = self }};
+    const map: Map = .single(&parts);
+    try map.findPath(gpa, start, end, path, .{});
 }
 
 /// Whether every polygon can be reached from the first: a mesh of one

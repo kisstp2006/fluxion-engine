@@ -33,6 +33,15 @@ pub const Settings = struct {
     /// and how long it may be, in metres - nought for any length.
     edge_max_error: f32 = 1.3,
     edge_max_length: f32 = 12,
+    /// How far apart the heights sampled inside each polygon are, in
+    /// metres; nought samples none, and a polygon's height is its corners'.
+    detail_sample_distance: f32 = 0.5,
+    /// Only what is between these two corners on the ground - x and z - is
+    /// kept, cut straight at them. What is round them is still looked at,
+    /// as far as the agent's radius and a little more, so the mesh is not
+    /// worn back from where it is cut: two meshes cut along one line meet
+    /// there. None keeps all.
+    bounds: ?[2]Vec3 = null,
 };
 
 pub const Input = struct {
@@ -73,6 +82,16 @@ pub fn bake(gpa: Allocator, input: Input, settings: Settings, report: ?*Report) 
     const ch = @max(settings.cell_height, 0.01);
     // Room above the highest floor for the agent to stand.
     max[1] += settings.agent_height + ch;
+    if (settings.bounds) |b| {
+        // What is round the bounds, as far as the radius wears and a few
+        // cells more, so nothing is worn back from where the mesh is cut.
+        const border = @ceil(settings.agent_radius / cs) * cs + 3 * cs;
+        min[0] = @max(min[0], @min(b[0][0], b[1][0]) - border);
+        min[2] = @max(min[2], @min(b[0][2], b[1][2]) - border);
+        max[0] = @min(max[0], @max(b[0][0], b[1][0]) + border);
+        max[2] = @min(max[2], @max(b[0][2], b[1][2]) + border);
+        if (min[0] >= max[0] or min[2] >= max[2]) return empty(gpa, agent);
+    }
 
     const height: i32 = @intFromFloat(@ceil(settings.agent_height / ch));
     const climb: i32 = @intFromFloat(@floor(settings.agent_max_climb / ch));
@@ -117,21 +136,206 @@ pub fn bake(gpa: Allocator, input: Input, settings: Settings, report: ?*Report) 
     defer mesh.deinit(gpa);
     if (report) |r| r.bad_outlines = mesh.bad_outlines;
 
-    const vertices = try gpa.alloc(Vec3, mesh.vertices.items.len);
-    errdefer gpa.free(vertices);
-    for (mesh.vertices.items, vertices) |v, *w| {
-        w.* = .{
+    var vertices: std.ArrayList(Vec3) = .empty;
+    defer vertices.deinit(gpa);
+    var polygons: std.ArrayList(NavMesh.Polygon) = .empty;
+    defer polygons.deinit(gpa);
+    try vertices.ensureTotalCapacity(gpa, mesh.vertices.items.len);
+    for (mesh.vertices.items) |v| {
+        vertices.appendAssumeCapacity(.{
             min[0] + @as(f32, @floatFromInt(v.x)) * cs,
             min[1] + @as(f32, @floatFromInt(v.y)) * ch,
             min[2] + @as(f32, @floatFromInt(v.z)) * cs,
+        });
+    }
+    try polygons.ensureTotalCapacity(gpa, mesh.polygons.items.len);
+    for (mesh.polygons.items) |p| {
+        polygons.appendAssumeCapacity(.{ .vertices = p.vertices, .neighbours = p.neighbours, .count = @intCast(p.count()), .area = p.area });
+    }
+    if (settings.bounds) |b| try clipToBounds(gpa, &vertices, &polygons, b);
+
+    const owned_vertices = try vertices.toOwnedSlice(gpa);
+    errdefer gpa.free(owned_vertices);
+    const owned_polygons = try polygons.toOwnedSlice(gpa);
+    errdefer gpa.free(owned_polygons);
+    var nav = try NavMesh.init(gpa, owned_vertices, owned_polygons, agent);
+    // The mesh holds the two from here: on a later failure it frees them.
+    errdefer {
+        gpa.free(nav.boxes);
+        gpa.free(nav.details);
+        gpa.free(nav.detail_heights);
+    }
+    if (settings.detail_sample_distance > 0) try sampleHeights(gpa, &nav, &chf, settings.detail_sample_distance);
+    return nav;
+}
+
+/// Each polygon cut straight at the bounds on the ground: what is outside
+/// goes, a polygon of more than `max_vertices` corners is cut into a fan,
+/// the corners welded again where they meet, and each polygon told again
+/// which is across each of its edges.
+fn clipToBounds(gpa: Allocator, vertices: *std.ArrayList(Vec3), polygons: *std.ArrayList(NavMesh.Polygon), bounds: [2]Vec3) Allocator.Error!void {
+    const lo: [2]f32 = .{ @min(bounds[0][0], bounds[1][0]), @min(bounds[0][2], bounds[1][2]) };
+    const hi: [2]f32 = .{ @max(bounds[0][0], bounds[1][0]), @max(bounds[0][2], bounds[1][2]) };
+    var out_vertices: std.ArrayList(Vec3) = .empty;
+    errdefer out_vertices.deinit(gpa);
+    var out_polygons: std.ArrayList(NavMesh.Polygon) = .empty;
+    errdefer out_polygons.deinit(gpa);
+    var welded: std.AutoHashMapUnmanaged([3]i32, u32) = .empty;
+    defer welded.deinit(gpa);
+
+    for (polygons.items) |p| {
+        var buffer_a: [16]Vec3 = undefined;
+        var buffer_b: [16]Vec3 = undefined;
+        var n: usize = p.count;
+        for (p.vertices[0..n], 0..) |v, i| buffer_a[i] = vertices.items[v];
+        // Against each of the four sides.
+        n = clipSide(buffer_a[0..n], &buffer_b, 0, lo[0], true);
+        n = clipSide(buffer_b[0..n], &buffer_a, 0, hi[0], false);
+        n = clipSide(buffer_a[0..n], &buffer_b, 2, lo[1], true);
+        n = clipSide(buffer_b[0..n], &buffer_a, 2, hi[1], false);
+        // Corners in the same place are one.
+        var kept: [16]u32 = undefined;
+        var count: usize = 0;
+        for (buffer_a[0..n]) |v| {
+            const index = try weld(gpa, &welded, &out_vertices, v);
+            if (count > 0 and kept[count - 1] == index) continue;
+            kept[count] = index;
+            count += 1;
+        }
+        if (count > 1 and kept[0] == kept[count - 1]) count -= 1;
+        if (count < 3) continue;
+        // A fan of pieces of no more than `max_vertices` corners, each
+        // convex as the whole is.
+        var start: usize = 1;
+        while (start + 1 < count) {
+            const end = @min(start + NavMesh.max_vertices - 2, count - 1);
+            var piece: NavMesh.Polygon = .{ .area = p.area };
+            piece.vertices[0] = kept[0];
+            var k: usize = 1;
+            for (kept[start .. end + 1]) |v| {
+                piece.vertices[k] = v;
+                k += 1;
+            }
+            piece.count = @intCast(k);
+            try out_polygons.append(gpa, piece);
+            start = end;
+        }
+    }
+    try connectAll(gpa, out_polygons.items);
+    vertices.deinit(gpa);
+    polygons.deinit(gpa);
+    vertices.* = out_vertices;
+    polygons.* = out_polygons;
+}
+
+/// The part of a convex polygon on the kept side of where `axis` is `at`:
+/// above it with `keep_above`, below otherwise.
+fn clipSide(in: []const Vec3, out: *[16]Vec3, comptime axis: usize, at: f32, keep_above: bool) usize {
+    if (in.len == 0) return 0;
+    var n: usize = 0;
+    var j = in.len - 1;
+    for (in, 0..) |b, i| {
+        const a = in[j];
+        const da = if (keep_above) a[axis] - at else at - a[axis];
+        const db = if (keep_above) b[axis] - at else at - b[axis];
+        if ((da >= 0) != (db >= 0)) {
+            const t = da / (da - db);
+            if (n < out.len) out[n] = vec.lerp(a, b, t);
+            n += 1;
+        }
+        if (db >= 0) {
+            if (n < out.len) out[n] = b;
+            n += 1;
+        }
+        j = i;
+    }
+    return @min(n, out.len);
+}
+
+/// The index of the corner at `v`, a new one unless one is there already -
+/// within a thousandth of a metre.
+fn weld(gpa: Allocator, welded: *std.AutoHashMapUnmanaged([3]i32, u32), vertices: *std.ArrayList(Vec3), v: Vec3) Allocator.Error!u32 {
+    const key: [3]i32 = .{ @intFromFloat(@round(v[0] * 1000)), @intFromFloat(@round(v[1] * 1000)), @intFromFloat(@round(v[2] * 1000)) };
+    const entry = try welded.getOrPut(gpa, key);
+    if (entry.found_existing) return entry.value_ptr.*;
+    try vertices.append(gpa, v);
+    entry.value_ptr.* = @intCast(vertices.items.len - 1);
+    return entry.value_ptr.*;
+}
+
+/// Two polygons are across from each other where they go along the same
+/// two corners opposite ways.
+fn connectAll(gpa: Allocator, polygons: []NavMesh.Polygon) Allocator.Error!void {
+    const Edge = struct { poly: u32, edge: u8 };
+    var edges: std.AutoHashMapUnmanaged([2]u32, Edge) = .empty;
+    defer edges.deinit(gpa);
+    for (polygons, 0..) |p, i| {
+        for (0..p.count) |e| {
+            const a = p.vertices[e];
+            const b = p.vertices[(e + 1) % p.count];
+            try edges.put(gpa, .{ a, b }, .{ .poly = @intCast(i), .edge = @intCast(e) });
+        }
+    }
+    for (polygons, 0..) |*p, i| {
+        for (0..p.count) |e| {
+            const a = p.vertices[e];
+            const b = p.vertices[(e + 1) % p.count];
+            const other = edges.get(.{ b, a }) orelse continue;
+            if (other.poly == i) continue;
+            p.neighbours[e] = other.poly;
+        }
+    }
+}
+
+/// Heights sampled inside each polygon, `step` apart: of the floors in the
+/// cell under a sample, the one nearest the polygon as its corners make it.
+fn sampleHeights(gpa: Allocator, nav: *NavMesh, chf: *const Compact, step: f32) Allocator.Error!void {
+    const details = try gpa.alloc(NavMesh.Detail, nav.polygons.len);
+    errdefer gpa.free(details);
+    var heights: std.ArrayList(f32) = .empty;
+    defer heights.deinit(gpa);
+    const cs = chf.cell_size;
+    const ch = chf.cell_height;
+    for (nav.polygons, details, 0..) |p, *d, i| {
+        const box = nav.boxes[i];
+        const width: u32 = @min(@as(u32, @intFromFloat(@floor((box[1][0] - box[0][0]) / step))) + 2, 0xffff);
+        const depth: u32 = @min(@as(u32, @intFromFloat(@floor((box[1][2] - box[0][2]) / step))) + 2, 0xffff);
+        d.* = .{ .x = box[0][0], .z = box[0][2], .step = step, .width = @intCast(width), .depth = @intCast(depth), .first = @intCast(heights.items.len) };
+        // A height to choose the floor by where a sample is off the
+        // polygon: the middle of its corners.
+        var middle: f32 = 0;
+        for (p.vertices[0..p.count]) |v| middle += nav.vertices[v][1];
+        middle /= @floatFromInt(p.count);
+        try heights.ensureUnusedCapacity(gpa, @as(usize, width) * depth);
+        for (0..depth) |z| for (0..width) |x| {
+            const at: Vec3 = .{ d.x + @as(f32, @floatFromInt(x)) * step, 0, d.z + @as(f32, @floatFromInt(z)) * step };
+            const near = nav.planarHeight(@intCast(i), at) orelse middle;
+            heights.appendAssumeCapacity(floorNear(chf, at, near, cs, ch));
         };
     }
-    const polygons = try gpa.alloc(NavMesh.Polygon, mesh.polygons.items.len);
-    errdefer gpa.free(polygons);
-    for (mesh.polygons.items, polygons) |p, *q| {
-        q.* = .{ .vertices = p.vertices, .neighbours = p.neighbours, .count = @intCast(p.count()), .area = p.area };
+    nav.setDetail(gpa, details, try heights.toOwnedSlice(gpa));
+}
+
+/// The height of the floor in the cell under `at` nearest `near`, or NaN.
+fn floorNear(chf: *const Compact, at: Vec3, near: f32, cs: f32, ch: f32) f32 {
+    const fx = (at[0] - chf.origin[0]) / cs;
+    const fz = (at[2] - chf.origin[2]) / cs;
+    if (fx < 0 or fz < 0) return std.math.nan(f32);
+    const x: u32 = @intFromFloat(@floor(fx));
+    const z: u32 = @intFromFloat(@floor(fz));
+    if (x >= chf.width or z >= chf.depth) return std.math.nan(f32);
+    const cell = chf.cellAt(x, z);
+    var best = std.math.nan(f32);
+    var best_d = std.math.inf(f32);
+    for (chf.spans[cell.first..][0..cell.count]) |s| {
+        const h = chf.origin[1] + @as(f32, @floatFromInt(s.y)) * ch;
+        const d = @abs(h - near);
+        if (d < best_d) {
+            best_d = d;
+            best = h;
+        }
     }
-    return NavMesh.init(gpa, vertices, polygons, agent);
+    return best;
 }
 
 fn empty(gpa: Allocator, agent: NavMesh.Agent) Allocator.Error!NavMesh {
@@ -348,4 +552,49 @@ test "a slope is walked up with coarse cells and a low climb: its rounding into 
     defer stepped.deinit(testing.allocator);
     try stepped.findPath(testing.allocator, .{ -6, 0, 0 }, .{ 6, 0.6, 0 }, &path);
     try testing.expect(path.partial);
+}
+
+test "heights inside a polygon reaching from the floor up a ramp to a platform are the floor's, the ramp's and the platform's" {
+    var world: World = .{};
+    defer world.deinit();
+    try world.box(.{ -10, -0.5, -3 }, .{ 10, 0, 3 });
+    try world.box(.{ 4, 0, -3 }, .{ 10, 1, 3 });
+    try world.turnedBox(.{ 0.5, 0.3, -2 }, .{ 4.5, 0.6, 2 }, std.math.degreesToRadians(17.0));
+    var mesh = try bake(testing.allocator, world.input(), .{ .cell_size = 0.2, .cell_height = 0.05 }, null);
+    defer mesh.deinit(testing.allocator);
+    try testing.expectEqual(mesh.polygons.len, mesh.details.len);
+    // On the floor, half way up the ramp, and on the platform.
+    for ([_][2]f32{ .{ -5, 0 }, .{ -2, 0 }, .{ 2.5, 0 }, .{ 7, 0 } }) |at| {
+        const found = mesh.closestPoint(.{ at[0], 3, at[1] }).?;
+        const expected: f32 = if (at[0] < 0.5) 0 else if (at[0] > 4.3) 1 else 0.45 + (at[0] - 2.5) * @tan(std.math.degreesToRadians(17.0)) + 0.15 / @cos(std.math.degreesToRadians(17.0));
+        try testing.expectApproxEqAbs(expected, found.point[1], 0.12);
+    }
+    // Written and read back, they are still there.
+    const bytes = try mesh.write(testing.allocator);
+    defer testing.allocator.free(bytes);
+    var back = try NavMesh.read(testing.allocator, bytes);
+    defer back.deinit(testing.allocator);
+    try testing.expectEqual(mesh.detail_heights.len, back.detail_heights.len);
+    try testing.expectApproxEqAbs(mesh.closestPoint(.{ 2.5, 3, 0 }).?.point[1], back.closestPoint(.{ 2.5, 3, 0 }).?.point[1], 1e-6);
+}
+
+test "two meshes baked from one floor cut along a line meet on it, not worn back from it" {
+    var world: World = .{};
+    defer world.deinit();
+    try world.box(.{ -10, -0.5, -4 }, .{ 10, 0, 4 });
+    var left = try bake(testing.allocator, world.input(), .{ .bounds = .{ .{ -10, 0, -10 }, .{ 0, 0, 10 } } }, null);
+    defer left.deinit(testing.allocator);
+    var right = try bake(testing.allocator, world.input(), .{ .bounds = .{ .{ 0, 0, -10 }, .{ 10, 0, 10 } } }, null);
+    defer right.deinit(testing.allocator);
+    var left_most: f32 = -100;
+    var right_least: f32 = 100;
+    for (left.vertices) |v| left_most = @max(left_most, v[0]);
+    for (right.vertices) |v| right_least = @min(right_least, v[0]);
+    try testing.expectApproxEqAbs(@as(f32, 0), left_most, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, 0), right_least, 1e-3);
+    // Worn back at the floor's own edges, as ever.
+    for (left.vertices) |v| try testing.expect(v[0] >= -9.6);
+    // Each still one piece.
+    try testing.expectEqual(left.polygons.len, try left.connectedFrom(testing.allocator, 0));
+    try testing.expectEqual(right.polygons.len, try right.connectedFrom(testing.allocator, 0));
 }

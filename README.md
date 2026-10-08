@@ -2699,18 +2699,40 @@ fn walk(app: *fx.App) !void {                          // a .fixed system
   left out. The baker is a module of its own, `fx.navmesh`, built for
   speed whatever the engine is built as: a level a hundred metres across
   bakes in a few dozen milliseconds.
-- **The way across is A* from polygon to polygon**, pulled tight through
-  the doorways between them: `app.navigationPath(from, to)` gives its
-  corners, `app.closestNavigationPoint(point)` the nearest point of the
-  map. A way is found on the region nearest its start and does not cross
-  into another; a target off it is gone towards as near as it reaches.
+- **Heights inside each polygon are sampled** `detail_sample_distance`
+  apart, so a point is put on the floor, the ramp or the platform a
+  polygon reaching across all three covers - not where its corners alone
+  would put it.
+- **The regions are one map**, each mesh where its region is now, joined
+  where their edges meet - within `app.navigation.settings.edge_margin`.
+  Baked meshes are worn back from their own edges, so two regions to be
+  joined are cut to boxes that meet: `bake_bounds_center` and
+  `bake_bounds_size`, with `scope = .scene` so each sees the floor round
+  its box and its mesh reaches the box's sides.
+- **The way across is A* from polygon to polygon** over the whole map,
+  pulled tight through the doorways between them: `app.navigationPath(from,
+  to)` gives its corners, `app.closestNavigationPoint(point)` the nearest
+  point of the map. A target off it is gone towards as near as it reaches.
+- **A `NavigationLink3D` joins two places the mesh does not**: a jump
+  across a gap, a drop off a ledge - only one way, with `bidirectional`
+  off - a ladder. Its ends are found on the nearest mesh, within
+  `search_radius`; a way along it costs its length times `travel_cost`,
+  and `enter_cost`. An agent whose way takes it hears `link_reached` with
+  its start and end, and makes the jump.
+- **A `NavigationObstacle3D` is something in the way that moves on its
+  own** - a cart, a boulder: agents with avoidance keep out of its way,
+  taking all of the turning as it does not turn for them, and its
+  `velocity` is worked out from its moves. With `affect_paths`, a way does
+  not go through a doorway it stands in - a wide one is narrowed to beside
+  it - and agents find their way again when it has moved.
 - **A `NavigationAgent3D` finds its own way** to `target_position`:
   `app.nextPathPosition(agent)` is the corner to head for, the way found
   again when the target moves or the agent strays further than
   `path_max_distance`. Within `path_desired_distance` of a corner it heads
   for the next, and within `target_desired_distance` of the end it has
   finished - `isNavigationFinished`, `isTargetReached`, and the signals
-  `path_changed`, `target_reached` and `navigation_finished`. The corners
+  `path_changed`, `target_reached`, `navigation_finished` and
+  `link_reached`. The corners
   are on the floor: what walks to them flattens the way, its middle being
   above it.
 - **Avoidance**: an agent with `avoidance_enabled` says the velocity it
@@ -2721,12 +2743,12 @@ fn walk(app: *fx.App) !void {                          // a .fixed system
   moved by it moves in the same step.
 - **From a script all of it is there**: `app.nextPathPosition(self.entity)`,
   `app.navigationPath(a, b).len`, `agent.velocity_computed.connect(...)`.
-  `app.debug_views.navigation` draws each region's mesh and each agent's way.
+  `app.debug_views.navigation` draws each region's mesh, where regions
+  meet, the links, the obstacles, the boxes regions are cut to and each
+  agent's way.
 
-Not here yet: ways from one region into another, links across gaps and
-jumps, obstacles that move, and heights inside a polygon truer than its
-corners - one reaching from a floor up a ramp is only as high in the
-middle as its corners say.
+Not here yet: a mesh baked again round an obstacle as it moves, rather
+than its doorways closed; and a navigation mesh in 2D.
 
 ## 📁 The project's files
 

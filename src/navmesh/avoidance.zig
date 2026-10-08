@@ -30,6 +30,10 @@ pub const Agent = struct {
     max_neighbours: usize = 10,
     /// How far ahead, in seconds, it keeps clear of the others.
     time_horizon: f32 = 1,
+    /// Whether it turns aside itself. One that does not - an obstacle that
+    /// moves as it moves - keeps its velocity, and each agent near it takes
+    /// all of the turning away rather than half.
+    avoids: bool = true,
 };
 
 const Line = struct {
@@ -66,6 +70,10 @@ pub fn solve(gpa: Allocator, agents: []const Agent, dt: f32, out: []Vec2) Alloca
     defer projected.deinit(gpa);
 
     for (agents, out, 0..) |a, *result, i| {
+        if (!a.avoids) {
+            result.* = a.velocity;
+            continue;
+        }
         lines.clearRetainingCapacity();
         near.clearRetainingCapacity();
         for (agents, 0..) |b, j| {
@@ -118,8 +126,9 @@ pub fn solve(gpa: Allocator, agents: []const Agent, dt: f32, out: []Vec2) Alloca
                 line.direction = .{ unit_w[1], -unit_w[0] };
                 u = scale(unit_w, combined_radius * inv_dt - w_len);
             }
-            // Each of the two turns half of the way.
-            line.point = a.velocity + scale(u, 0.5);
+            // Each of the two turns half of the way; all of it, past one
+            // that does not turn.
+            line.point = a.velocity + scale(u, if (b.avoids) 0.5 else 1);
             try lines.append(gpa, line);
         }
 
@@ -243,4 +252,29 @@ test "two agents walking at each other each turn aside, and pass without touchin
     try testing.expect(closest > 0.95);
     // And past each other.
     try testing.expect(agents[0].position[0] > 4 and agents[1].position[0] < -4);
+}
+
+test "an agent crossing the way of an obstacle that does not turn aside goes round it alone" {
+    var agents = [_]Agent{
+        .{ .position = .{ -5, 0 }, .velocity = .{ 1.5, 0 }, .preferred = .{ 1.5, 0 }, .radius = 0.4, .max_speed = 2, .time_horizon = 2 },
+        // Coming across its way, keeping on.
+        .{ .position = .{ 0, -4.5 }, .velocity = .{ 0, 1.4 }, .preferred = .{ 0, 1.4 }, .radius = 0.8, .max_speed = 1.4, .avoids = false },
+    };
+    var out: [2]Vec2 = undefined;
+    const dt = 0.05;
+    var closest: f32 = std.math.inf(f32);
+    for (0..300) |_| {
+        try solve(testing.allocator, &agents, dt, &out);
+        for (&agents, out) |*a, v| {
+            a.velocity = v;
+            a.position += scale(v, dt);
+        }
+        agents[0].preferred = .{ 1.5, 0 };
+        const d = agents[1].position - agents[0].position;
+        closest = @min(closest, @sqrt(dot(d, d)));
+    }
+    // The obstacle never turned.
+    try testing.expectApproxEqAbs(@as(f32, 0), agents[1].position[0], 1e-6);
+    try testing.expect(closest > 1.15);
+    try testing.expect(agents[0].position[0] > 5);
 }

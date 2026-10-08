@@ -19,6 +19,7 @@
 pub const vec = @import("vec.zig");
 pub const Vec3 = vec.Vec3;
 pub const NavMesh = @import("NavMesh.zig");
+pub const Map = @import("Map.zig");
 pub const avoidance = @import("avoidance.zig");
 const bake_mod = @import("bake.zig");
 pub const bake = bake_mod.bake;
@@ -33,6 +34,7 @@ test {
     _ = @import("contours.zig");
     _ = @import("polymesh.zig");
     _ = NavMesh;
+    _ = Map;
     _ = avoidance;
     _ = bake_mod;
 }
