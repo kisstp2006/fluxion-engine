@@ -39,6 +39,7 @@ pub const Camera2D = @import("../render/render_components.zig").Camera2D;
 pub const RenderView = @import("../render/render_components.zig").RenderView;
 pub const MeshInstance3D = @import("../render/render3d_components.zig").MeshInstance3D;
 pub const PrimitiveMesh3D = @import("../render/render3d_components.zig").PrimitiveMesh3D;
+pub const CSGShape3D = @import("../render/csg_shapes.zig").CSGShape3D;
 pub const Material3D = @import("../render/render3d_components.zig").Material3D;
 pub const Material3DData = @import("../render/render3d_components.zig").Material3DData;
 pub const Camera3D = @import("../render/render3d_components.zig").Camera3D;
@@ -254,6 +255,7 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Sprite3D);
     ecs.component.check(Label3D);
     ecs.component.check(Particles3D);
+    ecs.component.check(CSGShape3D);
     ecs.component.check(Collider2D);
 }
 

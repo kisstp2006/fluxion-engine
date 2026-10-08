@@ -38,6 +38,7 @@ const Color = @import("../math/color.zig").Color;
 const components3d = @import("render3d_components.zig");
 const lightmaps = @import("lightmaps.zig");
 const materials = @import("materials.zig");
+const csg_shapes = @import("csg_shapes.zig");
 const mesh = @import("mesh.zig");
 const renderer3d = @import("renderer3d.zig");
 const Transform3D = @import("../scene/transform3d.zig").Transform3D;
@@ -45,7 +46,6 @@ const Transform3D = @import("../scene/transform3d.zig").Transform3D;
 const Uuid = id.Uuid;
 const LightmapGI = components3d.LightmapGI;
 const MeshInstance3D = components3d.MeshInstance3D;
-const PrimitiveMesh3D = components3d.PrimitiveMesh3D;
 const Material3D = components3d.Material3D;
 const Material3DData = components3d.Material3DData;
 
@@ -279,10 +279,10 @@ const Gathering = struct {
             for (chunk.slice(MeshInstance3D), chunk.entities) |instance, entity| {
                 if (instance.gi_mode != .static) continue;
                 if (!app.inherited.of(app.gpa, &app.world, entity).visible) continue;
-                const kept: *mesh.Kept = if (app.world.get(entity, PrimitiveMesh3D)) |shape|
-                    try app.meshes.primitive(app.gpa, shape.primitive())
-                else
-                    app.meshes.keptOf(instance.mesh) orelse continue;
+                const kept: *mesh.Kept = try app.meshDrawnBy(entity, instance) orelse continue;
+                // A CSG shape's mesh made again as it moved has no
+                // lightmap UVs yet.
+                if (app.world.has(entity, csg_shapes.CSGShape3D)) try csg_shapes.unwrap(app, kept);
                 const made = &kept.mesh;
                 if (made.indices.len == 0) continue;
                 const placed = app.drawnTransform3D(entity) orelse continue;

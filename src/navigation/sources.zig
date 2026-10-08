@@ -114,12 +114,9 @@ fn gatherMeshes(app: *App, region: Entity, scope: NavigationRegion3D.Scope, to_l
             // A skin goes where its bones do.
             if (!instance.skeleton.isNone()) continue;
             if (!inScope(app, e, region, scope) or moves(app, e)) continue;
-            var solid = false;
-            const mesh = if (app.world.get(e, components.PrimitiveMesh3D)) |shape| held: {
-                solid = shape.shape != .plane;
-                const kept = try app.meshes.primitive(gpa, shape.primitive());
-                break :held &kept.mesh;
-            } else app.meshOf(instance.mesh) orelse continue;
+            // A closed shape, whose inside is not walked on.
+            const solid = if (app.world.get(e, components.PrimitiveMesh3D)) |shape| shape.shape != .plane else app.world.has(e, components.CSGShape3D);
+            const mesh = &(try app.meshDrawnBy(e, instance) orelse continue).mesh;
             const world = (app.worldTransform3D(e) orelse continue).matrix();
             const m = to_local.mul(world);
             const mirrored = m.det() < 0;

@@ -81,7 +81,6 @@ const billboards = @import("billboards.zig");
 
 const MeshInstance3D = components3d.MeshInstance3D;
 const MaterialHandle = @import("materials.zig").MaterialHandle;
-const PrimitiveMesh3D = components3d.PrimitiveMesh3D;
 const Material3D = components3d.Material3D;
 const Material3DData = components3d.Material3DData;
 const DirectionalLight3D = components3d.DirectionalLight3D;
@@ -920,10 +919,7 @@ pub const Renderer3D = struct {
                 if (!self.worlds.admits(app, entity)) continue;
                 const looks = app.inherited.of(gpa, &app.world, entity);
                 if (!looks.visible) continue;
-                const kept: *mesh.Kept = if (app.world.get(entity, PrimitiveMesh3D)) |shape|
-                    try app.meshes.primitive(gpa, shape.primitive())
-                else
-                    app.meshes.keptOf(instance.mesh) orelse continue;
+                const kept: *mesh.Kept = try app.meshDrawnBy(entity, instance) orelse continue;
                 if (kept.mesh.indices.len == 0) continue;
                 // A mesh a skeleton bends is drawn in the skeleton's space,
                 // its box made from its bones' as they are now.

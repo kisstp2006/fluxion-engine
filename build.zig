@@ -44,6 +44,11 @@ pub fn build(b: *std.Build) void {
         .root_module = e.navmesh,
     });
     test_step.dependOn(&b.addRunArtifact(navmesh_tests).step);
+    const csg_tests = b.addTest(.{
+        .name = "fluxion-csg-tests",
+        .root_module = e.csg,
+    });
+    test_step.dependOn(&b.addRunArtifact(csg_tests).step);
 
     const ndk = b.option([]const u8, "android-ndk", "The Android NDK, for a build for Android (default: ANDROID_NDK_HOME, then the newest in the Android SDK's ndk folder)");
     const program = runtime(b, e, target, optimize, ndk);
@@ -246,6 +251,15 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .single_threaded = single_threaded,
     });
 
+    // Solids joined and cut: the same, for a level of them is remade as
+    // its pieces are dragged.
+    const csg = b.createModule(.{
+        .root_source_file = b.path("src/csg/root.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .single_threaded = single_threaded,
+    });
+
     // Nothing here is lazy, and that is the difference between an engine and
     // the libraries under it. A library keeps its window, its file reading
     // and its renderer behind `lazy` so a consumer never downloads what it
@@ -279,6 +293,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
             .{ .name = "fluxion_net", .module = net.module("fluxion_net") },
             .{ .name = "fluxion_lightmapper", .module = lightmapper },
             .{ .name = "fluxion_navmesh", .module = navmesh },
+            .{ .name = "fluxion_csg", .module = csg },
         },
     };
     const mod = if (exported) b.addModule("fluxion_engine", mod_options) else b.createModule(mod_options);
@@ -319,6 +334,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
         .net = net,
         .lightmapper = lightmapper,
         .navmesh = navmesh,
+        .csg = csg,
         .single_threaded = single_threaded,
     };
 }
@@ -339,6 +355,7 @@ const Engine = struct {
     net: *std.Build.Dependency,
     lightmapper: *std.Build.Module,
     navmesh: *std.Build.Module,
+    csg: *std.Build.Module,
     single_threaded: ?bool,
 };
 

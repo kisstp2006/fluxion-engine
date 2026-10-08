@@ -1300,6 +1300,39 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   `app.saveMesh` and `app.loadMesh` write and read a `.mesh` file - the
   vertices and the indices as they are held. A mesh's corners go
   counter-clockwise seen from the side they face.
+- **Solids joined and cut - a `CSGShape3D` - build a level**: walls with
+  their doors and windows cut out, an arch, a pillar's round top. Each is a
+  box, a cylinder standing along `y`, a ball, a closed `mesh` - or a `group`
+  of nothing of its own - and each `CSGShape3D` under it, in their order, is
+  joined to it (`union`), cut from it (`subtract`) or met with it, only
+  where both are (`intersect`). The one at the top, whose parent has none,
+  is what they all come to: the `MeshInstance3D` beside it draws it, a
+  `Collider3D{ .shape = .mesh }` beside it collides with it, a navigation
+  region walks on it and a lightmap bakes it - `app.meshDrawnBy(entity,
+  instance)` is the mesh each of them is given. Those under it draw
+  nothing; one an `Appearance` hides is left out. The mesh is made again
+  when a shape under it moves or changes, and kept while none does: a
+  shape dragged in an editor is cut as it goes. Each face is drawn with
+  the material of the shape it came from - a doorway's sides with the
+  door's - or its parent's where it has none; its picture lies flat on it,
+  a metre across, as big on every face. The mesh has lightmap UVs once it
+  has stayed as it is for `fx.csg_shapes.settle_frames`: one made again
+  every frame - dragged, or cut by a moving shape - is not unwrapped each
+  time, and a bake unwraps it then.
+  `app.csgMeshOf(top)` is the mesh itself, for an editor to bake into one
+  of its own; `fx.csg` is the solids and how they are joined, for a tool.
+
+  ```zig
+  const wall = try app.world.spawnWith(.{
+      fx.Transform3D.at(0, 1.5, 0), fx.MeshInstance3D{},
+      fx.CSGShape3D{ .size = .init(6, 3, 0.3) }, fx.Collider3D{ .shape = .mesh },
+  });
+  const door = try app.world.spawnWith(.{
+      fx.Transform3D.at(0, -0.5, 0),
+      fx.CSGShape3D{ .operation = .subtract, .size = .init(1, 2, 1) },
+  });
+  try app.setParent(door, wall, false);
+  ```
 - **A `Material3D` beside it names the material it is drawn with**: a
   `.mat3d` file, or one made in code with `app.addMaterial`. It holds nothing
   else - the material does, and what changes it changes every mesh drawn

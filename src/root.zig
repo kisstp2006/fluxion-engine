@@ -238,6 +238,11 @@ pub const background_load = @import("assets/background_load.zig");
 /// The 3D layer's components: see `render/render3d_components.zig`.
 pub const MeshInstance3D = components.MeshInstance3D;
 pub const PrimitiveMesh3D = components.PrimitiveMesh3D;
+/// Solids joined, cut and met: see `render/csg_shapes.zig`.
+pub const CSGShape3D = components.CSGShape3D;
+pub const csg_shapes = @import("render/csg_shapes.zig");
+/// The solids themselves, and how they are joined.
+pub const csg = @import("fluxion_csg");
 pub const Material3D = components.Material3D;
 pub const Material3DData = components.Material3DData;
 pub const Camera3D = components.Camera3D;
@@ -612,6 +617,7 @@ test {
     _ = @import("render/particles_test.zig");
     _ = @import("render/render_test.zig");
     _ = @import("render/render3d_test.zig");
+    _ = @import("render/csg_test.zig");
     _ = @import("render/mesh.zig");
     _ = @import("render/lightmap_uv.zig");
     _ = @import("render/lightmaps.zig");

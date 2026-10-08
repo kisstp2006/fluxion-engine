@@ -731,7 +731,7 @@ pub const Gpu = struct {
         return .{ .vertices = vertex_buffer, .indices = index_buffer, .index_count = @intCast(mesh.indices.len), .skin = skin_buffer };
     }
 
-    fn deinit(self: Gpu, device: *rhi.Device) void {
+    pub fn deinit(self: Gpu, device: *rhi.Device) void {
         device.destroyBuffer(self.vertices);
         device.destroyBuffer(self.indices);
         if (!self.skin.isNone()) device.destroyBuffer(self.skin);
@@ -745,8 +745,12 @@ pub const Kept = struct {
     /// When it was last drawn, by `Meshes.clock`: a primitive's that has not
     /// been for a while is let go.
     used: u64 = 0,
+    /// Which making of a mesh this is: a number of its own each time a mesh
+    /// is kept, read again or made again - `Meshes.stamp` - so what is made
+    /// from one, a collider, is made again with it.
+    stamp: u64 = 0,
 
-    fn deinit(self: *Kept, gpa: Allocator, device: *rhi.Device) void {
+    pub fn deinit(self: *Kept, gpa: Allocator, device: *rhi.Device) void {
         if (self.gpu) |gpu| gpu.deinit(device);
         self.mesh.deinit(gpa);
     }
@@ -766,6 +770,8 @@ pub const Meshes = struct {
     primitives: std.AutoHashMapUnmanaged(PrimitiveKey, Kept) = .empty,
     /// Counts up each frame drawn: see `Kept.used`.
     clock: u64 = 0,
+    /// The last `Kept.stamp` given.
+    stamps: u64 = 0,
 
     const Inner = id.handle.Table(Entry);
 
@@ -778,6 +784,12 @@ pub const Meshes = struct {
 
     /// How many frames a primitive's mesh is kept after it was last drawn.
     pub const primitive_frames = 120;
+
+    /// A `Kept.stamp` no mesh has had.
+    pub fn stamp(self: *Meshes) u64 {
+        self.stamps += 1;
+        return self.stamps;
+    }
 
     fn toId(handle: MeshHandle) Inner.Handle {
         return @bitCast(handle);
@@ -812,13 +824,13 @@ pub const Meshes = struct {
         if (self.find(name)) |known| {
             const held = self.table.get(toId(known)).?;
             held.kept.deinit(gpa, device);
-            held.kept = .{ .mesh = mesh };
+            held.kept = .{ .mesh = mesh, .stamp = self.stamp() };
             held.on_disc = on_disc;
             return known;
         }
         const source = try gpa.dupe(u8, name);
         errdefer gpa.free(source);
-        return fromId(try self.table.add(gpa, .{ .source = source, .on_disc = on_disc, .kept = .{ .mesh = mesh } }));
+        return fromId(try self.table.add(gpa, .{ .source = source, .on_disc = on_disc, .kept = .{ .mesh = mesh, .stamp = self.stamp() } }));
     }
 
     /// The mesh in the `.mesh` file at `path`, read now unless it was read
@@ -845,7 +857,7 @@ pub const Meshes = struct {
         if (!held.on_disc) return false;
         const mesh = try readFile(app, held.source);
         held.kept.deinit(app.gpa, &app.device);
-        held.kept = .{ .mesh = mesh };
+        held.kept = .{ .mesh = mesh, .stamp = self.stamp() };
         return true;
     }
 
@@ -890,7 +902,7 @@ pub const Meshes = struct {
                 self.primitives.removeByPtr(found.key_ptr);
                 return err;
             };
-            found.value_ptr.* = .{ .mesh = mesh };
+            found.value_ptr.* = .{ .mesh = mesh, .stamp = self.stamp() };
         }
         return found.value_ptr;
     }

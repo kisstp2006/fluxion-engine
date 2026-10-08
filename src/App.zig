@@ -126,6 +126,7 @@ const lights = @import("render/lights.zig");
 const shading = @import("render/shaders.zig");
 const view_textures = @import("render/view_textures.zig");
 const mesh_table = @import("render/mesh.zig");
+const csg_shapes = @import("render/csg_shapes.zig");
 const material_table = @import("render/materials.zig");
 const lightmap_table = @import("render/lightmaps.zig");
 const navmesh_table = @import("navigation/navmeshes.zig");
@@ -408,6 +409,9 @@ drawings: drawing.Drawings = .{},
 particles: particle_emitters.Particles = .{},
 /// Each `Particles3D`'s particles: see `render/particles3d.zig`.
 particles3d: particles_3d.Emitters = .{},
+/// The mesh each `CSGShape3D` at the top comes to: see
+/// `render/csg_shapes.zig` and `meshDrawnBy`.
+csg: csg_shapes.Shapes = .{},
 /// Every mesh read or made, and the meshes primitives come to: see
 /// `render/mesh.zig` and `addMesh`.
 meshes: mesh_table.Meshes = .{},
@@ -591,7 +595,7 @@ const entity_tables = .{
     .current_scene,    .tile_chunks, .bodies,             .areas,
     .picking,          .audio,       .control_tree,       .poses,
     .bodies3d,         .areas3d,     .slide_collisions3d, .picking3d,
-    .navigation,       .particles3d,
+    .navigation,       .particles3d, .csg,
 };
 
 /// The engine's own components: what every scene can hold from the start.
@@ -605,6 +609,7 @@ pub const engine_components = .{
     components.ViewTexture,
     components3d.MeshInstance3D,
     components3d.PrimitiveMesh3D,
+    csg_shapes.CSGShape3D,
     components3d.Material3D,
     components3d.Camera3D,
     components3d.DirectionalLight3D,
@@ -1022,6 +1027,7 @@ pub fn destroy(self: *App) void {
     self.ui.deinit();
     self.sprites.deinit(gpa);
     self.renderer3d.deinit(gpa);
+    self.csg.deinit(gpa, &self.device);
     self.meshes.deinit(gpa, &self.device);
     self.materials.deinit(gpa);
     self.lightmaps.deinit(gpa, &self.device);
@@ -5170,6 +5176,26 @@ pub fn reloadMesh(self: *App, handle: mesh_table.MeshHandle) !bool {
 /// A mesh's triangles, as they are kept.
 pub fn meshOf(self: *App, handle: mesh_table.MeshHandle) ?*const mesh_table.Mesh {
     return self.meshes.get(handle);
+}
+
+/// The mesh a `MeshInstance3D` on `entity` draws: what the `CSGShape3D`
+/// beside it and those under it come to, the shape a `PrimitiveMesh3D`
+/// beside it says, or the one it names. Null for none - and for a
+/// `CSGShape3D` under another, which is part of that one's mesh. What the
+/// renderer draws, a mesh collider collides with, a navigation region walks
+/// on and a lightmap bakes.
+pub fn meshDrawnBy(self: *App, entity: ecs.Entity, instance: components3d.MeshInstance3D) Allocator.Error!?*mesh_table.Kept {
+    if (self.world.has(entity, csg_shapes.CSGShape3D)) return self.csg.meshOf(self, entity);
+    if (self.world.get(entity, components3d.PrimitiveMesh3D)) |shape| return try self.meshes.primitive(self.gpa, shape.primitive());
+    return self.meshes.keptOf(instance.mesh);
+}
+
+/// The triangles a `CSGShape3D` at the top comes to, made now if any shape
+/// under it changed: what an editor bakes into a mesh of its own. Null
+/// for one that is not at the top.
+pub fn csgMeshOf(self: *App, top: ecs.Entity) Allocator.Error!?*const mesh_table.Mesh {
+    const kept = try self.csg.meshOf(self, top) orelse return null;
+    return &kept.mesh;
 }
 
 /// Let a mesh go: what draws it draws nothing.

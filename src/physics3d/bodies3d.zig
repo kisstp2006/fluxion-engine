@@ -33,7 +33,6 @@ const Collider3D = components.Collider3D;
 const Area3D = components.Area3D;
 const CharacterBody3D = components.CharacterBody3D;
 const MeshInstance3D = components.MeshInstance3D;
-const PrimitiveMesh3D = components.PrimitiveMesh3D;
 const BodyId = physics3d.BodyId;
 const ShapeId = physics3d.ShapeId;
 
@@ -151,11 +150,15 @@ const Inputs = struct {
     place: Transform3D,
     /// The mesh a `convex` or `mesh` collider is made from.
     mesh: usize,
+    /// Which making of it: see `mesh.Kept.stamp`.
+    stamp: u64,
 };
 
-/// What a hull or a mesh was made from: the mesh, and how it was scaled.
+/// What a hull or a mesh was made from: the mesh, which making of it, and
+/// how it was scaled.
 const MeshKey = struct {
     mesh: usize,
+    stamp: u64,
     scale: [3]u32,
 };
 
@@ -503,20 +506,17 @@ fn inputsOf(app: *App, e: Entity, place: Transform3D, collider: Collider3D, owne
     }
     var shaped = collider;
     if (isArea(&app.world, owner)) shaped.sensor = true;
-    return .{ .collider = shaped, .place = frame, .mesh = meshOf(app, e, collider) };
+    const made = meshOf(app, e, collider);
+    return .{ .collider = shaped, .place = frame, .mesh = if (made) |kept| @intFromPtr(&kept.mesh) else 0, .stamp = if (made) |kept| kept.stamp else 0 };
 }
 
-/// The mesh a `convex` or `mesh` collider is made from, as an address: its
-/// own, or what the `MeshInstance3D` beside it draws. Nought for none.
-fn meshOf(app: *App, e: Entity, collider: Collider3D) usize {
-    if (collider.shape != .convex and collider.shape != .mesh) return 0;
-    if (!collider.mesh.isNone()) return if (app.meshOf(collider.mesh)) |m| @intFromPtr(m) else 0;
-    if (app.world.get(e, PrimitiveMesh3D)) |shape| {
-        const kept = app.meshes.primitive(app.gpa, shape.primitive()) catch return 0;
-        return @intFromPtr(&kept.mesh);
-    }
-    const instance = app.world.get(e, MeshInstance3D) orelse return 0;
-    return if (app.meshOf(instance.mesh)) |m| @intFromPtr(m) else 0;
+/// The mesh a `convex` or `mesh` collider is made from: its own, or what
+/// the `MeshInstance3D` beside it draws.
+fn meshOf(app: *App, e: Entity, collider: Collider3D) ?*mesh_table.Kept {
+    if (collider.shape != .convex and collider.shape != .mesh) return null;
+    if (!collider.mesh.isNone()) return app.meshes.keptOf(collider.mesh);
+    const instance = app.world.get(e, MeshInstance3D) orelse return null;
+    return app.meshDrawnBy(e, instance.*) catch null;
 }
 
 fn reshape(self: *Bodies3D, app: *App, link: *ShapeLink, e: Entity, body: BodyId, inputs: Inputs) !void {
@@ -596,7 +596,7 @@ fn shapeOf(self: *Bodies3D, app: *App, link: *ShapeLink, inputs: Inputs, e: Enti
 fn keyOf(inputs: Inputs) ?MeshKey {
     if (inputs.mesh == 0) return null;
     const s = inputs.place.scale;
-    return .{ .mesh = inputs.mesh, .scale = .{ @bitCast(s.x), @bitCast(s.y), @bitCast(s.z) } };
+    return .{ .mesh = inputs.mesh, .stamp = inputs.stamp, .scale = .{ @bitCast(s.x), @bitCast(s.y), @bitCast(s.z) } };
 }
 
 /// The corners of the mesh at `address`, scaled.
