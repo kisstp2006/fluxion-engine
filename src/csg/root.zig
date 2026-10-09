@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 //! Solids joined, cut and met: constructive solid geometry. A box, a
-//! cylinder, a ball or a closed mesh is a `Solid` - the polygons round it -
+//! cylinder, a ball, an outline drawn out or a closed mesh is a `Solid` -
+//! the polygons round it -
 //! and one solid joined with another, cut by it or met with it is another
 //! solid, by binary space partitioning (`Solid.combine`). What it comes to
 //! is triangles, each knowing whose polygon it was.
@@ -26,6 +27,7 @@ pub const box = Solid.box;
 pub const cylinder = Solid.cylinder;
 pub const sphere = Solid.sphere;
 pub const mesh = Solid.mesh;
+pub const prism = Solid.prism;
 
 pub const planarUv = Solid.planarUv;
 pub const Indexed = Solid.Indexed;

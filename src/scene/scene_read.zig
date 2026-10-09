@@ -24,6 +24,7 @@ const components = @import("components.zig");
 const component_texts = @import("component_texts.zig");
 const registry = @import("registry.zig");
 const scene = @import("scene.zig");
+const scene_write = @import("scene_write.zig");
 
 const Entity = ecs.Entity;
 const ComponentId = ecs.component.Id;
@@ -895,7 +896,12 @@ pub fn readComponent(loading: *Loading, comptime T: type, out: *T) anyerror!void
                 matched = true;
                 seen.set(i);
                 const mark = loading.path.push("{s}", .{field.name});
-                try readValue(loading, field.type, &@field(out.*, field.name));
+                if (comptime scene_write.isList(field.type) and field.defaultValue() != null) {
+                    // The items it holds, and the rest as they start.
+                    @field(out.*, field.name) = field.defaultValue().?;
+                    const info = @typeInfo(field.type).array;
+                    try readFirstItems(loading, info.child, info.len, &@field(out.*, field.name));
+                } else try readValue(loading, field.type, &@field(out.*, field.name));
                 loading.path.pop(mark);
             }
         }
@@ -1030,6 +1036,19 @@ fn readValue(loading: *Loading, comptime T: type, out: *T) anyerror!void {
             };
         },
     }
+}
+
+/// As many of `out`'s items as the list holds, up to all of them: a list of
+/// a component's that a scene wrote the start of.
+fn readFirstItems(loading: *Loading, comptime Item: type, comptime len: usize, out: *[len]Item) anyerror!void {
+    try loading.open(.array_begin, std.fmt.comptimePrint("a list of up to {d}", .{len}));
+    for (out, 0..) |*item, i| {
+        if (try loading.reader.peek() == .array_end) break;
+        const mark = loading.path.push("{d}", .{i});
+        try readValue(loading, Item, item);
+        loading.path.pop(mark);
+    }
+    if (try loading.next() != .array_end) return loading.fail(error.LengthMismatch, "expected {d} items at most, found more", .{len});
 }
 
 fn readItems(loading: *Loading, comptime Item: type, comptime len: usize, out: *[len]Item) anyerror!void {

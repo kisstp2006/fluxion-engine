@@ -165,6 +165,13 @@ pub const Materials = struct {
         return held.source;
     }
 
+    /// Whether the material was read from a `.mat3d` file - its source
+    /// that file's path - rather than made in code.
+    pub fn fromFile(self: *Materials, handle: MaterialHandle) bool {
+        const held = self.table.get(toId(handle)) orelse return false;
+        return held.on_disc;
+    }
+
     /// The material itself, to read or to change: what draws with it draws
     /// the change from the next frame.
     pub fn get(self: *Materials, handle: MaterialHandle) ?*Material3DData {

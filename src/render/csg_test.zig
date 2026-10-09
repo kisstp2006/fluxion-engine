@@ -211,3 +211,39 @@ test "a group joins what is under it; a cylinder met with a box keeps only where
     const held = (try app.meshDrawnBy(pillar, app.world.get(pillar, MeshInstance3D).?.*)).?;
     try testing.expectApproxEqAbs(@as(f32, std.math.pi * 0.5), volumeOf(&held.mesh), 0.01);
 }
+
+test "a polygon is its outline drawn out, and a scene keeps only the corners it has" {
+    const app = try headless();
+    defer app.destroy();
+    // An L seen from above, half a metre tall: three squares of one.
+    var shape: CSGShape3D = .{ .shape = .polygon, .height = 0.5, .point_count = 6 };
+    const l = [_]math.Vec2{ .init(0, 0), .init(2, 0), .init(2, 1), .init(1, 1), .init(1, 2), .init(0, 2) };
+    @memcpy(shape.points[0..l.len], &l);
+    const ell = try app.world.spawnWith(.{ Transform3D{}, MeshInstance3D{}, shape });
+    const held = (try app.meshDrawnBy(ell, app.world.get(ell, MeshInstance3D).?.*)).?;
+    try testing.expectApproxEqAbs(@as(f32, 1.5), volumeOf(&held.mesh), 1e-4);
+    try testing.expect(held.mesh.bounds.max.approxEql(.init(2, 0.25, 2)));
+
+    // Written down: its six corners, not all it could have; read back, the
+    // same.
+    const written = try @import("../scene/scene.zig").write(app, testing.allocator, .{});
+    defer testing.allocator.free(written);
+    const points = std.mem.indexOf(u8, written, "\"points\"").?;
+    const count = std.mem.indexOf(u8, written[points..], "\"point_count\"").?;
+    try testing.expectEqual(@as(usize, 6), std.mem.count(u8, written[points..][0..count], "\"x\""));
+    app.clearWorld();
+    _ = try @import("../scene/scene.zig").read(app, written, .{});
+    var it = try ecs.Query(.{CSGShape3D}).over(&app.world);
+    const back = (it.next() orelse return error.TestUnexpectedResult).slice(CSGShape3D)[0];
+    try testing.expectEqual(@as(u32, 6), back.point_count);
+    try testing.expectEqualSlices(math.Vec2, &l, back.outline());
+    // Past them, what a polygon starts with.
+    try testing.expectEqual(@as(f32, 0), back.points[6].x);
+
+    // A box's corners are not written at all.
+    app.clearWorld();
+    _ = try app.world.spawnWith(.{ Transform3D{}, CSGShape3D{} });
+    const plain = try @import("../scene/scene.zig").write(app, testing.allocator, .{});
+    defer testing.allocator.free(plain);
+    try testing.expect(std.mem.indexOf(u8, plain, "\"points\"") == null);
+}

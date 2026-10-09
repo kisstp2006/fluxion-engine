@@ -5227,11 +5227,20 @@ pub fn unloadMesh(self: *App, handle: mesh_table.MeshHandle) void {
 }
 
 /// Write a mesh to a `.mesh` file, which `loadMesh` reads back. `res://` is
-/// taken, as everywhere.
+/// taken, as everywhere. Each surface's material goes with it by its path:
+/// one read from a `.mat3d` file or a model's; one made in code is not
+/// written, and that surface is read back with none.
 pub fn saveMesh(self: *App, handle: mesh_table.MeshHandle, path: []const u8) !void {
     const io = self.io orelse return error.NoIo;
     const held = self.meshes.get(handle) orelse return error.NoSuchMesh;
-    const bytes = try mesh_table.write(self.gpa, held.*);
+    const names = try self.gpa.alloc([]const u8, held.surfaces.len);
+    defer self.gpa.free(names);
+    for (held.surfaces, names) |surface, *name| {
+        const source = self.materials.sourceOf(surface.material) orelse "";
+        const of_file = self.materials.fromFile(surface.material) or models.baseOf(source) != null;
+        name.* = if (of_file) source else "";
+    }
+    const bytes = try mesh_table.writeNamed(self.gpa, held.*, names);
     defer self.gpa.free(bytes);
     const file = try self.project.osPath(self.gpa, path);
     defer self.gpa.free(file);

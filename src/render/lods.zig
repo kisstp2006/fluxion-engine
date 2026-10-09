@@ -5,9 +5,10 @@
 //! further off - the coarsest one whose difference from the whole would
 //! cover no more than `Rendering.lod_threshold` pixels.
 //!
-//! A level is made by `fluxion_simplify` from the one before, surface by
-//! surface, half as many triangles each time, until one would be too small
-//! or would change the shape too much. A model's levels are made once, by
+//! A level is made by `fluxion_simplify` from the one before, every
+//! surface together - so no gap opens where two meet - half as many
+//! triangles each time, until one would be too small or would change the
+//! shape too much. A model's levels are made once, by
 //! an editor as it brings the model in, and kept in a file of their own
 //! beside what it made of it - `.fluxion/imported/<model>.lods` - which an
 //! export takes along; where there is none, or one made of another version
@@ -64,29 +65,34 @@ pub fn make(gpa: Allocator, vertices: []const Vertex, indices: []const u32, surf
     var from_surfaces: []const Surface = surfaces;
     var distance: f32 = 0;
     while (levels.items.len < max_levels) {
-        var made_indices: std.ArrayList(u32) = .empty;
-        errdefer made_indices.deinit(gpa);
-        const made_surfaces = try gpa.alloc(Surface, from_surfaces.len);
-        errdefer gpa.free(made_surfaces);
-        var worst: f32 = 0;
-        for (from_surfaces, made_surfaces) |surface, *out| {
-            const part = from_indices[surface.first_index..][0..surface.index_count];
-            const fewer = try simplify.simplify(gpa, part, positions, .{ .target_index_count = part.len / 2, .target_error = step_error });
-            defer gpa.free(fewer.indices);
-            out.* = .{ .first_index = @intCast(made_indices.items.len), .index_count = @intCast(fewer.indices.len), .material = surface.material };
-            try made_indices.appendSlice(gpa, fewer.indices);
-            worst = @max(worst, fewer.error_share);
+        // The surfaces one after another, each a group of its own.
+        var parts: std.ArrayList(u32) = .empty;
+        defer parts.deinit(gpa);
+        const ends = try gpa.alloc(u32, from_surfaces.len);
+        defer gpa.free(ends);
+        for (from_surfaces, ends) |surface, *end| {
+            try parts.appendSlice(gpa, from_indices[surface.first_index..][0..surface.index_count]);
+            end.* = @intCast(parts.items.len);
         }
+        const fewer = try simplify.simplify(gpa, parts.items, positions, .{ .target_index_count = parts.items.len / 2, .target_error = step_error, .group_ends = ends });
+        defer gpa.free(fewer.group_ends);
+        errdefer gpa.free(fewer.indices);
         const before = from_indices.len;
-        const after = made_indices.items.len;
+        const after = fewer.indices.len;
         // Too few left, or too few taken away to be worth a level.
         if (after / 3 < least_triangles or after * 5 > before * 4) {
-            made_indices.deinit(gpa);
-            gpa.free(made_surfaces);
+            gpa.free(fewer.indices);
             break;
         }
-        distance += worst * extent;
-        try levels.append(gpa, .{ .indices = try made_indices.toOwnedSlice(gpa), .surfaces = made_surfaces, .distance = distance });
+        const made_surfaces = try gpa.alloc(Surface, from_surfaces.len);
+        errdefer gpa.free(made_surfaces);
+        var start: u32 = 0;
+        for (from_surfaces, made_surfaces, fewer.group_ends) |surface, *out, end| {
+            out.* = .{ .first_index = start, .index_count = end - start, .material = surface.material };
+            start = end;
+        }
+        distance += fewer.error_share * extent;
+        try levels.append(gpa, .{ .indices = fewer.indices, .surfaces = made_surfaces, .distance = distance });
         const last = levels.items[levels.items.len - 1];
         from_indices = last.indices;
         from_surfaces = last.surfaces;
@@ -106,8 +112,9 @@ pub fn hashOf(vertices: []const Vertex, indices: []const u32) u64 {
 // -------------------------------------------------------------------------
 // The file
 
-/// What a file of a model's levels starts with.
-pub const magic = "FXLODS01";
+/// What a file of a model's levels starts with. One of an earlier version -
+/// levels made holding every seam still - is not read: they are made again.
+pub const magic = "FXLODS02";
 
 /// One mesh's levels, as a file keeps them: by the mesh's place in its
 /// model, and its hash.
@@ -286,6 +293,54 @@ test "a dense mesh gets coarser levels, each about half the one before, further 
     // Small: none.
     const small = try make(gpa, ball.vertices, ball.indices[0..300], &.{.{ .first_index = 0, .index_count = 300 }});
     try testing.expectEqual(@as(usize, 0), small.len);
+}
+
+test "a mesh of two surfaces gets levels with no gap where they meet" {
+    const gpa = testing.allocator;
+    const ball = try ballMesh(gpa, 96, 48);
+    defer gpa.free(ball.vertices);
+    defer gpa.free(ball.indices);
+    // Its top half one surface, its bottom half another.
+    const half: u32 = @intCast(ball.indices.len / 2);
+    const surfaces = [_]Surface{
+        .{ .first_index = 0, .index_count = half },
+        .{ .first_index = half, .index_count = @intCast(ball.indices.len - half) },
+    };
+    const levels = try make(gpa, ball.vertices, ball.indices, &surfaces);
+    defer {
+        for (levels) |*level| level.deinit(gpa);
+        gpa.free(levels);
+    }
+    try testing.expect(levels.len >= 3);
+    // Each vertex's place: the first as near as makes no difference.
+    const place = try gpa.alloc(u32, ball.vertices.len);
+    defer gpa.free(place);
+    for (ball.vertices, place, 0..) |v, *at, i| {
+        at.* = @intCast(i);
+        for (ball.vertices[0..i], 0..) |w, j| {
+            if (@abs(v.position[0] - w.position[0]) + @abs(v.position[1] - w.position[1]) + @abs(v.position[2] - w.position[2]) < 1e-4) {
+                at.* = place[j];
+                break;
+            }
+        }
+    }
+    // Every level closed: each edge between places has two triangles.
+    var edges: std.AutoHashMapUnmanaged([2]u32, u32) = .empty;
+    defer edges.deinit(gpa);
+    for (levels) |level| {
+        try testing.expectEqual(@as(usize, 2), level.surfaces.len);
+        try testing.expectEqual(level.indices.len, level.surfaces[1].first_index + level.surfaces[1].index_count);
+        edges.clearRetainingCapacity();
+        var t: usize = 0;
+        while (t < level.indices.len) : (t += 3) for (0..3) |k| {
+            const a = place[level.indices[t + k]];
+            const b = place[level.indices[t + (k + 1) % 3]];
+            const got = try edges.getOrPut(gpa, .{ @min(a, b), @max(a, b) });
+            got.value_ptr.* = if (got.found_existing) got.value_ptr.* + 1 else 1;
+        };
+        var it = edges.valueIterator();
+        while (it.next()) |count| try testing.expectEqual(@as(u32, 2), count.*);
+    }
 }
 
 test "levels kept in a file are read back for the mesh they were made for, and not for another" {

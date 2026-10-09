@@ -15,8 +15,8 @@
 //! the side a `Material3D`'s `cull` keeps. A mesh is one or more surfaces -
 //! runs of its triangles - each drawn with a material of its own: a model's
 //! mesh has one for each material it was made with. A `.mesh` file is the
-//! vertices, the indices and the surfaces as they are held, little-endian -
-//! see `write`.
+//! vertices, the indices and the surfaces as they are held, little-endian,
+//! and each surface's material by its path - see `write`.
 //!
 //! **A mesh a skeleton bends** has a `skin`: each vertex's bones - up to
 //! four of the skin's, by their place in its list - and how much each moves
@@ -36,6 +36,8 @@ const Project = @import("../project/Project.zig");
 const file_table = @import("../assets/file_table.zig");
 const lightmap_uv = @import("lightmap_uv.zig");
 const MaterialHandle = @import("materials.zig").MaterialHandle;
+
+const log = std.log.scoped(.fluxion_engine);
 
 const Vec3 = math.Vec3;
 const Vec2 = math.Vec2;
@@ -560,9 +562,10 @@ pub fn capsule(gpa: Allocator, radius: f32, height: f32, rings: u32, segments: u
 
 /// What a `.mesh` file starts with, its version in the last two letters.
 /// A file of an earlier version - eight numbers a vertex and one surface,
-/// no tangents, no lightmap UVs, or no skin - is still read, its tangents
-/// worked out and its lightmap UVs and skin none.
-pub const magic = "FXMESH06";
+/// no tangents, no lightmap UVs, no skin, no coarser levels or no
+/// materials - is still read, its tangents worked out and the rest none.
+pub const magic = "FXMESH07";
+const magic_v6 = "FXMESH06";
 const magic_v5 = "FXMESH05";
 const magic_v1 = "FXMESH01";
 const magic_v2 = "FXMESH02";
@@ -589,9 +592,17 @@ const bone_bounds_size = 6 * 4;
 /// two `u32`s, and with a skin each bone's box as six `f32`s; then how
 /// many coarser levels it has, and for each its distance as an `f32`, how
 /// many surfaces and each one's first index and count, how many indices
-/// and the indices. Little-endian throughout. A surface's material is not
-/// written: what reads the file gives it one.
+/// and the indices; last, each surface's material's path, as its length
+/// in bytes and its bytes - none, nought long, for a surface with no
+/// material of a file. Little-endian throughout. See `writeNamed`.
 pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
+    return writeNamed(gpa, mesh, &.{});
+}
+
+/// `write`, with the path of each surface's material - `res://` - which
+/// `readNamed` gives back and what reads the file draws it with. A surface
+/// past `materials` has none.
+pub fn writeNamed(gpa: Allocator, mesh: Mesh, materials: []const []const u8) Allocator.Error![]u8 {
     const bones: u32 = if (mesh.skin.len > 0) @intCast(mesh.bone_bounds.len) else 0;
     const skinned = mesh.skin.len > 0;
     const size = header_size + mesh.vertices.len * vertex_size + (if (skinned) mesh.vertices.len * skin_vertex_size else 0) + mesh.indices.len * 4 + mesh.surfaces.len * 8 + @as(usize, bones) * bone_bounds_size;
@@ -641,6 +652,12 @@ pub fn write(gpa: Allocator, mesh: Mesh) Allocator.Error![]u8 {
         appendInt(&out, @intCast(level.indices.len));
         for (level.indices) |index| appendInt(&out, index);
     }
+    for (0..mesh.surfaces.len) |i| {
+        const name = if (i < materials.len) materials[i] else "";
+        try out.ensureUnusedCapacity(gpa, 4 + name.len);
+        appendInt(&out, @intCast(name.len));
+        out.appendSliceAssumeCapacity(name);
+    }
     return out.toOwnedSlice(gpa);
 }
 
@@ -652,16 +669,39 @@ fn appendInt(out: *std.ArrayList(u8), value: u32) void {
 
 /// A `.mesh` file's bytes as a mesh, the caller's. `error.BadMesh` for one
 /// that is not one, is cut short, names a vertex it does not have, or has
-/// surfaces that are not its indices.
+/// surfaces that are not its indices. Its surfaces have no material: see
+/// `readNamed`.
 pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh})!Mesh {
+    const named = try readNamed(gpa, bytes);
+    named.freeMaterials(gpa);
+    return named.mesh;
+}
+
+/// A mesh read with its surfaces' materials' paths.
+pub const Named = struct {
+    mesh: Mesh,
+    /// One a surface: its material's path, or nought long for none.
+    materials: [][]u8,
+
+    pub fn freeMaterials(self: Named, gpa: Allocator) void {
+        for (self.materials) |name| gpa.free(name);
+        gpa.free(self.materials);
+    }
+};
+
+/// `read`, and each surface's material's path as the file names it: the
+/// caller's, both.
+pub fn readNamed(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh})!Named {
     if (bytes.len < magic.len) return error.BadMesh;
     const first = std.mem.eql(u8, bytes[0..magic.len], magic_v1);
     const second = std.mem.eql(u8, bytes[0..magic.len], magic_v2);
     const third = std.mem.eql(u8, bytes[0..magic.len], magic_v3);
     const fourth = std.mem.eql(u8, bytes[0..magic.len], magic_v4);
     const fifth = std.mem.eql(u8, bytes[0..magic.len], magic_v5);
-    const sixth = std.mem.eql(u8, bytes[0..magic.len], magic);
-    if (!first and !second and !third and !fourth and !fifth and !sixth) return error.BadMesh;
+    const sixth = std.mem.eql(u8, bytes[0..magic.len], magic_v6);
+    const seventh = std.mem.eql(u8, bytes[0..magic.len], magic);
+    if (!first and !second and !third and !fourth and !fifth and !sixth and !seventh) return error.BadMesh;
+    const levelled = sixth or seventh;
     const header: u64 = if (first) header_size_v1 else if (second or third) header_size_v3 else if (fourth) header_size_v4 else header_size;
     if (bytes.len < header) return error.BadMesh;
     var at: usize = magic.len;
@@ -675,7 +715,7 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     const surfaces_size: u64 = if (first) 0 else @as(u64, surface_count) * 8;
     const skin_size: u64 = if (bone_count > 0) @as(u64, vertex_count) * skin_vertex_size + @as(u64, bone_count) * bone_bounds_size else 0;
     const before_levels = header + @as(u64, vertex_count) * each + @as(u64, index_count) * 4 + surfaces_size + skin_size;
-    if (if (sixth) bytes.len < before_levels + 4 else bytes.len != before_levels) return error.BadMesh;
+    if (if (levelled) bytes.len < before_levels + 4 else bytes.len != before_levels) return error.BadMesh;
     at += 24;
     const vertices = try gpa.alloc(Vertex, vertex_count);
     errdefer gpa.free(vertices);
@@ -720,17 +760,36 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadMesh
     if (first or second) computeTangents(vertices, indices);
     // Worked out again rather than trusted: a file edited by hand keeps
     // its picking and its culling right.
-    const lods = if (sixth) try readLevels(gpa, bytes, &at, vertex_count, surface_count) else try gpa.alloc(Lod, 0);
+    const lods = if (levelled) try readLevels(gpa, bytes, &at, vertex_count, surface_count) else try gpa.alloc(Lod, 0);
     errdefer {
         for (lods) |*level| level.deinit(gpa);
         gpa.free(lods);
     }
+    const materials = try gpa.alloc([]u8, surfaces.len);
+    var named: usize = 0;
+    errdefer {
+        for (materials[0..named]) |name| gpa.free(name);
+        gpa.free(materials);
+    }
+    for (materials) |*name| {
+        if (!seventh) {
+            name.* = &.{};
+        } else {
+            if (bytes.len - at < 4) return error.BadMesh;
+            const length = takeInt(bytes, &at);
+            if (bytes.len - at < length) return error.BadMesh;
+            name.* = try gpa.dupe(u8, bytes[at..][0..length]);
+            at += length;
+        }
+        named += 1;
+    }
+    if (at != bytes.len) return error.BadMesh;
     var out = try Mesh.adopt(vertices, indices, surfaces);
     out.uv2_texels = uv2_texels;
     out.skin = skin;
     out.bone_bounds = bone_bounds;
     out.lods = lods;
-    return out;
+    return .{ .mesh = out, .materials = materials };
 }
 
 /// A `.mesh` file's coarser levels, from `at` to its end: none past
@@ -768,7 +827,6 @@ fn readLevels(gpa: Allocator, bytes: []const u8, at: *usize, vertex_count: u32, 
         level.* = .{ .indices = level_indices, .surfaces = level_surfaces, .distance = distance };
         made += 1;
     }
-    if (at.* != bytes.len) return error.BadMesh;
     return lods;
 }
 
@@ -949,10 +1007,22 @@ pub const Meshes = struct {
         return self.keep(app.gpa, &app.device, source, mesh, true);
     }
 
+    /// The mesh in the file at `source`, each surface with the material
+    /// the file names read: one that does not read is said, and that
+    /// surface has none.
     fn readFile(app: *App, source: []const u8) !Mesh {
         const bytes = try app.project.readFileAlloc(app.gpa, source, .limited(file_table.file_limit));
         defer app.gpa.free(bytes);
-        return read(app.gpa, bytes);
+        const named = try readNamed(app.gpa, bytes);
+        defer named.freeMaterials(app.gpa);
+        for (named.mesh.surfaces, named.materials) |*surface, name| {
+            if (name.len == 0) continue;
+            surface.material = app.loadMaterial(name) catch |err| no: {
+                log.warn("{s}: its material {s} was not read: {t}", .{ source, name, err });
+                break :no .none;
+            };
+        }
+        return named.mesh;
     }
 
     /// Read a mesh's file again. Says whether it had one.
@@ -1159,10 +1229,10 @@ test "a mesh's file reads back as it was written, and one that is not whole is r
     try testing.expectError(error.BadMesh, read(testing.allocator, bytes[0 .. bytes.len - 1]));
     try testing.expectError(error.BadMesh, read(testing.allocator, "FXMESH99"));
     // A surface that is not the indices: its count, before the count of
-    // levels.
+    // levels and its material's path, none.
     const broken = try testing.allocator.dupe(u8, bytes);
     defer testing.allocator.free(broken);
-    std.mem.writeInt(u32, broken[broken.len - 8 ..][0..4], 99, .little);
+    std.mem.writeInt(u32, broken[broken.len - 12 ..][0..4], 99, .little);
     try testing.expectError(error.BadMesh, read(testing.allocator, broken));
 }
 
@@ -1182,11 +1252,35 @@ test "a mesh's coarser levels go to its file and back, and a level naming no ver
         try testing.expectEqual(a.distance, b.distance);
         try testing.expectEqual(a.surfaces[0].index_count, b.surfaces[0].index_count);
     }
-    // The last level's last index past the vertices.
+    // The last level's last index - before its surface's material, none -
+    // past the vertices.
     const broken = try gpa.dupe(u8, bytes);
     defer gpa.free(broken);
-    std.mem.writeInt(u32, broken[broken.len - 4 ..][0..4], @intCast(made.vertices.len), .little);
+    std.mem.writeInt(u32, broken[broken.len - 8 ..][0..4], @intCast(made.vertices.len), .little);
     try testing.expectError(error.BadMesh, read(gpa, broken));
+}
+
+test "a mesh's surfaces' materials go to its file by their paths, and a name cut short is refused" {
+    const gpa = testing.allocator;
+    var made = try box(gpa, .init(1, 1, 1));
+    defer made.deinit(gpa);
+    // Two surfaces: half its triangles each.
+    gpa.free(made.surfaces);
+    made.surfaces = try gpa.dupe(Surface, &.{ .{ .first_index = 0, .index_count = 18 }, .{ .first_index = 18, .index_count = 18 } });
+    const bytes = try writeNamed(gpa, made, &.{"res://materials/brick.mat3d"});
+    defer gpa.free(bytes);
+    const named = try readNamed(gpa, bytes);
+    defer {
+        named.freeMaterials(gpa);
+        var back = named.mesh;
+        back.deinit(gpa);
+    }
+    try testing.expectEqual(@as(usize, 2), named.materials.len);
+    try testing.expectEqualStrings("res://materials/brick.mat3d", named.materials[0]);
+    try testing.expectEqualStrings("", named.materials[1]);
+    try testing.expectEqual(@as(u32, 18), named.mesh.surfaces[1].first_index);
+    // The second's length cut in two.
+    try testing.expectError(error.BadMesh, readNamed(gpa, bytes[0 .. bytes.len - 2]));
 }
 
 /// A ball dense enough to have levels.
@@ -1281,8 +1375,8 @@ test "a mesh's file of the fourth version still reads, with no skin" {
     defer old.deinit(testing.allocator);
     try old.appendSlice(testing.allocator, "FXMESH04");
     try old.appendSlice(testing.allocator, bytes[magic.len .. magic.len + 16]);
-    // And for the count of levels at its end.
-    try old.appendSlice(testing.allocator, bytes[magic.len + 20 .. bytes.len - 4]);
+    // And for the count of levels and the material at its end.
+    try old.appendSlice(testing.allocator, bytes[magic.len + 20 .. bytes.len - 8]);
     var back = try read(testing.allocator, old.items);
     defer back.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), back.skin.len);

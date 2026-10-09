@@ -2,9 +2,10 @@
 
 //! Solids joined, cut and met, in the scene: a level's walls with their
 //! doors and windows cut out, an arch, a pillar's round top. A `CSGShape3D`
-//! is a box, a cylinder, a ball or a closed mesh - or only a group of what
-//! is under it - and each `CSGShape3D` under it, in their order, is joined
-//! to it, cut from it or met with it, by its `operation`.
+//! is a box, a cylinder, a ball, an outline drawn out - a polygon - or a
+//! closed mesh - or only a group of what is under it - and each
+//! `CSGShape3D` under it, in their order, is joined to it, cut from it or
+//! met with it, by its `operation`.
 //!
 //! The one at the top - whose parent has none - is what they all come to:
 //! the `MeshInstance3D` beside it draws a mesh of it, a mesh `Collider3D`
@@ -57,7 +58,8 @@ const Mat4 = math.Mat4;
 /// with. See `render/csg_shapes.zig`.
 pub const CSGShape3D = extern struct {
     /// What it is: a box, a cylinder standing along `y`, a ball, the closed
-    /// `mesh`, or nothing of its own - only a group of what is under it.
+    /// `mesh`, nothing of its own - only a group of what is under it - or a
+    /// polygon: its outline drawn out along `y`.
     shape: Shape = .box,
     /// What it does to what its parent comes to: joined to it, cut from it,
     /// or kept only where both are. Nothing at the top.
@@ -66,7 +68,7 @@ pub const CSGShape3D = extern struct {
     size: math.Vec3 = .one,
     /// A cylinder's and a ball's.
     radius: f32 = 0.5,
-    /// A cylinder's, from end to end.
+    /// A cylinder's and a polygon's, from end to end.
     height: f32 = 1,
     /// How many faces round a cylinder or a ball has.
     sides: u32 = 16,
@@ -74,6 +76,12 @@ pub const CSGShape3D = extern struct {
     rings: u32 = 8,
     /// Whether a cylinder or a ball is lit as if round, or face by face.
     smooth: bool = true,
+    /// A polygon's outline, seen from above: the first `point_count`, each
+    /// corner's `x` and `z` - as `x` and `y` - in order round it, either
+    /// way. A metre square to start with.
+    points: [max_points]math.Vec2 = square,
+    /// How many of `points` the outline has.
+    point_count: u32 = 4,
     /// The material its faces are drawn with, and the sides of what it
     /// cuts; none takes its parent's. A `Material3D` beside the one at the
     /// top draws every face with its own.
@@ -81,7 +89,12 @@ pub const CSGShape3D = extern struct {
     /// The closed mesh a `.mesh` shape is.
     mesh: mesh.MeshHandle = .none,
 
-    pub const Shape = enum(u8) { box, cylinder, sphere, mesh, group };
+    pub const Shape = enum(u8) { box, cylinder, sphere, mesh, group, polygon };
+
+    /// A polygon's corners: the first `point_count` of `points`.
+    pub fn outline(self: *const CSGShape3D) []const math.Vec2 {
+        return self.points[0..@min(self.point_count, max_points)];
+    }
 
     pub const Operation = enum(u8) {
         /// What is in either.
@@ -94,17 +107,32 @@ pub const CSGShape3D = extern struct {
 
     pub const reflect_name = "CSGShape3D";
     pub const reflect_fields = .{
-        .shape = .{attr.Doc{ .text = "A box, a cylinder, a sphere, a closed mesh, or a group of what is under it" }},
+        .shape = .{attr.Doc{ .text = "A box, a cylinder, a sphere, a closed mesh, a group of what is under it, or an outline drawn out" }},
         .operation = .{attr.Doc{ .text = "Joined to what its parent comes to, cut from it, or kept only where both are" }},
         .size = .{attr.Doc{ .text = "A box's width, height and depth" }},
         .radius = .{ attr.Range{ .min = 0, .max = 1000 }, attr.Doc{ .text = "A cylinder's and a sphere's" } },
-        .height = .{ attr.Range{ .min = 0, .max = 1000 }, attr.Doc{ .text = "A cylinder's, end to end" } },
+        .height = .{ attr.Range{ .min = 0, .max = 1000 }, attr.Doc{ .text = "A cylinder's and a polygon's, end to end" } },
         .sides = .{ attr.Range{ .min = min_sides, .max = max_sides, .step = 1 }, attr.Doc{ .text = "Faces round a cylinder or a sphere" } },
         .rings = .{ attr.Range{ .min = min_rings, .max = max_rings, .step = 1 }, attr.Doc{ .text = "Bands of a sphere from pole to pole" } },
         .smooth = .{attr.Doc{ .text = "Lit as if round, or face by face" }},
+        .points = .{ attr.Hidden{}, attr.Doc{ .text = "A polygon's corners seen from above, x and z" } },
+        .point_count = .{ attr.Hidden{}, attr.Doc{ .text = "How many corners a polygon has" } },
         .material = .{ attr.Group{ .name = "Look" }, attr.Doc{ .text = "Its faces' material, and the sides of what it cuts; none takes its parent's" } },
         .mesh = .{attr.Doc{ .text = "The closed mesh a mesh shape is" }},
     };
+};
+
+/// The most corners a polygon has.
+pub const max_points = 32;
+
+/// A metre square about the middle: a polygon's outline to start with.
+const square: [max_points]math.Vec2 = blk: {
+    var corners: [max_points]math.Vec2 = @splat(.zero);
+    corners[0] = .{ .x = -0.5, .y = -0.5 };
+    corners[1] = .{ .x = 0.5, .y = -0.5 };
+    corners[2] = .{ .x = 0.5, .y = 0.5 };
+    corners[3] = .{ .x = -0.5, .y = 0.5 };
+    break :blk corners;
 };
 
 pub const min_sides = 3;
@@ -298,6 +326,12 @@ const Building = struct {
             .sphere => try csg.sphere(arena, radius, sides, std.math.clamp(shape.rings, min_rings, max_rings), affine, tag),
             .mesh => try self.closedMesh(shape.mesh, affine, tag),
             .group => .{},
+            .polygon => polygon: {
+                var corners: [max_points][2]f64 = undefined;
+                const held = shape.outline();
+                for (held, corners[0..held.len]) |p, *c| c.* = .{ p.x, p.y };
+                break :polygon try csg.prism(arena, corners[0..held.len], @abs(shape.height), affine, tag);
+            },
         };
         if (depth == max_depth) return solid;
         // Copied: the children of one asked after the children of another.

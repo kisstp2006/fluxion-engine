@@ -541,7 +541,9 @@ fn ValueText(comptime T: type) type {
     };
 }
 
-/// A component: an object of the fields that do not hold their defaults.
+/// A component: an object of the fields that do not hold their defaults - a
+/// list among them, of anything but bytes, up to its last item that does
+/// not, the rest read back as they start.
 pub fn writeComponent(saving: *Saving, w: *json.Writer, comptime T: type, value: *const T) json.Writer.Error!void {
     if (@typeInfo(T) != .@"struct") return writeValue(saving, w, T, value);
     try w.beginObject();
@@ -556,12 +558,34 @@ pub fn writeComponent(saving: *Saving, w: *json.Writer, comptime T: type, value:
             (if (field.defaultValue()) |default| !saving.every_field and std.meta.eql(held.*, default) else false);
         if (!skip) {
             try w.key(field.name);
-            try writeValue(saving, w, field.type, held);
+            if (comptime isList(field.type) and field.defaultValue() != null) {
+                if (saving.every_field) {
+                    try writeValue(saving, w, field.type, held);
+                } else try writeFirstItems(saving, w, field.type, held, field.defaultValue().?);
+            } else try writeValue(saving, w, field.type, held);
         }
     }
     // What it keeps beside it.
     inline for (comptime scene.besideOf(T)) |beside| try beside.write(saving, w);
     try w.endObject();
+}
+
+/// Whether a component's field of type `T` is a list - an array of anything
+/// but bytes, which are a name - that a scene may hold the start of.
+pub fn isList(comptime T: type) bool {
+    return switch (@typeInfo(T)) {
+        .array => |info| info.child != u8,
+        else => false,
+    };
+}
+
+/// `value`'s items up to the last that is not `default`'s.
+fn writeFirstItems(saving: *Saving, w: *json.Writer, comptime T: type, value: *const T, default: T) json.Writer.Error!void {
+    var end: usize = value.len;
+    while (end > 0 and std.meta.eql(value[end - 1], default[end - 1])) end -= 1;
+    try w.beginArray();
+    for (value[0..end]) |*item| try writeValue(saving, w, @typeInfo(T).array.child, item);
+    try w.endArray();
 }
 
 /// Whether `T` keeps its field `name` out of every scene: `attr.Unsaved`.

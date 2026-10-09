@@ -237,6 +237,32 @@ test "a material is written to a file and read back, its picture by its path and
     try testing.expect(app.materialParam(back, "glow") == null);
 }
 
+test "a mesh is written with its surfaces' materials and read back drawn with them; one made in code is not named" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const app = try appIn(&folder);
+    defer app.destroy();
+    const made_brick = try app.addMaterial("brick", .{ .emission_energy = 3 });
+    try app.saveMaterial(made_brick, "res://brick.mat3d");
+    app.unloadMaterial(made_brick);
+    const brick = try app.loadMaterial("res://brick.mat3d");
+    const glass = try app.addMaterial("glass", .{ .transparency = .alpha });
+    // A box of two surfaces: one brick, one glass.
+    var crate = try @import("../render/mesh.zig").box(testing.allocator, .init(1, 1, 1));
+    testing.allocator.free(crate.surfaces);
+    crate.surfaces = try testing.allocator.dupe(@import("../render/mesh.zig").Surface, &.{
+        .{ .first_index = 0, .index_count = 18, .material = brick },
+        .{ .first_index = 18, .index_count = 18, .material = glass },
+    });
+    const handle = try app.addMesh("crate", crate);
+    try app.saveMesh(handle, "res://crate.mesh");
+    app.unloadMesh(handle);
+    const back = app.meshOf(try app.loadMesh("res://crate.mesh")).?;
+    try testing.expectEqual(brick, back.surfaces[0].material);
+    try testing.expectEqual(materials.MaterialHandle.none, back.surfaces[1].material);
+}
+
 /// The red triangle as one GLB, its picture in its binary part.
 fn triangleGlb(gpa: std.mem.Allocator) ![]u8 {
     var pixels: [2 * 2 * 4]u8 = undefined;

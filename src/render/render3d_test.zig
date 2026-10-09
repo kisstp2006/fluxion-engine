@@ -111,8 +111,8 @@ test "a dense mesh far off is drawn at a coarser level, near it whole, and with 
     try testing.expect(dense.lods.len >= 2);
     const whole: u64 = dense.indices.len / 3;
     const handle = try app.addMesh("dense", dense);
-    const ball = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), MeshInstance3D{ .mesh = handle } });
-    // Near: whole.
+    // Near - a metre from the camera - whole.
+    const ball = try app.world.spawnWith(.{ Transform3D.at(0, 0, 3), MeshInstance3D{ .mesh = handle } });
     _ = try app.step();
     try testing.expectEqual(whole, app.renderer3d.last_frame.triangles);
     try testing.expectEqual(@as(u32, 1), app.renderer3d.lod_levels[0]);

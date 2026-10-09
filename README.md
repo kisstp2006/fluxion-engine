@@ -1298,12 +1298,17 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   `fx.mesh.box`, `sphere`, `plane`, `cylinder` and `capsule` make the same in
   code, a primitive's mesh is made once for its numbers and shared, and
   `app.saveMesh` and `app.loadMesh` write and read a `.mesh` file - the
-  vertices and the indices as they are held. A mesh's corners go
-  counter-clockwise seen from the side they face.
+  vertices and the indices as they are held, and each surface's material by
+  its path, read again with it: one of a `.mat3d` file or a model's, not one
+  made in code. A mesh's corners go counter-clockwise seen from the side
+  they face.
 - **Solids joined and cut - a `CSGShape3D` - build a level**: walls with
   their doors and windows cut out, an arch, a pillar's round top. Each is a
-  box, a cylinder standing along `y`, a ball, a closed `mesh` - or a `group`
-  of nothing of its own - and each `CSGShape3D` under it, in their order, is
+  box, a cylinder standing along `y`, a ball, a `polygon` - an outline of up
+  to `fx.csg_shapes.max_points` corners, seen from above, drawn out along
+  `y`: an L of a platform, a doorway with a pointed top turned upright - a
+  closed `mesh`, or a `group` of nothing of its own - and each `CSGShape3D`
+  under it, in their order, is
   joined to it (`union`), cut from it (`subtract`) or met with it, only
   where both are (`intersect`). The one at the top, whose parent has none,
   is what they all come to: the `MeshInstance3D` beside it draws it, a
@@ -1315,7 +1320,9 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   shape dragged in an editor is cut as it goes. Each face is drawn with
   the material of the shape it came from - a doorway's sides with the
   door's - or its parent's where it has none; its picture lies flat on it,
-  a metre across, as big on every face. The mesh has lightmap UVs once it
+  a metre across, as big on every face. Where a cut went through one face
+  and not the one beside it, the corners it made are put into the other's
+  edge too, so no hair of a gap shows along it. The mesh has lightmap UVs once it
   has stayed as it is for `fx.csg_shapes.settle_frames`: one made again
   every frame - dragged, or cut by a moving shape - is not unwrapped each
   time, and a bake unwraps it then.
@@ -1332,8 +1339,11 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   it made of it, `.fluxion/imported/<model>.lods`, which an export takes
   along; with none they are made as the model is read. A `.mesh` file keeps
   its mesh's levels; `fx.lods.make` makes them for a mesh made in code.
-  What would show is kept as it is: a corner on an open edge, on a seam of
-  the pictures or the normals, between surfaces.
+  What would show keeps its line: a corner on an open edge, on a seam of the
+  pictures or the normals, or between two surfaces - made fewer together -
+  moves only along it, onto the next corner on it, each side keeping its own
+  vertex, so a model of many seams is made as few as one of none and no gap
+  opens between its surfaces; a corner where such lines meet stays.
 - **`visibility_range`** on a `MeshInstance3D` stops drawing it, and its
   shadow, past that many metres from the camera.
 - **The 3D world is drawn at the project's `scale_3d`** of the picture it
@@ -1648,9 +1658,10 @@ app.world.get(wall, fx.Material3D).?.material = brick;
   `addMaterial` for one made in code, `materialOf` to change it - what draws
   with it draws the change - `materialParam` and `setMaterialParam` for its
   shader's numbers, `saveMaterial` and `reloadMaterial`.
-- **A `.mesh` file holds surfaces too**, with corner colours, tangents and
-  lightmap UVs: what `saveMesh` writes now; one written before is read as it
-  was, its tangents worked out and its lightmap UVs none.
+- **A `.mesh` file holds surfaces too**, with corner colours, tangents,
+  lightmap UVs, coarser levels and each surface's material by its path: what
+  `saveMesh` writes now; one written before is read as it was, its tangents
+  worked out and the rest none.
 
 ## 🎨 The 2D layer
 

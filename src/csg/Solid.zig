@@ -556,6 +556,123 @@ pub fn cylinder(arena: Allocator, radius: f64, height: f64, sides: u32, smooth: 
     return .{ .polygons = out.items };
 }
 
+/// The most corners `prism`'s outline has: those past it are left out.
+pub const max_outline = 64;
+
+/// An outline drawn out: a solid standing along `y`, `height` tall about
+/// its middle, its ends the polygon `outline` - each corner's `x` and `z`,
+/// in order round it either way - and its sides flat. An outline that
+/// crosses itself makes what it makes; one of fewer than three corners, or
+/// no area, nothing.
+pub fn prism(arena: Allocator, outline: []const [2]f64, height: f64, place: Affine, tag: u32) Allocator.Error!Solid {
+    var pool: Pool = .{ .backing = arena };
+    // The corners, those on the one before left out, turned round so that
+    // seen from below they go round the way a face's corners go.
+    var corners: [max_outline][2]f64 = undefined;
+    var n: usize = 0;
+    for (outline[0..@min(outline.len, max_outline)]) |p| {
+        if (n > 0 and @abs(p[0] - corners[n - 1][0]) <= epsilon and @abs(p[1] - corners[n - 1][1]) <= epsilon) continue;
+        corners[n] = p;
+        n += 1;
+    }
+    while (n > 0 and @abs(corners[0][0] - corners[n - 1][0]) <= epsilon and @abs(corners[0][1] - corners[n - 1][1]) <= epsilon) n -= 1;
+    if (n < 3) return .{};
+    var twice_area: f64 = 0;
+    for (0..n) |i| {
+        const a = corners[i];
+        const b = corners[(i + 1) % n];
+        twice_area += a[0] * b[1] - b[0] * a[1];
+    }
+    if (!(@abs(twice_area) > epsilon * epsilon)) return .{};
+    if (twice_area < 0) std.mem.reverse([2]f64, corners[0..n]);
+
+    const top = height / 2;
+    var out: PolygonList = try .withCapacity(&pool, 3 * n);
+    // The ends: the outline cut into triangles, each one face.
+    var ears: [max_outline][3]u8 = undefined;
+    const triangle_count = earsOf(corners[0..n], &ears);
+    const up: Vec3 = .init(0, 1, 0);
+    const down: Vec3 = .init(0, -1, 0);
+    for (ears[0..triangle_count]) |ear| {
+        var below: [3]Vertex = undefined;
+        var above: [3]Vertex = undefined;
+        for (ear, 0..) |at, k| {
+            const p = corners[at];
+            below[k] = .{ .pos = .init(p[0], -top, p[1]), .normal = down };
+            above[2 - k] = .{ .pos = .init(p[0], top, p[1]), .normal = up };
+        }
+        try placed(&pool, &below, place, tag, &out);
+        try placed(&pool, &above, place, tag, &out);
+    }
+    // The sides, each facing out.
+    for (0..n) |i| {
+        const a = corners[i];
+        const b = corners[(i + 1) % n];
+        const outward: Vec3 = Vec3.init(b[1] - a[1], 0, a[0] - b[0]).norm();
+        try placed(&pool, &.{
+            .{ .pos = .init(a[0], -top, a[1]), .normal = outward },
+            .{ .pos = .init(a[0], top, a[1]), .normal = outward },
+            .{ .pos = .init(b[0], top, b[1]), .normal = outward },
+            .{ .pos = .init(b[0], -top, b[1]), .normal = outward },
+        }, place, tag, &out);
+    }
+    return .{ .polygons = out.items };
+}
+
+/// `corners` - a polygon going round with its area to the left - cut into
+/// triangles, by ears: a corner whose triangle with the two beside it holds
+/// no other corner is cut off, until three are left. Where none is found -
+/// an outline that crosses itself - the rest is a fan.
+fn earsOf(corners: []const [2]f64, into: *[max_outline][3]u8) usize {
+    var left: [max_outline]u8 = undefined;
+    var n = corners.len;
+    for (0..n) |i| left[i] = @intCast(i);
+    var count: usize = 0;
+    while (n > 3) {
+        var cut = false;
+        for (0..n) |i| {
+            const a = left[(i + n - 1) % n];
+            const b = left[i];
+            const c = left[(i + 1) % n];
+            if (!isEar(corners, left[0..n], a, b, c)) continue;
+            into[count] = .{ a, b, c };
+            count += 1;
+            std.mem.copyForwards(u8, left[i .. n - 1], left[i + 1 .. n]);
+            n -= 1;
+            cut = true;
+            break;
+        }
+        if (!cut) break;
+    }
+    // Three left, or none found: a fan from the first.
+    for (1..n - 1) |i| {
+        into[count] = .{ left[0], left[i], left[i + 1] };
+        count += 1;
+    }
+    return count;
+}
+
+/// Whether `b`, between `a` and `c`, is an ear: it turns left, and no
+/// other corner left is inside the triangle or on its long side.
+fn isEar(corners: []const [2]f64, left: []const u8, a: u8, b: u8, c: u8) bool {
+    const pa = corners[a];
+    const pb = corners[b];
+    const pc = corners[c];
+    if (!(turn(pa, pb, pc) > epsilon * epsilon)) return false;
+    for (left) |other| {
+        if (other == a or other == b or other == c) continue;
+        const p = corners[other];
+        if (turn(pa, pb, p) >= 0 and turn(pb, pc, p) >= 0 and turn(pc, pa, p) >= 0) return false;
+    }
+    return true;
+}
+
+/// Twice the area of the triangle `a`, `b`, `c`: more than nought where it
+/// turns left.
+fn turn(a: [2]f64, b: [2]f64, c: [2]f64) f64 {
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+}
+
 /// A ball of `slices` round and `stacks` from pole to pole.
 pub fn sphere(arena: Allocator, radius: f64, slices: u32, stacks: u32, place: Affine, tag: u32) Allocator.Error!Solid {
     var pool: Pool = .{ .backing = arena };
@@ -671,7 +788,10 @@ pub fn triangles(self: Solid, gpa: Allocator) Allocator.Error!Triangles {
 /// same - the same place, to a hundredth of a millimetre, facing the same
 /// way, at the same place on a picture - each with its place on a picture
 /// laid flat on its face (`planarUv`) and the way that picture's `u` runs,
-/// and the triangles of each tag together, the tags in their order.
+/// and the triangles of each tag together, the tags in their order. Where
+/// a cut went through one face and not the one beside it, the corners it
+/// made are put into the other's edge too (`mended`), so the triangles
+/// meet corner to corner and no hair of a gap shows along it.
 pub const Indexed = struct {
     positions: [][3]f32,
     normals: [][3]f32,
@@ -700,13 +820,15 @@ pub fn indexed(self: Solid, gpa: Allocator) Allocator.Error!Indexed {
     var arena_state: std.heap.ArenaAllocator = .init(gpa);
     defer arena_state.deinit();
     var pool: Pool = .{ .backing = arena_state.allocator() };
+    const whole = try mended(&pool, self.polygons);
 
-    // Each polygon a fan of triangles from its first corner, those with no
-    // area left out, at most so many.
+    // Each polygon a fan of triangles from its first corner - or, one with
+    // corners put into its edges, from its middle - those with no area
+    // left out, at most so many.
     var most: usize = 0;
     var last: u32 = 0;
-    for (self.polygons) |polygon| {
-        if (polygon.vertices.len >= 3) most += polygon.vertices.len - 2;
+    for (whole.polygons, whole.centred) |polygon, centred| {
+        if (polygon.vertices.len >= 3) most += if (centred) polygon.vertices.len else polygon.vertices.len - 2;
         last = @max(last, polygon.tag);
     }
     const positions = try pool.take([3]f32, most * 3);
@@ -724,13 +846,23 @@ pub fn indexed(self: Solid, gpa: Allocator) Allocator.Error!Indexed {
         while (tag <= last) : (tag += 1) {
             const first = index_count;
             corners.clear();
-            for (self.polygons) |polygon| {
+            for (whole.polygons, whole.centred) |polygon, centred| {
                 if (polygon.tag != tag or polygon.vertices.len < 3) continue;
                 const v = polygon.vertices;
                 const way = polygon.plane.normal;
                 const facing: [3]f32 = .{ @floatCast(way.x), @floatCast(way.y), @floatCast(way.z) };
-                for (1..v.len - 1) |k| {
-                    const fan = [3]Vertex{ v[0], v[k], v[k + 1] };
+                var middle: Vertex = .{ .pos = .zero, .normal = .zero };
+                if (centred) {
+                    for (v) |c| {
+                        middle.pos = middle.pos.add(c.pos);
+                        middle.normal = middle.normal.add(c.normal);
+                    }
+                    middle.pos = middle.pos.scale(1 / @as(f64, @floatFromInt(v.len)));
+                    middle.normal = middle.normal.norm();
+                }
+                const count = if (centred) v.len else v.len - 2;
+                for (0..count) |k| {
+                    const fan: [3]Vertex = if (centred) .{ middle, v[k], v[(k + 1) % v.len] } else .{ v[0], v[k + 1], v[k + 2] };
                     const size = fan[1].pos.sub(fan[0].pos).cross(fan[2].pos.sub(fan[0].pos)).len();
                     if (!(size > epsilon * epsilon)) continue;
                     for (fan) |c| {
@@ -775,6 +907,178 @@ pub fn indexed(self: Solid, gpa: Allocator) Allocator.Error!Indexed {
     return out;
 }
 
+/// `polygons` with every corner of another that lies inside one of their
+/// edges - not at its ends - put into that edge, in order along it: where
+/// a cut went through one face and not the one beside it. `centred` says
+/// which got one: with corners in a line along an edge, such a polygon is
+/// a fan from its middle, where a fan from a corner would have triangles
+/// of no area along it.
+fn mended(pool: *Pool, polygons: []const Polygon) Allocator.Error!struct { polygons: []Polygon, centred: []bool } {
+    const out = try pool.take(Polygon, polygons.len);
+    @memcpy(out, polygons);
+    const centred = try pool.take(bool, polygons.len);
+    @memset(centred, false);
+    const arena = pool.backing;
+
+    // The corners, each place once, and the edges' mean length.
+    var total: usize = 0;
+    for (polygons) |polygon| total += polygon.vertices.len;
+    if (total == 0) return .{ .polygons = out, .centred = centred };
+    const points = try pool.take(Vec3, total);
+    var count: usize = 0;
+    var seen: std.AutoHashMapUnmanaged([3]u32, void) = .empty;
+    try seen.ensureTotalCapacity(arena, @intCast(total));
+    var length: f64 = 0;
+    var edges: usize = 0;
+    for (polygons) |polygon| {
+        if (polygon.vertices.len < 3) continue;
+        for (polygon.vertices, 0..) |v, i| {
+            const next = polygon.vertices[(i + 1) % polygon.vertices.len];
+            length += next.pos.sub(v.pos).len();
+            edges += 1;
+            const p = rounded(.{ @floatCast(v.pos.x), @floatCast(v.pos.y), @floatCast(v.pos.z) });
+            if (seen.getOrPutAssumeCapacity(.{ @bitCast(p[0]), @bitCast(p[1]), @bitCast(p[2]) }).found_existing) continue;
+            points[count] = v.pos;
+            count += 1;
+        }
+    }
+    if (edges == 0) return .{ .polygons = out, .centred = centred };
+    var grid: Grid = .{ .side = @max(length / @as(f64, @floatFromInt(edges)), 1e-3), .points = points[0..count] };
+    try grid.fill(pool);
+
+    var along: List(Grid.Found) = .{};
+    var grown: List(Vertex) = .{};
+    for (out, centred) |*polygon, *is_centred| {
+        const v = polygon.vertices;
+        if (v.len < 3) continue;
+        grown.items.len = 0;
+        for (v, 0..) |a, i| {
+            const b = v[(i + 1) % v.len];
+            try grown.append(pool, a);
+            try grid.inside(pool, a.pos, b.pos, &along);
+            for (along.items) |found| {
+                try grown.append(pool, .{ .pos = grid.points[found.point], .normal = Vertex.between(a, b, found.t).normal });
+            }
+        }
+        if (grown.items.len == v.len) continue;
+        const kept = try pool.take(Vertex, grown.items.len);
+        @memcpy(kept, grown.items);
+        polygon.vertices = kept;
+        is_centred.* = true;
+    }
+    return .{ .polygons = out, .centred = centred };
+}
+
+/// The corners of a solid in boxes of `side` a side, each in every box
+/// within `epsilon` of it, for finding those along an edge by walking the
+/// boxes it goes through.
+const Grid = struct {
+    side: f64,
+    points: []const Vec3,
+    /// Each box's first entry; an entry's `next` is the box's next.
+    heads: std.AutoHashMapUnmanaged([3]i64, u32) = .empty,
+    entries: List(Entry) = .{},
+
+    const Entry = struct { point: u32, next: u32 };
+    const none = std.math.maxInt(u32);
+    /// A corner found inside an edge: how far along, and which.
+    const Found = struct { t: f64, point: u32 };
+
+    fn boxOf(self: *const Grid, p: Vec3) [3]i64 {
+        return .{ self.cell(p.x), self.cell(p.y), self.cell(p.z) };
+    }
+
+    fn cell(self: *const Grid, x: f64) i64 {
+        return @intFromFloat(std.math.clamp(@floor(x / self.side), -1e15, 1e15));
+    }
+
+    fn fill(self: *Grid, pool: *Pool) Allocator.Error!void {
+        try self.heads.ensureTotalCapacity(pool.backing, @intCast(self.points.len));
+        for (self.points, 0..) |p, i| {
+            const low = self.boxOf(p.sub(.init(epsilon, epsilon, epsilon)));
+            const high = self.boxOf(p.add(.init(epsilon, epsilon, epsilon)));
+            var x = low[0];
+            while (x <= high[0]) : (x += 1) {
+                var y = low[1];
+                while (y <= high[1]) : (y += 1) {
+                    var z = low[2];
+                    while (z <= high[2]) : (z += 1) {
+                        const got = try self.heads.getOrPut(pool.backing, .{ x, y, z });
+                        try self.entries.append(pool, .{ .point = @intCast(i), .next = if (got.found_existing) got.value_ptr.* else none });
+                        got.value_ptr.* = @intCast(self.entries.items.len - 1);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Into `found`: the corners within `epsilon` of the edge `a` to `b`
+    /// and not at its ends, in order from `a`.
+    fn inside(self: *const Grid, pool: *Pool, a: Vec3, b: Vec3, found: *List(Found)) Allocator.Error!void {
+        found.items.len = 0;
+        const d = b.sub(a);
+        const length_squared = d.dot(d);
+        if (!(length_squared > epsilon * epsilon)) return;
+        // The boxes the edge goes through, one after another.
+        var box_at = self.boxOf(a);
+        const last = self.boxOf(b);
+        const from: [3]f64 = .{ a.x, a.y, a.z };
+        const way: [3]f64 = .{ d.x, d.y, d.z };
+        var step: [3]i64 = undefined;
+        var next_t: [3]f64 = undefined;
+        var each_t: [3]f64 = undefined;
+        var steps: i64 = 0;
+        for (0..3) |k| {
+            steps += @intCast(@abs(last[k] - box_at[k]));
+            if (way[k] > 0) {
+                step[k] = 1;
+                next_t[k] = (@as(f64, @floatFromInt(box_at[k] + 1)) * self.side - from[k]) / way[k];
+                each_t[k] = self.side / way[k];
+            } else if (way[k] < 0) {
+                step[k] = -1;
+                next_t[k] = (@as(f64, @floatFromInt(box_at[k])) * self.side - from[k]) / way[k];
+                each_t[k] = -self.side / way[k];
+            } else {
+                step[k] = 0;
+                next_t[k] = std.math.inf(f64);
+                each_t[k] = std.math.inf(f64);
+            }
+        }
+        // A few more than it should take, for the rounding.
+        var left = steps + 3;
+        while (true) {
+            if (self.heads.get(box_at)) |head| {
+                var at = head;
+                while (at != none) : (at = self.entries.items[at].next) {
+                    const point = self.entries.items[at].point;
+                    const p = self.points[point];
+                    const t = p.sub(a).dot(d) / length_squared;
+                    if (!(t > 0 and t < 1)) continue;
+                    if (p.sub(a.add(d.scale(t))).len() > epsilon) continue;
+                    if (p.sub(a).len() <= epsilon or p.sub(b).len() <= epsilon) continue;
+                    // One in two boxes the edge goes through is met twice.
+                    for (found.items) |known| {
+                        if (known.point == point) break;
+                    } else try found.append(pool, .{ .t = t, .point = point });
+                }
+            }
+            if (std.mem.eql(i64, &box_at, &last) or left == 0) break;
+            left -= 1;
+            var k: usize = 0;
+            if (next_t[1] < next_t[k]) k = 1;
+            if (next_t[2] < next_t[k]) k = 2;
+            if (next_t[k] > 1) break;
+            box_at[k] += step[k];
+            next_t[k] += each_t[k];
+        }
+        std.mem.sort(Found, found.items, {}, struct {
+            fn earlier(_: void, x: Found, y: Found) bool {
+                return x.t < y.t;
+            }
+        }.earlier);
+    }
+};
+
 /// The corners met so far, by everything that makes them one: a table
 /// of their places among the vertices, open, twice as large as needed.
 const Corners = struct {
@@ -813,10 +1117,16 @@ const Corners = struct {
 };
 
 /// A corner to the nearest hundredth of a millimetre: the same corner, cut
-/// out of two faces' edges, is one.
+/// out of two faces' edges, is one - and nought is nought, whichever side
+/// it was rounded from.
 fn rounded(p: [3]f32) [3]f32 {
     const grid = 1e5;
-    return .{ @round(p[0] * grid) / grid, @round(p[1] * grid) / grid, @round(p[2] * grid) / grid };
+    var out: [3]f32 = undefined;
+    for (&out, p) |*o, x| {
+        const r = @round(x * grid) / grid;
+        o.* = if (r == 0) 0 else r;
+    }
+    return out;
 }
 
 /// Where on a picture a point of a face is: the point seen along the axis
@@ -1001,6 +1311,34 @@ test "a box as a mesh is four corners a face, a tag's triangles together, each c
     }
 }
 
+test "an outline drawn out is closed, faces out and holds its area times its height, whichever way it goes round" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // An L, seen from above: three squares of one.
+    const l = [_][2]f64{ .{ 0, 0 }, .{ 2, 0 }, .{ 2, 1 }, .{ 1, 1 }, .{ 1, 2 }, .{ 0, 2 } };
+    const solid = try prism(arena, &l, 0.5, .identity, 0);
+    try expectNear(1.5, solid.volume(), 1e-9);
+    try testing.expect(solid.closed());
+    var reversed = l;
+    std.mem.reverse([2]f64, &reversed);
+    try expectNear(1.5, (try prism(arena, &reversed, 0.5, .identity, 0)).volume(), 1e-9);
+    // Corners on one another, and the last on the first, are one.
+    const doubled = [_][2]f64{ .{ 0, 0 }, .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 }, .{ 0, 0 } };
+    try expectNear(1, (try prism(arena, &doubled, 1, .identity, 0)).volume(), 1e-9);
+    // Too few corners, or no area: nothing.
+    try testing.expectEqual(@as(usize, 0), (try prism(arena, l[0..2], 1, .identity, 0)).polygons.len);
+    try testing.expectEqual(@as(usize, 0), (try prism(arena, &.{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 0 } }, 1, .identity, 0)).polygons.len);
+    // Cut from a box, it leaves its shape: a doorway with a pointed top.
+    const wall = try box(arena, .init(4, 4, 1), .identity, 0);
+    const pointed = [_][2]f64{ .{ -0.5, -2 }, .{ 0.5, -2 }, .{ 0.5, 0 }, .{ 0, 1 }, .{ -0.5, 0 } };
+    // Standing up: the outline's z is the wall's y, drawn out along z.
+    const upright: Affine = .{ .rows = .{ .{ 1, 0, 0, 0 }, .{ 0, 0, 1, 0 }, .{ 0, -1, 0, 0 } } };
+    const holed = try wall.combine(arena, try prism(arena, &pointed, 2, upright, 1), .subtract);
+    try expectNear(16 - 2.5, holed.volume(), 1e-6);
+    try testing.expect(holed.closed());
+}
+
 test "many cuts make a deep tree, which is walked without running out of stack" {
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
@@ -1017,4 +1355,50 @@ test "many cuts make a deep tree, which is walked without running out of stack" 
     var tris = try solid.triangles(testing.allocator);
     defer tris.deinit(testing.allocator);
     try testing.expect(tris.count() > 200);
+    var made = try solid.indexed(testing.allocator);
+    defer made.deinit(testing.allocator);
+    try testing.expect(try closedByPlaces(testing.allocator, made));
+}
+
+/// Whether every edge of `made`'s triangles, by its corners' places, has
+/// two triangles on it: no corner of one triangle in the middle of
+/// another's edge, where a hair of a gap would show.
+fn closedByPlaces(gpa: Allocator, made: Indexed) !bool {
+    var edges: std.AutoHashMapUnmanaged([6]u32, u32) = .empty;
+    defer edges.deinit(gpa);
+    var t: usize = 0;
+    while (t < made.indices.len) : (t += 3) for (0..3) |k| {
+        const a = made.positions[made.indices[t + k]];
+        const b = made.positions[made.indices[t + (k + 1) % 3]];
+        const ka: [3]u32 = .{ @bitCast(a[0]), @bitCast(a[1]), @bitCast(a[2]) };
+        const kb: [3]u32 = .{ @bitCast(b[0]), @bitCast(b[1]), @bitCast(b[2]) };
+        const low = std.mem.order(u32, &ka, &kb) == .lt;
+        const key: [6]u32 = if (low) ka ++ kb else kb ++ ka;
+        const got = try edges.getOrPut(gpa, key);
+        got.value_ptr.* = if (got.found_existing) got.value_ptr.* + 1 else 1;
+    };
+    var it = edges.valueIterator();
+    while (it.next()) |count| if (count.* != 2) return false;
+    return true;
+}
+
+test "where a cut went through one face and not the one beside it, the triangles still meet corner to corner" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const a = try box(arena, .init(2, 2, 2), .identity, 0);
+    var shifted: Affine = .identity;
+    shifted.rows[0][3] = 0.7;
+    shifted.rows[1][3] = 0.6;
+    shifted.rows[2][3] = 0.5;
+    // Two boxes joined askew, of two tags.
+    const joined = try a.combine(arena, try box(arena, .init(2, 2, 2), shifted, 1), .@"union");
+    var made = try joined.indexed(testing.allocator);
+    defer made.deinit(testing.allocator);
+    try testing.expect(try closedByPlaces(testing.allocator, made));
+    // A ball cut from a box.
+    const holed = try a.combine(arena, try sphere(arena, 1.1, 16, 8, shifted, 1), .subtract);
+    var cut = try holed.indexed(testing.allocator);
+    defer cut.deinit(testing.allocator);
+    try testing.expect(try closedByPlaces(testing.allocator, cut));
 }
