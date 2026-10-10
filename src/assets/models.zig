@@ -59,6 +59,7 @@ const Uuid = @import("fluxion_id").Uuid;
 
 const App = @import("../App.zig");
 const Project = @import("../project/Project.zig");
+const attr = @import("../reflect/attr.zig");
 const file_table = @import("file_table.zig");
 const gltf = @import("gltf.zig");
 const mesh = @import("../render/mesh.zig");
@@ -162,12 +163,43 @@ pub const ImportSettings = struct {
     /// Whether every one of its animations goes round and round, not only
     /// one whose name ends in `loop`.
     loop_animations: bool = false,
+    /// Materials of its own drawn with a material file in their place, by
+    /// name: `[{ "name": "Rust", "material": "res://materials/rust.mat3d" }]`.
+    /// One that does not read is said, and its own is drawn.
+    materials: []const MaterialFile = &.{},
+
+    // The materials put in place are named in the file, not changed in an
+    // inspector.
+    pub const reflect_fields = .{
+        .materials = .{attr.Hidden{}},
+    };
+
+    pub const MaterialFile = struct {
+        /// The material's name in the model.
+        name: []const u8,
+        /// The `.mat3d` drawn in its place.
+        material: []const u8,
+    };
+
+    /// The material file in place of the model's material `name`, if any.
+    pub fn materialFor(self: ImportSettings, name: []const u8) ?[]const u8 {
+        for (self.materials) |entry| if (std.mem.eql(u8, entry.name, name)) return entry.material;
+        return null;
+    }
+
+    pub fn deinit(self: ImportSettings, gpa: Allocator) void {
+        for (self.materials) |entry| {
+            gpa.free(entry.name);
+            gpa.free(entry.material);
+        }
+        gpa.free(self.materials);
+    }
 };
 
 /// A model's import settings, or what they start as when it has none or
-/// they do not read.
-pub fn settingsOf(gpa: Allocator, files: Project.Files, file: []const u8) ImportSettings {
-    const path = std.mem.concat(gpa, u8, &.{ file, import_extension }) catch return .{};
+/// they do not read: the caller's, to `deinit` with `gpa`.
+pub fn settingsOf(gpa: Allocator, files: Project.Files, file: []const u8) Allocator.Error!ImportSettings {
+    const path = try std.mem.concat(gpa, u8, &.{ file, import_extension });
     defer gpa.free(path);
     const bytes = files.read(gpa, path, .limited(64 * 1024)) catch return .{};
     defer gpa.free(bytes);
@@ -176,7 +208,25 @@ pub fn settingsOf(gpa: Allocator, files: Project.Files, file: []const u8) Import
         return .{};
     };
     defer parsed.deinit();
-    return parsed.value;
+    var out = parsed.value;
+    // Its own copy of the names: what was read goes with `parsed`.
+    const materials = try gpa.alloc(ImportSettings.MaterialFile, parsed.value.materials.len);
+    var made: usize = 0;
+    errdefer {
+        for (materials[0..made]) |entry| {
+            gpa.free(entry.name);
+            gpa.free(entry.material);
+        }
+        gpa.free(materials);
+    }
+    for (parsed.value.materials, materials) |entry, *copy| {
+        const name = try gpa.dupe(u8, entry.name);
+        errdefer gpa.free(name);
+        copy.* = .{ .name = name, .material = try gpa.dupe(u8, entry.material) };
+        made += 1;
+    }
+    out.materials = materials;
+    return out;
 }
 
 /// Reads the files a `.gltf` names, beside it.
@@ -209,6 +259,7 @@ pub const Prepared = struct {
     settings: ImportSettings,
 
     pub fn deinit(self: *Prepared) void {
+        self.settings.deinit(self.model.gpa);
         self.model.deinit();
     }
 };
@@ -221,7 +272,8 @@ pub fn prepare(gpa: Allocator, files: Project.Files, file: []const u8, source: ?
     const bytes = try files.read(gpa, file, .limited(file_table.file_limit));
     defer gpa.free(bytes);
     var beside: Beside = .{ .files = files, .folder = folderOf(file) };
-    const settings = settingsOf(gpa, files, file);
+    const settings = try settingsOf(gpa, files, file);
+    errdefer settings.deinit(gpa);
     var model = try gltf.parse(gpa, bytes, beside.fetch());
     errdefer model.deinit();
     model.unwrap_lightmap = settings.lightmap_uvs;
@@ -346,6 +398,13 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
         if (material.occlusion) |ref| look.occlusion_texture = pictures[ref.image];
         var name: [512]u8 = undefined;
         out.* = try app.materials.add(gpa, try std.fmt.bufPrint(&name, "{s}#material/{d}", .{ source, at }), look);
+        // Drawn with a material file in its place where the import says so.
+        if (prepared.settings.materialFor(material.name)) |file| {
+            out.* = materialFile(app, file) catch |err| own: {
+                log.warn("{s}: the material {s} for {s} was not read, and its own is drawn: {t}", .{ source, file, material.name, err });
+                break :own out.*;
+            };
+        }
     }
 
     // Made on a loading thread, the meshes' memory is that thread's
@@ -412,6 +471,13 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
     const text = try sceneText(gpa, source, prepared);
     defer gpa.free(text);
     return app.scenes.add(gpa, source, text);
+}
+
+/// A material file read for a model: its errors named rather than worked
+/// out, since reading one can read a model, and a model's are worked out
+/// from this.
+fn materialFile(app: *App, file: []const u8) anyerror!MaterialHandle {
+    return app.loadMaterial(file);
 }
 
 /// Each node's parent, the first that lists it; none for a root.

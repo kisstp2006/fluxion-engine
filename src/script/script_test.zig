@@ -585,6 +585,51 @@ test "every script under a folder is read again, the imported ones too, as an ed
     }
 }
 
+test "a file loaded after another imported it is the module the import made: its structs are one type" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDirPath(testing.io, "scripts/night");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "scripts/night/night.flux", .data =
+        \\struct Night {
+        \\    var hour: int = 12;
+        \\}
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "scripts/night/walker.flux", .data =
+        \\const nt = @import("night.flux");
+        \\fn hour_of(n: nt.Night) int { return n.hour; }
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "scripts/office.flux", .data =
+        \\const nt = @import("night/night.flux");
+        \\const walker = @import("night/walker.flux");
+        \\fn hour() int { return walker.hour_of(nt.Night{}); }
+    });
+
+    // Every file in the order an export reads them: the one importing the
+    // night first, the night itself, then one holding both - which takes
+    // the night the first was made with.
+    for ([_]bool{ false, true }) |run| {
+        const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+        defer app.destroy();
+        try app.useScripts(.{ .run = run });
+        const walker = try app.loadScript("res://scripts/night/walker.flux");
+        const night = try app.loadScript("res://scripts/night/night.flux");
+        const office = try app.loadScript("res://scripts/office.flux");
+        const scripts = app.scripts.?;
+        try testing.expect(scripts.moduleOf(office) != null);
+        try testing.expectEqual(scripts.moduleOf(night).?, scripts.vm.moduleNamed("res://scripts/night/night.flux").?);
+        if (!run) {
+            for ([_]ScriptHandle{ walker, night, office }) |handle| {
+                const image = try app.compiledScript(handle, testing.allocator, .{});
+                testing.allocator.free(image);
+            }
+        } else {
+            try testing.expectEqual(@as(i64, 12), (try scripts.vm.callName(scripts.moduleOf(office).?, "hour", &.{})).asInt());
+        }
+    }
+}
+
 test "a script imports the file beside it, and calls another entity's script" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

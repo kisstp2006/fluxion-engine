@@ -221,6 +221,22 @@ test "the lamps the camera sees are kept, nearest first, and a mesh is lit by th
     try testing.expectEqual([4]f32{ -1, -1, -1, -1 }, app.renderer3d.gathered.items[0].lights[1]);
 }
 
+test "a lamp that falls off with the distance says so to the shader, with its gloss" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 1, 0), PointLight3D{ .range = 5, .falloff = .distance, .attenuation = 0, .specular = 0.25 } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.lamps_kept);
+    const lamp = app.renderer3d.lamps.items[0];
+    try testing.expectEqual(@as(f32, 1), lamp.falloff);
+    try testing.expectEqual(@as(f32, 0.25), lamp.specular);
+    // No power of the distance: kept as none, where one fading toward its
+    // range by none would be made a little.
+    try testing.expectEqual(@as(f32, 0), lamp.attenuation);
+}
+
 test "a light that casts a shadow draws what it sees into the atlas: a spot one view, a point light six, a sun its cascades" {
     const app = try headless();
     defer app.destroy();

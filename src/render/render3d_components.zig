@@ -208,6 +208,10 @@ pub const Material3DData = extern struct {
     emission: Color = .black,
     emission_energy: f32 = 1,
     emission_texture: assets.TextureHandle = .none,
+    /// How `emission_texture` and `emission` make the light given off: the
+    /// one times the other, or the two added - the colour glowing where
+    /// the picture is dark too.
+    emission_mode: EmissionMode = .multiply,
     transparency: Transparency = .disabled,
     /// Under this alpha nothing is drawn, with `transparency` at `scissor`.
     alpha_scissor_threshold: f32 = 0.5,
@@ -249,6 +253,8 @@ pub const Material3DData = extern struct {
     /// neither, for a leaf, a sheet of paper.
     pub const Cull = enum(u8) { back, front, disabled };
 
+    pub const EmissionMode = enum(u8) { multiply, add };
+
     pub const reflect_name = "Material3DData";
     pub const reflect_fields = .{
         .albedo_color = .{attr.Doc{ .text = "Multiplied into the picture; the alpha shows with transparency on" }},
@@ -264,6 +270,7 @@ pub const Material3DData = extern struct {
         .emission = .{ attr.Group{ .name = "Light it gives off" }, attr.Doc{ .text = "Light it gives off whatever lights it" } },
         .emission_energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the light it gives off is" } },
         .emission_texture = .{attr.Doc{ .text = "Where on the mesh it gives off light, times the emission" }},
+        .emission_mode = .{attr.Doc{ .text = "The picture times the emission colour, or the two added: the colour glowing where the picture is dark too" }},
         .alpha_scissor_threshold = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "Under this alpha nothing is drawn, with transparency at scissor" } },
         .uv_scale = .{ attr.Group{ .name = "Where the pictures lie" }, attr.Doc{ .text = "How many times the pictures are laid across" } },
         .uv_offset = .{attr.Doc{ .text = "How far the pictures are moved, in pictures" }},
@@ -372,6 +379,18 @@ pub const DirectionalLight3D = extern struct {
     };
 };
 
+/// How a point or spot light's light falls off.
+pub const Falloff = enum(u8) {
+    /// To nothing at its range, along `attenuation`'s curve: one evenly; and
+    /// toward the edge of a spot light's cone along `angle_attenuation`'s.
+    range,
+    /// With the distance to the power `attenuation`, as light does - one is
+    /// a light that halves at twice the distance - cut off smoothly toward
+    /// its range; toward the edge of a spot light's cone, a rim that
+    /// `angle_attenuation` narrows.
+    distance,
+};
+
 /// Light from a point, every way: a bulb, a candle. It reaches `range` from
 /// where its `Transform3D` is, and fades on the way. A mesh is lit by the
 /// eight of these and of `SpotLight3D` nearest it that reach it. With a
@@ -386,8 +405,15 @@ pub const PointLight3D = extern struct {
     bake: LightBake = .indirect,
     /// How far it reaches, in units: nothing further is lit by it.
     range: f32 = 5,
-    /// How it fades toward `range`: one evenly, more sooner, less later.
+    /// How it fades toward `range`: one evenly, more sooner, less later -
+    /// or, with `falloff` `.distance`, the power of the distance it falls
+    /// with.
     attenuation: f32 = 1,
+    /// How its light falls off: see `Falloff`.
+    falloff: Falloff = .range,
+    /// How much of its light a surface gives back as a gloss: one as the
+    /// surface's roughness and metal say, nought none, more brighter.
+    specular: f32 = 1,
     /// Whether it fades out as the camera moves away from it.
     distance_fade: bool = false,
     /// How far from the camera it starts to fade.
@@ -410,7 +436,9 @@ pub const PointLight3D = extern struct {
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is, next to it" } },
         .bake = .{attr.Doc{ .text = bake_doc }},
         .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
-        .attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later" } },
+        .attenuation = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later; with distance falloff, the power of the distance it falls with" } },
+        .falloff = .{attr.Doc{ .text = "Range fades smoothly to nothing at its range; distance falls with the distance, as light does, cut off smoothly at its range" }},
+        .specular = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How much of its light a surface gives back as a gloss: one as the surface says, nought none" } },
         .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
         .distance_fade_begin = .{ attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
         .distance_fade_length = .{ attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },
@@ -434,9 +462,14 @@ pub const SpotLight3D = extern struct {
     bake: LightBake = .indirect,
     range: f32 = 5,
     attenuation: f32 = 1,
+    /// How its light falls off, with distance and toward the edge of its
+    /// cone: see `Falloff`.
+    falloff: Falloff = .range,
+    specular: f32 = 1,
     /// From the middle of the cone to its edge, in radians.
     angle: f32 = std.math.degreesToRadians(45.0),
-    /// How it fades toward the edge of the cone: one evenly, more sooner.
+    /// How it fades toward the edge of the cone: one evenly, more sooner -
+    /// or, with `falloff` `.distance`, the power of how far from the edge.
     angle_attenuation: f32 = 1,
     distance_fade: bool = false,
     distance_fade_begin: f32 = 40,
@@ -454,7 +487,9 @@ pub const SpotLight3D = extern struct {
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is, next to it" } },
         .bake = .{attr.Doc{ .text = bake_doc }},
         .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
-        .attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later" } },
+        .attenuation = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later; with distance falloff, the power of the distance it falls with" } },
+        .falloff = .{attr.Doc{ .text = "Range fades smoothly to nothing at its range; distance falls with the distance, as light does, cut off smoothly at its range" }},
+        .specular = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How much of its light a surface gives back as a gloss: one as the surface says, nought none" } },
         .angle = .{ attr.Angle{}, attr.Range{ .min = std.math.degreesToRadians(0.1), .max = std.math.degreesToRadians(89.9) }, attr.Doc{ .text = "From the middle of the cone to its edge" } },
         .angle_attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward the edge of the cone: one evenly, more sooner" } },
         .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },

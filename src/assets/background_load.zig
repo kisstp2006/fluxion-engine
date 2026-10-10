@@ -312,7 +312,11 @@ pub const Load = struct {
             // from its binary part by the steps after this one.
             self.bytes = try self.files.read(self.gpa, self.file, .limited(file_table.file_limit));
             var beside: models.Beside = .{ .files = self.files, .folder = models.folderOf(self.file) };
-            self.prepared = .{ .model = try gltf.parse(self.gpa, self.bytes, beside.fetch()), .settings = models.settingsOf(self.gpa, self.files, self.file) };
+            self.prepared = made: {
+                var model = try gltf.parse(self.gpa, self.bytes, beside.fetch());
+                errdefer model.deinit();
+                break :made .{ .model = model, .settings = try models.settingsOf(self.gpa, self.files, self.file) };
+            };
             const model = &self.prepared.?.model;
             model.unwrap_lightmap = self.prepared.?.settings.lightmap_uvs;
             model.lod_file = try models.lodFileOf(self.gpa, self.files, self.source);

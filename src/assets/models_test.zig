@@ -211,6 +211,29 @@ test "a model's import settings scale its root" {
     try testing.expect(app.globalPosition3D(app.find("Holder").?).?.approxEql(.init(0.5, 1, 1.5)));
 }
 
+test "a model's material is drawn with a material file in its place where its import says so, by its name" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    try folder.put("models/blue.mat3d", "{ \"albedo_color\": { \"r\": 0, \"g\": 0, \"b\": 1, \"a\": 1 } }");
+    try folder.put("models/tri.gltf.import", "{ \"materials\": [{ \"name\": \"Red\", \"material\": \"res://models/blue.mat3d\" }] }");
+    const app = try appIn(&folder);
+    defer app.destroy();
+    _ = try app.instantiate(try app.loadScene("res://models/tri.gltf"), .none);
+    const blue = app.findMaterial("res://models/blue.mat3d").?;
+    const drawn = app.meshOf(app.findMesh("res://models/tri.gltf#mesh/0").?).?;
+    try testing.expect(drawn.surfaces[0].material.eql(blue));
+    try testing.expectEqual(@as(f32, 1), app.materialOf(blue).?.albedo_color.b);
+    // A name the model has not is passed over; one that does not read is
+    // said, and the model's own drawn.
+    try folder.put("models/tri.gltf.import", "{ \"materials\": [{ \"name\": \"Red\", \"material\": \"res://models/none.mat3d\" }, { \"name\": \"Green\", \"material\": \"res://models/blue.mat3d\" }] }");
+    const again = try appIn(&folder);
+    defer again.destroy();
+    _ = try again.instantiate(try again.loadScene("res://models/tri.gltf"), .none);
+    const own = again.meshOf(again.findMesh("res://models/tri.gltf#mesh/0").?).?;
+    try testing.expect(own.surfaces[0].material.eql(again.findMaterial("res://models/tri.gltf#material/0").?));
+}
+
 test "a material is written to a file and read back, its picture by its path and its shader's numbers with it" {
     var folder: Folder = undefined;
     try folder.init();

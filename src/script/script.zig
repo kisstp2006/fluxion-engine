@@ -755,6 +755,13 @@ pub const Scripts = struct {
         const name = try gpa.dupe(u8, source);
         errdefer gpa.free(name);
         const made: ScriptHandle = .fromId(try self.files.add(gpa, .{ .source = name, .text = text, .module = null, .on_disc = on_disc }));
+        // A file another script imported already is that module: compiled
+        // again it would be a module of its own, its structs other types
+        // than the ones the importers hold, though named the same.
+        if (on_disc) if (self.vm.moduleNamed(name)) |imported| {
+            self.files.get(made.toId()).?.module = imported;
+            return made;
+        };
         self.compile(made);
         return made;
     }

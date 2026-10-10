@@ -86,6 +86,7 @@ const Material3DData = components3d.Material3DData;
 const DirectionalLight3D = components3d.DirectionalLight3D;
 const PointLight3D = components3d.PointLight3D;
 const SpotLight3D = components3d.SpotLight3D;
+const Falloff = components3d.Falloff;
 const Environment = components3d.Environment;
 const GiMode = components3d.GiMode;
 const LightmapGI = components3d.LightmapGI;
@@ -254,6 +255,10 @@ const Lamp = struct {
     entity: u64 = 0,
     /// Half a spot light's cone, in radians.
     angle: f32 = 0,
+    /// One where it falls off with the distance, nought toward its range.
+    falloff: f32 = 0,
+    /// Its gloss, times one.
+    specular: f32 = 1,
     /// A spot light's up: its cookie's top.
     up: math.Vec3 = .unit_y,
     /// Its cookie's picture, and the tile of the cookie atlas it is in.
@@ -864,7 +869,7 @@ pub const Renderer3D = struct {
             lights.places[at] = .{ lamp.place.x, lamp.place.y, lamp.place.z, lamp.range };
             lights.colors[at] = .{ lamp.color[0], lamp.color[1], lamp.color[2], lamp.attenuation };
             lights.aims[at] = .{ lamp.aim.x, lamp.aim.y, lamp.aim.z, lamp.edge };
-            lights.cones[at] = .{ lamp.cone, 0, 0, 0 };
+            lights.cones[at] = .{ lamp.cone, lamp.falloff, lamp.specular, 0 };
             lights.ups[at] = .{ lamp.up.x, lamp.up.y, lamp.up.z, @tan(lamp.angle) };
             if (!lamp.cookie.isNone()) lights.cookies[at] = cookieRect(lamp.cookie_tile, bottom_left);
         }
@@ -924,7 +929,8 @@ pub const Renderer3D = struct {
                     if (light.bake == .all and self.baked != null) continue;
                     if (!self.worlds.admits(app, entity)) continue;
                     const placed = placedLight(app, entity) orelse continue;
-                    var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
+                    var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation, light.falloff);
+                    lamp.specular = @max(light.specular, 0);
                     lamp.entity = entity.toInt();
                     if (light.shadow) lamp.shadow = .{ .bias = light.shadow_bias, .normal_bias = light.shadow_normal_bias, .blur = light.shadow_blur, .size = @max(light.size, 0) };
                     // Its way and up, which turn its cookie; its cone is none.
@@ -948,7 +954,8 @@ pub const Renderer3D = struct {
                     if (light.bake == .all and self.baked != null) continue;
                     if (!self.worlds.admits(app, entity)) continue;
                     const placed = placedLight(app, entity) orelse continue;
-                    var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation);
+                    var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation, light.falloff);
+                    lamp.specular = @max(light.specular, 0);
                     lamp.entity = entity.toInt();
                     lamp.aim = placed.forward().tryNorm() orelse continue;
                     lamp.angle = std.math.clamp(light.angle, 0, std.math.degreesToRadians(89.9));
@@ -1765,7 +1772,9 @@ fn lookOf(look: Material3DData, normal_map: bool) Look {
     const energy = look.emission_energy;
     return .{
         .albedo_color = linear(look.albedo_color),
-        .emission_color = .{ glow[0] * energy, glow[1] * energy, glow[2] * energy, 0 },
+        // Its fourth number, the energy the picture is added by: nought
+        // where it is multiplied in, or there is none.
+        .emission_color = .{ glow[0] * energy, glow[1] * energy, glow[2] * energy, if (look.emission_mode == .add and !look.emission_texture.isNone()) energy else 0 },
         .uv_place = .{ look.uv_scale.x, look.uv_scale.y, look.uv_offset.x, look.uv_offset.y },
         .surface = .{
             std.math.clamp(look.metallic, 0, 1),
@@ -1784,14 +1793,18 @@ fn lookOf(look: Material3DData, normal_map: bool) Look {
 }
 
 /// A lamp, from what a point or spot light says.
-fn lampOf(place: math.Vec3, color: Color, energy: f32, range: f32, attenuation: f32) Lamp {
+fn lampOf(place: math.Vec3, color: Color, energy: f32, range: f32, attenuation: f32, falloff: Falloff) Lamp {
     const c = linear(color);
     const e = @max(energy, 0);
+    const by_distance = falloff == .distance;
     return .{
         .place = place,
         .range = @max(range, 0.001),
         .color = .{ c[0] * e, c[1] * e, c[2] * e },
-        .attenuation = @max(attenuation, 0.01),
+        // A light that falls off with no power of the distance does not
+        // fall off; one that fades toward its range by none would not end.
+        .attenuation = if (by_distance) @max(attenuation, 0) else @max(attenuation, 0.01),
+        .falloff = if (by_distance) 1 else 0,
         .aim = .zero,
         .edge = -2,
         .cone = 1,
@@ -1858,7 +1871,7 @@ test "a mesh is lit by the nearest lamps that reach it, nearest first, and no mo
     defer renderer.lamps.deinit(testing.allocator);
     const box: math.Aabb = .{ .min = .init(-1, -1, -1), .max = .init(1, 1, 1) };
     for (0..12) |i| {
-        var lamp = lampOf(.init(@floatFromInt(2 + i), 0, 0), .white, 1, 20, 1);
+        var lamp = lampOf(.init(@floatFromInt(2 + i), 0, 0), .white, 1, 20, 1, .range);
         if (i == 3) lamp.range = 0.5; // too short to reach
         try renderer.lamps.append(testing.allocator, lamp);
     }
@@ -1879,6 +1892,11 @@ test "a material's numbers are linear, as light adds up" {
     try testing.expectEqual(@as(f32, 1), look.facing[0]);
     // No occlusion picture, so none of it is read.
     try testing.expectEqual(@as(f32, 0), look.surface[3]);
+    // The emission picture multiplied in: no energy to add it by. Added,
+    // only where there is a picture.
+    try testing.expectEqual(@as(f32, 0), look.emission_color[3]);
+    try testing.expectEqual(@as(f32, 0), lookOf(.{ .emission_mode = .add, .emission_energy = 3 }, false).emission_color[3]);
+    try testing.expectEqual(@as(f32, 3), lookOf(.{ .emission_mode = .add, .emission_energy = 3, .emission_texture = .{ .index = 1, .generation = 1 } }, false).emission_color[3]);
 }
 
 test "a lamp fades smoothly to nothing with its distance from the camera" {

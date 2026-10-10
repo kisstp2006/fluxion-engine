@@ -311,6 +311,11 @@ const engine_head =
     \\// The light that leaves a surface toward the eye, of one that comes
     \\// from `l`, a unit of it: what it scatters, and what it reflects.
     \\vec3 shine(vec3 n, vec3 v, vec3 l, vec3 albedo, float metallic, float roughness) {
+    \\    return shineGlossed(n, v, l, albedo, metallic, roughness, 1.0);
+    \\}
+    \\
+    \\// `shine` with its gloss times `gloss`: a lamp's `specular`.
+    \\vec3 shineGlossed(vec3 n, vec3 v, vec3 l, vec3 albedo, float metallic, float roughness, float gloss) {
     \\    float n_l = max(dot(n, l), 0.0);
     \\    if (n_l <= 0.0) {
     \\        return vec3(0.0);
@@ -330,7 +335,7 @@ const engine_head =
     \\    vec3 fresnel = f0 + (vec3(1.0) - f0) * pow(1.0 - h_v, 5.0);
     \\    vec3 reflected = fresnel * (spread * hidden / (4.0 * n_v * n_l + 0.0001));
     \\    vec3 scattered = (vec3(1.0) - fresnel) * (1.0 - metallic) * albedo;
-    \\    return (scattered + reflected * PI) * n_l;
+    \\    return (scattered + reflected * PI * gloss) * n_l;
     \\}
     \\
     \\// How far from its light a depth seen in a shadow view is: `info` is the
@@ -519,11 +524,26 @@ const engine_head =
     \\    }
     \\    vec3 l = to / max(d, 0.0001);
     \\    vec4 color = LIGHT_COLORS[at];
-    \\    float fade = pow(max(1.0 - d / place.w, 0.0), color.w);
+    \\    vec4 cone = LIGHT_CONES[at];
+    \\    float fade = 0.0;
+    \\    if (cone.y > 0.5) {
+    \\        // With the distance, cut off smoothly toward the range.
+    \\        float near = d / place.w;
+    \\        near = near * near;
+    \\        near = max(1.0 - near * near, 0.0);
+    \\        fade = near * near * pow(max(d, 0.0001), -color.w);
+    \\    } else {
+    \\        fade = pow(max(1.0 - d / place.w, 0.0), color.w);
+    \\    }
     \\    vec4 aim = LIGHT_AIMS[at];
     \\    if (aim.w > -1.5) {
-    \\        float t = clamp((dot(-l, aim.xyz) - aim.w) / max(1.0 - aim.w, 0.0001), 0.0, 1.0);
-    \\        fade = fade * pow(t, LIGHT_CONES[at].x);
+    \\        if (cone.y > 0.5) {
+    \\            float rim = max((1.0 - max(dot(-l, aim.xyz), aim.w)) / max(1.0 - aim.w, 0.0001), 0.0001);
+    \\            fade = fade * (1.0 - pow(rim, cone.x));
+    \\        } else {
+    \\            float t = clamp((dot(-l, aim.xyz) - aim.w) / max(1.0 - aim.w, 0.0001), 0.0, 1.0);
+    \\            fade = fade * pow(t, cone.x);
+    \\        }
     \\    }
     \\    vec4 cookie = LIGHT_COOKIES[at];
     \\    if (cookie.z > 0.0) {
@@ -542,7 +562,7 @@ const engine_head =
     \\        uv = clamp(uv, vec2(0.002), vec2(0.998));
     \\        color = vec4(color.rgb * toLinear(sample_level(COOKIE_ATLAS, cookie.xy + uv * cookie.zw, 0.0).rgb), color.w);
     \\    }
-    \\    vec3 light = shine(n, v, l, albedo, metallic, roughness) * color.rgb * fade;
+    \\    vec3 light = shineGlossed(n, v, l, albedo, metallic, roughness, cone.z) * color.rgb * fade;
     \\    if (light.r + light.g + light.b <= 0.0) {
     \\        return light;
     \\    }
@@ -704,7 +724,7 @@ const prologue = " vec3 ALBEDO = toLinear(sample(ALBEDO_TEXTURE, UV).rgb) * ALBE
     " float ALPHA = sample(ALBEDO_TEXTURE, UV).a * ALBEDO_COLOR.a * COLOR.a;" ++
     " float METALLIC = SURFACE.x * sample(SURFACE_TEXTURE, UV).b;" ++
     " float ROUGHNESS = SURFACE.y * sample(SURFACE_TEXTURE, UV).g;" ++
-    " vec3 EMISSION = toLinear(sample(EMISSION_TEXTURE, UV).rgb) * EMISSION_COLOR.rgb;" ++
+    " vec3 EMISSION = mix(toLinear(sample(EMISSION_TEXTURE, UV).rgb) * EMISSION_COLOR.rgb, EMISSION_COLOR.rgb + toLinear(sample(EMISSION_TEXTURE, UV).rgb) * EMISSION_COLOR.w, step(0.000001, EMISSION_COLOR.w));" ++
     " vec3 NORMAL_MAP = sample(NORMAL_TEXTURE, UV).rgb;" ++
     " float AO = mix(1.0, sample(OCCLUSION_TEXTURE, UV).r, SURFACE.w);";
 

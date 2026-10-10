@@ -75,6 +75,28 @@ pub const Triangle = struct {
     material: u32,
 };
 
+/// How much of a lamp's light reaches `d` from it, by its range.
+pub fn lampFade(light: Light, d: f32) f32 {
+    if (light.by_distance) {
+        var near = d / light.range;
+        near = near * near;
+        near = @max(1 - near * near, 0);
+        return near * near * std.math.pow(f32, @max(d, 0.0001), -light.attenuation);
+    }
+    return std.math.pow(f32, @max(1 - d / light.range, 0), light.attenuation);
+}
+
+/// How much of a spot light's light is left `cosine` from its way, by its
+/// cone.
+pub fn coneFade(light: Light, cosine: f32) f32 {
+    if (light.by_distance) {
+        const rim = @max((1 - @max(cosine, light.cone)) / @max(1 - light.cone, 0.0001), 0.0001);
+        return 1 - std.math.pow(f32, rim, light.cone_attenuation);
+    }
+    const t = std.math.clamp((cosine - light.cone) / @max(1 - light.cone, 0.0001), 0, 1);
+    return std.math.pow(f32, t, light.cone_attenuation);
+}
+
 pub const Light = struct {
     kind: Kind,
     /// Where a lamp is.
@@ -88,6 +110,9 @@ pub const Light = struct {
     /// The cosine of a spot light's edge, and how it fades toward it.
     cone: f32 = -1,
     cone_attenuation: f32 = 1,
+    /// Whether it falls off with the distance - `attenuation` the power -
+    /// rather than toward its range: see the engine's `Falloff`.
+    by_distance: bool = false,
     /// How big a lamp is across, in units; how wide a sun looks, in radians.
     size: f32 = 0,
     /// A cookie's top, and how wide a spot light's is: the tangent of half
@@ -432,13 +457,10 @@ const World = struct {
                 const l = to / splat(d);
                 const facing = dot(n, l);
                 if (facing <= 0) return splat(0);
-                var fade = std.math.pow(f32, @max(1 - d / light.range, 0), light.attenuation);
+                var fade = lampFade(light, d);
                 var color = vec(light.color);
                 const aim = normalize(vec(light.direction));
-                if (light.kind == .spot) {
-                    const t = std.math.clamp((dot(-l, aim) - light.cone) / @max(1 - light.cone, 0.0001), 0, 1);
-                    fade *= std.math.pow(f32, t, light.cone_attenuation);
-                }
+                if (light.kind == .spot) fade *= coneFade(light, dot(-l, aim));
                 if (fade <= 0) return splat(0);
                 if (light.cookie) |image| color *= self.cookieAt(light, image, p, l);
                 const count = if (light.size > 0) @max(rays, 1) else 1;
@@ -1175,6 +1197,25 @@ fn meanOf(result: Result, instance: u32) [3]f32 {
     };
     const n: f64 = @floatFromInt((across / 2) * (across / 2));
     return .{ @floatCast(sum[0] / n), @floatCast(sum[1] / n), @floatCast(sum[2] / n) };
+}
+
+test "a lamp falls off toward its range, or with the distance cut off smoothly at its range; a cone's edge either way" {
+    const near: Light = .{ .kind = .point, .color = .{ 1, 1, 1 }, .range = 10, .attenuation = 1, .direct = true };
+    try testing.expectApproxEqAbs(@as(f32, 0.5), lampFade(near, 5), 1e-5);
+    try testing.expectEqual(@as(f32, 0), lampFade(near, 10));
+    var far = near;
+    far.by_distance = true;
+    // A half at twice the distance, near it; nothing at its range.
+    try testing.expectApproxEqAbs(lampFade(far, 1) / 2, lampFade(far, 2), 0.01);
+    try testing.expectEqual(@as(f32, 0), lampFade(far, 10));
+    const edge = @cos(std.math.degreesToRadians(30.0));
+    var spot: Light = .{ .kind = .spot, .color = .{ 1, 1, 1 }, .range = 10, .cone = edge, .cone_attenuation = 1, .direct = true };
+    try testing.expectApproxEqAbs(@as(f32, 1), coneFade(spot, 1), 1e-5);
+    try testing.expectApproxEqAbs(@as(f32, 0), coneFade(spot, edge), 1e-5);
+    spot.by_distance = true;
+    // Bright to near the edge, and nothing at it.
+    try testing.expect(coneFade(spot, @cos(std.math.degreesToRadians(20.0))) > 0.5);
+    try testing.expectApproxEqAbs(@as(f32, 0), coneFade(spot, edge), 1e-4);
 }
 
 test "an open floor under the sky is lit by the sky, and a sun on it adds as much as it falls" {
