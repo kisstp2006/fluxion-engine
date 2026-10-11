@@ -78,13 +78,25 @@ pub const Triangle = struct {
     material: u32,
 };
 
+/// The nearest a lamp's light is counted from, whatever its size: nearer,
+/// a light that falls off with the distance would grow without end, and a
+/// wall beside a bulb be lit hundreds of times over. The renderer counts
+/// from the same, so what is baked and what is drawn agree.
+pub const least_lamp_distance: f32 = 0.05;
+
+/// The nearest a lamp `size` across is counted from: its middle is inside
+/// it, and nothing is lit from nearer than its edge.
+pub fn lampNear(size: f32) f32 {
+    return @max(size * 0.5, least_lamp_distance);
+}
+
 /// How much of a lamp's light reaches `d` from it, by its range.
 pub fn lampFade(light: Light, d: f32) f32 {
     if (light.by_distance) {
         var near = d / light.range;
         near = near * near;
         near = @max(1 - near * near, 0);
-        return near * near * std.math.pow(f32, @max(d, 0.0001), -light.attenuation);
+        return near * near * std.math.pow(f32, @max(d, lampNear(light.size)), -light.attenuation);
     }
     return std.math.pow(f32, @max(1 - d / light.range, 0), light.attenuation);
 }
@@ -1238,6 +1250,11 @@ test "a lamp falls off toward its range, or with the distance cut off smoothly a
     // A half at twice the distance, near it; nothing at its range.
     try testing.expectApproxEqAbs(lampFade(far, 1) / 2, lampFade(far, 2), 0.01);
     try testing.expectEqual(@as(f32, 0), lampFade(far, 10));
+    // Never brighter than at its edge, however near: no hot spot beside it.
+    try testing.expectEqual(lampFade(far, least_lamp_distance), lampFade(far, 0.0001));
+    far.size = 0.4;
+    try testing.expectEqual(lampFade(far, 0.2), lampFade(far, 0.01));
+    try testing.expect(lampFade(far, 0.2) < 6);
     const edge = @cos(std.math.degreesToRadians(30.0));
     var spot: Light = .{ .kind = .spot, .color = .{ 1, 1, 1 }, .range = 10, .cone = edge, .cone_attenuation = 1, .direct = true };
     try testing.expectApproxEqAbs(@as(f32, 1), coneFade(spot, 1), 1e-5);

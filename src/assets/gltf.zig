@@ -442,6 +442,47 @@ fn split(bytes: []const u8) Error!struct { text: []const u8, bin: ?[]const u8 } 
     return .{ .text = text orelse return error.BadModel, .bin = bin };
 }
 
+/// The names of a glTF's materials, in their order - empty for one with
+/// none, "" for one not named - read from the document alone: no buffer
+/// or picture is touched. The caller's, freed with `freeNames`.
+pub fn materialNames(gpa: Allocator, bytes: []const u8) Error![][]u8 {
+    const text = (try split(bytes)).text;
+    const Document = struct {
+        materials: []const struct { name: []const u8 = "" } = &.{},
+    };
+    const parsed = std.json.parseFromSlice(Document, gpa, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_if_needed }) catch |err| return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.BadModel,
+    };
+    defer parsed.deinit();
+    const out = try gpa.alloc([]u8, parsed.value.materials.len);
+    var made: usize = 0;
+    errdefer freeNames(gpa, out[0..made]);
+    for (parsed.value.materials, out) |material, *name| {
+        name.* = try gpa.dupe(u8, material.name);
+        made += 1;
+    }
+    return out;
+}
+
+/// Lets go of what `materialNames` gave.
+pub fn freeNames(gpa: Allocator, names: []const []u8) void {
+    for (names) |name| gpa.free(name);
+    gpa.free(names);
+}
+
+test "a model's material names are read from its document alone, in order" {
+    const names = try materialNames(testing.allocator,
+        \\{ "asset": { "version": "2.0" }, "materials": [{ "name": "Rust" }, {}, { "name": "Glass", "pbrMetallicRoughness": {} }] }
+    );
+    defer freeNames(testing.allocator, names);
+    try testing.expectEqual(@as(usize, 3), names.len);
+    try testing.expectEqualStrings("Rust", names[0]);
+    try testing.expectEqualStrings("", names[1]);
+    try testing.expectEqualStrings("Glass", names[2]);
+    try testing.expectError(error.BadModel, materialNames(testing.allocator, "not a model"));
+}
+
 /// The document and its buffers read; every mesh and picture named but
 /// not yet made.
 /// What is read of `bytes` by `buildMesh` and `decodeImage` - a GLB's

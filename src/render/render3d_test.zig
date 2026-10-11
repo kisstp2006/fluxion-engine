@@ -235,6 +235,13 @@ test "a lamp that falls off with the distance says so to the shader, with its gl
     // No power of the distance: kept as none, where one fading toward its
     // range by none would be made a little.
     try testing.expectEqual(@as(f32, 0), lamp.attenuation);
+    // Counted from no nearer than its edge, as the lightmapper counts it.
+    try testing.expectEqual(@as(f32, 0.05), lamp.near);
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 1, 1), PointLight3D{ .range = 5, .falloff = .distance, .size = 0.5 } });
+    _ = try app.step();
+    var widest: f32 = 0;
+    for (app.renderer3d.lamps.items) |held| widest = @max(widest, held.near);
+    try testing.expectEqual(@as(f32, 0.25), widest);
 }
 
 test "a light that casts a shadow draws what it sees into the atlas: a spot one view, a point light six, a sun its cascades" {

@@ -87,6 +87,7 @@ const DirectionalLight3D = components3d.DirectionalLight3D;
 const PointLight3D = components3d.PointLight3D;
 const SpotLight3D = components3d.SpotLight3D;
 const Falloff = components3d.Falloff;
+const lightmapper = @import("fluxion_lightmapper");
 const Environment = components3d.Environment;
 const GiMode = components3d.GiMode;
 const LightmapGI = components3d.LightmapGI;
@@ -259,6 +260,8 @@ const Lamp = struct {
     falloff: f32 = 0,
     /// Its gloss, times one.
     specular: f32 = 1,
+    /// The nearest its light is counted from: see `lightmapper.lampNear`.
+    near: f32 = lightmapper.least_lamp_distance,
     /// A spot light's up: its cookie's top.
     up: math.Vec3 = .unit_y,
     /// Its cookie's picture, and the tile of the cookie atlas it is in.
@@ -869,7 +872,7 @@ pub const Renderer3D = struct {
             lights.places[at] = .{ lamp.place.x, lamp.place.y, lamp.place.z, lamp.range };
             lights.colors[at] = .{ lamp.color[0], lamp.color[1], lamp.color[2], lamp.attenuation };
             lights.aims[at] = .{ lamp.aim.x, lamp.aim.y, lamp.aim.z, lamp.edge };
-            lights.cones[at] = .{ lamp.cone, lamp.falloff, lamp.specular, 0 };
+            lights.cones[at] = .{ lamp.cone, lamp.falloff, lamp.specular, lamp.near };
             lights.ups[at] = .{ lamp.up.x, lamp.up.y, lamp.up.z, @tan(lamp.angle) };
             if (!lamp.cookie.isNone()) lights.cookies[at] = cookieRect(lamp.cookie_tile, bottom_left);
         }
@@ -931,6 +934,7 @@ pub const Renderer3D = struct {
                     const placed = placedLight(app, entity) orelse continue;
                     var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation, light.falloff);
                     lamp.specular = @max(light.specular, 0);
+                    lamp.near = lightmapper.lampNear(@max(light.size, 0));
                     lamp.entity = entity.toInt();
                     if (light.shadow) lamp.shadow = .{ .bias = light.shadow_bias, .normal_bias = light.shadow_normal_bias, .blur = light.shadow_blur, .size = @max(light.size, 0) };
                     // Its way and up, which turn its cookie; its cone is none.
@@ -956,6 +960,7 @@ pub const Renderer3D = struct {
                     const placed = placedLight(app, entity) orelse continue;
                     var lamp = lampOf(placed.position, light.color, light.energy, light.range, light.attenuation, light.falloff);
                     lamp.specular = @max(light.specular, 0);
+                    lamp.near = lightmapper.lampNear(@max(light.size, 0));
                     lamp.entity = entity.toInt();
                     lamp.aim = placed.forward().tryNorm() orelse continue;
                     lamp.angle = std.math.clamp(light.angle, 0, std.math.degreesToRadians(89.9));

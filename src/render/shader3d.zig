@@ -527,11 +527,12 @@ const engine_head =
     \\    vec4 cone = LIGHT_CONES[at];
     \\    float fade = 0.0;
     \\    if (cone.y > 0.5) {
-    \\        // With the distance, cut off smoothly toward the range.
+    \\        // With the distance, cut off smoothly toward the range, and
+    \\        // counted from no nearer than its edge: `cone.w`.
     \\        float near = d / place.w;
     \\        near = near * near;
     \\        near = max(1.0 - near * near, 0.0);
-    \\        fade = near * near * pow(max(d, 0.0001), -color.w);
+    \\        fade = near * near * pow(max(d, cone.w), -color.w);
     \\    } else {
     \\        fade = pow(max(1.0 - d / place.w, 0.0), color.w);
     \\    }
@@ -720,11 +721,15 @@ fn enginePart(skinned: bool) []const u8 {
 
 /// What the fragment stage starts with: the surface as the material says.
 /// One line, written after the stage's `{`.
-const prologue = " vec3 ALBEDO = toLinear(sample(ALBEDO_TEXTURE, UV).rgb) * ALBEDO_COLOR.rgb * COLOR.rgb;" ++
-    " float ALPHA = sample(ALBEDO_TEXTURE, UV).a * ALBEDO_COLOR.a * COLOR.a;" ++
-    " float METALLIC = SURFACE.x * sample(SURFACE_TEXTURE, UV).b;" ++
-    " float ROUGHNESS = SURFACE.y * sample(SURFACE_TEXTURE, UV).g;" ++
-    " vec3 EMISSION = mix(toLinear(sample(EMISSION_TEXTURE, UV).rgb) * EMISSION_COLOR.rgb, EMISSION_COLOR.rgb + toLinear(sample(EMISSION_TEXTURE, UV).rgb) * EMISSION_COLOR.w, step(0.000001, EMISSION_COLOR.w));" ++
+const prologue = " vec4 ALBEDO_TEXEL = sample(ALBEDO_TEXTURE, UV);" ++
+    " vec4 SURFACE_TEXEL = sample(SURFACE_TEXTURE, UV);" ++
+    " vec3 EMISSION_TEXEL = toLinear(sample(EMISSION_TEXTURE, UV).rgb);" ++
+    " vec3 ALBEDO = toLinear(ALBEDO_TEXEL.rgb) * ALBEDO_COLOR.rgb * COLOR.rgb;" ++
+    " float ALPHA = ALBEDO_TEXEL.a * ALBEDO_COLOR.a * COLOR.a;" ++
+    " float METALLIC = SURFACE.x * SURFACE_TEXEL.b;" ++
+    " float ROUGHNESS = SURFACE.y * SURFACE_TEXEL.g;" ++
+    // The picture times the colour, or - its energy in `.w` - added to it.
+    " vec3 EMISSION = mix(EMISSION_TEXEL * EMISSION_COLOR.rgb, EMISSION_COLOR.rgb + EMISSION_TEXEL * EMISSION_COLOR.w, step(0.000001, EMISSION_COLOR.w));" ++
     " vec3 NORMAL_MAP = sample(NORMAL_TEXTURE, UV).rgb;" ++
     " float AO = mix(1.0, sample(OCCLUSION_TEXTURE, UV).r, SURFACE.w);";
 

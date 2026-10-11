@@ -91,6 +91,39 @@ pub const CSGShape3D = extern struct {
 
     pub const Shape = enum(u8) { box, cylinder, sphere, mesh, group, polygon };
 
+    /// The fields every shape has, whatever it is.
+    pub const common_fields = [_]Field{ .shape, .operation, .material };
+
+    /// A field by its name: what `activeFields` lists.
+    pub const Field = std.meta.FieldEnum(CSGShape3D);
+
+    /// The fields that make what a shape of the kind `shape` comes to,
+    /// beside `common_fields`: what a mesh is remade for, and all an
+    /// inspector need show. The one list of them - a field added to
+    /// `CSGShape3D` is refused at compile time until it is put here or in
+    /// `common_fields`.
+    pub fn activeFields(shape: Shape) []const Field {
+        return switch (shape) {
+            .box => &.{.size},
+            .cylinder => &.{ .radius, .height, .sides, .smooth },
+            .sphere => &.{ .radius, .sides, .rings, .smooth },
+            .polygon => &.{ .height, .points, .point_count },
+            .mesh => &.{.mesh},
+            .group => &.{},
+        };
+    }
+
+    comptime {
+        for (std.meta.fields(CSGShape3D)) |field| {
+            const tag = @field(Field, field.name);
+            var found = std.mem.indexOfScalar(Field, &common_fields, tag) != null;
+            for (std.enums.values(Shape)) |kind| {
+                if (std.mem.indexOfScalar(Field, activeFields(kind), tag) != null) found = true;
+            }
+            if (!found) @compileError("CSGShape3D." ++ field.name ++ " is in no shape's activeFields nor in common_fields");
+        }
+    }
+
     /// A polygon's corners: the first `point_count` of `points`.
     pub fn outline(self: *const CSGShape3D) []const math.Vec2 {
         return self.points[0..@min(self.point_count, max_points)];
@@ -264,24 +297,12 @@ fn signatureOf(app: *App, top: Entity) u64 {
 
 fn sign(app: *App, hasher: *std.hash.Wyhash, entity: Entity, shape: CSGShape3D, depth: usize) void {
     hasher.update(std.mem.asBytes(&entity));
-    hasher.update(std.mem.asBytes(&shape.shape));
-    hasher.update(std.mem.asBytes(&shape.operation));
-    hasher.update(std.mem.asBytes(&shape.material));
-    switch (shape.shape) {
-        .box => hasher.update(std.mem.asBytes(&shape.size)),
-        .cylinder, .sphere => {
-            hasher.update(std.mem.asBytes(&shape.radius));
-            hasher.update(std.mem.asBytes(&shape.sides));
-            hasher.update(std.mem.asBytes(&shape.smooth));
-            if (shape.shape == .cylinder) hasher.update(std.mem.asBytes(&shape.height)) else hasher.update(std.mem.asBytes(&shape.rings));
-        },
-        .polygon => {
-            hasher.update(std.mem.asBytes(&shape.height));
-            hasher.update(std.mem.sliceAsBytes(shape.outline()));
-        },
-        .mesh => hasher.update(std.mem.asBytes(&shape.mesh)),
-        .group => {},
-    }
+    inline for (CSGShape3D.common_fields) |field| hasher.update(std.mem.asBytes(&@field(shape, @tagName(field))));
+    for (CSGShape3D.activeFields(shape.shape)) |field| switch (field) {
+        // Only the corners the outline has: the rest are not drawn.
+        .points => hasher.update(std.mem.sliceAsBytes(shape.outline())),
+        inline else => |tag| hasher.update(std.mem.asBytes(&@field(shape, @tagName(tag)))),
+    };
     if (shape.shape == .mesh) {
         const stamp: u64 = if (app.meshes.keptOf(shape.mesh)) |kept| kept.stamp else 0;
         hasher.update(std.mem.asBytes(&stamp));
@@ -349,12 +370,16 @@ const Building = struct {
             },
         };
         if (depth == max_depth) return solid;
-        // The tree's slices stay good while no entity changes shape.
+        // The tree's slices stay good while no entity changes shape: nothing
+        // building a solid spawns, despawns or reparents, which a debug
+        // build checks rather than reading a slice gone stale.
+        const structure = self.app.world.structure;
         for (self.app.children(entity)) |child| {
             const under = self.app.world.get(child, CSGShape3D) orelse continue;
             if (!shown(self.app, child)) continue;
             const held = under.*;
             const other = try self.solidOf(child, held, place.mul(placeOf(self.app, child)), material, depth + 1);
+            std.debug.assert(self.app.world.structure == structure);
             solid = try solid.combine(arena, other, switch (held.operation) {
                 .@"union" => .@"union",
                 .subtract => .subtract,

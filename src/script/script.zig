@@ -775,11 +775,16 @@ pub const Scripts = struct {
         if (!self.options.run) {
             // An editor's: the structs are made by compiling, and nothing
             // runs. Text that does not compile leaves the last that did.
+            const previous = file.module;
             const compiled = self.vm.compile(source, file.text) catch |err| switch (err) {
                 error.CompileFailed => return self.sayDiagnostics(source),
                 error.OutOfMemory => return self.outOfMemory(null),
             };
             self.files.get(handle.toId()).?.module = compiled;
+            // Compiled afresh it is a module of its own: those importing the
+            // old one would hold structs of another type, named the same,
+            // until they are compiled again too.
+            if (previous) |old| if (old != compiled) self.compileImportersOf(old, 0) catch self.outOfMemory(null);
             return;
         }
         const module = self.vm.load(source, file.text) catch |err| switch (err) {
@@ -792,6 +797,53 @@ pub const Scripts = struct {
             error.OutOfMemory => return self.outOfMemory(null),
         };
         self.files.get(handle.toId()).?.module = module;
+    }
+
+    /// Every module that imports `old` compiled again, and those importing
+    /// them, so each holds the module now under `old`'s name: a file of the
+    /// table by its handle, one only imported from its file. One that does
+    /// not compile now is said, and keeps what it had.
+    fn compileImportersOf(self: *Scripts, old: *flux.object.Module, depth: u32) Allocator.Error!void {
+        // Imports go one way, but a chain of them is not followed for ever.
+        if (depth >= 32) return;
+        const gpa = self.app.gpa;
+        // Gathered before any is compiled: compiling changes the table.
+        var importers: std.ArrayList(*flux.object.Module) = .empty;
+        defer importers.deinit(gpa);
+        var modules = self.vm.modules.iterator();
+        while (modules.next()) |entry| {
+            const module = entry.value_ptr.*;
+            if (module == old) continue;
+            if (std.mem.indexOfScalar(*flux.object.Module, module.imports.items, old) != null) try importers.append(gpa, module);
+        }
+        for (importers.items) |module| {
+            var files = self.files.iterator();
+            const held: ?ScriptHandle = while (files.next()) |entry| {
+                if (entry.value.module == module) break .fromId(entry.handle);
+            } else null;
+            if (held) |handle| {
+                // Its own compile follows those importing it in turn.
+                self.compile(handle);
+                continue;
+            }
+            const name = module.name.bytes();
+            const text = self.app.project.readFileAlloc(gpa, name, .limited(file_limit)) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => {
+                    log.warn("{s} imports a script changed, and is not read again: {t}", .{ name, err });
+                    continue;
+                },
+            };
+            defer gpa.free(text);
+            const compiled = self.vm.compile(name, text) catch |err| switch (err) {
+                error.CompileFailed => {
+                    self.sayDiagnostics(name);
+                    continue;
+                },
+                error.OutOfMemory => return error.OutOfMemory,
+            };
+            if (compiled != module) try self.compileImportersOf(module, depth + 1);
+        }
     }
 
     /// A script's compiled code, which `compile` loads again in a VM set up

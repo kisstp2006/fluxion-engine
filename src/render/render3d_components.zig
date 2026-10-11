@@ -384,9 +384,10 @@ pub const Falloff = enum(u8) {
     /// To nothing at its range, along `attenuation`'s curve: one evenly; and
     /// toward the edge of a spot light's cone along `angle_attenuation`'s.
     range,
-    /// With the distance to the power `attenuation`, as light does - one is
-    /// a light that halves at twice the distance - cut off smoothly toward
-    /// its range; toward the edge of a spot light's cone, a rim that
+    /// With the distance to the power `attenuation` - one is a light that
+    /// halves at twice the distance, two one that falls as light does in
+    /// the world - counted from no nearer than its edge, half its `size`,
+    /// and cut off smoothly toward its range; toward the edge of a spot light's cone, a rim that
     /// `angle_attenuation` narrows.
     distance,
 };
@@ -436,7 +437,7 @@ pub const PointLight3D = extern struct {
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is, next to it" } },
         .bake = .{attr.Doc{ .text = bake_doc }},
         .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
-        .attenuation = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later; with distance falloff, the power of the distance it falls with" } },
+        .attenuation = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later; with distance falloff, the power of the distance it falls with: two as light falls in the world" } },
         .falloff = .{attr.Doc{ .text = "Range fades smoothly to nothing at its range; distance falls with the distance, as light does, cut off smoothly at its range" }},
         .specular = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How much of its light a surface gives back as a gloss: one as the surface says, nought none" } },
         .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
@@ -487,11 +488,11 @@ pub const SpotLight3D = extern struct {
         .energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright: one is the colour as it is, next to it" } },
         .bake = .{attr.Doc{ .text = bake_doc }},
         .range = .{ attr.Range{ .min = 0.01, .max = 4096 }, attr.Doc{ .text = "How far it reaches: nothing further is lit by it" } },
-        .attenuation = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later; with distance falloff, the power of the distance it falls with" } },
+        .attenuation = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How it fades toward its range: one evenly, more sooner, less later; with distance falloff, the power of the distance it falls with: two as light falls in the world" } },
         .falloff = .{attr.Doc{ .text = "Range fades smoothly to nothing at its range; distance falls with the distance, as light does, cut off smoothly at its range" }},
         .specular = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How much of its light a surface gives back as a gloss: one as the surface says, nought none" } },
         .angle = .{ attr.Angle{}, attr.Range{ .min = std.math.degreesToRadians(0.1), .max = std.math.degreesToRadians(89.9) }, attr.Doc{ .text = "From the middle of the cone to its edge" } },
-        .angle_attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward the edge of the cone: one evenly, more sooner" } },
+        .angle_attenuation = .{ attr.Range{ .min = 0.01, .max = 16 }, attr.Doc{ .text = "How it fades toward the edge of the cone: one evenly, more sooner; with distance falloff, how narrow its soft rim is" } },
         .distance_fade = .{ attr.Group{ .name = "Distance fade" }, attr.Doc{ .text = "Whether it fades out as the camera moves away from it" } },
         .distance_fade_begin = .{ attr.Range{ .min = 0, .max = 1_000_000 }, attr.Doc{ .text = "How far from the camera it starts to fade" } },
         .distance_fade_length = .{ attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "How much further it takes to disappear" } },

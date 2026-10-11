@@ -153,6 +153,24 @@ pub fn readablePath(gpa: Allocator, source: []const u8) Allocator.Error![]u8 {
     return if (isConverted(source)) importedPath(gpa, source) else gpa.dupe(u8, source);
 }
 
+/// The names of the materials of the model at `source` - what an import's
+/// `materials` puts a file in place of - read from its document, or from
+/// the glTF an editor made of it. Empty where it does not read. The
+/// caller's, freed with `gltf.freeNames`.
+pub fn materialNamesOf(gpa: Allocator, files: Project.Files, source: []const u8) Allocator.Error![][]u8 {
+    const path = try readablePath(gpa, source);
+    defer gpa.free(path);
+    const bytes = files.read(gpa, path, .limited(file_table.file_limit)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return gpa.alloc([]u8, 0),
+    };
+    defer gpa.free(bytes);
+    return gltf.materialNames(gpa, bytes) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => gpa.alloc([]u8, 0),
+    };
+}
+
 /// How a model is brought in, as `<model>.import` says.
 pub const ImportSettings = struct {
     /// What its size is multiplied by: 0.01 for one made in centimetres.
@@ -180,6 +198,39 @@ pub const ImportSettings = struct {
         /// The `.mat3d` drawn in its place.
         material: []const u8,
     };
+
+    /// The material file `material` put in place of the model's material
+    /// `name` - or none put there, for null: the settings' own copies,
+    /// freed with `gpa` as the rest are.
+    pub fn setMaterialFor(self: *ImportSettings, gpa: Allocator, name: []const u8, material: ?[]const u8) Allocator.Error!void {
+        for (self.materials, 0..) |entry, at| {
+            if (!std.mem.eql(u8, entry.name, name)) continue;
+            if (material) |file| {
+                const copy = try gpa.dupe(u8, file);
+                gpa.free(entry.material);
+                @constCast(self.materials)[at].material = copy;
+            } else {
+                const kept = try gpa.alloc(MaterialFile, self.materials.len - 1);
+                @memcpy(kept[0..at], self.materials[0..at]);
+                @memcpy(kept[at..], self.materials[at + 1 ..]);
+                gpa.free(entry.name);
+                gpa.free(entry.material);
+                gpa.free(self.materials);
+                self.materials = kept;
+            }
+            return;
+        }
+        const file = material orelse return;
+        const grown = try gpa.alloc(MaterialFile, self.materials.len + 1);
+        errdefer gpa.free(grown);
+        const own_name = try gpa.dupe(u8, name);
+        errdefer gpa.free(own_name);
+        const own_file = try gpa.dupe(u8, file);
+        @memcpy(grown[0..self.materials.len], self.materials);
+        grown[self.materials.len] = .{ .name = own_name, .material = own_file };
+        gpa.free(self.materials);
+        self.materials = grown;
+    }
 
     /// The material file in place of the model's material `name`, if any.
     pub fn materialFor(self: ImportSettings, name: []const u8) ?[]const u8 {

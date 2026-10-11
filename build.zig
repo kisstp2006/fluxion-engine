@@ -30,8 +30,10 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{
         .name = "fluxion-engine-tests",
         .root_module = mod,
+        .filters = if (b.option([]const u8, "test-filter", "Run only the engine tests whose names contain this text")) |filter| &.{filter} else &.{},
     });
     const run_tests = b.addRunArtifact(tests);
+    b.step("test-core", "Run the engine's own tests, without the examples and the other modules'").dependOn(&run_tests.step);
     const test_step = b.step("test", "Run the engine test suite");
     test_step.dependOn(&run_tests.step);
     const lightmapper_tests = b.addTest(.{
@@ -60,6 +62,7 @@ pub fn build(b: *std.Build) void {
     const android = target.result.abi.isAndroid();
     const web = target.result.cpu.arch.isWasm();
     b.installArtifact(program);
+    b.step("runtime-only", "Build and install only the game runtime").dependOn(&b.addInstallArtifact(program, .{}).step);
     test_step.dependOn(&program.step);
     // And for a browser, whatever the target: a change that breaks the page's
     // build is found where the change is made.

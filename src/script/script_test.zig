@@ -630,6 +630,47 @@ test "a file loaded after another imported it is the module the import made: its
     }
 }
 
+test "a script an editor changes is compiled afresh with those importing it, so its structs stay one type" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.createDirPath(testing.io, "scripts/night");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "scripts/night/night.flux", .data =
+        \\struct Night {
+        \\    var hour: int = 12;
+        \\}
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "scripts/night/walker.flux", .data =
+        \\const nt = @import("night.flux");
+        \\fn hour_of(n: nt.Night) int { return n.hour; }
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "scripts/office.flux", .data =
+        \\const nt = @import("night/night.flux");
+        \\const walker = @import("night/walker.flux");
+        \\fn hour() int { return walker.hour_of(nt.Night{}); }
+    });
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+    defer app.destroy();
+    try app.useScripts(.{ .run = false });
+    const night = try app.loadScript("res://scripts/night/night.flux");
+    const office = try app.loadScript("res://scripts/office.flux");
+    const scripts = app.scripts.?;
+    // The editor's unsaved text: the struct with a field more.
+    try scripts.setText(night, "struct Night {\n    var hour: int = 12;\n    var stars: int = 3;\n}");
+    const now = scripts.moduleOf(night).?;
+    try testing.expectEqual(now, scripts.vm.moduleNamed("res://scripts/night/night.flux").?);
+    // The table's importer, and the one only imported, hold the new module.
+    const office_module = scripts.moduleOf(office).?;
+    try testing.expect(std.mem.indexOfScalar(*flux.object.Module, office_module.imports.items, now) != null);
+    const walker = scripts.vm.moduleNamed("res://scripts/night/walker.flux").?;
+    try testing.expect(std.mem.indexOfScalar(*flux.object.Module, walker.imports.items, now) != null);
+    for ([_]ScriptHandle{ night, office }) |handle| {
+        const image = try app.compiledScript(handle, testing.allocator, .{});
+        testing.allocator.free(image);
+    }
+}
+
 test "a script imports the file beside it, and calls another entity's script" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
