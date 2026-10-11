@@ -224,6 +224,8 @@ pub const Load = struct {
         width: u32,
         height: u32,
         pixels: []u8,
+        /// The `.uid` file beside it, read with it on the loading thread.
+        uid: Project.UidRead = .unknown,
     };
 
     /// A sound's file read, waiting for the mixer.
@@ -332,7 +334,7 @@ pub const Load = struct {
                 var picture = try image.decode(self.gpa, self.bytes);
                 errdefer picture.deinit(self.gpa);
                 self.decoded = try self.gpa.alloc(?Decoded, 1);
-                self.decoded[0] = .{ .width = picture.width, .height = picture.height, .pixels = picture.pixels };
+                self.decoded[0] = .{ .width = picture.width, .height = picture.height, .pixels = picture.pixels, .uid = Project.readUidWith(self.gpa, self.files, self.source) };
             },
             .scene => try self.findNamed(),
             else => {},
@@ -424,7 +426,7 @@ pub const Load = struct {
         const bytes = try self.files.read(self.gpa, self.pictures[at], .limited(file_table.file_limit));
         defer self.gpa.free(bytes);
         const picture = try image.decode(self.gpa, bytes);
-        self.decoded[at] = .{ .width = picture.width, .height = picture.height, .pixels = picture.pixels };
+        self.decoded[at] = .{ .width = picture.width, .height = picture.height, .pixels = picture.pixels, .uid = Project.readUidWith(self.gpa, self.files, self.pictures[at]) };
     }
 
     fn readSound(self: *Load, at: u32) !void {
@@ -678,7 +680,7 @@ fn made(app: *App, load: *Load) !void {
         const picture = held orelse continue;
         const source = if (load.kind == .texture) load.source else load.pictures[at];
         if (app.assets.findTexture(source) != null) continue;
-        _ = app.assets.adoptTexture(source, picture.width, picture.height, picture.pixels, .{}) catch |err|
+        _ = app.assets.adoptTexture(source, picture.width, picture.height, picture.pixels, .{ .uid = picture.uid }) catch |err|
             log.warn("the picture {s} did not reach the GPU: {t}", .{ source, err });
     }
     for (load.heard, 0..) |held, at| {

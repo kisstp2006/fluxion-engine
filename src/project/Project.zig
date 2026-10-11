@@ -741,6 +741,35 @@ fn pathOfUidPath(self: *Project, path: []const u8) Error![]const u8 {
     return (try self.pathOf(uid)) orelse error.NoSuchUid;
 }
 
+/// What a loading thread found beside a file: its UUID, that it has none,
+/// or that it did not look - a part of a model, a packed game's file.
+pub const UidRead = union(enum) { unknown, none, known: Uuid };
+
+/// The `.uid` file beside the project file `project_path`, read through
+/// `files`: from any thread, so a loading thread reads it with the file and
+/// the game's never waits on the disk for it. See `learnUid`.
+pub fn readUidWith(gpa: Allocator, through: Files, project_path: []const u8) UidRead {
+    if (!isProjectPath(project_path) or isPart(project_path) or through.pack != null) return .unknown;
+    var name: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&name, "{s}" ++ uid_extension, .{project_path}) catch return .unknown;
+    const text = through.read(gpa, path, .limited(256)) catch |err| return switch (err) {
+        error.FileNotFound => .none,
+        else => .unknown,
+    };
+    defer gpa.free(text);
+    return if (parseUid(text)) |uid| .{ .known = uid } else .unknown;
+}
+
+/// What `readUidWith` read for `project_path`, taken in on this thread:
+/// nothing is read here. One not looked at is looked for as `uidOf` does.
+pub fn learnUid(self: *Project, project_path: []const u8, read: UidRead) UidError!void {
+    switch (read) {
+        .unknown => _ = try self.uidOf(project_path),
+        .none => {},
+        .known => |uid| try self.remember(uid, project_path),
+    }
+}
+
 /// A UUID from `uid://...`, with or without the scheme, and with space
 /// around it.
 fn parseUid(text: []const u8) ?Uuid {

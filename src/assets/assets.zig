@@ -188,6 +188,10 @@ pub const LoadOptions = struct {
     /// A chain of levels below the picture, for one drawn small: a 3D
     /// surface's. See `Texture.mips`.
     mips: bool = false,
+    /// What a loading thread read of the `.uid` file beside it: taken in
+    /// rather than read again here, on the game's thread. See
+    /// `Project.readUidWith`.
+    uid: Project.UidRead = .unknown,
 };
 
 gpa: Allocator,
@@ -493,7 +497,7 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
 pub fn adoptTexture(self: *Assets, path: []const u8, width: u32, height: u32, rgba: []const u8, options: LoadOptions) !TextureHandle {
     const source = try self.project.canonical(self.gpa, path);
     errdefer self.gpa.free(source);
-    self.learnUid(source);
+    self.learnUidRead(source, options.uid);
     return self.addTexture(width, height, rgba, .{
         .filter = options.filter orelse self.default_filter,
         .wrap = options.wrap,
@@ -538,8 +542,13 @@ pub fn findTexture(self: *Assets, path: []const u8) ?TextureHandle {
 /// Remember the UUID beside a project's file, for the scene that names it.
 /// A `.uid` file that does not read is said so, and the file loads without.
 fn learnUid(self: *Assets, source: []const u8) void {
+    self.learnUidRead(source, .unknown);
+}
+
+/// `learnUid`, from what a loading thread read where it read one.
+fn learnUidRead(self: *Assets, source: []const u8, read: Project.UidRead) void {
     if (!Project.isProjectPath(source) or Project.isPart(source)) return;
-    _ = self.project.uidOf(source) catch |err| {
+    self.project.learnUid(source, read) catch |err| {
         log.warn("the {s} file beside {s} does not read: {t}", .{ Project.uid_extension, source, err });
     };
 }

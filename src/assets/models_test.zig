@@ -659,3 +659,23 @@ test "a picture a material or a scene names is sampled as the project says, unle
     try testing.expect(std.mem.indexOf(u8, text, "\"nearest\"") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\"linear\"") == null);
 }
+
+test "a picture read in the background has its .uid file read with it, so the game's thread never reads one" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    try folder.put("models/red.png.uid", "uid://6f1c2a1e-5b7d-4e3a-9c2f-0a1b2c3d4e5f\n");
+    const app = try appIn(&folder);
+    defer app.destroy();
+    try app.loadInBackground("res://models/red.png");
+    var words: [64]u8 = undefined;
+    while (app.loadStatus("res://models/red.png") == .loading) _ = app.loadsReport(&words);
+    // Gone before the picture is taken: what the taking knows of it, the
+    // loading thread read.
+    try folder.tmp.dir.deleteFile(testing.io, "models/red.png.uid");
+    try app.finishLoad("res://models/red.png");
+    try testing.expect(app.assets.findTexture("res://models/red.png") != null);
+    const uid = (try app.project.uidOf("res://models/red.png")).?;
+    var text: [36]u8 = undefined;
+    try testing.expectEqualStrings("6f1c2a1e-5b7d-4e3a-9c2f-0a1b2c3d4e5f", std.fmt.bufPrint(&text, "{f}", .{uid}) catch unreachable);
+}
