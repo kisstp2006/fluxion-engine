@@ -391,7 +391,8 @@ fn runtime(b: *std.Build, e: Engine, target: std.Build.ResolvedTarget, optimize:
         .single_threaded = e.single_threaded,
         // A game as it ships carries no debug information: a debug build
         // is the one to find a fault with.
-        .strip = optimize == .ReleaseFast or optimize == .ReleaseSmall,
+        // `-Dstrip=false` keeps it, for a profiler to name what is slow.
+        .strip = stripOption(b) orelse (optimize == .ReleaseFast or optimize == .ReleaseSmall),
         .imports = &.{.{ .name = "fluxion_engine", .module = e.mod }},
     });
     const android = target.result.abi.isAndroid();
@@ -560,4 +561,17 @@ fn addSources(b: *std.Build, run: *std.Build.Step.Run) void {
         std.mem.replaceScalar(u8, path, '\\', '/');
         run.addFileArg(b.path(b.fmt("src/{s}", .{path})));
     }
+}
+
+/// `-Dstrip`, declared once however many runtimes are built.
+fn stripOption(b: *std.Build) ?bool {
+    const Memo = struct {
+        var asked = false;
+        var value: ?bool = null;
+    };
+    if (!Memo.asked) {
+        Memo.asked = true;
+        Memo.value = b.option(bool, "strip", "Leave the runtime's debug information out (default: in ReleaseFast and ReleaseSmall)");
+    }
+    return Memo.value;
 }

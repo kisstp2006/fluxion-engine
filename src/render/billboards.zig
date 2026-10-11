@@ -315,33 +315,37 @@ pub const Billboards = struct {
 
     /// The batches cut by their alpha, drawn as the solid surfaces are: once,
     /// after them.
-    pub fn drawSolid(self: *Billboards, pass: Pass) !void {
-        if (self.solid_drawn) return;
+    /// Whether it drew any: what the pass had bound is not bound now.
+    pub fn drawSolid(self: *Billboards, pass: Pass) !bool {
+        if (self.solid_drawn) return false;
         self.solid_drawn = true;
+        var drew = false;
         for (self.batches.items) |batch| {
             if (!batch.solid()) break;
-            try self.drawBatch(pass, batch);
+            drew = try self.drawBatch(pass, batch) or drew;
         }
+        return drew;
     }
 
     /// The see-through batches further than `depth` not drawn yet: before a
-    /// see-through surface that far away.
-    pub fn drawFurtherThan(self: *Billboards, pass: Pass, depth: f32) !void {
-        try self.drawSolid(pass);
+    /// see-through surface that far away. Whether any was drawn.
+    pub fn drawFurtherThan(self: *Billboards, pass: Pass, depth: f32) !bool {
+        var drew = try self.drawSolid(pass);
         while (self.next < self.batches.items.len) : (self.next += 1) {
             const batch = self.batches.items[self.next];
-            if (batch.depth <= depth) return;
-            try self.drawBatch(pass, batch);
+            if (batch.depth <= depth) return drew;
+            drew = try self.drawBatch(pass, batch) or drew;
         }
+        return drew;
     }
 
     /// Whatever is left, at the end of the pass.
     pub fn drawRest(self: *Billboards, pass: Pass) !void {
-        try self.drawFurtherThan(pass, -std.math.inf(f32));
+        _ = try self.drawFurtherThan(pass, -std.math.inf(f32));
     }
 
-    fn drawBatch(self: *Billboards, pass: Pass, batch: Batch) !void {
-        const pipeline = self.pipelineOf(batch.way, pass) catch return;
+    fn drawBatch(self: *Billboards, pass: Pass, batch: Batch) !bool {
+        const pipeline = self.pipelineOf(batch.way, pass) catch return false;
         const list = pass.list;
         try list.setPipeline(pipeline);
         try list.setUniformBuffer(0, pass.frame);
@@ -350,6 +354,7 @@ pub const Billboards = struct {
         try list.setVertexBuffer(0, self.buffer, 0);
         try list.draw(.{ .vertex_count = batch.count, .first_vertex = batch.first });
         self.draw_calls += 1;
+        return true;
     }
 
     fn pipelineOf(self: *Billboards, way: Way, pass: Pass) !rhi.Pipeline {

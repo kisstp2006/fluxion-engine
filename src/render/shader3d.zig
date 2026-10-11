@@ -748,7 +748,15 @@ const caster_epilogue = " if (ALPHA < FEEL.z) { discard; } ";
 
 /// What a `.shader3d` file is compiled as: the surface lit, or what casts
 /// its shadow - the same surface, its depth alone.
-pub const Variant = enum { lit, caster };
+///
+/// `solid` is the engine's own shader's caster for a surface not cut by its
+/// alpha: no picture is read and nothing is left out, so a GPU tests the
+/// depth before running it and skips what is hidden, as it cannot where a
+/// shader may `discard`.
+pub const Variant = enum { lit, caster, solid };
+
+/// What the solid caster ends with: the pictures it does not read.
+const solid_unread = "\nvec4 solidUnread() { vec2 at = vec2(0.0, 0.0); return sample(ALBEDO_TEXTURE, at) + sample(EMISSION_TEXTURE, at) + sample(SURFACE_TEXTURE, at) + sample(NORMAL_TEXTURE, at) + sample(OCCLUSION_TEXTURE, at); }\n";
 
 /// The engine's own: the surface as the material says.
 pub const plain =
@@ -868,14 +876,21 @@ pub fn wholeOf(gpa: Allocator, text: []const u8, variant: Variant, skinned: bool
         out.open = @intCast(start);
         out.close = @intCast(end);
         w.writeAll(text[0..start]) catch return error.OutOfMemory;
-        w.writeAll(prologue) catch return error.OutOfMemory;
+        if (variant != .solid) w.writeAll(prologue) catch return error.OutOfMemory;
         w.writeAll(text[start..end]) catch return error.OutOfMemory;
-        w.writeAll(if (variant == .lit) epilogue else caster_epilogue) catch return error.OutOfMemory;
+        w.writeAll(switch (variant) {
+            .lit => epilogue,
+            .caster => caster_epilogue,
+            .solid => "",
+        }) catch return error.OutOfMemory;
         w.writeAll(text[end..]) catch return error.OutOfMemory;
     } else w.writeAll(text) catch return error.OutOfMemory;
     w.writeAll("\n") catch return error.OutOfMemory;
     out.engine_line = std.mem.count(u8, full.written(), "\n") + 1;
     w.writeAll(enginePart(skinned)) catch return error.OutOfMemory;
+    // The material's pictures named, as every 3D shader's are, by a function
+    // nothing calls: the solid caster reads none of them.
+    if (variant == .solid) w.writeAll(solid_unread) catch return error.OutOfMemory;
     out.source = full.toOwnedSlice() catch return error.OutOfMemory;
     return out;
 }
@@ -928,6 +943,10 @@ pub const Compiled = struct {
     refused: bool = false,
     /// What casts its shadow: the same surface, drawn as depth alone.
     caster: Caster,
+    /// The engine's own shader's caster for a surface its alpha does not
+    /// cut: nothing read, nothing left out. Null for a file's own shader,
+    /// whose stage may change the alpha, or where it did not compile.
+    solid: ?Caster = null,
     /// Whether the file reads `TIME`: then what it casts may change while
     /// nothing moves, and a shadow it is in is drawn again every time.
     reads_time: bool = false,
@@ -964,6 +983,12 @@ pub const Compiled = struct {
         for (self.after_depth) |row| for (row) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
         for (self.caster.pipelines) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
         for (self.caster.depth_first) |row| for (row) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
+        if (self.solid) |*solid| {
+            for (solid.pipelines) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
+            for (solid.depth_first) |row| for (row) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
+            device.destroyShader(solid.gpu);
+            solid.module.deinit();
+        }
         device.destroyShader(self.gpu);
         device.destroyShader(self.caster.gpu);
         self.module.deinit();
@@ -1040,11 +1065,12 @@ pub const Compiled = struct {
 
     /// The pipeline a solid surface's depth is drawn with before its light,
     /// into the picture's own depth: the caster's, with no push back.
-    pub fn depthFirstPipelineOf(self: *Compiled, device: *rhi.Device, depth_format: rhi.Format, samples: u32, cull: Material3DData.Cull) !rhi.Pipeline {
+    pub fn depthFirstPipelineOf(self: *Compiled, device: *rhi.Device, depth_format: rhi.Format, samples: u32, cull: Material3DData.Cull, solid: bool) !rhi.Pipeline {
+        const caster = self.casterFor(solid);
         const row = std.math.log2_int(u32, samples);
-        const held = &self.caster.depth_first[row][@intFromEnum(cull)];
+        const held = &caster.depth_first[row][@intFromEnum(cull)];
         if (!held.isNone()) return held.*;
-        held.* = makePipeline(device, &self.caster.module, self.caster.gpu, self.skin, .{
+        held.* = makePipeline(device, &caster.module, caster.gpu, self.skin, .{
             .depth = .{ .test_enabled = true, .write = true, .compare = .less },
             .cull = cullOf(cull),
             .color_format = null,
@@ -1061,21 +1087,29 @@ pub const Compiled = struct {
     /// The pipeline what it draws casts a shadow with, into a `depth_format`
     /// atlas: depth alone, pushed back by its slope, so a surface does not
     /// shadow itself.
-    pub fn casterPipelineOf(self: *Compiled, device: *rhi.Device, depth_format: rhi.Format, cull: Material3DData.Cull) !rhi.Pipeline {
-        const held = &self.caster.pipelines[@intFromEnum(cull)];
+    pub fn casterPipelineOf(self: *Compiled, device: *rhi.Device, depth_format: rhi.Format, cull: Material3DData.Cull, solid: bool) !rhi.Pipeline {
+        const caster = self.casterFor(solid);
+        const held = &caster.pipelines[@intFromEnum(cull)];
         if (!held.isNone()) return held.*;
-        held.* = makePipeline(device, &self.caster.module, self.caster.gpu, self.skin, .{
+        held.* = makePipeline(device, &caster.module, caster.gpu, self.skin, .{
             .depth = .{ .test_enabled = true, .write = true, .compare = .less, .slope_bias = caster_slope_bias },
             .cull = cullOf(cull),
             .color_format = null,
             .depth_format = depth_format,
             .label = "3D shadow",
         }) catch |err| {
-            self.caster.refused = true;
+            caster.refused = true;
             log.err("the graphics driver refused a 3D shader's shadow pipeline: {s}", .{device.diagnostics()});
             return err;
         };
         return held.*;
+    }
+
+    /// The caster a surface's depth is drawn with: the solid one for a
+    /// surface its alpha does not cut, where there is one.
+    pub fn casterFor(self: *Compiled, solid: bool) *Caster {
+        if (solid) if (self.solid) |*held| return held;
+        return &self.caster;
     }
 };
 
@@ -1188,6 +1222,23 @@ fn compileWith(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []c
         device.destroyShader(caster.gpu);
         caster.module.deinit();
     }
+    // The engine's own reads nothing for a solid surface's depth. One that
+    // does not compile leaves its depth to the caster.
+    var solid: ?Compiled.Caster = null;
+    if (std.mem.eql(u8, text, plain)) {
+        var quiet: std.Io.Writer.Allocating = .init(gpa);
+        defer quiet.deinit();
+        if (compileAs(gpa, device, text, label, .solid, skinned, &quiet.writer)) |made| {
+            solid = .{ .module = made.module, .gpu = made.gpu };
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => log.warn("the engine's solid caster did not compile, and solid surfaces' depth reads their pictures: {s}", .{quiet.written()}),
+        }
+    }
+    errdefer if (solid) |*held| {
+        device.destroyShader(held.gpu);
+        held.module.deinit();
+    };
     const own_text = try gpa.dupe(u8, text);
     errdefer gpa.free(own_text);
     const own_label = try gpa.dupe(u8, label);
@@ -1197,6 +1248,7 @@ fn compileWith(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []c
         .params = lit.params,
         .writes_normal_map = lit.writes_normal_map,
         .caster = .{ .module = caster.module, .gpu = caster.gpu },
+        .solid = solid,
         .reads_time = std.mem.indexOf(u8, text, "TIME") != null,
         .skin = skinned,
         .gpa = gpa,
@@ -1222,7 +1274,7 @@ fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []con
     }
     var said: std.Io.Writer.Allocating = .init(gpa);
     defer said.deinit();
-    var module = shader.compileWith(gpa, built.source, &said.writer, .{ .depth_only = variant == .caster }) catch |err| switch (err) {
+    var module = shader.compileWith(gpa, built.source, &said.writer, .{ .depth_only = variant != .lit }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.CompileFailed => {
             material.tellOfLines(said.written(), built.engine_line, problems);
@@ -1343,7 +1395,8 @@ test "a shader's skinned variant is compiled when first asked for, for every bac
     try testing.expect(skinned.caster.module.block("Skin") != null);
     // Its pipelines take the third buffer; the plain ones do not.
     _ = try skinned.pipelineOf(&device, .rgba16_float, .depth32_float, 1, .{ .cull = .back, .blend = false });
-    _ = try skinned.casterPipelineOf(&device, .depth32_float, .back);
+    _ = try skinned.casterPipelineOf(&device, .depth32_float, .back, false);
+    _ = try skinned.casterPipelineOf(&device, .depth32_float, .back, true);
     _ = try own.pipelineOf(&device, .rgba16_float, .depth32_float, 1, .{ .cull = .back, .blend = false });
 }
 

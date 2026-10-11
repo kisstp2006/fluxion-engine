@@ -700,3 +700,37 @@ test "sprites, labels and particles are drawn as quads in the 3D pass, those of 
     _ = try app.step();
     try testing.expectEqual(@as(u32, 0), flat.quads);
 }
+
+test "surfaces drawn one after another bind only what changes: the frame, lights, shadows and fog once a pass" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, -1, 0, 0);
+    _ = try app.world.spawnWith(.{ Transform3D.at(1, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{ .shape = .sphere } });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 1, 0), MeshInstance3D{}, PrimitiveMesh3D{ .shape = .cylinder } });
+    _ = try app.step();
+    try testing.expectEqual(@as(u32, 3), app.renderer3d.draw_calls);
+    // Two of the three draws, in the depth pass and in the light pass, take
+    // the shared bindings and the same white pictures as the one before.
+    try testing.expect(app.renderer3d.bindings_skipped >= 2 * 2 * 8);
+}
+
+test "a solid surface's depth is drawn by the engine's solid caster, reading no picture; one its alpha cuts keeps its own" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, -1, 0, 0);
+    const leaf = try app.materials.add(app.gpa, "leaf", .{ .transparency = .scissor });
+    _ = try app.world.spawnWith(.{ Transform3D.at(1, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{ .shape = .sphere }, Material3D{ .material = leaf } });
+    _ = try app.step();
+    const plain = &app.renderer3d.plain.?;
+    try testing.expect(plain.solid != null);
+    try testing.expect(plain.casterFor(true) == &plain.solid.?);
+    var solid: usize = 0;
+    var cut: usize = 0;
+    for (app.renderer3d.items.items) |item| {
+        if (item.solid) solid += 1 else cut += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), solid);
+    try testing.expectEqual(@as(usize, 1), cut);
+}

@@ -176,6 +176,78 @@ pub const Totals = struct {
 };
 
 /// What is drawn of one surface, before it is sorted.
+/// What a pass has bound so far, for each binding asked for again with
+/// the same thing to be skipped. Every backend keeps what is bound for the
+/// whole of a pass, across pipelines, so only a change need be a command:
+/// hundreds of surfaces in a row read the same frame, lights, shadow map
+/// and fog, and often the same pictures. Made afresh at each pass's start,
+/// and after anything that binds behind its back.
+const Binder = struct {
+    list: *rhi.CommandList,
+    pipeline: ?rhi.Pipeline = null,
+    uniforms: [slots]?Range = @splat(null),
+    textures: [slots]?Picture = @splat(null),
+    vertices: [3]?Vertices = @splat(null),
+    index: ?rhi.Buffer = null,
+    /// How many commands were not written: the frame's numbers say it.
+    skipped: u32 = 0,
+
+    const slots = 16;
+    const Range = struct { buffer: rhi.Buffer, offset: u32, size: u32 };
+    const Picture = struct { texture: rhi.Texture, sampler: rhi.Sampler };
+    const Vertices = struct { buffer: rhi.Buffer, offset: u32 };
+
+    fn setPipeline(self: *Binder, pipeline: rhi.Pipeline) !void {
+        if (self.pipeline) |held| if (std.meta.eql(held, pipeline)) {
+            self.skipped += 1;
+            return;
+        };
+        self.pipeline = pipeline;
+        try self.list.setPipeline(pipeline);
+    }
+
+    fn uniform(self: *Binder, slot: u32, buffer: rhi.Buffer) !void {
+        if (self.same(Range, &self.uniforms, slot, .{ .buffer = buffer, .offset = 0, .size = 0 })) return;
+        try self.list.setUniformBuffer(slot, buffer);
+    }
+
+    fn uniformRange(self: *Binder, slot: u32, buffer: rhi.Buffer, offset: u32, size: u32) !void {
+        if (self.same(Range, &self.uniforms, slot, .{ .buffer = buffer, .offset = offset, .size = size })) return;
+        try self.list.setUniformBufferRange(slot, buffer, offset, size);
+    }
+
+    fn texture(self: *Binder, slot: u32, picture: rhi.Texture, sampler: rhi.Sampler) !void {
+        if (self.same(Picture, &self.textures, slot, .{ .texture = picture, .sampler = sampler })) return;
+        try self.list.setTexture(slot, picture, sampler);
+    }
+
+    fn vertexBuffer(self: *Binder, slot: u32, buffer: rhi.Buffer, offset: u32) !void {
+        if (self.same(Vertices, &self.vertices, slot, .{ .buffer = buffer, .offset = offset })) return;
+        try self.list.setVertexBuffer(slot, buffer, offset);
+    }
+
+    fn indexBuffer(self: *Binder, buffer: rhi.Buffer) !void {
+        if (self.index) |held| if (std.meta.eql(held, buffer)) {
+            self.skipped += 1;
+            return;
+        };
+        self.index = buffer;
+        try self.list.setIndexBuffer(buffer, .u32);
+    }
+
+    /// Whether `slot` holds `value` already; else it does from now on. A
+    /// slot past what is kept is never the same.
+    fn same(self: *Binder, comptime T: type, kept: []?T, slot: u32, value: T) bool {
+        if (slot >= kept.len) return false;
+        if (kept[slot]) |held| if (std.meta.eql(held, value)) {
+            self.skipped += 1;
+            return true;
+        };
+        kept[slot] = value;
+        return false;
+    }
+};
+
 const Item = struct {
     way: u8,
     transparent: bool,
@@ -200,9 +272,16 @@ const Item = struct {
     instance: u32,
     /// The bones it is bent by, among this draw's skins, or `no_skin`.
     skin: u32 = no_skin,
+    /// Whether its depth is drawn by its shader's solid caster: the
+    /// engine's own, its alpha cutting nothing, reading no picture.
+    solid: bool = false,
 
     /// Solid ones first, grouped by how they are drawn and then nearest
     /// first; see-through ones after, furthest first.
+    fn lessThan(a: Item, b: Item) bool {
+        return before({}, a, b);
+    }
+
     fn before(_: void, a: Item, b: Item) bool {
         if (a.transparent != b.transparent) return !a.transparent;
         if (a.transparent) return a.depth > b.depth;
@@ -303,7 +382,38 @@ const ShadowItem = struct {
 const Caster = struct {
     item: Item,
     bounds: math.Aabb,
+
+    fn lessThan(a: Caster, b: Caster) bool {
+        return Item.order(a.item, b.item) == .lt;
+    }
 };
+
+/// `list` in the order `lessThan` gives, those equal as they were: their
+/// indices sorted, not they - an `Item` is large, and moving it about was
+/// most of what sorting a frame's cost - and then each copied once into
+/// `scratch`, which takes the list's place.
+fn sortStable(comptime T: type, gpa: Allocator, list: *std.ArrayList(T), scratch: *std.ArrayList(T), order: *std.ArrayList(u32), comptime before: fn (T, T) bool) Allocator.Error!void {
+    const items = list.items;
+    if (items.len < 2) return;
+    order.clearRetainingCapacity();
+    try order.ensureTotalCapacity(gpa, items.len);
+    for (0..items.len) |at| order.appendAssumeCapacity(@intCast(at));
+    const Context = struct {
+        items: []const T,
+        pub fn lessThan(context: @This(), a: u32, b: u32) bool {
+            const x = context.items[a];
+            const y = context.items[b];
+            if (before(x, y)) return true;
+            if (before(y, x)) return false;
+            return a < b;
+        }
+    };
+    std.sort.pdq(u32, order.items, Context{ .items = items }, Context.lessThan);
+    scratch.clearRetainingCapacity();
+    try scratch.ensureTotalCapacity(gpa, items.len);
+    for (order.items) |at| scratch.appendAssumeCapacity(items[at]);
+    std.mem.swap(std.ArrayList(T), list, scratch);
+}
 
 const DistanceFade = struct {
     enabled: bool,
@@ -411,6 +521,10 @@ pub const Renderer3D = struct {
     shadow_lamps: std.ArrayList(shadows3d.Lamp) = .empty,
     casters: std.ArrayList(Caster) = .empty,
     shadow_items: std.ArrayList(ShadowItem) = .empty,
+    /// Where sorting writes: the order found, and the sorted copies.
+    sort_order: std.ArrayList(u32) = .empty,
+    sorted_items: std.ArrayList(Item) = .empty,
+    sorted_casters: std.ArrayList(Caster) = .empty,
     /// The spot lights' cookies, a tile each, made the first time a light
     /// has one; what picture each tile holds, drawn again only when that
     /// changes; and what draws one into its tile.
@@ -430,6 +544,9 @@ pub const Renderer3D = struct {
     drawn: u32 = 0,
     draw_calls: u32 = 0,
     triangles: u64 = 0,
+    /// How many bindings the last draw did not write, as each pass had
+    /// them bound already: see `Binder`.
+    bindings_skipped: u32 = 0,
     /// What every draw of the frame drew together - each render view's, and
     /// the screen's - and of the frame before, which `tick` ends.
     this_frame: Totals = .{},
@@ -601,6 +718,9 @@ pub const Renderer3D = struct {
         self.shadow_lamps.deinit(gpa);
         self.casters.deinit(gpa);
         self.shadow_items.deinit(gpa);
+        self.sort_order.deinit(gpa);
+        self.sorted_items.deinit(gpa);
+        self.sorted_casters.deinit(gpa);
         self.shadow_frames.deinit(gpa, device);
         self.frame_offsets.deinit(gpa);
         if (self.cookie_atlas) |atlas| device.destroyTexture(atlas);
@@ -643,6 +763,7 @@ pub const Renderer3D = struct {
     pub fn draw(self: *Renderer3D, app: *App, into: rhi.RenderTarget, width: u32, height: u32, view: View3D, clear: ?Color, lighting: Lighting) !void {
         self.drawn = 0;
         self.draw_calls = 0;
+        self.bindings_skipped = 0;
         self.triangles = 0;
         self.lod_levels = @splat(0);
         self.culled = 0;
@@ -689,7 +810,7 @@ pub const Renderer3D = struct {
         try self.planShadows(gpa, view, rendering);
         try self.gather(app, drawn_view, frustum, self.plan.views.items.len > 0, rendering.lod_threshold);
         try self.gatherShadowItems(gpa);
-        std.mem.sort(Item, self.items.items, {}, Item.before);
+        try sortStable(Item, gpa, &self.items, &self.sorted_items, &self.sort_order, Item.lessThan);
         self.staging.clearRetainingCapacity();
         try self.staging.ensureTotalCapacity(gpa, self.items.items.len + self.shadow_items.items.len);
         for (self.items.items) |item| self.staging.appendAssumeCapacity(self.gathered.items[item.instance]);
@@ -729,6 +850,7 @@ pub const Renderer3D = struct {
             .samples = samples,
         };
         const items = self.items.items;
+        var bind: Binder = .{ .list = list };
         var start: usize = 0;
         while (start < items.len) {
             var end = start + 1;
@@ -736,8 +858,11 @@ pub const Renderer3D = struct {
             var first = items[start];
             // The pictures cut by their alpha after the solid surfaces, and
             // the see-through ones among the see-through, the furthest
-            // first.
-            if (first.transparent) try flat.drawFurtherThan(pass, first.depth);
+            // first: they bind what they draw with, and the pass's bindings
+            // are not known after them.
+            if (first.transparent) if (try flat.drawFurtherThan(pass, first.depth)) {
+                bind = .{ .list = list, .skipped = bind.skipped };
+            };
             // A shader whose pipeline the device refuses is drawn as the
             // engine's own, and is not asked again.
             const pipeline = (if (first.depth_first)
@@ -752,8 +877,8 @@ pub const Renderer3D = struct {
                 else
                     plain.pipelineOf(device, post.light_format, depth_format, samples, .of(first.way));
             };
-            try list.setPipeline(pipeline);
-            try self.bindSurface(list, first, start, shadow_map);
+            try bind.setPipeline(pipeline);
+            try self.bindSurface(&bind, first, start, shadow_map);
             try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
             self.draw_calls += 1;
             self.triangles += @as(u64, first.index_count / 3) * (end - start);
@@ -763,6 +888,7 @@ pub const Renderer3D = struct {
         try list.endPass();
         try device.submit();
         self.drawn = @intCast(items.len);
+        self.bindings_skipped += bind.skipped;
 
         try post.finish(gpa, targets, into, width, height, .of(environment, lighting.antialias and rendering.screen_space_aa == .fxaa), clear == null);
         // What goes over it with a depth test reads its depth: where it is
@@ -779,16 +905,18 @@ pub const Renderer3D = struct {
         if (items.len == 0 or items[0].transparent) return false;
         try list.beginPass(.{ .depth = .{ .texture = depth } });
         try list.setViewport(.{ .width = @floatFromInt(width), .height = @floatFromInt(height) });
+        var bind: Binder = .{ .list = list };
+        defer self.bindings_skipped += bind.skipped;
         var start: usize = 0;
         while (start < items.len and !items[start].transparent) {
             var end = start + 1;
             while (end < items.len and Item.joins(items[start], items[end])) end += 1;
             defer start = end;
             const first = items[start];
-            const pipeline = first.compiled.depthFirstPipelineOf(device, depth_format, samples, Way.of(first.way).cull) catch continue;
+            const pipeline = first.compiled.depthFirstPipelineOf(device, depth_format, samples, Way.of(first.way).cull, first.solid) catch continue;
             for (items[start..end]) |*item| item.depth_first = true;
-            try list.setPipeline(pipeline);
-            try self.bindSurface(list, first, start, shadow_map);
+            try bind.setPipeline(pipeline);
+            try self.bindDepth(&bind, first, start, shadow_map);
             try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
         }
         try list.endPass();
@@ -798,26 +926,58 @@ pub const Renderer3D = struct {
     /// What a surface is drawn with, besides its pipeline: the frame, its
     /// look, the lights and its pictures, its vertices and its instances
     /// from `start`.
-    fn bindSurface(self: *Renderer3D, list: *rhi.CommandList, first: Item, start: usize, shadow_map: rhi.Texture) !void {
-        try list.setUniformBuffer(0, self.frame);
-        try list.setUniformBufferRange(1, self.blocks.buffer.?, self.look_offsets.items[first.look], @sizeOf(Look));
-        try list.setUniformBuffer(2, self.lights);
+    fn bindSurface(self: *Renderer3D, bind: *Binder, first: Item, start: usize, shadow_map: rhi.Texture) !void {
+        try bind.uniform(0, self.frame);
+        try self.bindMaterial(bind, first);
+        try bind.texture(shader3d.shadow_map_slot, shadow_map, self.comparing);
+        try bind.texture(shader3d.shadow_depth_slot, shadow_map, self.reading);
+        try self.bindShared(bind);
+        try bind.vertexBuffer(0, first.gpu.vertices, 0);
+        try bind.vertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
+        try self.bindSkin(bind, first);
+        try bind.indexBuffer(first.index_buffer);
+    }
+
+    /// `bindSurface` for its depth alone: a solid one's pictures are not
+    /// read, and left as they were.
+    fn bindDepth(self: *Renderer3D, bind: *Binder, first: Item, start: usize, shadow_map: rhi.Texture) !void {
+        if (!first.solid) return self.bindSurface(bind, first, start, shadow_map);
+        try bind.uniform(0, self.frame);
+        try self.bindNumbers(bind, first);
+        try bind.texture(shader3d.shadow_map_slot, shadow_map, self.comparing);
+        try bind.texture(shader3d.shadow_depth_slot, shadow_map, self.reading);
+        try self.bindShared(bind);
+        try bind.vertexBuffer(0, first.gpu.vertices, 0);
+        try bind.vertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
+        try self.bindSkin(bind, first);
+        try bind.indexBuffer(first.index_buffer);
+    }
+
+    /// A surface's own numbers and pictures: its look, its shader's
+    /// numbers, and the five pictures.
+    fn bindMaterial(self: *Renderer3D, bind: *Binder, first: Item) !void {
+        try self.bindNumbers(bind, first);
+        for (first.textures, 0..) |texture, slot| try bind.texture(@intCast(slot), texture, first.sampler);
+    }
+
+    /// Its look's numbers and its shader's.
+    fn bindNumbers(self: *Renderer3D, bind: *Binder, first: Item) !void {
+        try bind.uniformRange(1, self.blocks.buffer.?, self.look_offsets.items[first.look], @sizeOf(Look));
         if (first.params != no_params) {
             const set = self.param_sets.items[first.params];
-            try list.setUniformBufferRange(shader3d.params_slot, self.blocks.buffer.?, self.param_offsets.items[first.params], set.len);
+            try bind.uniformRange(shader3d.params_slot, self.blocks.buffer.?, self.param_offsets.items[first.params], set.len);
         }
-        try list.setUniformBuffer(shader3d.shadows_slot, self.shadows);
-        for (first.textures, 0..) |texture, slot| try list.setTexture(@intCast(slot), texture, first.sampler);
-        try list.setTexture(shader3d.shadow_map_slot, shadow_map, self.comparing);
-        try list.setTexture(shader3d.shadow_depth_slot, shadow_map, self.reading);
-        try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
-        try list.setUniformBuffer(shader3d.probes_slot, self.probes);
-        try list.setUniformBuffer(fog_volumes.slot, self.fog);
-        try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
-        try list.setVertexBuffer(0, first.gpu.vertices, 0);
-        try list.setVertexBuffer(1, self.instances, @intCast(start * @sizeOf(Instance)));
-        try self.bindSkin(list, first);
-        try list.setIndexBuffer(first.index_buffer, .u32);
+    }
+
+    /// What every surface of the draw reads alike: the lights, the shadows'
+    /// numbers, the cookies, the probes, the fog and the lightmap.
+    fn bindShared(self: *Renderer3D, bind: *Binder) !void {
+        try bind.uniform(2, self.lights);
+        try bind.uniform(shader3d.shadows_slot, self.shadows);
+        try bind.texture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
+        try bind.uniform(shader3d.probes_slot, self.probes);
+        try bind.uniform(fog_volumes.slot, self.fog);
+        try bind.texture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
     }
 
     /// The frame's numbers: the camera, the suns, the light from
@@ -1119,6 +1279,7 @@ pub const Renderer3D = struct {
                         .depth = depth,
                         .instance = at,
                         .skin = skin,
+                        .solid = look.transparency != .scissor and compiled.solid != null,
                     };
                     if (seen) try self.items.append(gpa, item);
                     // What is laid over what is behind it casts no shadow.
@@ -1252,6 +1413,10 @@ pub const Renderer3D = struct {
     /// sorted by view and then by how they are drawn.
     fn gatherShadowItems(self: *Renderer3D, gpa: Allocator) !void {
         self.shadow_items.clearRetainingCapacity();
+        // The casters in the order they are drawn once, rather than every
+        // view's again: each view's come out in that order, the views one
+        // after another, as `ShadowItem.before` wants them.
+        if (self.plan.views.items.len > 0) try sortStable(Caster, gpa, &self.casters, &self.sorted_casters, &self.sort_order, Caster.lessThan);
         for (self.plan.views.items, 0..) |shadow_view, at| {
             for (self.casters.items) |caster| {
                 if (shadow_view.reach) |reach| if (!reach.intersectsAabb(caster.bounds)) continue;
@@ -1259,7 +1424,7 @@ pub const Renderer3D = struct {
                 try self.shadow_items.append(gpa, .{ .view = @intCast(at), .item = caster.item });
             }
         }
-        std.mem.sort(ShadowItem, self.shadow_items.items, {}, ShadowItem.before);
+        if (std.debug.runtime_safety) std.debug.assert(std.sort.isSorted(ShadowItem, self.shadow_items.items, {}, ShadowItem.before));
         self.shadow_casters = @intCast(self.shadow_items.items.len);
     }
 
@@ -1358,6 +1523,9 @@ pub const Renderer3D = struct {
             try list.setScissor(.{ .x = @intCast(tile.x), .y = @intCast(tile.y), .width = tile.size, .height = tile.size });
             try self.tile_clear.?.draw(list);
         }
+        // After the tiles' clears, which bind their own.
+        var bind: Binder = .{ .list = list };
+        defer self.bindings_skipped += bind.skipped;
         var start: usize = 0;
         var current: ?u32 = null;
         while (start < items.len) {
@@ -1378,32 +1546,22 @@ pub const Renderer3D = struct {
             var first = shadowed.item;
             const way = Way.of(first.way);
             // A shader whose caster the device refuses casts as the engine's.
-            const pipeline = first.compiled.casterPipelineOf(device, format, way.cull) catch |err| blk: {
+            const pipeline = first.compiled.casterPipelineOf(device, format, way.cull, first.solid) catch |err| blk: {
                 const plain = &self.plain.?;
                 if (first.compiled == plain) return err;
                 first.params = no_params;
-                break :blk try plain.casterPipelineOf(device, format, way.cull);
+                break :blk try plain.casterPipelineOf(device, format, way.cull, false);
             };
-            try list.setPipeline(pipeline);
-            try list.setUniformBufferRange(0, self.shadow_frames.buffer.?, self.frame_offsets.items[shadowed.view], @sizeOf(Frame));
-            try list.setUniformBufferRange(1, self.blocks.buffer.?, self.look_offsets.items[first.look], @sizeOf(Look));
-            try list.setUniformBuffer(2, self.lights);
-            if (first.params != no_params) {
-                const set = self.param_sets.items[first.params];
-                try list.setUniformBufferRange(shader3d.params_slot, self.blocks.buffer.?, self.param_offsets.items[first.params], set.len);
-            }
-            try list.setUniformBuffer(shader3d.shadows_slot, self.shadows);
-            for (first.textures, 0..) |texture, slot| try list.setTexture(@intCast(slot), texture, first.sampler);
-            try list.setTexture(shader3d.shadow_map_slot, self.no_shadow, self.comparing);
-            try list.setTexture(shader3d.shadow_depth_slot, self.no_shadow, self.reading);
-            try list.setTexture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
-            try list.setUniformBuffer(shader3d.probes_slot, self.probes);
-            try list.setUniformBuffer(fog_volumes.slot, self.fog);
-            try list.setTexture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
-            try list.setVertexBuffer(0, first.gpu.vertices, 0);
-            try list.setVertexBuffer(1, self.instances, @intCast((first_instance + start) * @sizeOf(Instance)));
-            try self.bindSkin(list, first);
-            try list.setIndexBuffer(first.index_buffer, .u32);
+            try bind.setPipeline(pipeline);
+            try bind.uniformRange(0, self.shadow_frames.buffer.?, self.frame_offsets.items[shadowed.view], @sizeOf(Frame));
+            if (first.solid) try self.bindNumbers(&bind, first) else try self.bindMaterial(&bind, first);
+            try bind.texture(shader3d.shadow_map_slot, self.no_shadow, self.comparing);
+            try bind.texture(shader3d.shadow_depth_slot, self.no_shadow, self.reading);
+            try self.bindShared(&bind);
+            try bind.vertexBuffer(0, first.gpu.vertices, 0);
+            try bind.vertexBuffer(1, self.instances, @intCast((first_instance + start) * @sizeOf(Instance)));
+            try self.bindSkin(&bind, first);
+            try bind.indexBuffer(first.index_buffer);
             try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(end - start) });
             self.shadow_draws += 1;
             start = end;
@@ -1482,10 +1640,10 @@ pub const Renderer3D = struct {
 
     /// What the cookie atlas is read with: smoothly, kept inside it.
     /// A bent item's bones and each vertex's, where its shader reads them.
-    fn bindSkin(self: *const Renderer3D, list: *rhi.CommandList, item: Item) !void {
+    fn bindSkin(self: *const Renderer3D, bind: *Binder, item: Item) !void {
         if (item.skin == no_skin or !item.compiled.skin) return;
-        try list.setUniformBufferRange(shader3d.skin_slot, self.blocks.buffer.?, self.skin_offsets.items[item.skin], @sizeOf(shader3d.Skin));
-        try list.setVertexBuffer(2, item.gpu.skin, 0);
+        try bind.uniformRange(shader3d.skin_slot, self.blocks.buffer.?, self.skin_offsets.items[item.skin], @sizeOf(shader3d.Skin));
+        try bind.vertexBuffer(2, item.gpu.skin, 0);
     }
 
     fn cookieSampler(self: *const Renderer3D) rhi.Sampler {
