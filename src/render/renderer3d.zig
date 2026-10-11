@@ -317,6 +317,19 @@ const Item = struct {
     }
 };
 
+/// What a material is drawn as, the same for every surface that has it in
+/// a draw: see `Renderer3D.surfaceLookOf`.
+const SurfaceLook = struct {
+    compiled: *shader3d.Compiled,
+    textures: [5]rhi.Texture,
+    sampler: rhi.Sampler,
+    look: u32,
+    way: u8,
+    blend: bool,
+    /// Its alpha cuts nothing: its depth may be the solid caster's.
+    solid: bool,
+};
+
 /// A point or spot light the frame keeps.
 const Lamp = struct {
     place: math.Vec3,
@@ -463,6 +476,10 @@ pub const Renderer3D = struct {
     /// This draw's materials' numbers, each once.
     looks: std.ArrayList(Look) = .empty,
     look_found: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    /// What each material a draw meets is drawn as - its shader, look and
+    /// pictures - worked out the first time a surface has it, by its
+    /// handle: hundreds of surfaces share a few dozen materials.
+    surface_looks: std.AutoHashMapUnmanaged(u64, SurfaceLook) = .empty,
     /// This draw's shaders' own numbers, each set once.
     param_bytes: std.ArrayList(u8) = .empty,
     param_sets: std.ArrayList(struct { start: u32, len: u32 }) = .empty,
@@ -731,6 +748,7 @@ pub const Renderer3D = struct {
         self.lamps.deinit(gpa);
         self.looks.deinit(gpa);
         self.look_found.deinit(gpa);
+        self.surface_looks.deinit(gpa);
         self.param_bytes.deinit(gpa);
         self.param_sets.deinit(gpa);
         self.param_found.deinit(gpa);
@@ -1189,6 +1207,7 @@ pub const Renderer3D = struct {
         self.casters.clearRetainingCapacity();
         self.looks.clearRetainingCapacity();
         self.look_found.clearRetainingCapacity();
+        self.surface_looks.clearRetainingCapacity();
         self.param_bytes.clearRetainingCapacity();
         self.param_sets.clearRetainingCapacity();
         self.param_found.clearRetainingCapacity();
@@ -1197,7 +1216,6 @@ pub const Renderer3D = struct {
         self.skin_found.clearRetainingCapacity();
         const alpha = app.time.alpha();
         const forward = view.forward();
-        const plain = &self.plain.?;
 
         var it = try ecs.Query(.{ Transform3D, MeshInstance3D }).over(&app.world);
         while (it.next()) |chunk| {
@@ -1241,9 +1259,8 @@ pub const Renderer3D = struct {
                 for (surfaces) |surface| {
                     if (surface.index_count == 0) continue;
                     const chosen = if (!own.isNone() and app.materials.get(own) != null) own else surface.material;
-                    const look = materialOf(app, chosen);
-                    var compiled = if (look.shader.isNone()) plain else app.shaders.compiled3DOf(look.shader) orelse plain;
-                    if (compiled.refused) compiled = plain;
+                    const drawn = try self.surfaceLookOf(app, chosen);
+                    var compiled = drawn.compiled;
                     // Bent with the shader's skinned variant: where that
                     // does not compile, the mesh is drawn as it was made.
                     var skin: u32 = no_skin;
@@ -1251,42 +1268,66 @@ pub const Renderer3D = struct {
                         compiled = skinned;
                         skin = held.skin;
                     };
-                    // Between levels too: a surface's pictures are asked for
-                    // their chains, and read from them once they have them.
-                    var sampler = app.assets.mipSamplerFor(if (look.texture_filter == .nearest) .nearest else .linear, .repeat);
-                    var textures: [5]rhi.Texture = .{ self.white, self.white, self.white, self.flat, self.white };
-                    for ([_]@TypeOf(look.albedo_texture){ look.albedo_texture, look.emission_texture, look.metallic_roughness_texture, look.normal_texture, look.occlusion_texture }, 0..) |handle, slot| {
-                        if (handle.isNone()) continue;
-                        const held = app.assets.get(handle) orelse continue;
-                        app.assets.wantMips(handle);
-                        textures[slot] = held.gpu;
-                        if (slot == 0 and look.texture_filter == .texture) sampler = app.assets.mipSamplerFor(held.filter, .repeat);
-                    }
-                    const blend = look.transparency == .alpha;
-                    const way: Way = .{ .cull = look.cull, .blend = blend };
                     const item: Item = .{
-                        .way = @intCast(way.index()),
-                        .transparent = blend,
+                        .way = drawn.way,
+                        .transparent = drawn.blend,
                         .compiled = compiled,
                         .gpu = gpu,
                         .index_buffer = index_buffer,
                         .first_index = surface.first_index,
                         .index_count = surface.index_count,
-                        .textures = textures,
-                        .sampler = sampler,
-                        .look = try self.lookIndex(gpa, lookOf(look, !look.normal_texture.isNone() or compiled.writes_normal_map)),
+                        .textures = drawn.textures,
+                        .sampler = drawn.sampler,
+                        .look = drawn.look,
                         .params = try self.paramSetOf(app, compiled, chosen, entity),
                         .depth = depth,
                         .instance = at,
                         .skin = skin,
-                        .solid = look.transparency != .scissor and compiled.solid != null,
+                        .solid = drawn.solid and compiled.solid != null,
                     };
+                    const blend = drawn.blend;
                     if (seen) try self.items.append(gpa, item);
                     // What is laid over what is behind it casts no shadow.
                     if (casts and !blend) try self.casters.append(gpa, .{ .item = item, .bounds = bounds });
                 }
             }
         }
+    }
+
+    /// What the material `chosen` is drawn as this draw: worked out the
+    /// first time a surface has it, and kept until the next.
+    fn surfaceLookOf(self: *Renderer3D, app: *App, chosen: MaterialHandle) !SurfaceLook {
+        const key = @as(u64, chosen.index) << 32 | chosen.generation;
+        const found = try self.surface_looks.getOrPut(app.gpa, key);
+        if (found.found_existing) return found.value_ptr.*;
+        errdefer _ = self.surface_looks.remove(key);
+        const look = materialOf(app, chosen);
+        const plain = &self.plain.?;
+        var compiled = if (look.shader.isNone()) plain else app.shaders.compiled3DOf(look.shader) orelse plain;
+        if (compiled.refused) compiled = plain;
+        // Between levels too: a surface's pictures are asked for their
+        // chains, and read from them once they have them.
+        var sampler = app.assets.mipSamplerFor(if (look.texture_filter == .nearest) .nearest else .linear, .repeat);
+        var textures: [5]rhi.Texture = .{ self.white, self.white, self.white, self.flat, self.white };
+        for ([_]@TypeOf(look.albedo_texture){ look.albedo_texture, look.emission_texture, look.metallic_roughness_texture, look.normal_texture, look.occlusion_texture }, 0..) |handle, slot| {
+            if (handle.isNone()) continue;
+            const held = app.assets.get(handle) orelse continue;
+            app.assets.wantMips(handle);
+            textures[slot] = held.gpu;
+            if (slot == 0 and look.texture_filter == .texture) sampler = app.assets.mipSamplerFor(held.filter, .repeat);
+        }
+        const blend = look.transparency == .alpha;
+        const way: Way = .{ .cull = look.cull, .blend = blend };
+        found.value_ptr.* = .{
+            .compiled = compiled,
+            .textures = textures,
+            .sampler = sampler,
+            .look = try self.lookIndex(app.gpa, lookOf(look, !look.normal_texture.isNone() or compiled.writes_normal_map)),
+            .way = @intCast(way.index()),
+            .blend = blend,
+            .solid = look.transparency != .scissor,
+        };
+        return found.value_ptr.*;
     }
 
     /// Where a mesh a skeleton bends is drawn: in the skeleton's entity's
