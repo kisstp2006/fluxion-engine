@@ -148,16 +148,26 @@ const Inputs = struct {
     collider: Collider3D,
     /// The collider's entity in its body's frame, scale and all.
     place: Transform3D,
-    /// The mesh a `convex` or `mesh` collider is made from.
+    /// Where the mesh a `convex` or `mesh` collider is made from is, to
+    /// read its corners from now: not what it is - the mesh table moves
+    /// its meshes as it grows - which `stamp` says.
     mesh: usize,
-    /// Which making of it: see `mesh.Kept.stamp`.
+    /// Which making of it: see `mesh.Kept.stamp`, a number no other mesh
+    /// or making has.
     stamp: u64,
+
+    /// Whether a shape made from `a` is the one `b` would make. A mesh moved
+    /// in memory is the same mesh: made again for that, every collider of
+    /// a level was, each time streaming grew the table.
+    fn same(a: Inputs, b: Inputs) bool {
+        return std.meta.eql(a.collider, b.collider) and std.meta.eql(a.place, b.place) and
+            a.stamp == b.stamp and (a.mesh == 0) == (b.mesh == 0);
+    }
 };
 
-/// What a hull or a mesh was made from: the mesh, which making of it, and
+/// What a hull or a mesh was made from: which making of which mesh, and
 /// how it was scaled.
 const MeshKey = struct {
-    mesh: usize,
     stamp: u64,
     scale: [3]u32,
 };
@@ -418,7 +428,7 @@ fn syncColliders(self: *Bodies3D, app: *App) !void {
             const inputs = inputsOf(app, e, place, collider, owner) orelse continue;
 
             const link = &self.shapes.items[e.index];
-            if (!link.entity.eql(e) or !link.body.eql(body_link.body) or !std.meta.eql(link.made_from, inputs)) {
+            if (!link.entity.eql(e) or !link.body.eql(body_link.body) or !Inputs.same(link.made_from, inputs)) {
                 try self.reshape(app, link, e, body_link.body, inputs);
             }
             self.shape_seen.items[e.index] = self.mark;
@@ -564,13 +574,13 @@ fn shapeOf(self: *Bodies3D, app: *App, link: *ShapeLink, inputs: Inputs, e: Enti
         },
         .convex => blk: {
             const key = keyOf(inputs) orelse break :blk null;
-            const hull = try self.hullOf(app, key, place.scale) orelse break :blk null;
+            const hull = try self.hullOf(app, key, inputs.mesh, place.scale) orelse break :blk null;
             link.key = key;
             break :blk .{ .hull = hull };
         },
         .mesh => blk: {
             const key = keyOf(inputs) orelse break :blk null;
-            const mesh = try self.meshFor(app, key, place.scale) orelse break :blk null;
+            const mesh = try self.meshFor(app, key, inputs.mesh, place.scale) orelse break :blk null;
             link.key = key;
             break :blk .{ .mesh = mesh };
         },
@@ -596,7 +606,7 @@ fn shapeOf(self: *Bodies3D, app: *App, link: *ShapeLink, inputs: Inputs, e: Enti
 fn keyOf(inputs: Inputs) ?MeshKey {
     if (inputs.mesh == 0) return null;
     const s = inputs.place.scale;
-    return .{ .mesh = inputs.mesh, .stamp = inputs.stamp, .scale = .{ @bitCast(s.x), @bitCast(s.y), @bitCast(s.z) } };
+    return .{ .stamp = inputs.stamp, .scale = .{ @bitCast(s.x), @bitCast(s.y), @bitCast(s.z) } };
 }
 
 /// The corners of the mesh at `address`, scaled.
@@ -608,12 +618,12 @@ fn cornersOf(gpa: Allocator, address: usize, scale: Vec3) !?[]Vec3 {
     return out;
 }
 
-fn hullOf(self: *Bodies3D, app: *App, key: MeshKey, scale: Vec3) !?*const physics3d.Hull {
+fn hullOf(self: *Bodies3D, app: *App, key: MeshKey, address: usize, scale: Vec3) !?*const physics3d.Hull {
     if (self.hulls.getPtr(key)) |made| {
         made.users += 1;
         return made.held;
     }
-    const corners = try cornersOf(app.gpa, key.mesh, scale) orelse return null;
+    const corners = try cornersOf(app.gpa, address, scale) orelse return null;
     defer app.gpa.free(corners);
     const held = try app.gpa.create(physics3d.Hull);
     errdefer app.gpa.destroy(held);
@@ -629,14 +639,14 @@ fn hullOf(self: *Bodies3D, app: *App, key: MeshKey, scale: Vec3) !?*const physic
     return held;
 }
 
-fn meshFor(self: *Bodies3D, app: *App, key: MeshKey, scale: Vec3) !?*const physics3d.Mesh {
+fn meshFor(self: *Bodies3D, app: *App, key: MeshKey, address: usize, scale: Vec3) !?*const physics3d.Mesh {
     if (self.meshes.getPtr(key)) |made| {
         made.users += 1;
         return made.held;
     }
-    const corners = try cornersOf(app.gpa, key.mesh, scale) orelse return null;
+    const corners = try cornersOf(app.gpa, address, scale) orelse return null;
     defer app.gpa.free(corners);
-    const m: *const mesh_table.Mesh = @ptrFromInt(key.mesh);
+    const m: *const mesh_table.Mesh = @ptrFromInt(address);
     const held = try app.gpa.create(physics3d.Mesh);
     errdefer app.gpa.destroy(held);
     held.* = physics3d.Mesh.init(app.gpa, corners, m.indices) catch |err| switch (err) {

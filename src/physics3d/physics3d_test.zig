@@ -352,3 +352,24 @@ test "a click through the camera picks the area it is over, and a wall in front 
     try testing.expectEqual(@as(usize, 1), Clicks.pressed);
     try testing.expect(!app.world.get(lever, Area3D).?.hovered);
 }
+
+test "a mesh collider is not made again when its mesh only moves in memory, as the mesh table grows" {
+    const app = try headless();
+    defer app.destroy();
+    const floor = try app.world.spawnWith(.{ Transform3D{}, MeshInstance3D{}, PrimitiveMesh3D{ .shape = .plane, .size = .init(10, 1, 10) }, Collider3D{ .shape = .mesh } });
+    try frames(app, 2);
+    const shape = app.bodies3d.shapes.items[floor.index].shape;
+    const stamp = app.bodies3d.shapes.items[floor.index].made_from.stamp;
+    try testing.expect(!std.meta.eql(shape, @TypeOf(shape).none));
+    // Meshes enough of their own that the table holding the floor's grows,
+    // and moves it.
+    for (0..300) |i| {
+        var made: PrimitiveMesh3D = .of(.box);
+        made.size = .init(1 + @as(f32, @floatFromInt(i)) * 0.01, 1, 1);
+        _ = try app.world.spawnWith(.{ Transform3D.at(0, 50, 0), MeshInstance3D{}, made, Collider3D{ .shape = .convex } });
+    }
+    try frames(app, 2);
+    try testing.expectEqual(stamp, app.bodies3d.shapes.items[floor.index].made_from.stamp);
+    try testing.expect(std.meta.eql(shape, app.bodies3d.shapes.items[floor.index].shape));
+    try testing.expectEqual(@as(usize, 1), app.bodies3d.meshes.count());
+}
