@@ -336,6 +336,7 @@ const Gathering = struct {
             .albedo_image = try self.imageOf(look.albedo_texture),
             .emission = .{ glow[0] * e, glow[1] * e, glow[2] * e },
             .emission_image = try self.imageOf(look.emission_texture),
+            .emission_image_energy = if (look.emission_mode == .add) e else 0,
             .alpha = albedo[3],
             .cut = if (look.transparency == .scissor) look.alpha_scissor_threshold else null,
             .two_sided = look.cull == .disabled,
@@ -344,6 +345,7 @@ const Gathering = struct {
             // Drawn as its colour whatever lights it: it gives that off.
             made.emission = .{ albedo[0], albedo[1], albedo[2] };
             made.emission_image = made.albedo_image;
+            made.emission_image_energy = 0;
             made.albedo = .{ 0, 0, 0 };
         }
         const at: u32 = @intCast(self.materials.items.len);

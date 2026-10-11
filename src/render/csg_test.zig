@@ -247,3 +247,28 @@ test "a polygon is its outline drawn out, and a scene keeps only the corners it 
     defer testing.allocator.free(plain);
     try testing.expect(std.mem.indexOf(u8, plain, "\"points\"") == null);
 }
+
+test "only a shape's active fields remake its mesh, including every nested sibling" {
+    const app = try headless();
+    defer app.destroy();
+    const built = try wallWithDoor(app);
+    _ = try app.csgMeshOf(built.wall);
+    const made = app.csg.made;
+    const shape = app.world.get(built.wall, CSGShape3D).?;
+    shape.radius = 3;
+    shape.points[31] = .init(9, 9);
+    _ = try app.csgMeshOf(built.wall);
+    try testing.expectEqual(made, app.csg.made);
+    const group = try app.world.spawnWith(.{ Transform3D{}, CSGShape3D{ .shape = .group } });
+    try app.setParent(group, built.wall, false);
+    const child = try app.world.spawnWith(.{ Transform3D.at(2, 0, 0), CSGShape3D{ .size = .init(1, 1, 1) } });
+    try app.setParent(child, group, false);
+    _ = try app.csgMeshOf(built.wall);
+    const before = app.csg.made;
+    app.world.get(built.door, CSGShape3D).?.size.x = 2;
+    _ = try app.csgMeshOf(built.wall);
+    try testing.expectEqual(before + 1, app.csg.made);
+    app.world.get(child, Transform3D).?.position.x = 3;
+    _ = try app.csgMeshOf(built.wall);
+    try testing.expectEqual(before + 2, app.csg.made);
+}

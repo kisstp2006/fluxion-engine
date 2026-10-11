@@ -454,6 +454,18 @@ fn allPolygons(pool: *Pool, root: *Node) Allocator.Error![]Polygon {
 pub fn combine(self: Solid, arena: Allocator, other: Solid, operation: Operation) Allocator.Error!Solid {
     if (other.polygons.len == 0) return if (operation == .intersect) .{} else self;
     if (self.polygons.len == 0) return if (operation == .@"union") other else .{};
+    // Solids apart need no partitioning. Keep their faces and tags as they
+    // are; touching solids still take the full path to remove shared faces.
+    if (apart(self, other)) return switch (operation) {
+        .subtract => self,
+        .intersect => .{},
+        .@"union" => joined: {
+            const polygons = try arena.alloc(Polygon, self.polygons.len + other.polygons.len);
+            @memcpy(polygons[0..self.polygons.len], self.polygons);
+            @memcpy(polygons[self.polygons.len..], other.polygons);
+            break :joined .{ .polygons = polygons };
+        },
+    };
     var pool: Pool = .{ .backing = arena };
     const a = try treeOf(&pool, self.polygons);
     const b = try treeOf(&pool, other.polygons);
@@ -487,6 +499,27 @@ pub fn combine(self: Solid, arena: Allocator, other: Solid, operation: Operation
         },
     }
     return .{ .polygons = try allPolygons(&pool, a) };
+}
+
+/// Whether the boxes round two solids have a gap larger than the plane
+/// tolerance. A small gap still takes the partitioning path.
+fn apart(a: Solid, b: Solid) bool {
+    const one = boundsOf(a);
+    const two = boundsOf(b);
+    return one.high.x + epsilon < two.low.x or two.high.x + epsilon < one.low.x or
+        one.high.y + epsilon < two.low.y or two.high.y + epsilon < one.low.y or
+        one.high.z + epsilon < two.low.z or two.high.z + epsilon < one.low.z;
+}
+
+fn boundsOf(solid: Solid) struct { low: Vec3, high: Vec3 } {
+    var low: Vec3 = .init(std.math.inf(f64), std.math.inf(f64), std.math.inf(f64));
+    var high = low.scale(-1);
+    for (solid.polygons) |polygon| for (polygon.vertices) |vertex| {
+        const p = vertex.pos;
+        low = .init(@min(low.x, p.x), @min(low.y, p.y), @min(low.z, p.z));
+        high = .init(@max(high.x, p.x), @max(high.y, p.y), @max(high.z, p.z));
+    };
+    return .{ .low = low, .high = high };
 }
 
 /// A polygon of `corners` as `place` puts it, turned over where `place`
@@ -675,6 +708,11 @@ fn turn(a: [2]f64, b: [2]f64, c: [2]f64) f64 {
 
 /// A ball of `slices` round and `stacks` from pole to pole.
 pub fn sphere(arena: Allocator, radius: f64, slices: u32, stacks: u32, place: Affine, tag: u32) Allocator.Error!Solid {
+    return sphereWithNormals(arena, radius, slices, stacks, true, place, tag);
+}
+
+/// A ball, lit as if round or face by face.
+pub fn sphereWithNormals(arena: Allocator, radius: f64, slices: u32, stacks: u32, smooth: bool, place: Affine, tag: u32) Allocator.Error!Solid {
     var pool: Pool = .{ .backing = arena };
     const across = @max(slices, 3);
     const down = @max(stacks, 2);
@@ -691,6 +729,10 @@ pub fn sphere(arena: Allocator, radius: f64, slices: u32, stacks: u32, place: Af
                 if (j + 1 == down and k == 2) continue;
                 corners[count] = onBall(radius, at[0], at[1], across, down);
                 count += 1;
+            }
+            if (!smooth) {
+                const plane = Plane.through(corners[0..count]) orelse continue;
+                for (corners[0..count]) |*corner| corner.normal = plane.normal;
             }
             try placed(&pool, corners[0..count], place, tag, &out);
         }
@@ -1401,4 +1443,41 @@ test "where a cut went through one face and not the one beside it, the triangles
     var cut = try holed.indexed(testing.allocator);
     defer cut.deinit(testing.allocator);
     try testing.expect(try closedByPlaces(testing.allocator, cut));
+}
+
+test "solids apart keep their faces and tags, while touching solids lose the shared faces" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const a = try box(arena, .init(1, 1, 1), .identity, 7);
+    var place: Affine = .identity;
+    place.rows[0][3] = 2;
+    const b = try box(arena, .init(1, 1, 1), place, 9);
+    const joined = try a.combine(arena, b, .@"union");
+    try expectNear(2, joined.volume(), 1e-8);
+    try expectNear(12, joined.area(), 1e-8);
+    try testing.expect(joined.closed());
+    try testing.expectEqual(@as(u32, 9), joined.polygons[6].tag);
+    // A disjoint cut and meeting allocate nothing.
+    const cut = try a.combine(std.testing.failing_allocator, b, .subtract);
+    try testing.expectEqual(a.polygons.ptr, cut.polygons.ptr);
+    try testing.expectEqual(@as(usize, 0), (try a.combine(std.testing.failing_allocator, b, .intersect)).polygons.len);
+    place.rows[0][3] = 1;
+    const touching = try a.combine(arena, try box(arena, .init(1, 1, 1), place, 9), .@"union");
+    try expectNear(2, touching.volume(), 1e-8);
+    try expectNear(10, touching.area(), 1e-8);
+    try testing.expect(touching.closed());
+}
+
+test "a sphere's smooth option changes the normals without changing its solid" {
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const smooth = try sphere(arena, 1, 8, 4, .identity, 0);
+    const flat = try sphereWithNormals(arena, 1, 8, 4, false, .identity, 0);
+    try expectNear(smooth.volume(), flat.volume(), 1e-9);
+    for (flat.polygons) |polygon| for (polygon.vertices) |vertex| {
+        try expectNear(1, vertex.normal.dot(polygon.plane.normal), 1e-9);
+    };
+    try testing.expect(smooth.polygons[2].vertices[0].normal.dot(smooth.polygons[2].plane.normal) < 0.99);
 }

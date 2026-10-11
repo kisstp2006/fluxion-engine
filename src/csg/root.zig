@@ -26,6 +26,7 @@ pub const epsilon = Solid.epsilon;
 pub const box = Solid.box;
 pub const cylinder = Solid.cylinder;
 pub const sphere = Solid.sphere;
+pub const sphereWithNormals = Solid.sphereWithNormals;
 pub const mesh = Solid.mesh;
 pub const prism = Solid.prism;
 

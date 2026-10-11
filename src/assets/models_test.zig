@@ -15,6 +15,7 @@ const Project = @import("../project/Project.zig");
 const components = @import("../scene/components.zig");
 const materials = @import("../render/materials.zig");
 const gltf = @import("gltf.zig");
+const models = @import("models.zig");
 const animation = @import("../animation/animation.zig");
 const math = @import("fluxion_math");
 const rhi = @import("fluxion_rhi");
@@ -197,6 +198,49 @@ test "an FBX no editor has turned into glTF is refused, and read once one has" {
     _ = try app.instantiate(scene, .none);
     try testing.expect(app.find("box") != null);
     try testing.expect(app.findMesh("res://models/box.fbx#mesh/0") != null);
+}
+
+test "converted models use their original import settings, including materials, in both loading paths" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    try folder.put("models/box.fbx", "Kaydara FBX Binary");
+    try folder.tmp.dir.createDirPath(testing.io, ".fluxion/imported/models");
+    try folder.put(".fluxion/imported/models/box.fbx.glb", try triangle());
+    const picture = try folder.tmp.dir.readFileAlloc(testing.io, "models/red.png", testing.allocator, .limited(4096));
+    defer testing.allocator.free(picture);
+    try folder.put(".fluxion/imported/models/red.png", picture);
+    try folder.put("models/blue.mat3d", "{ \"albedo_color\": { \"r\": 0, \"g\": 0, \"b\": 1, \"a\": 1 } }");
+    try folder.put("models/box.fbx.import", "{ \"scale\": 0.5, \"materials\": [{ \"name\": \"Red\", \"material\": \"res://models/blue.mat3d\" }] }");
+    for ([_]bool{ false, true }) |background| {
+        const app = try appIn(&folder);
+        defer app.destroy();
+        if (background) {
+            try app.loadInBackground("res://models/box.fbx");
+            try app.finishLoad("res://models/box.fbx");
+        }
+        const root = try app.instantiate(try app.loadScene("res://models/box.fbx"), .none);
+        try testing.expectEqual(@as(f32, 0.5), app.world.get(root, Transform3D).?.scale.x);
+        const mesh = app.meshOf(app.findMesh("res://models/box.fbx#mesh/0").?).?;
+        try testing.expect(mesh.surfaces[0].material.eql(app.findMaterial("res://models/blue.mat3d").?));
+    }
+}
+
+fn settingsWithAllocationFailures(gpa: std.mem.Allocator, files: Project.Files) !void {
+    const settings = try models.settingsOf(gpa, files, "res://models/tri.gltf");
+    defer settings.deinit(gpa);
+    try testing.expectEqualStrings("res://models/blue.mat3d", settings.materialFor("Red").?);
+    try testing.expectEqualStrings("res://models/green.mat3d", settings.materialFor("Green").?);
+}
+
+test "import settings keep their material names and release every partial copy on allocation failure" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    try folder.put("models/tri.gltf.import", "{ \"materials\": [{ \"name\": \"Red\", \"material\": \"res://models/blue.mat3d\" }, { \"name\": \"Green\", \"material\": \"res://models/green.mat3d\" }] }");
+    const app = try appIn(&folder);
+    defer app.destroy();
+    try testing.checkAllAllocationFailures(testing.allocator, settingsWithAllocationFailures, .{app.project.files()});
 }
 
 test "a model's import settings scale its root" {
@@ -399,7 +443,6 @@ test "a dense model's meshes get levels of detail as it is read, kept in a file 
     const glb = try ballGlb(testing.allocator, 96, 48);
     defer testing.allocator.free(glb);
     try folder.put("models/ball.glb", glb);
-    const models = @import("models.zig");
     const lods = @import("../render/lods.zig");
     {
         // No file of them: made as it is read.

@@ -1317,7 +1317,14 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   instance)` is the mesh each of them is given. Those under it draw
   nothing; one an `Appearance` hides is left out. The mesh is made again
   when a shape under it moves or changes, and kept while none does: a
-  shape dragged in an editor is cut as it goes. Each face is drawn with
+  shape dragged in an editor is cut as it goes. Only fields the current
+  shape uses enter its cache signature; an unused polygon corner does not
+  remake a box. Solids whose bounds are separated by more than the plane
+  tolerance skip BSP partitioning: union keeps their tagged faces, a cut
+  keeps the first solid, and an intersection is empty. Touching solids
+  still take the partitioning path to remove shared faces. A sphere's
+  `smooth` chooses round or face normals without changing its geometry.
+  Each face is drawn with
   the material of the shape it came from - a doorway's sides with the
   door's - or its parent's where it has none; its picture lies flat on it,
   a metre across, as big on every face. Where a cut went through one face
@@ -1383,7 +1390,11 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   and the green of `metallic_roughness_texture`; a `normal_texture` tilting
   its surface by `normal_scale`, and an `occlusion_texture` darkening its
   creases by `occlusion_strength`; `emission` times `emission_energy` - and
-  `emission_texture` - for the light it gives off; `transparency` to lay it
+  `emission_texture` - for the light it gives off. `emission_mode` is
+  `multiply` by default; `add` adds the picture to the emission colour,
+  both times `emission_energy`, in the renderer and in baked lighting.
+  With no emission picture, either mode gives off the colour alone.
+  `transparency` to lay it
   over what is behind it by its alpha, or to cut it where the alpha is under
   `alpha_scissor_threshold`; `cull` for which side of its triangles is left
   out; `unshaded` for its colour as it is; and a `shader` of its own - see
@@ -1415,6 +1426,12 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   a `color` and an `energy`. Up to four suns light the world; the sixty-four
   point and spot lights the camera sees, nearest first, are kept, and each
   mesh is lit by the eight of them nearest it that reach it.
+- **Point and spot lights can fall off with distance**: `falloff` defaults
+  to `range`, preserving the range-based curve. With `distance`, intensity
+  falls as distance to the power `attenuation`, with a smooth cutoff at
+  `range`; zero attenuation keeps the intensity until that cutoff.
+  `specular` scales their reflected gloss: zero removes it, one keeps it.
+  Baked lighting uses the same distance and cone falloff.
 - **Shadows**: a light with `shadow` has what it lights cast one - every
   mesh with `cast_shadow` (on unless turned off) that is not laid over what
   is behind it. A sun's shadow reaches `shadow_max_distance` from the
@@ -1652,6 +1669,11 @@ app.world.get(wall, fx.Material3D).?.material = brick;
   `"lightmap_uvs": true` for lightmap UVs worked out for the meshes that
   bring none, and `"loop_animations": true` for animations that go round -
   one whose name ends in `loop` does either way.
+- **Import settings can replace materials by name**:
+  `"materials": [{ "name": "Rust", "material": "res://materials/rust.mat3d" }]`
+  draws the named material with that file. A missing or invalid replacement
+  warns and keeps the model's own material. FBX and Blender models use the
+  settings beside their original files, including when loaded in the background.
 - **A `.mat3d` is a `Material3DData`**, written as a scene writes a
   component - only what is not as a material starts - with its shader's
   numbers under `params`, and kept under a `MaterialHandle`: `loadMaterial`,

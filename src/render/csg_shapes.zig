@@ -264,8 +264,23 @@ fn signatureOf(app: *App, top: Entity) u64 {
 
 fn sign(app: *App, hasher: *std.hash.Wyhash, entity: Entity, shape: CSGShape3D, depth: usize) void {
     hasher.update(std.mem.asBytes(&entity));
-    inline for (std.meta.fields(CSGShape3D)) |field| {
-        hasher.update(std.mem.asBytes(&@field(shape, field.name)));
+    hasher.update(std.mem.asBytes(&shape.shape));
+    hasher.update(std.mem.asBytes(&shape.operation));
+    hasher.update(std.mem.asBytes(&shape.material));
+    switch (shape.shape) {
+        .box => hasher.update(std.mem.asBytes(&shape.size)),
+        .cylinder, .sphere => {
+            hasher.update(std.mem.asBytes(&shape.radius));
+            hasher.update(std.mem.asBytes(&shape.sides));
+            hasher.update(std.mem.asBytes(&shape.smooth));
+            if (shape.shape == .cylinder) hasher.update(std.mem.asBytes(&shape.height)) else hasher.update(std.mem.asBytes(&shape.rings));
+        },
+        .polygon => {
+            hasher.update(std.mem.asBytes(&shape.height));
+            hasher.update(std.mem.sliceAsBytes(shape.outline()));
+        },
+        .mesh => hasher.update(std.mem.asBytes(&shape.mesh)),
+        .group => {},
     }
     if (shape.shape == .mesh) {
         const stamp: u64 = if (app.meshes.keptOf(shape.mesh)) |kept| kept.stamp else 0;
@@ -323,7 +338,7 @@ const Building = struct {
         var solid: csg.Solid = switch (shape.shape) {
             .box => try csg.box(arena, .init(@abs(shape.size.x), @abs(shape.size.y), @abs(shape.size.z)), affine, tag),
             .cylinder => try csg.cylinder(arena, radius, @abs(shape.height), sides, shape.smooth, affine, tag),
-            .sphere => try csg.sphere(arena, radius, sides, std.math.clamp(shape.rings, min_rings, max_rings), affine, tag),
+            .sphere => try csg.sphereWithNormals(arena, radius, sides, std.math.clamp(shape.rings, min_rings, max_rings), shape.smooth, affine, tag),
             .mesh => try self.closedMesh(shape.mesh, affine, tag),
             .group => .{},
             .polygon => polygon: {
@@ -334,9 +349,8 @@ const Building = struct {
             },
         };
         if (depth == max_depth) return solid;
-        // Copied: the children of one asked after the children of another.
-        const children = try arena.dupe(Entity, self.app.children(entity));
-        for (children) |child| {
+        // The tree's slices stay good while no entity changes shape.
+        for (self.app.children(entity)) |child| {
             const under = self.app.world.get(child, CSGShape3D) orelse continue;
             if (!shown(self.app, child)) continue;
             const held = under.*;

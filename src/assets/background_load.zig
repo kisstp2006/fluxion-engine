@@ -315,7 +315,7 @@ pub const Load = struct {
             self.prepared = made: {
                 var model = try gltf.parse(self.gpa, self.bytes, beside.fetch());
                 errdefer model.deinit();
-                break :made .{ .model = model, .settings = try models.settingsOf(self.gpa, self.files, self.file) };
+                break :made .{ .model = model, .settings = try models.settingsOf(self.gpa, self.files, self.source) };
             };
             const model = &self.prepared.?.model;
             model.unwrap_lightmap = self.prepared.?.settings.lightmap_uvs;

@@ -201,9 +201,13 @@ pub const ImportSettings = struct {
 pub fn settingsOf(gpa: Allocator, files: Project.Files, file: []const u8) Allocator.Error!ImportSettings {
     const path = try std.mem.concat(gpa, u8, &.{ file, import_extension });
     defer gpa.free(path);
-    const bytes = files.read(gpa, path, .limited(64 * 1024)) catch return .{};
+    const bytes = files.read(gpa, path, .limited(64 * 1024)) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return .{},
+    };
     defer gpa.free(bytes);
     const parsed = json.parseAs(ImportSettings, gpa, bytes, .{ .syntax = .json5 }) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
         log.warn("{s} does not read, and the model is brought in as it is: {t}", .{ path, err });
         return .{};
     };
@@ -272,7 +276,7 @@ pub fn prepare(gpa: Allocator, files: Project.Files, file: []const u8, source: ?
     const bytes = try files.read(gpa, file, .limited(file_table.file_limit));
     defer gpa.free(bytes);
     var beside: Beside = .{ .files = files, .folder = folderOf(file) };
-    const settings = try settingsOf(gpa, files, file);
+    const settings = try settingsOf(gpa, files, source orelse file);
     errdefer settings.deinit(gpa);
     var model = try gltf.parse(gpa, bytes, beside.fetch());
     errdefer model.deinit();

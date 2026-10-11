@@ -46,6 +46,9 @@ pub const Material = struct {
     /// Linear, its energy counted in, times its picture's: what it gives off.
     emission: [3]f32 = .{ 0, 0, 0 },
     emission_image: ?u32 = null,
+    /// When positive, add the picture times this energy to `emission`
+    /// instead of multiplying it into the colour, as the renderer does.
+    emission_image_energy: f32 = 0,
     /// Its picture's alpha times this under `cut` is not there: a hole a
     /// ray passes through. Null for a material with none.
     alpha: f32 = 1,
@@ -425,7 +428,10 @@ const World = struct {
             }
             if (m.emission_image) |image| {
                 const c = self.texel(image, uv);
-                emission *= Vec3{ c[0], c[1], c[2] };
+                const picture = Vec3{ c[0], c[1], c[2] };
+                if (m.emission_image_energy > 0) {
+                    emission += picture * splat(m.emission_image_energy);
+                } else emission *= picture;
             }
         }
         return .{ .albedo = albedo, .emission = emission };
@@ -1197,6 +1203,30 @@ fn meanOf(result: Result, instance: u32) [3]f32 {
     };
     const n: f64 = @floatFromInt((across / 2) * (across / 2));
     return .{ @floatCast(sum[0] / n), @floatCast(sum[1] / n), @floatCast(sum[2] / n) };
+}
+
+test "emission pictures multiply the colour or add their own light, including black texels and no picture" {
+    var triangles: std.ArrayList(Triangle) = .empty;
+    defer triangles.deinit(testing.allocator);
+    try quad(&triangles, .{ .{ -1, 0, 1 }, .{ 1, 0, 1 }, .{ 1, 0, -1 }, .{ -1, 0, -1 } }, .{ 0, 1, 0 }, 0, 0);
+    var materials = [_]Material{.{ .emission = .{ 2, 0, 0 }, .emission_image = 0 }};
+    const pixels = [_]u8{ 0, 255, 0, 255, 0, 0, 0, 255 };
+    var world = try World.init(testing.allocator, .{
+        .triangles = triangles.items,
+        .instances = &.{.{ .lit = true, .least_texels = 8 }},
+        .materials = &materials,
+        .images = &.{.{ .width = 2, .height = 1, .pixels = &pixels }},
+        .lights = &.{},
+    }, .{});
+    defer world.deinit(testing.allocator);
+    const green: bvh.Hit = .{ .t = 0, .triangle = 0, .u = 0.25, .v = 0, .back = false };
+    const black: bvh.Hit = .{ .t = 0, .triangle = 0, .u = 0.75, .v = 0, .back = false };
+    try testing.expectEqual(Vec3{ 0, 0, 0 }, world.surfaceAt(green).emission);
+    materials[0].emission_image_energy = 3;
+    try testing.expectEqual(Vec3{ 2, 3, 0 }, world.surfaceAt(green).emission);
+    try testing.expectEqual(Vec3{ 2, 0, 0 }, world.surfaceAt(black).emission);
+    materials[0].emission_image = null;
+    try testing.expectEqual(Vec3{ 2, 0, 0 }, world.surfaceAt(green).emission);
 }
 
 test "a lamp falls off toward its range, or with the distance cut off smoothly at its range; a cone's edge either way" {
