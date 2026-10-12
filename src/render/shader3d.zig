@@ -739,7 +739,7 @@ pub const prologue_len: u32 = prologue.len;
 /// What it ends with: the surface lit. One line, written before the
 /// stage's `}`.
 const epilogue = " if (ALPHA < FEEL.z) { discard; }" ++
-    " target = vec4(lit(decals(ALBEDO, WORLD_POSITION, WORLD_NORMAL), METALLIC, ROUGHNESS, EMISSION, NORMAL_MAP, AO, WORLD_POSITION, WORLD_NORMAL, WORLD_TANGENT, LIGHT_LIST_0, LIGHT_LIST_1, GI_AT), ALPHA); ";
+    " target = vec4(lit(decals(ALBEDO, WORLD_POSITION, WORLD_NORMAL, ddx(WORLD_POSITION), ddy(WORLD_POSITION)), METALLIC, ROUGHNESS, EMISSION, NORMAL_MAP, AO, WORLD_POSITION, WORLD_NORMAL, WORLD_TANGENT, LIGHT_LIST_0, LIGHT_LIST_1, GI_AT), ALPHA); ";
 
 pub const epilogue_len: u32 = epilogue.len;
 

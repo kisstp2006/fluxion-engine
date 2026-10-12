@@ -39,7 +39,8 @@ pub const rows = 5;
 
 /// The decals, as the shader's `Decals` block says: each its world to its
 /// own space - its box from minus one to one - as three rows, where its
-/// picture is in the atlas, and its colour; and how many there are.
+/// picture is in the atlas, and its colour; and how many there are, how
+/// many pixels across the atlas is, and its smallest level to read.
 pub const Block = extern struct {
     decals: [most * rows][4]f32 = @splat(@splat(0)),
     count: [4]f32 = @splat(0),
@@ -54,9 +55,11 @@ pub const shader_part =
     \\    vec4 DECAL_COUNT;
     \\}
     \\
-    \\// A surface's colour at `p`, facing `n`, under the decals it is inside.
-    \\// What is drawn as its colour alone - a sky, a glow - takes none.
-    \\vec3 decals(vec3 albedo, vec3 p, vec3 n) {
+    \\// A surface's colour at `p`, facing `n`, under the decals it is inside;
+    \\// `dx` and `dy` are how far `p` is from the next pixel across and down,
+    \\// which say how much of a decal's picture a pixel spans. What is drawn
+    \\// as its colour alone - a sky, a glow - takes none.
+    \\vec3 decals(vec3 albedo, vec3 p, vec3 n, vec3 dx, vec3 dy) {
     \\    vec3 result = albedo;
     \\    if (FEEL.x > 0.5) {
     \\        return result;
@@ -68,6 +71,9 @@ pub const shader_part =
     \\            vec4 r1 = DECALS[b + 1];
     \\            vec4 r2 = DECALS[b + 2];
     \\            vec3 q = vec3(dot(r0.xyz, p) + r0.w, dot(r1.xyz, p) + r1.w, dot(r2.xyz, p) + r2.w);
+    \\            // How much of the box a pixel spans: which level of the atlas it reads.
+    \\            vec2 across = vec2(dot(r0.xyz, dx), dot(r1.xyz, dx));
+    \\            vec2 down = vec2(dot(r0.xyz, dy), dot(r1.xyz, dy));
     \\            if (max(abs(q.x), max(abs(q.y), abs(q.z))) < 1.0) {
     \\                vec4 place = DECALS[b + 3];
     \\                vec4 tint = DECALS[b + 4];
@@ -77,7 +83,13 @@ pub const shader_part =
     \\                float cover = tint.w * smoothstep(0.0, 0.35, square) * (1.0 - smoothstep(0.75, 1.0, abs(q.z)));
     \\                vec3 paint = tint.rgb;
     \\                if (place.z > 0.0) {
-    \\                    vec4 texel = sample_level(COOKIE_ATLAS, place.xy + vec2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5) * place.zw, 0.0);
+    \\                    float span = max(length(across * place.zw), length(down * place.zw)) * 0.5 * DECAL_COUNT.y;
+    \\                    float level = clamp(log2(max(span, 0.0001)), 0.0, DECAL_COUNT.z);
+    \\                    // Kept half a texel of that level inside its tile, so as not
+    \\                    // to read its neighbour's.
+    \\                    vec2 edge = vec2(0.5 * exp2(level) / DECAL_COUNT.y) / abs(place.zw);
+    \\                    vec2 inside = clamp(vec2(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5), edge, vec2(1.0) - edge);
+    \\                    vec4 texel = sample_level(COOKIE_ATLAS, place.xy + inside * place.zw, level);
     \\                    paint = toLinear(texel.rgb) * tint.rgb;
     \\                    cover = cover * texel.a;
     \\                } else {
@@ -139,9 +151,10 @@ pub fn gather(app: *App, kept: *std.ArrayList(Kept), view: View3D, frustum: math
     if (kept.items.len > most) kept.shrinkRetainingCapacity(most);
 }
 
-/// The block for what `gather` kept, each picture at its `place`; a decal
+/// The block for what `gather` kept, each picture at its `place` in an
+/// atlas `pixels` across, read no smaller than its level `smallest`; a decal
 /// whose picture found no tile is left out.
-pub fn blockOf(kept: []const Kept) Block {
+pub fn blockOf(kept: []const Kept, pixels: f32, smallest: f32) Block {
     var block: Block = .{};
     var count: usize = 0;
     for (kept) |decal| {
@@ -151,7 +164,7 @@ pub fn blockOf(kept: []const Kept) Block {
         @memcpy(block.decals[count * rows ..][0..rows], &held);
         count += 1;
     }
-    block.count = .{ @floatFromInt(count), 0, 0, 0 };
+    block.count = .{ @floatFromInt(count), pixels, smallest, 0 };
     return block;
 }
 
@@ -228,7 +241,7 @@ test "a decal's picture is at its place in the block, and one with no tile is le
         // More pictures than tiles: left out.
         .{ .rows = @splat(@splat(0)), .pictured = true, .distance = 3 },
     };
-    const block = blockOf(&kept);
+    const block = blockOf(&kept, 1024, 4);
     try testing.expectEqual(@as(f32, 2), block.count[0]);
     try testing.expectEqualSlices(f32, &.{ 0.5, 0.25, 0.25, 0.25 }, &block.decals[3]);
     // No picture, no place: the shader draws its dot.

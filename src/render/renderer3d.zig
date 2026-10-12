@@ -858,7 +858,9 @@ pub const Renderer3D = struct {
         for (self.decals_kept.items) |*decal| if (!decal.picture.isNone()) {
             decal.place = cookieRect(decal.tile, bottom_left);
         };
-        try device.updateBuffer(self.decal_block, 0, std.mem.asBytes(&decals.blockOf(self.decals_kept.items)));
+        // Down to a tile of four pixels: a decal of a few is a soft dot.
+        const smallest: f32 = if (self.atlasMips()) 6 else 0;
+        try device.updateBuffer(self.decal_block, 0, std.mem.asBytes(&decals.blockOf(self.decals_kept.items, cookie_size * cookie_across, smallest)));
         try self.uploadFrame(app, drawn_view, view_projection, environment, lighting);
         const fog = try fog_volumes.gather(app, view, frustum, @floatCast(app.interface.seconds), self.worlds);
         self.fog_volumes_kept = @intFromFloat(fog.count[0]);
@@ -1655,10 +1657,13 @@ pub const Renderer3D = struct {
         const device = self.device;
         var fresh = false;
         if (self.cookie_atlas == null) {
+            // With its smaller levels where the device makes them: a decal
+            // seen from afar reads one, and does not sparkle.
             self.cookie_atlas = try device.createTexture(.{
                 .width = cookie_size * cookie_across,
                 .height = cookie_size * cookie_across,
                 .usage = .{ .sampled = true, .render_target = true },
+                .mip_levels = if (self.atlasMips()) 0 else 1,
                 .label = "cookie atlas",
             });
             self.cookie_tiles = @splat(.none);
@@ -1697,7 +1702,9 @@ pub const Renderer3D = struct {
 
         const copy = &self.cookie_copy.?;
         const list = device.begin();
-        try list.beginPass(.{ .color = .{ .target = .{ .texture = self.cookie_atlas.? }, .load = if (fresh) .clear else .load, .clear_color = .{ 1, 1, 1, 1 } } });
+        // Clear, what no picture covers lays nothing on: a decal reading past
+        // its picture's edge.
+        try list.beginPass(.{ .color = .{ .target = .{ .texture = self.cookie_atlas.? }, .load = if (fresh) .clear else .load, .clear_color = .{ 1, 1, 1, 0 } } });
         try list.setPipeline(copy.pipeline);
         try list.setVertexBuffer(0, copy.corners, 0);
         for (drawn, 0..) |draw_it, at| {
@@ -1709,7 +1716,12 @@ pub const Renderer3D = struct {
             try list.draw(.{ .vertex_count = 4 });
         }
         try list.endPass();
+        if (self.atlasMips()) try list.generateMips(self.cookie_atlas.?);
         try device.submit();
+    }
+
+    fn atlasMips(self: *const Renderer3D) bool {
+        return self.device.caps().formatSupport(.rgba8_unorm).generate_mips;
     }
 
     /// What the cookie atlas is read with: smoothly, kept inside it.
@@ -1991,7 +2003,9 @@ const CookieCopy = struct {
         const corners = [8]f32{ 0, 0, 1, 0, 0, 1, 1, 1 };
         const buffer = try device.createBuffer(.{ .kind = .vertex, .size = @sizeOf(@TypeOf(corners)), .data = std.mem.asBytes(&corners), .label = "cookie quad" });
         errdefer device.destroyBuffer(buffer);
-        const sampler = try device.createSampler(.{});
+        // Through the levels: a picture is read into its tile from the level
+        // nearest its size, and the atlas from the one a decal wants.
+        const sampler = try device.createSampler(.{ .mip_filter = .linear });
         return .{ .gpu = gpu, .pipeline = pipeline, .corners = buffer, .sampler = sampler };
     }
 
