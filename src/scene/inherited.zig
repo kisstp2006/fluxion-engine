@@ -88,6 +88,20 @@ pub const Appearance = extern struct {
     /// over the lit world as it is: a sign that glows in the dark. See
     /// `lights.zig`.
     lighting: Lighting = .inherit,
+    /// Whether its meshes and everything under it throw shadows, and
+    /// whether they are seen: `only` is a shadow and nothing else - a
+    /// first-person player's own body, which the camera inside it must not
+    /// see but the sun must. A mesh's own `cast_shadow` off still keeps
+    /// its shadow off.
+    shadows: Shadows = .inherit,
+
+    pub const Shadows = enum(u8) {
+        /// As its parent does; a root casts.
+        inherit,
+        cast,
+        none,
+        only,
+    };
 
     pub const Lighting = enum(u8) {
         /// As its parent is; a root is lit.
@@ -104,6 +118,7 @@ pub const Appearance = extern struct {
         .z = .{attr.Doc{ .text = "Added to the layer it and everything under it is drawn on" }},
         .z_relative = .{attr.Doc{ .text = "Whether z is added to the one it inherits" }},
         .lighting = .{attr.Doc{ .text = "Whether lights fall on it and everything under it: as its parent, lit, or drawn as it is over the lit world" }},
+        .shadows = .{attr.Doc{ .text = "Whether it and everything under it throw shadows: as its parent, yes, no, or only a shadow - not seen itself" }},
     };
 };
 
@@ -118,6 +133,8 @@ pub const Resolved = struct {
     render_layers: u32 = 1,
     /// Drawn as it is over the lit world, rather than lit.
     unshaded: bool = false,
+    /// Never `.inherit`.
+    shadows: Appearance.Shadows = .cast,
 
     /// The layer something on `layer` is drawn on under this.
     pub fn layer(self: Resolved, own: i16) i16 {
@@ -205,6 +222,7 @@ fn ownOver(world: *const ecs.World, entity: Entity, above: Resolved) Resolved {
         out.z = if (appearance.z_relative) above.z + appearance.z else appearance.z;
         if (appearance.render_layers != 0) out.render_layers = appearance.render_layers;
         if (appearance.lighting != .inherit) out.unshaded = appearance.lighting == .unshaded;
+        if (appearance.shadows != .inherit) out.shadows = appearance.shadows;
     }
     return out;
 }

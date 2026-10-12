@@ -666,6 +666,26 @@ test "what is on a camera's front layers is drawn last, over the world, and cast
     for (app.renderer3d.casters.items) |caster| try testing.expect(!caster.item.front);
 }
 
+test "what is a shadow only casts one and is not seen, and what has none is seen and casts none, with all under it" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    // A player's own body, which the camera inside it must not see; and a
+    // body under one whose shadows are off.
+    const body = try boxAt(app, 1, 0, 0);
+    try app.world.add(body, Appearance{ .shadows = .only });
+    const holder = try app.world.spawnWith(.{ Transform3D{}, Appearance{ .shadows = .none } });
+    const held = try boxAt(app, -1, 0, 0);
+    try app.world.add(held, components.Parent.of(holder));
+    _ = try app.world.spawnWith(.{ Transform3D{}, components.DirectionalLight3D{ .shadow = true } });
+    _ = try app.step();
+    // Seen: the first box and the held one. Casting: the first box and
+    // the body.
+    try testing.expectEqual(@as(usize, 2), app.renderer3d.items.items.len);
+    try testing.expectEqual(@as(usize, 2), app.renderer3d.casters.items.len);
+}
+
 test "the decals a camera sees are kept, nearest first, and one whose time is up is despawned" {
     const app = try headless();
     defer app.destroy();

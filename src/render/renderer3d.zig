@@ -1299,8 +1299,9 @@ pub const Renderer3D = struct {
                     self.culled += 1;
                     continue;
                 }
-                const seen = frustum.testAabb(bounds) != .outside;
-                const casts = casting and instance.cast_shadow and !front;
+                // A shadow alone is never seen; none, never cast.
+                const seen = looks.shadows != .only and frustum.testAabb(bounds) != .outside;
+                const casts = casting and instance.cast_shadow and looks.shadows != .none and !front;
                 if (!seen) self.culled += 1;
                 if (!seen and !casts) continue;
                 kept.used = app.meshes.clock;
