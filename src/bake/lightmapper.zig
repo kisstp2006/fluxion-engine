@@ -1251,9 +1251,12 @@ test "a lamp falls off toward its range, or with the distance cut off smoothly a
     try testing.expectApproxEqAbs(lampFade(far, 1) / 2, lampFade(far, 2), 0.01);
     try testing.expectEqual(@as(f32, 0), lampFade(far, 10));
     // Never brighter than at its edge, however near: no hot spot beside it.
-    try testing.expectEqual(lampFade(far, least_lamp_distance), lampFade(far, 0.0001));
+    // As near as makes no difference, that is: the distance is counted from
+    // the edge, and the cut toward the range from where it is, which this
+    // near the lamp is a few parts in ten million.
+    try testing.expectApproxEqRel(lampFade(far, least_lamp_distance), lampFade(far, 0.0001), 1e-5);
     far.size = 0.4;
-    try testing.expectEqual(lampFade(far, 0.2), lampFade(far, 0.01));
+    try testing.expectApproxEqRel(lampFade(far, 0.2), lampFade(far, 0.01), 1e-5);
     try testing.expect(lampFade(far, 0.2) < 6);
     const edge = @cos(std.math.degreesToRadians(30.0));
     var spot: Light = .{ .kind = .spot, .color = .{ 1, 1, 1 }, .range = 10, .cone = edge, .cone_attenuation = 1, .direct = true };
