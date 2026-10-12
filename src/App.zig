@@ -645,6 +645,8 @@ pub const engine_components = .{
     components.Collider3D,
     components.Area3D,
     components.RayCast3D,
+    components.Joint3D,
+    components.PhysicalBone3D,
     components.NavigationRegion3D,
     components.NavigationAgent3D,
     components.NavigationLink3D,

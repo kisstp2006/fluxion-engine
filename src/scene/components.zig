@@ -69,6 +69,8 @@ pub const CharacterBody3D = @import("../physics3d/physics3d_components.zig").Cha
 pub const Collider3D = @import("../physics3d/physics3d_components.zig").Collider3D;
 pub const Area3D = @import("../physics3d/physics3d_components.zig").Area3D;
 pub const RayCast3D = @import("../physics3d/physics3d_components.zig").RayCast3D;
+pub const Joint3D = @import("../physics3d/physics3d_components.zig").Joint3D;
+pub const PhysicalBone3D = @import("../physics3d/physics3d_components.zig").PhysicalBone3D;
 pub const NavigationRegion3D = @import("../navigation/navigation_components.zig").NavigationRegion3D;
 pub const NavigationAgent3D = @import("../navigation/navigation_components.zig").NavigationAgent3D;
 pub const NavigationLink3D = @import("../navigation/navigation_components.zig").NavigationLink3D;
@@ -249,6 +251,8 @@ test "every engine component is one the world will accept" {
     ecs.component.check(Collider3D);
     ecs.component.check(Area3D);
     ecs.component.check(RayCast3D);
+    ecs.component.check(Joint3D);
+    ecs.component.check(PhysicalBone3D);
     ecs.component.check(NavigationRegion3D);
     ecs.component.check(NavigationAgent3D);
     ecs.component.check(NavigationLink3D);

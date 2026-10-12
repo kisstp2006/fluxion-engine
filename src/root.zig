@@ -297,6 +297,8 @@ pub const CharacterBody3D = components.CharacterBody3D;
 pub const Collider3D = components.Collider3D;
 pub const Area3D = components.Area3D;
 pub const RayCast3D = components.RayCast3D;
+pub const Joint3D = components.Joint3D;
+pub const PhysicalBone3D = components.PhysicalBone3D;
 pub const NavigationRegion3D = components.NavigationRegion3D;
 pub const NavigationAgent3D = components.NavigationAgent3D;
 pub const NavigationLink3D = components.NavigationLink3D;
@@ -623,6 +625,7 @@ test {
     _ = @import("physics/areas_test.zig");
     _ = @import("physics/bodies_test.zig");
     _ = @import("physics3d/physics3d_test.zig");
+    _ = @import("physics3d/ragdolls3d.zig");
     _ = @import("navigation/navigation_test.zig");
     _ = @import("script/code_help_test.zig");
     _ = @import("navigation/sources.zig");

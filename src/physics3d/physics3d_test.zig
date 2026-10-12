@@ -403,3 +403,65 @@ test "a mesh collider is not made again when its mesh only moves in memory, as t
     try testing.expect(std.meta.eql(shape, app.bodies3d.shapes.items[floor.index].shape));
     try testing.expectEqual(@as(usize, 1), app.bodies3d.meshes.count());
 }
+
+test "a joint holds a body to another, and to the world with none named; taken away, it lets go" {
+    const app = try headless();
+    defer app.destroy();
+    // A lamp on a chain: a link held to the ceiling, the lamp held to the link.
+    const link = try app.world.spawnWith(.{ Transform3D.at(0, 4, 0), RigidBody3D{}, Collider3D.box(.init(0.05, 0.25, 0.05)), components.Joint3D{ .position = .init(0, 0.25, 0), .connected_position = .init(0, 4.25, 0) } });
+    const lamp = try app.world.spawnWith(.{ Transform3D.at(0, 3.5, 0), RigidBody3D{}, Collider3D.sphere(0.2), components.Joint3D{ .connected = link, .position = .init(0, 0.25, 0), .connected_position = .init(0, -0.25, 0) } });
+    // Pushed sideways, it swings and keeps its length.
+    app.world.get(lamp, RigidBody3D).?.linear_velocity = .init(2, 0, 0);
+    try frames(app, 120);
+    try testing.expectEqual(@as(usize, 2), app.physics3d.jointCount());
+    const hung = app.world.get(lamp, Transform3D).?.position;
+    // No further from the ceiling than the chain and the lamp's hook reach.
+    try testing.expect(hung.sub(.init(0, 4.25, 0)).len() < 1.02);
+    try testing.expect(hung.y > 3);
+    // Disabled, the chain lets the lamp go.
+    app.world.get(lamp, components.Joint3D).?.disabled = true;
+    try frames(app, 60);
+    try testing.expectEqual(@as(usize, 1), app.physics3d.jointCount());
+    try testing.expect(app.world.get(lamp, Transform3D).?.position.y < 0);
+    try app.world.remove(link, components.Joint3D);
+    try frames(app, 1);
+    try testing.expectEqual(@as(usize, 0), app.physics3d.jointCount());
+}
+
+test "a physical bone follows its bone while it is not simulated, and the bone follows it once it is" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try floorOf(app);
+    const skeleton_table = @import("../render/skeleton.zig");
+    const bones = [_]skeleton_table.Bone{
+        .{ .name = "Hips", .rest = .{ .translation = .init(0, 1, 0) } },
+        .{ .name = "Chest", .parent = 0, .rest = .{ .translation = .init(0, 0.5, 0) } },
+    };
+    const skeleton = try app.addSkeleton("doll", try skeleton_table.Skeleton.init(app.gpa, &bones));
+    const doll = try app.world.spawnWith(.{Transform3D.at(2, 0, 0)});
+    const rig = try app.world.spawnWith(.{ Transform3D{}, Parent.of(doll), components.Skeleton3D{ .skeleton = skeleton } });
+    const hips = try app.world.spawnWith(.{ Transform3D{}, Parent.of(doll), RigidBody3D{}, Collider3D.box(.init(0.15, 0.15, 0.1)), components.PhysicalBone3D.of("Hips") });
+    const chest_body = try app.world.spawnWith(.{ Transform3D{}, Parent.of(doll), RigidBody3D{}, Collider3D.box(.init(0.15, 0.2, 0.1)), components.PhysicalBone3D.of("Chest"), components.Joint3D{ .connected = hips, .connected_position = .init(0, 0.25, 0), .position = .init(0, -0.25, 0) } });
+    try frames(app, 10);
+    // Following: kinematic, where the hips are, a metre up beside the doll.
+    try testing.expectEqual(RigidBody3D.Type.kinematic, app.world.get(hips, RigidBody3D).?.type);
+    try testing.expect(app.world.get(hips, Transform3D).?.position.sub(.init(0, 1, 0)).len() < 1e-3);
+    try testing.expect(app.bodyOf3D(hips).?.position().sub(.init(2, 1, 0)).len() < 1e-3);
+    // Simulated: it falls onto the floor, and the skeleton's hips with it.
+    var it = try @import("fluxion_ecs").Query(.{components.PhysicalBone3D}).over(&app.world);
+    while (it.next()) |chunk| for (chunk.slice(components.PhysicalBone3D)) |*part| {
+        part.simulate = true;
+    };
+    try frames(app, 180);
+    try testing.expectEqual(RigidBody3D.Type.dynamic, app.world.get(hips, RigidBody3D).?.type);
+    const globals = app.poses.globalsOf(app, rig).?;
+    const fallen = math.Transform.fromMat4(globals[0]).translation;
+    try testing.expect(fallen.y < 0.4);
+    // The chest still hangs from the hips at the joint, and its bone is
+    // where its body is.
+    const hips_at = app.bodyOf3D(hips).?.transform;
+    const chest_at = app.bodyOf3D(chest_body).?.transform;
+    try testing.expect(hips_at.apply(.init(0, 0.25, 0)).sub(chest_at.apply(.init(0, -0.25, 0))).len() < 0.02);
+    const chest = math.Transform.fromMat4(globals[1]).translation;
+    try testing.expect(chest.add(.init(2, 0, 0)).sub(chest_at.position).len() < 0.02);
+}

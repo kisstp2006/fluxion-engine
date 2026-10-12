@@ -114,7 +114,7 @@ until they are registered for scenes.
 | 2D | Sprites in one instanced draw per texture, text from one glyph atlas, cameras, animated sprites, particles, lights and shadows, tile maps, views drawn into textures |
 | 3D | Meshes and glTF models with skeletons, materials and a surface's own shader, sun, point and spot lights with shadows, baked lightmaps and probes, constructive solids, levels of detail, meshes streamed by their distance, fog, particles |
 | The interface | An immediate layout in `app.ui`, and controls as entities with themes, focus and touch buttons |
-| Physics | Rigid bodies, colliders, characters, areas, rays and picking, in 2D and in 3D |
+| Physics | Rigid bodies, colliders, characters, areas, rays and picking, in 2D and in 3D; joints and ragdolls in 3D |
 | Navigation | Navigation meshes baked from a level, agents, links and obstacles |
 | Sound | Players, buses, and sound heard from where it is in 2D and 3D |
 | Scenes | A world written as JSON or CBOR and read back, entities by UUID, scenes instanced in scenes, any file read in the background |
@@ -330,7 +330,7 @@ The rest is in folders by what it is about:
 | `core/` | The schedule of systems, commands, states, signals and events |
 | `scene/` | The tree, names, UUIDs, groups, instances, and the scene file |
 | `render/` | The 2D and 3D layers, materials and shaders, lights, particles, render views |
-| `physics/`, `physics3d/` | Bodies, areas, characters, rays and picking |
+| `physics/`, `physics3d/` | Bodies, areas, characters, rays and picking; 3D joints and ragdolls |
 | `navigation/`, `navmesh/` | Agents finding their way, and the mesh they walk baked |
 | `assets/` | The tables of files of each kind, background loading, streamed meshes |
 | `bake/`, `csg/`, `simplify/` | The lightmapper, solids cut from each other, and levels of detail made |

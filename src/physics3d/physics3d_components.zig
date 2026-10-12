@@ -2,8 +2,9 @@
 
 //! The components the 3D physics reads and writes: `RigidBody3D`,
 //! `CharacterBody3D`, `Collider3D`, `Area3D` and `RayCast3D` - the 2D ones'
-//! counterparts, in metres, with `+y` up. See `scene/components.zig` for
-//! what every component is.
+//! counterparts, in metres, with `+y` up - and `Joint3D` and
+//! `PhysicalBone3D`, which hold bodies together and make a ragdoll. See
+//! `scene/components.zig` for what every component is.
 
 const std = @import("std");
 
@@ -16,6 +17,7 @@ const InputEvent = @import("../input/input_event.zig").InputEvent;
 const Entity = @import("fluxion_ecs").Entity;
 const Rotation = @import("../scene/transform3d.zig").Rotation;
 const MeshHandle = @import("../render/mesh.zig").MeshHandle;
+const name_len = @import("../render/skeleton.zig").name_len;
 
 /// Something that moves as a solid object in the 3D world: it falls, is
 /// pushed, rolls and bounces. What it collides with is its `Collider3D`,
@@ -166,6 +168,128 @@ pub const Collider3D = extern struct {
 
     pub fn cylinder(radius: f32, height: f32) Collider3D {
         return .{ .shape = .cylinder, .radius = radius, .height = height };
+    }
+};
+
+/// This entity's body held to another's at a point, turning only as far as
+/// the joint lets it: a shoulder, a knee, a door's hinge, a lamp on a
+/// chain. Beside a `RigidBody3D`, or on a collider of one.
+///
+/// ```zig
+/// // An arm held at the shoulder, swinging in a cone and twisting a little.
+/// _ = try world.spawnWith(.{ Transform3D.at(0.6, 1.4, 0), RigidBody3D{}, Collider3D.capsule(0.06, 0.3),
+///     Joint3D{ .connected = chest, .position = .init(0, 0.15, 0), .connected_position = .init(0.2, 0.2, 0),
+///         .limit_swing = true, .swing = 1.2, .limit_twist = true, .twist_lower = -0.3, .twist_upper = 0.3 } });
+/// ```
+///
+/// The joint is a frame on each body - `position` and `rotation` on this
+/// one's, `connected_position` and `connected_rotation` on the other's,
+/// each in its body's own space - and is at rest where the two frames are
+/// one, whatever pose the bodies are in when it is made. A `ball` turns
+/// any way: its frames' `x` axes may lean apart by up to `swing`, and this
+/// one may twist about its `x` from `twist_lower` to `twist_upper`. A
+/// `hinge` turns about its frames' `z` only, from `twist_lower` to
+/// `twist_upper`. Two bodies a joint holds do not collide with each other
+/// unless `collide_connected` says so.
+pub const Joint3D = extern struct {
+    /// The body it is held to: an entity with a `RigidBody3D`, or a
+    /// collider of one. None holds it to the world, where
+    /// `connected_position` is.
+    connected: Entity = .none,
+    kind: Kind = .ball,
+    /// The joint on this body, in its own space.
+    position: math.Vec3 = .zero,
+    rotation: Rotation = .identity,
+    /// The joint on the connected body, in its own space - or the world's.
+    connected_position: math.Vec3 = .zero,
+    connected_rotation: Rotation = .identity,
+    /// A ball's cone: how far the two `x` axes may lean apart.
+    limit_swing: bool = false,
+    swing: f32 = std.math.pi / 4.0,
+    /// A ball's twist about `x`, a hinge's turn about `z`.
+    limit_twist: bool = false,
+    twist_lower: f32 = -std.math.pi / 4.0,
+    twist_upper: f32 = std.math.pi / 4.0,
+    /// Whether the two bodies still collide with each other.
+    collide_connected: bool = false,
+    /// Not holding anything while on.
+    disabled: bool = false,
+
+    pub const Kind = physics3d.joint.Kind;
+
+    pub const reflect_name = "Joint3D";
+    pub const reflect_fields = .{
+        .connected = .{attr.Doc{ .text = "The body it is held to; none holds it to the world" }},
+        .kind = .{attr.Doc{ .text = "A ball turns any way, as far as its cone and twist let it; a hinge turns about z only" }},
+        .position = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "The joint on this body, in its own space" } },
+        .rotation = .{attr.Doc{ .text = "How the joint is turned on this body" }},
+        .connected_position = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "The joint on the connected body, in its own space - or the world's" } },
+        .connected_rotation = .{attr.Doc{ .text = "How the joint is turned on the connected body" }},
+        .limit_swing = .{attr.Doc{ .text = "Whether a ball's x axes may lean apart only as far as the swing" }},
+        .swing = .{ attr.Angle{}, attr.Doc{ .text = "How far a ball's x axes may lean apart" } },
+        .limit_twist = .{attr.Doc{ .text = "Whether its twist is limited" }},
+        .twist_lower = .{ attr.Angle{}, attr.Doc{ .text = "A ball's least twist about x, a hinge's least turn about z" } },
+        .twist_upper = .{ attr.Angle{}, attr.Doc{ .text = "A ball's most twist about x, a hinge's most turn about z" } },
+        .collide_connected = .{attr.Doc{ .text = "Whether the two bodies still collide" }},
+        .disabled = .{attr.Doc{ .text = "Off, it holds nothing" }},
+    };
+
+    /// The joint as the physics takes it, between two bodies.
+    pub fn def(self: Joint3D, a: physics3d.BodyId, b: physics3d.BodyId) physics3d.JointDef {
+        return .{
+            .body_a = a,
+            .body_b = b,
+            .frame_a = .{ .position = self.connected_position, .rotation = self.connected_rotation.quat() },
+            .frame_b = .{ .position = self.position, .rotation = self.rotation.quat() },
+            .kind = self.kind,
+            .swing = if (self.limit_swing) self.swing else null,
+            .twist = if (self.limit_twist) .{ .lower = self.twist_lower, .upper = self.twist_upper } else null,
+            .collide = self.collide_connected,
+        };
+    }
+};
+
+/// A body that is one bone of a skeleton: a ragdoll's part. Beside a
+/// `RigidBody3D` - its shape a `Collider3D`, its hold on the next part up a
+/// `Joint3D` - its place is the bone's, in the world.
+///
+/// While `simulate` is off it follows the bone as it is animated, a
+/// kinematic body: what a shot hits, part by part. Turned on, it is a
+/// dynamic body from where the bone is, moving as the bone was, and the
+/// bone follows it: the skeleton falls as the bodies do. Turned off again,
+/// the bone is the animation's once more.
+pub const PhysicalBone3D = extern struct {
+    bone: [name_len]u8 = @splat(0),
+    /// The entity with the `Skeleton3D`. None takes the nearest one: under
+    /// this entity's parent, or under the parent's parent, and so up.
+    skeleton: Entity = .none,
+    simulate: bool = false,
+    /// How fast the bone moved and turned, in the world, the last frame it
+    /// was followed: what the body starts with.
+    carried_velocity: math.Vec3 = .zero,
+    carried_spin: math.Vec3 = .zero,
+    /// The skeleton it is a bone of, as last found.
+    found_skeleton: Entity = .none,
+
+    pub const reflect_name = "PhysicalBone3D";
+    pub const reflect_fields = .{
+        .bone = .{attr.Doc{ .text = "The bone it is, by its name" }},
+        .skeleton = .{attr.Doc{ .text = "The entity with the Skeleton3D; none takes the nearest one up the tree" }},
+        .simulate = .{attr.Doc{ .text = "Off it follows the bone; on, the bone follows it - a ragdoll" }},
+        .carried_velocity = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Unit{ .text = "m/s" }, attr.Doc{ .text = "How fast the bone moved, the last frame it was followed" } },
+        .carried_spin = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Unit{ .text = "rad/s" }, attr.Doc{ .text = "How fast the bone turned, the last frame it was followed" } },
+        .found_skeleton = .{ attr.ReadOnly{}, attr.Unsaved{}, attr.Doc{ .text = "The skeleton it is a bone of, as last found" } },
+    };
+
+    /// One that is the bone called `name`.
+    pub fn of(name: []const u8) PhysicalBone3D {
+        var out: PhysicalBone3D = .{};
+        @memcpy(out.bone[0..@min(name.len, name_len)], name[0..@min(name.len, name_len)]);
+        return out;
+    }
+
+    pub fn boneName(self: *const PhysicalBone3D) []const u8 {
+        return std.mem.sliceTo(&self.bone, 0);
     }
 };
 

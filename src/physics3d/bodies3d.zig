@@ -4,7 +4,9 @@
 //! `CharacterBody3D` and `Area3D` is a body and each `Collider3D` a shape,
 //! made, changed and taken away as the components are; after every step the
 //! bodies' places, turns and speeds go back into the components. The
-//! handles live here, beside the world: no component holds one.
+//! handles live here, beside the world: no component holds one. Each
+//! `Joint3D` is a joint between two of the bodies, made again whenever it
+//! or either body changed.
 //!
 //! **A collider made from a mesh** - `convex` or `mesh` - is made from the
 //! mesh's corners as its entity is scaled, once for each mesh and scale,
@@ -32,9 +34,11 @@ const RigidBody3D = components.RigidBody3D;
 const Collider3D = components.Collider3D;
 const Area3D = components.Area3D;
 const CharacterBody3D = components.CharacterBody3D;
+const Joint3D = components.Joint3D;
 const MeshInstance3D = components.MeshInstance3D;
 const BodyId = physics3d.BodyId;
 const ShapeId = physics3d.ShapeId;
+const JointId = physics3d.JointId;
 
 const Bodies3D = @This();
 const log = std.log.scoped(.fluxion_engine);
@@ -99,6 +103,11 @@ exceptions: std.AutoArrayHashMapUnmanaged(EntityPair, u32) = .empty,
 /// from, with how many shapes use each.
 hulls: std.AutoHashMapUnmanaged(MeshKey, Made(physics3d.Hull)) = .empty,
 meshes: std.AutoHashMapUnmanaged(MeshKey, Made(physics3d.Mesh)) = .empty,
+/// Each `Joint3D`'s joint, by its entity's index.
+joints: std.ArrayList(JointLink) = .empty,
+/// What a joint with no `connected` body holds to: a static body at the
+/// world's origin, made the first time one is wanted.
+anchor: BodyId = .none,
 
 /// Two entities, the lower first.
 pub const EntityPair = struct {
@@ -124,6 +133,16 @@ const BodyLink = struct {
     parent: Entity = .none,
     /// Where the body was last put, in the world.
     placed: Placed = .{},
+};
+
+const JointLink = struct {
+    entity: Entity = .none,
+    joint: JointId = .none,
+    /// The component and the two bodies the joint was made from.
+    held: Joint3D = .{},
+    a: BodyId = .none,
+    b: BodyId = .none,
+    seen: u32 = 0,
 };
 
 const ShapeLink = struct {
@@ -206,6 +225,7 @@ pub fn deinit(self: *Bodies3D, gpa: Allocator) void {
     self.ended_frame.deinit(gpa);
     self.refused.deinit(gpa);
     self.exceptions.deinit(gpa);
+    self.joints.deinit(gpa);
     var hulls = self.hulls.valueIterator();
     while (hulls.next()) |made| {
         made.held.deinit(gpa);
@@ -241,6 +261,7 @@ pub fn sync(self: *Bodies3D, app: *App) !void {
     try self.syncAreas(app);
     try self.syncColliders(app);
     try self.sweep(app);
+    try self.syncJoints(app);
 }
 
 fn grow(comptime T: type, gpa: Allocator, list: *std.ArrayList(T), len: usize, empty: T) Allocator.Error!void {
@@ -719,6 +740,47 @@ fn sweep(self: *Bodies3D, app: *App) !void {
     }
 }
 
+/// Each `Joint3D` a joint between its body and the one it names, made
+/// again when either changed - a body made anew takes its joints with it -
+/// and taken away with its component.
+fn syncJoints(self: *Bodies3D, app: *App) !void {
+    try grow(JointLink, app.gpa, &self.joints, app.world.entities.slots.items.len, .{});
+    var it = try ecs.Query(.{Joint3D}).over(&app.world);
+    while (it.next()) |chunk| {
+        for (chunk.entities, chunk.slice(Joint3D)) |e, held| {
+            const link = &self.joints.items[e.index];
+            if (!link.entity.eql(e)) {
+                if (!link.entity.isNone()) app.physics3d.destroyJoint(link.joint);
+                link.* = .{ .entity = e };
+            }
+            link.seen = self.mark;
+            const b = if (held.disabled) null else self.idOf(e);
+            const a = if (held.disabled) null else if (held.connected.isNone()) try self.anchorBody(app) else self.idOf(held.connected);
+            const wanted = b != null and a != null and !a.?.eql(b.?);
+            if (wanted and app.physics3d.joint(link.joint) != null and link.a.eql(a.?) and link.b.eql(b.?) and std.meta.eql(link.held, held)) continue;
+            app.physics3d.destroyJoint(link.joint);
+            link.* = .{ .entity = e, .held = held, .seen = self.mark };
+            if (!wanted) continue;
+            link.joint = app.physics3d.createJoint(held.def(a.?, b.?)) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.NoSuchBody, error.SameBody => continue,
+            };
+            link.a = a.?;
+            link.b = b.?;
+        }
+    }
+    for (self.joints.items) |*link| {
+        if (link.entity.isNone() or link.seen == self.mark) continue;
+        app.physics3d.destroyJoint(link.joint);
+        link.* = .{};
+    }
+}
+
+fn anchorBody(self: *Bodies3D, app: *App) !BodyId {
+    if (app.physics3d.body(self.anchor) == null) self.anchor = try app.physics3d.createBody(.{ .type = .static });
+    return self.anchor;
+}
+
 fn moved(was: Transform3D, now: Transform3D) bool {
     return !was.position.eql(now.position) or !std.meta.eql(was.rotation, now.rotation) or !was.scale.eql(now.scale) or
         was.inherit_rotation != now.inherit_rotation or was.inherit_scale != now.inherit_scale;
@@ -798,6 +860,10 @@ pub fn clear(self: *Bodies3D, app: *App) void {
         if (!link.entity.isNone()) app.physics3d.destroyBody(link.body);
     }
     for (self.shapes.items) |*link| self.release(app, link);
+    for (self.joints.items) |link| app.physics3d.destroyJoint(link.joint);
+    app.physics3d.destroyBody(self.anchor);
+    self.anchor = .none;
+    self.joints.clearRetainingCapacity();
     self.bodies.clearRetainingCapacity();
     self.shapes.clearRetainingCapacity();
     self.body_seen.clearRetainingCapacity();
