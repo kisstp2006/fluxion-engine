@@ -465,3 +465,37 @@ test "a physical bone follows its bone while it is not simulated, and the bone f
     const chest = math.Transform.fromMat4(globals[1]).translation;
     try testing.expect(chest.add(.init(2, 0, 0)).sub(chest_at.position).len() < 0.02);
 }
+
+test "a character walking down a ramp keeps to it, as far down every step: no shake" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try floorOf(app);
+    // The same ramp, walked down from the ledge at its top.
+    var slab: PrimitiveMesh3D = .of(.box);
+    slab.size = .init(6, 0.3, 3);
+    var ramp: Transform3D = .at(-6, 0.784, 0);
+    ramp.rotation = .of(.fromAxisAngle(.init(0, 0, 1), std.math.degreesToRadians(-18.0)));
+    _ = try app.world.spawnWith(.{ ramp, MeshInstance3D{}, slab, Collider3D{ .shape = .mesh } });
+    _ = try app.world.spawnWith(.{ Transform3D.at(-9.35, 0.925, 0), Collider3D.box(.init(0.65, 0.925, 1.5)) });
+    const player = try app.world.spawnWith(.{ Transform3D.at(-9.3, 1.85 + 0.92, 0), CharacterBody3D{}, Collider3D.capsule(0.4, 1.8) });
+    app.time.source = .{ .fixed = dt };
+    var last = app.world.get(player, Transform3D).?.position.y;
+    var off: usize = 0;
+    var rises: usize = 0;
+    for (0..120) |frame| {
+        const body = app.world.get(player, CharacterBody3D).?;
+        body.velocity = .init(5, body.velocity.y - 18 * dt, 0);
+        _ = try app.moveAndSlide(player);
+        _ = try app.step();
+        const now = app.world.get(player, Transform3D).?.position;
+        if (frame > 10 and now.x > -7.6 and now.x < -4.0) {
+            if (!app.world.get(player, CharacterBody3D).?.on_floor) off += 1;
+            if (now.y > last + 1e-3) rises += 1;
+            // As far down every step: the ramp's slope times the way along.
+            try testing.expectApproxEqAbs(@as(f32, 5 * dt * @tan(std.math.degreesToRadians(18.0))), last - now.y, 0.004);
+        }
+        last = now.y;
+    }
+    try testing.expectEqual(@as(usize, 0), off);
+    try testing.expectEqual(@as(usize, 0), rises);
+}

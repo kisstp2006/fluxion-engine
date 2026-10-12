@@ -182,14 +182,18 @@ pub fn moveAndSlide(app: *App, e: Entity) Error!bool {
         motion = rest.sub(normal.scale(@min(rest.dot(normal), 0)));
     }
 
-    // Walked off the top of a slope, or down a step: kept to the floor
-    // below, when it was on one and is not going up.
-    if (state.motion_mode == .grounded and state.on_floor and !out.on_floor and state.floor_snap_length > 0 and out.velocity.dot(up) <= 0) {
+    // Walked off the top of a slope, down a step, or on down a ramp: kept to
+    // the floor below, when it was on one and is not going up - every step,
+    // even one that ended within the margin of it, or a step that stayed up
+    // there would be followed by one that fell twice as far: a shake going
+    // down a ramp. What it was falling by is gone with it.
+    if (state.motion_mode == .grounded and state.on_floor and state.floor_snap_length > 0 and out.velocity.dot(up) <= 0) {
         if (try cast(app, body, up.scale(-state.floor_snap_length), state.safe_margin)) |below| {
             if (kindOf(state, up, below.normal) == .floor) {
                 try moveBy(app, e, body, up.scale(-state.floor_snap_length * below.fraction));
                 out.on_floor = true;
                 out.floor_normal = below.normal;
+                if (out.velocity.dot(up) < 0) out.velocity = out.velocity.sub(up.scale(out.velocity.dot(up)));
             }
         }
     }
