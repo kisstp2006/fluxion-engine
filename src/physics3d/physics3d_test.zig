@@ -141,6 +141,25 @@ test "a character walks, falls onto the floor, stands on it and stops at a wall"
     try testing.expectApproxEqAbs(@as(f32, 2.2), at.x, 0.03);
 }
 
+test "a character put somewhere by its transform moves on from there, not from where its body was" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try floorOf(app);
+    const player = try app.world.spawnWith(.{ Transform3D.at(0, 0.9, 0), CharacterBody3D{}, Collider3D.capsule(0.3, 1.8) });
+    app.time.source = .{ .fixed = dt };
+    try frames(app, 5);
+    // Sent across the floor between two steps, as a script respawns one.
+    app.world.get(player, Transform3D).?.position = .init(4, 0.9, -3);
+    const body = app.world.get(player, CharacterBody3D).?;
+    body.velocity = .init(1, 0, 0);
+    _ = try app.moveAndSlide(player);
+    _ = try app.step();
+    const at = app.world.get(player, Transform3D).?.position;
+    try testing.expectApproxEqAbs(@as(f32, 4 + dt), at.x, 1e-3);
+    try testing.expectApproxEqAbs(@as(f32, -3), at.z, 1e-3);
+    try testing.expect(app.physics3d.body(app.bodies3d.idOf(player).?).?.position().approxEql(at));
+}
+
 test "a character walks up a ramp of triangles onto the ledge at its top, and stops at the wall" {
     const app = try headless();
     defer app.destroy();

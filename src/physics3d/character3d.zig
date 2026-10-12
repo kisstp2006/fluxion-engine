@@ -285,7 +285,10 @@ fn upOf(state: CharacterBody3D) Vec3 {
 
 fn bodyOf(app: *App, e: Entity) Error!physics3d.BodyId {
     if (!app.world.has(e, CharacterBody3D)) return error.NotACharacter;
-    if (app.bodies3d.idOf(e)) |held| return held;
+    if (app.bodies3d.idOf(e)) |held| {
+        app.bodies3d.followTransform(app, e);
+        return held;
+    }
     app.bodies3d.sync(app) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NoBody,

@@ -408,6 +408,17 @@ pub fn movedTo(self: *Bodies3D, app: *App, e: Entity, position: Vec3, rotation: 
     link.parent = hierarchy.parentOf(&app.world, e);
 }
 
+/// A character put somewhere by its transform since the last sync - stood
+/// up at its spawn, sent through a door - has its body there too before it
+/// is moved, or the move starts from where the body was and takes it back.
+pub fn followTransform(self: *Bodies3D, app: *App, e: Entity) void {
+    if (e.index >= self.bodies.items.len) return;
+    const link = &self.bodies.items[e.index];
+    if (!link.entity.eql(e) or link.rigid == null) return;
+    const place = app.world.get(e, Transform3D) orelse return;
+    update(app, link, place.*, link.rigid.?, false);
+}
+
 /// An `Area3D` is a kinematic body that goes where its transform goes. One
 /// with a `RigidBody3D` as well is a body, and its area is passed over.
 fn syncAreas(self: *Bodies3D, app: *App) !void {
