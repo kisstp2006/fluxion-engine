@@ -627,6 +627,7 @@ pub const engine_components = .{
     components3d.Environment,
     components3d.LightmapGI,
     components3d.FogVolume,
+    components3d.Decal,
     components3d.World3D,
     components3d.Sprite3D,
     components3d.Label3D,

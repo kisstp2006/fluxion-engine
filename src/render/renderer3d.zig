@@ -31,6 +31,10 @@
 //! atlas - sixteen pictures at most in a frame - the first frame it is
 //! needed, and the light takes its colours across its cone.
 //!
+//! **Decals.** The forty-eight `Decal`s nearest the camera are laid onto
+//! the surfaces inside their boxes by the surfaces' shader, their pictures
+//! tiles of the same atlas: see `decals.zig`.
+//!
 //! **The environment.** The first `Environment` that is visible says what
 //! is behind everything, the light from everywhere, the fog, and how the
 //! light becomes a picture: exposure, tone and glow - see `post3d.zig`.
@@ -76,6 +80,7 @@ const shadows3d = @import("shadows3d.zig");
 const UniformBlocks = @import("uniform_blocks.zig").UniformBlocks;
 const View3D = @import("view3d.zig").View3D;
 const fog_volumes = @import("fog_volumes.zig");
+const decals = @import("decals.zig");
 const worlds3d = @import("worlds3d.zig");
 const billboards = @import("billboards.zig");
 
@@ -588,6 +593,13 @@ pub const Renderer3D = struct {
     fog_volumes_kept: u32 = 0,
     /// The fog volumes' block, and the world the draw sees.
     fog: rhi.Buffer,
+    /// The decals' numbers, as `decals.Block` says, and the decals the
+    /// draw keeps.
+    decal_block: rhi.Buffer,
+    decals_kept: std.ArrayList(decals.Kept) = .empty,
+    /// Every picture a lamp or a decal of the draw shines: see
+    /// `placePictures`.
+    shone: std.ArrayList(Shone) = .empty,
     /// The sprites, labels and particles: see `billboards.zig`. Null where
     /// nothing 3D is drawn.
     billboards: ?billboards.Billboards = null,
@@ -618,6 +630,8 @@ pub const Renderer3D = struct {
         errdefer device.destroyBuffer(probes);
         const fog = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(fog_volumes.Block), .dynamic = true, .label = "3D fog volumes" });
         errdefer device.destroyBuffer(fog);
+        const decal_block = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(decals.Block), .dynamic = true, .label = "3D decals" });
+        errdefer device.destroyBuffer(decal_block);
         const lightmap_sampler = try device.createSampler(.{});
         errdefer device.destroySampler(lightmap_sampler);
         const atlas_format = atlasFormat(device);
@@ -644,6 +658,7 @@ pub const Renderer3D = struct {
             .shadows = shadow_block,
             .probes = probes,
             .fog = fog,
+            .decal_block = decal_block,
             .lightmap_sampler = lightmap_sampler,
             .atlas_format = atlas_format,
             .no_shadow = no_shadow,
@@ -720,6 +735,7 @@ pub const Renderer3D = struct {
         device.destroyBuffer(self.shadows);
         device.destroyBuffer(self.probes);
         device.destroyBuffer(self.fog);
+        device.destroyBuffer(self.decal_block);
         device.destroySampler(self.lightmap_sampler);
         if (self.atlas) |atlas| device.destroyTexture(atlas);
         if (self.shadow_cache) |*cache| cache.deinit(gpa);
@@ -746,6 +762,8 @@ pub const Renderer3D = struct {
         self.items.deinit(gpa);
         self.staging.deinit(gpa);
         self.lamps.deinit(gpa);
+        self.decals_kept.deinit(gpa);
+        self.shone.deinit(gpa);
         self.looks.deinit(gpa);
         self.look_found.deinit(gpa);
         self.surface_looks.deinit(gpa);
@@ -834,7 +852,13 @@ pub const Renderer3D = struct {
         for (self.items.items) |item| self.staging.appendAssumeCapacity(self.gathered.items[item.instance]);
         for (self.shadow_items.items) |shadowed| self.staging.appendAssumeCapacity(self.gathered.items[shadowed.item.instance]);
         try self.upload(gpa);
-        try self.placeCookies(gpa);
+        try decals.gather(app, &self.decals_kept, view, frustum, self.worlds);
+        try self.placePictures(gpa);
+        const bottom_left = device.caps().features.render_target_origin_bottom_left;
+        for (self.decals_kept.items) |*decal| if (!decal.picture.isNone()) {
+            decal.place = cookieRect(decal.tile, bottom_left);
+        };
+        try device.updateBuffer(self.decal_block, 0, std.mem.asBytes(&decals.blockOf(self.decals_kept.items)));
         try self.uploadFrame(app, drawn_view, view_projection, environment, lighting);
         const fog = try fog_volumes.gather(app, view, frustum, @floatCast(app.interface.seconds), self.worlds);
         self.fog_volumes_kept = @intFromFloat(fog.count[0]);
@@ -995,6 +1019,7 @@ pub const Renderer3D = struct {
         try bind.texture(shader3d.cookie_slot, self.cookie_atlas orelse self.white, self.cookieSampler());
         try bind.uniform(shader3d.probes_slot, self.probes);
         try bind.uniform(fog_volumes.slot, self.fog);
+        try bind.uniform(decals.slot, self.decal_block);
         try bind.texture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
     }
 
@@ -1612,13 +1637,21 @@ pub const Renderer3D = struct {
         self.atlas_fresh = false;
     }
 
-    /// Every kept lamp's cookie into a tile of the cookie atlas: the one that
-    /// holds its picture already, or one no lamp of this draw needs, into
-    /// which it is drawn.
-    fn placeCookies(self: *Renderer3D, gpa: Allocator) !void {
-        var wanted = false;
-        for (self.lamps.items) |lamp| wanted = wanted or !lamp.cookie.isNone();
-        if (!wanted) return;
+    /// A picture a lamp or a decal of the draw shines onto surfaces, and
+    /// the tile of the atlas it is in: both the keeper's own.
+    const Shone = struct {
+        picture: *rhi.Texture,
+        tile: *u32,
+    };
+
+    /// Every kept lamp's cookie and every kept decal's picture into a tile
+    /// of the cookie atlas: the one that holds the picture already, or one
+    /// nothing of this draw needs, into which it is drawn.
+    fn placePictures(self: *Renderer3D, gpa: Allocator) !void {
+        self.shone.clearRetainingCapacity();
+        for (self.lamps.items) |*lamp| if (!lamp.cookie.isNone()) try self.shone.append(gpa, .{ .picture = &lamp.cookie, .tile = &lamp.cookie_tile });
+        for (self.decals_kept.items) |*decal| if (!decal.picture.isNone()) try self.shone.append(gpa, .{ .picture = &decal.picture, .tile = &decal.tile });
+        if (self.shone.items.len == 0) return;
         const device = self.device;
         var fresh = false;
         if (self.cookie_atlas == null) {
@@ -1635,29 +1668,29 @@ pub const Renderer3D = struct {
 
         var used: [cookie_across * cookie_across]bool = @splat(false);
         var drawn: [cookie_across * cookie_across]bool = @splat(false);
-        // Those already there first, so a new picture takes a tile no lamp keeps.
-        for (self.lamps.items) |*lamp| {
-            if (lamp.cookie.isNone()) continue;
-            for (self.cookie_tiles, 0..) |held, at| if (held == lamp.cookie) {
-                lamp.cookie_tile = @intCast(at);
+        // Those already there first, so a new picture takes a tile nothing keeps.
+        for (self.shone.items) |one| {
+            for (self.cookie_tiles, 0..) |held, at| if (held == one.picture.*) {
+                one.tile.* = @intCast(at);
                 used[at] = true;
                 break;
             };
         }
-        for (self.lamps.items) |*lamp| {
-            if (lamp.cookie.isNone() or self.cookie_tiles[lamp.cookie_tile] == lamp.cookie) continue;
+        for (self.shone.items) |one| {
+            if (one.picture.isNone() or self.cookie_tiles[one.tile.*] == one.picture.*) continue;
             const free = std.mem.indexOfScalar(bool, &used, false) orelse {
-                // More pictures than tiles: this one shines plain.
-                lamp.cookie = .none;
+                // More pictures than tiles: this lamp shines plain, this
+                // decal is left out.
+                one.picture.* = .none;
                 continue;
             };
             used[free] = true;
             drawn[free] = true;
-            self.cookie_tiles[free] = lamp.cookie;
-            lamp.cookie_tile = @intCast(free);
-            // Another lamp with the same picture finds it there.
-            for (self.lamps.items) |*other| if (other.cookie == lamp.cookie) {
-                other.cookie_tile = @intCast(free);
+            self.cookie_tiles[free] = one.picture.*;
+            one.tile.* = @intCast(free);
+            // Another with the same picture finds it there.
+            for (self.shone.items) |other| if (other.picture.* == one.picture.*) {
+                other.tile.* = @intCast(free);
             };
         }
         if (std.mem.indexOfScalar(bool, &drawn, true) == null and !fresh) return;

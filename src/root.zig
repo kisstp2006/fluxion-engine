@@ -263,6 +263,7 @@ pub const PointLight3D = components.PointLight3D;
 pub const SpotLight3D = components.SpotLight3D;
 pub const Environment = components.Environment;
 pub const FogVolume = components.FogVolume;
+pub const Decal = components.Decal;
 pub const World3D = components.World3D;
 pub const Sprite3D = components.Sprite3D;
 pub const Label3D = components.Label3D;
@@ -308,6 +309,7 @@ pub const particles = @import("render/particles.zig");
 pub const particles3d = @import("render/particles3d.zig");
 pub const billboards = @import("render/billboards.zig");
 pub const fog_volumes = @import("render/fog_volumes.zig");
+pub const decals = @import("render/decals.zig");
 pub const worlds3d = @import("render/worlds3d.zig");
 
 /// Light in the 2D world, and the shadows it casts: see `lights.zig`.
@@ -686,6 +688,7 @@ test {
     _ = @import("reflect/property.zig");
     _ = @import("render/GlyphAtlas.zig");
     _ = @import("render/debug_views.zig");
+    _ = @import("render/decals.zig");
     _ = @import("render/drawing.zig");
     _ = @import("render/lighting.zig");
     _ = @import("render/lights.zig");

@@ -649,6 +649,28 @@ test "the fog volumes a camera sees are kept, nearest first, eight at most, and 
     try testing.expectEqual(@as(u32, 0), app.renderer3d.fog_volumes_kept);
 }
 
+test "the decals a camera sees are kept, nearest first, and one whose time is up is despawned" {
+    const app = try headless();
+    defer app.destroy();
+    const Decal = components.Decal;
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    for (0..60) |i| _ = try app.world.spawnWith(.{ Transform3D.at(@as(f32, @floatFromInt(i % 10)) * 0.1, 0, 0.5), Decal{ .size = .init(0.2, 0.2, 0.2) } });
+    // Behind the camera, and with nothing of it showing: not laid on.
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 40), Decal{} });
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0.5), Decal{ .color = .{ .r = 1, .g = 1, .b = 1, .a = 0 } } });
+    _ = try app.step();
+    try testing.expectEqual(@as(usize, 48), app.renderer3d.decals_kept.items.len);
+
+    // A hole that lasts a little: older each frame, gone when its time is up.
+    app.time.source = .{ .fixed = 1.0 / 60.0 };
+    const hole = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0.5), Decal{ .lifetime = 0.05, .fade = 0.05 } });
+    _ = try app.step();
+    try testing.expect(app.world.get(hole, Decal).?.age > 0);
+    for (0..4) |_| _ = try app.step();
+    try testing.expect(!app.world.isAlive(hole));
+}
+
 test "sprites, labels and particles are drawn as quads in the 3D pass, those of another world and those behind the camera left out" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
     defer threaded.deinit();

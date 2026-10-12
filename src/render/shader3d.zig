@@ -64,6 +64,7 @@ const material = @import("material.zig");
 const mesh = @import("mesh.zig");
 const shadows3d = @import("shadows3d.zig");
 const fog_volumes = @import("fog_volumes.zig");
+const decals = @import("decals.zig");
 const Material3DData = @import("render3d_components.zig").Material3DData;
 
 const log = std.log.scoped(.fluxion_engine);
@@ -195,7 +196,7 @@ pub const Probes = extern struct {
     energy: [4]f32,
 };
 
-const engine_part = engine_head ++ fog_volumes.shader_part ++ engine_tail;
+const engine_part = engine_head ++ fog_volumes.shader_part ++ decals.shader_part ++ engine_tail;
 
 const engine_head =
     \\// The engine's part: what a 3D shader's file reads, and the vertex stage.
@@ -738,7 +739,7 @@ pub const prologue_len: u32 = prologue.len;
 /// What it ends with: the surface lit. One line, written before the
 /// stage's `}`.
 const epilogue = " if (ALPHA < FEEL.z) { discard; }" ++
-    " target = vec4(lit(ALBEDO, METALLIC, ROUGHNESS, EMISSION, NORMAL_MAP, AO, WORLD_POSITION, WORLD_NORMAL, WORLD_TANGENT, LIGHT_LIST_0, LIGHT_LIST_1, GI_AT), ALPHA); ";
+    " target = vec4(lit(decals(ALBEDO, WORLD_POSITION, WORLD_NORMAL), METALLIC, ROUGHNESS, EMISSION, NORMAL_MAP, AO, WORLD_POSITION, WORLD_NORMAL, WORLD_TANGENT, LIGHT_LIST_0, LIGHT_LIST_1, GI_AT), ALPHA); ";
 
 pub const epilogue_len: u32 = epilogue.len;
 
@@ -1166,7 +1167,7 @@ fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, sk
 /// block there, which the device binds nothing to.
 fn blockNames(module: *shader.Module) ![]const [:0]const u8 {
     const arena = module.arena.allocator();
-    const names = try arena.alloc([:0]const u8, @max(@max(@max(shadows_slot, probes_slot), skin_slot), fog_volumes.slot) + 1);
+    const names = try arena.alloc([:0]const u8, @max(@max(@max(@max(shadows_slot, probes_slot), skin_slot), fog_volumes.slot), decals.slot) + 1);
     @memset(names, "");
     for (module.blocks) |block| names[block.slot] = try arena.dupeZ(u8, block.name);
     return names;
@@ -1286,7 +1287,7 @@ fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []con
     // One block of its own, at its slot, and no textures but the engine's.
     var params: ?shader.Block = null;
     for (module.blocks) |block| {
-        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot or block.slot == fog_volumes.slot or (skinned and block.slot == skin_slot)) continue;
+        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot or block.slot == fog_volumes.slot or block.slot == decals.slot or (skinned and block.slot == skin_slot)) continue;
         if (block.slot != params_slot or params != null) {
             problems.print("a 3D shader's own numbers are one uniform block, at slot {d}: `{s}` is at {d}\n", .{ params_slot, block.name, block.slot }) catch {};
             return error.ShaderFailed;

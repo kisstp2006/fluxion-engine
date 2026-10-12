@@ -637,6 +637,44 @@ pub const FogVolume = extern struct {
     };
 };
 
+/// A picture laid onto whatever is inside a box in the 3D world, beside a
+/// `Transform3D`: a bullet's hole in a wall, a scorch on a floor, a painted
+/// line. It is shone along the box's own `-z`, its top the box's `y`, onto
+/// every lit surface inside - bending over a corner as the surface does -
+/// and replaces the surface's colour there by its picture's alpha. The
+/// forty-eight nearest the camera are drawn, and sixteen different pictures
+/// at once, the lights' cookies among them. With a `lifetime` it fades and
+/// is despawned when its time is up. See `render/decals.zig`.
+pub const Decal = extern struct {
+    /// The picture laid on, by its alpha. None is a soft round dot of its
+    /// colour.
+    texture: assets.TextureHandle = .none,
+    /// The box's whole size along its own axes, in metres, before its
+    /// transform's scale: how wide and tall the picture is, and how deep
+    /// into what it is laid on it reaches.
+    size: math.Vec3 = .init(1, 1, 0.5),
+    /// Multiplied into the picture; its alpha is how much of the surface
+    /// it covers.
+    color: Color = .white,
+    /// How long it lasts, in seconds: nought for ever.
+    lifetime: f32 = 0,
+    /// Over how many of its last seconds it fades away.
+    fade: f32 = 1,
+    /// How long it has been there, in seconds: counted for one with a
+    /// `lifetime`.
+    age: f32 = 0,
+
+    pub const reflect_name = "Decal";
+    pub const reflect_fields = .{
+        .texture = .{attr.Doc{ .text = "The picture laid on, by its alpha; none is a soft round dot" }},
+        .size = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "The box's width, height and depth: what is inside takes the picture" } },
+        .color = .{attr.Doc{ .text = "Multiplied into the picture; its alpha is how much it covers" }},
+        .lifetime = .{ attr.Group{ .name = "Lifetime" }, attr.Unit{ .text = "s" }, attr.Range{ .min = 0, .max = 3600 }, attr.Doc{ .text = "How long it lasts before it is despawned; nought for ever" } },
+        .fade = .{ attr.Unit{ .text = "s" }, attr.Range{ .min = 0, .max = 60 }, attr.Doc{ .text = "Over how many of its last seconds it fades away" } },
+        .age = .{ attr.Unit{ .text = "s" }, attr.Doc{ .text = "How long it has been there, counted for one with a lifetime" } },
+    };
+};
+
 /// How a picture in the 3D world faces: turned as its entity is, always at
 /// the camera, or at the camera turning only about its up - a tree, a lamp
 /// post, what stands upright.

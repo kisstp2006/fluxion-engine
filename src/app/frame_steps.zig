@@ -29,6 +29,7 @@ const hierarchy = @import("../scene/hierarchy.zig");
 const layers = @import("../render/layers.zig");
 const particles = @import("../render/particles.zig");
 const particles3d = @import("../render/particles3d.zig");
+const decals = @import("../render/decals.zig");
 const ray_casts = @import("../physics/ray_casts.zig");
 const ray_casts3d = @import("../physics3d/ray_casts3d.zig");
 const sprite_frames = @import("../animation/sprite_frames.zig");
@@ -380,6 +381,7 @@ fn sound(app: *App) anyerror!void {
 fn emitters(app: *App) anyerror!void {
     try particles.update(app, app.time.delta, .game);
     try particles3d.update(app, app.time.delta, .game);
+    try decals.age(app, app.time.delta);
 }
 
 /// The scripts of the dead, and of what lost its `Script`, hear `exit` in
