@@ -13,6 +13,9 @@ const flux = @import("fluxion_script");
 const reflect = @import("fluxion_reflect");
 
 const App = @import("../App.zig");
+const Project = @import("../project/Project.zig");
+const Transform2D = @import("../scene/components.zig").Transform2D;
+const Parent = @import("../scene/components.zig").Parent;
 const attr = @import("../reflect/attr.zig");
 const InputEvent = @import("../input/input_event.zig").InputEvent;
 
@@ -212,4 +215,108 @@ test "a value of one kind only is checked as one where the engine takes it, thou
     try testing.expectEqualStrings("the argument must be Image, not int", messages.items[0]);
     try testing.expectEqualStrings("the argument must be Image, not string", messages.items[1]);
     try testing.expectEqualStrings("the argument must be task, not int", messages.items[2]);
+}
+
+fn labelled(items: []const Item, label: []const u8) usize {
+    var count: usize = 0;
+    for (items) |item| count += @intFromBool(std.mem.eql(u8, item.label, label));
+    return count;
+}
+
+test "inside the quotes of a call, what its text names is offered: an entity, a group, a bus, a debug view, a file of its kind" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [160]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buffer, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try Project.writeSettings(testing.allocator, testing.io, root, .{ .application = .{ .name = "Named" } });
+    for ([_][]const u8{ "levels", "art", "scripts", ".hidden" }) |folder| try tmp.dir.createDirPath(testing.io, folder);
+    for ([_][]const u8{ "levels/one.scene", "levels/two.json", "art/hero.png", "art/hero.png.uid", "scripts/door.flux", ".hidden/three.scene" }) |file| {
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = file, .data = "" });
+    }
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = root });
+    defer app.destroy();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const level = try app.world.spawnWith(.{Transform2D{}});
+    try app.setName(level, "Level");
+    const player = try app.world.spawnWith(.{ Transform2D{}, Parent{ .entity = level } });
+    try app.setName(player, "Player");
+    // Two doors, in different places: one name.
+    const door = try app.world.spawnWith(.{ Transform2D{}, Parent{ .entity = level } });
+    try app.setName(door, "Door");
+    const other = try app.world.spawnWith(.{ Transform2D{}, Parent{ .entity = player } });
+    try app.setName(other, "Door");
+    try app.addToGroup(door, "doors");
+
+    // An entity by its name, once, with where it is.
+    var items = try offered(arena, app, "fn f() { app.find(\"$\"); }");
+    try testing.expectEqual(@as(usize, 1), labelled(items, "Player"));
+    try testing.expectEqual(@as(usize, 1), labelled(items, "Door"));
+    try testing.expectEqualStrings("/Level/Player", named(items, "Player").?.detail);
+    // The same on an entity, where the entity is no argument - and only
+    // where the name goes.
+    items = try offered(arena, app, "struct A { fn ready(self) { self.entity.childNamed(\"$\"); } }");
+    try testing.expectEqual(@as(usize, 1), labelled(items, "Door"));
+    items = try offered(arena, app, "fn f(e: Entity) { app.childNamed(e, \"$\"); }");
+    try testing.expectEqual(@as(usize, 1), labelled(items, "Player"));
+    try testing.expectEqual(@as(usize, 0), (try offered(arena, app, "fn f(e: Entity) { app.setName(e, \"$\"); }")).len);
+    // By the way to it, each of them.
+    items = try offered(arena, app, "fn f(e: Entity) { app.findPath(e, \"$\"); }");
+    try testing.expectEqual(@as(usize, 1), labelled(items, "/Level/Door"));
+    try testing.expectEqual(@as(usize, 1), labelled(items, "/Level/Player/Door"));
+
+    items = try offered(arena, app, "fn f(e: Entity) { e.addToGroup(\"$\"); }");
+    try testing.expectEqual(@as(usize, 1), labelled(items, "doors"));
+    items = try offered(arena, app, "fn f() { app.callGroup(\"$\", \"open\"); }");
+    try testing.expectEqual(@as(usize, 1), labelled(items, "doors"));
+    try testing.expectEqual(@as(usize, 0), (try offered(arena, app, "fn f() { app.callGroup(\"doors\", \"$\"); }")).len);
+
+    items = try offered(arena, app, "fn f() { app.setBusVolumeDb(\"$\", -6); }");
+    try testing.expectEqual(@as(usize, 1), labelled(items, "Master"));
+    items = try offered(arena, app, "fn f() { app.setDebugView(\"$\", true); }");
+    try testing.expectEqual(@as(usize, 1), labelled(items, "colliders"));
+
+    // A scene where a scene goes: not a picture, a `.uid` file beside one,
+    // or what is in a hidden folder.
+    items = try offered(arena, app, "fn f() { app.readScene(\"$\"); }");
+    try testing.expectEqual(@as(usize, 1), labelled(items, "res://levels/one.scene"));
+    try testing.expectEqual(@as(usize, 1), labelled(items, "res://levels/two.json"));
+    try testing.expectEqual(@as(usize, 2), items.len);
+    // Any file the engine reads, where any goes.
+    for ([_][]const u8{
+        "fn f() { app.loadInBackground(\"$\"); }",
+        "fn f() { const text = files.readText(\"$\"); }",
+        "fn f() { files.copy(\"res://art/hero.png\", \"$\"); }",
+    }) |source| {
+        items = try offered(arena, app, source);
+        try testing.expectEqual(@as(usize, 1), labelled(items, "res://art/hero.png"));
+        try testing.expectEqual(@as(usize, 1), labelled(items, "res://scripts/door.flux"));
+        try testing.expectEqual(@as(usize, 4), items.len);
+    }
+    try testing.expectEqualStrings("texture", named(items, "res://art/hero.png").?.detail);
+    items = try offered(arena, app, "fn f() { const picture = images.read(\"$\"); }");
+    try testing.expectEqual(@as(usize, 1), items.len);
+    // Text that names nothing of the engine's is offered nothing.
+    try testing.expectEqual(@as(usize, 0), (try offered(arena, app, "fn f() { files.writeText(\"user://a.txt\", \"$\"); }")).len);
+}
+
+test "where a call takes a component by name only the engine's types are offered, and where it takes a choice, the choices first" {
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io });
+    defer app.destroy();
+    var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var items = try offered(arena, app, "struct A { fn ready(self) { self.entity.get(Sp$); } }");
+    try testing.expect(named(items, "Sprite") != null);
+    try testing.expect(named(items, "Transform2D") != null);
+    // Not a choice a field takes, a call, or a keyword.
+    for ([_][]const u8{ "Key", "WindowMode", "print", "app", "self", "return" }) |other| try testing.expect(named(items, other) == null);
+
+    items = try offered(arena, app, "fn f() { app.setWindowMode(wi$); }");
+    try testing.expectEqual(@as(u8, 0), (named(items, ".windowed") orelse return error.NotOffered).rank);
+    try testing.expect(named(items, ".fullscreen") != null);
+    try testing.expect(named(items, "app") != null);
 }
