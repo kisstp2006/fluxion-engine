@@ -50,6 +50,9 @@ pub const View3D = struct {
     height: f32 = 1,
     /// The render layers it sees.
     cull_mask: u32 = 0xFFFF_FFFF,
+    /// The render layers it draws over everything else: see
+    /// `Camera3D.front_layers`.
+    front_layers: u32 = 0,
     /// The `RenderView` this is drawn for, if it is one's.
     render_view: ecs.Entity = .none,
     /// The `World3D` it sees, `.none` for the main world: the one its
@@ -71,6 +74,7 @@ pub const View3D = struct {
             .width = width,
             .height = height,
             .cull_mask = camera.cull_mask,
+            .front_layers = camera.front_layers,
         };
     }
 

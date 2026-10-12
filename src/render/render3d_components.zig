@@ -334,6 +334,12 @@ pub const Camera3D = extern struct {
     current: bool = false,
     /// The render layers it sees.
     cull_mask: u32 = 0xFFFF_FFFF,
+    /// The render layers it draws over everything else, after the rest and
+    /// with a depth of their own: a first-person weapon, which then never
+    /// sinks into a wall it is held against. What is on them - a mesh's own
+    /// `layers`, or an `Appearance`'s `render_layers` over it - casts no
+    /// shadow into the world.
+    front_layers: u32 = 0,
 
     pub const Projection = enum(u8) {
         /// Further is smaller.
@@ -350,6 +356,7 @@ pub const Camera3D = extern struct {
         .far = .{ attr.Range{ .min = 0.01, .max = 1_000_000 }, attr.Doc{ .text = "Nothing further is drawn" } },
         .current = .{attr.Doc{ .text = "The one the screen is seen through" }},
         .cull_mask = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it sees" } },
+        .front_layers = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it draws over everything else, with a depth of their own: a first-person weapon" } },
     };
 };
 

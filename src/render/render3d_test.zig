@@ -649,6 +649,23 @@ test "the fog volumes a camera sees are kept, nearest first, eight at most, and 
     try testing.expectEqual(@as(u32, 0), app.renderer3d.fog_volumes_kept);
 }
 
+test "what is on a camera's front layers is drawn last, over the world, and casts no shadow" {
+    const app = try headless();
+    defer app.destroy();
+    const eye = try looking(app);
+    app.world.get(eye, Camera3D).?.front_layers = 2;
+    // A wall, and a weapon behind it - in it, as one held against a wall is.
+    _ = try boxAt(app, 0, 0, 1);
+    const weapon = try boxAt(app, 0, 0, -1);
+    try app.world.add(weapon, Appearance{ .render_layers = 2 });
+    _ = try app.world.spawnWith(.{ Transform3D{}, components.DirectionalLight3D{ .shadow = true } });
+    _ = try app.step();
+    const items = app.renderer3d.items.items;
+    try testing.expectEqual(@as(usize, 2), items.len);
+    try testing.expect(!items[0].front and items[1].front);
+    for (app.renderer3d.casters.items) |caster| try testing.expect(!caster.item.front);
+}
+
 test "the decals a camera sees are kept, nearest first, and one whose time is up is despawned" {
     const app = try headless();
     defer app.destroy();

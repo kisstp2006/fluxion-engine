@@ -256,6 +256,9 @@ const Binder = struct {
 const Item = struct {
     way: u8,
     transparent: bool,
+    /// Drawn over everything else, with a depth of its own: on one of the
+    /// view's `front_layers`.
+    front: bool = false,
     compiled: *shader3d.Compiled,
     gpu: mesh.Gpu,
     /// The whole mesh's indices, or a coarser level's.
@@ -288,6 +291,7 @@ const Item = struct {
     }
 
     fn before(_: void, a: Item, b: Item) bool {
+        if (a.front != b.front) return !a.front;
         if (a.transparent != b.transparent) return !a.transparent;
         if (a.transparent) return a.depth > b.depth;
         return switch (order(a, b)) {
@@ -318,7 +322,7 @@ const Item = struct {
 
     /// Whether `b` is drawn in the same draw as `a`.
     fn joins(a: Item, b: Item) bool {
-        return order(a, b) == .eq and std.meta.eql(a.gpu, b.gpu);
+        return a.front == b.front and order(a, b) == .eq and std.meta.eql(a.gpu, b.gpu);
     }
 };
 
@@ -896,7 +900,26 @@ pub const Renderer3D = struct {
         const items = self.items.items;
         var bind: Binder = .{ .list = list };
         var start: usize = 0;
+        var fronted = false;
         while (start < items.len) {
+            // What is drawn over everything comes last: the world's own
+            // pictures first, then a pass of its own, the picture kept and
+            // the depth cleared.
+            if (items[start].front and !fronted) {
+                fronted = true;
+                try flat.drawRest(pass);
+                try list.endPass();
+                try list.beginPass(.{
+                    .color = .{
+                        .target = .{ .texture = targets.drawnInto() },
+                        .load = .load,
+                        .resolve = if (targets.multisampled != null) .{ .texture = targets.light } else null,
+                    },
+                    .depth = .{ .texture = targets.depth, .load = .clear },
+                });
+                try list.setViewport(.{ .width = @floatFromInt(drawn_width), .height = @floatFromInt(drawn_height) });
+                bind = .{ .list = list, .skipped = bind.skipped };
+            }
             var end = start + 1;
             while (end < items.len and Item.joins(items[start], items[end])) end += 1;
             var first = items[start];
@@ -904,7 +927,7 @@ pub const Renderer3D = struct {
             // the see-through ones among the see-through, the furthest
             // first: they bind what they draw with, and the pass's bindings
             // are not known after them.
-            if (first.transparent) if (try flat.drawFurtherThan(pass, first.depth)) {
+            if (first.transparent and !fronted) if (try flat.drawFurtherThan(pass, first.depth)) {
                 bind = .{ .list = list, .skipped = bind.skipped };
             };
             // A shader whose pipeline the device refuses is drawn as the
@@ -928,7 +951,7 @@ pub const Renderer3D = struct {
             self.triangles += @as(u64, first.index_count / 3) * (end - start);
             start = end;
         }
-        try flat.drawRest(pass);
+        if (!fronted) try flat.drawRest(pass);
         try list.endPass();
         try device.submit();
         self.drawn = @intCast(items.len);
@@ -952,7 +975,7 @@ pub const Renderer3D = struct {
         var bind: Binder = .{ .list = list };
         defer self.bindings_skipped += bind.skipped;
         var start: usize = 0;
-        while (start < items.len and !items[start].transparent) {
+        while (start < items.len and !items[start].transparent and !items[start].front) {
             var end = start + 1;
             while (end < items.len and Item.joins(items[start], items[end])) end += 1;
             defer start = end;
@@ -1251,6 +1274,7 @@ pub const Renderer3D = struct {
                 if (!self.worlds.admits(app, entity)) continue;
                 const looks = app.inherited.of(gpa, &app.world, entity);
                 if (!looks.visible) continue;
+                const front = (instance.layers | looks.render_layers) & view.front_layers != 0;
                 const kept: *mesh.Kept = try app.meshDrawnBy(entity, instance) orelse continue;
                 if (kept.mesh.indices.len == 0) continue;
                 // A mesh a skeleton bends is drawn in the skeleton's space,
@@ -1264,7 +1288,7 @@ pub const Renderer3D = struct {
                     continue;
                 }
                 const seen = frustum.testAabb(bounds) != .outside;
-                const casts = casting and instance.cast_shadow;
+                const casts = casting and instance.cast_shadow and !front;
                 if (!seen) self.culled += 1;
                 if (!seen and !casts) continue;
                 kept.used = app.meshes.clock;
@@ -1298,6 +1322,7 @@ pub const Renderer3D = struct {
                     const item: Item = .{
                         .way = drawn.way,
                         .transparent = drawn.blend,
+                        .front = front,
                         .compiled = compiled,
                         .gpu = gpu,
                         .index_buffer = index_buffer,
