@@ -102,8 +102,8 @@
         // Rigid bodies in space, for the 3D world: stepped beside the 2D
         // ones after each `.fixed` stage.
         .fluxion_physics3d = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-physics3d#a9838702270a5f251faaebea0a10177d5ded5b1f",
-            .hash = "fluxion_physics3d-0.1.0-44tGdufSAwD2euckJypG3bRrM65OAvWUoG89YhoPTa5k",
+            .url = "git+https://github.com/kisstp2006/fluxion-physics3d#5898313d14a7e9da10540966c63a806d3a904d42",
+            .hash = "fluxion_physics3d-0.1.0-44tGdiLdAwBQdlJU4liYceoeZMtx694cEnmqGcEoa1T-",
         },
 
         // The components and the engine's calls, described at run time: what
