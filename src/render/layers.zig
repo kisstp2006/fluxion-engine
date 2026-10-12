@@ -20,6 +20,7 @@ const image = @import("fluxion_image");
 const App = @import("../App.zig");
 const cameras = @import("cameras.zig");
 const view3d = @import("view3d.zig");
+const skyboxes = @import("skyboxes.zig");
 const View3D = view3d.View3D;
 const Lighting = @import("renderer3d.zig").Lighting;
 const view_textures = @import("view_textures.zig");
@@ -67,8 +68,13 @@ fn drawLayers(app: *App, into: rhi.RenderTarget, width: f32, height: f32) !void 
 fn drawLayersInto(app: *App, into: rhi.RenderTarget, area: GameArea, width: f32, height: f32) !void {
     // 1. The 3D layer, through the current 3D camera when there is one,
     //    with a depth test, clearing the frame: the 2D layer goes over it.
+    //    A skybox first, clearing it, and the world over it.
     var clear: ?Color = app.clear_color;
     if (app.world_on_screen) if (view3d.currentCamera(app)) |camera| if (view3d.viewOf(app, camera, width, height)) |seen| {
+        if (skyboxes.viewFor(app, seen)) |sky| {
+            try app.renderer3d.draw(app, into, area.width, area.height, sky, clear, .{ .antialias = true });
+            clear = null;
+        }
         try draw3D(app, into, area.width, area.height, seen, clear, .{ .antialias = true });
         clear = null;
     };

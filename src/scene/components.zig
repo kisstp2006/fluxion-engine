@@ -52,6 +52,7 @@ pub const LightmapGI = @import("../render/render3d_components.zig").LightmapGI;
 pub const FogVolume = @import("../render/render3d_components.zig").FogVolume;
 pub const Decal = @import("../render/render3d_components.zig").Decal;
 pub const World3D = @import("../render/render3d_components.zig").World3D;
+pub const SkyBox3D = @import("../render/render3d_components.zig").SkyBox3D;
 pub const Sprite3D = @import("../render/render3d_components.zig").Sprite3D;
 pub const Label3D = @import("../render/render3d_components.zig").Label3D;
 pub const Particles3D = @import("../render/particles3d.zig").Particles3D;
@@ -255,6 +256,7 @@ test "every engine component is one the world will accept" {
     ecs.component.check(FogVolume);
     ecs.component.check(Decal);
     ecs.component.check(World3D);
+    ecs.component.check(SkyBox3D);
     ecs.component.check(Sprite3D);
     ecs.component.check(Label3D);
     ecs.component.check(Particles3D);

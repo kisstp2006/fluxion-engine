@@ -819,6 +819,30 @@ pub const World3D = extern struct {
     pub const reflect_name = "World3D";
 };
 
+/// Beside a `World3D`: what is under it is the land round the level, made
+/// small, and drawn behind the main world as if it were as large as it
+/// stands for - a 3D skybox, as Counter-Strike's maps have. See
+/// `render/skyboxes.zig`.
+pub const SkyBox3D = extern struct {
+    /// How many metres of the main world one of the skybox stands for.
+    scale: f32 = 16,
+    /// Where in the skybox, in its own space, the main world's origin is:
+    /// where a camera at the main world's origin sees it from.
+    origin: math.Vec3 = .zero,
+    /// How near and how far the skybox's camera sees, in the skybox's own
+    /// metres.
+    near: f32 = 0.1,
+    far: f32 = 2000,
+
+    pub const reflect_name = "SkyBox3D";
+    pub const reflect_fields = .{
+        .scale = .{ attr.Range{ .min = 0.001, .max = 1000 }, attr.Doc{ .text = "How many metres of the main world one of the skybox stands for" } },
+        .origin = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "Where in the skybox the main world's origin is seen from" } },
+        .near = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0.0001, .max = 1000 }, attr.Doc{ .text = "How near the skybox's camera sees, in its own metres" } },
+        .far = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 1, .max = 1000000 }, attr.Doc{ .text = "How far the skybox's camera sees, in its own metres" } },
+    };
+};
+
 /// What surrounds the 3D world: the colour behind it, the light that comes
 /// from everywhere, fog, glow round what is bright, and how the light
 /// worked out is turned into a picture. The first one found is the world's;
