@@ -33,6 +33,15 @@ const std = @import("std");
 pub const App = @import("App.zig");
 /// The engine's version: what a plugin's manifest is checked against.
 pub const version = @import("engine_options").version;
+/// How far along a version is - alpha, beta, a release candidate or
+/// released - and how it is written with it: see `app/version.zig`.
+pub const VersionStage = @import("app/version.zig").Stage;
+/// How far along this version of the engine is.
+pub const version_stage = @import("app/version.zig").stage;
+/// The engine's version as it is written and shown: `0.3.2-alpha`. What a
+/// project's `application.engine_version` says of the one it was opened
+/// with.
+pub const version_text = @import("app/version.zig").text;
 /// Plugins: folders under `res://addons/` with a manifest. See
 /// `project/plugins.zig`.
 pub const plugins = @import("project/plugins.zig");
@@ -597,6 +606,7 @@ test {
     _ = @import("animation/tween_test.zig");
     _ = @import("app_test.zig");
     _ = @import("app/frame_stats.zig");
+    _ = @import("app/version.zig");
     _ = @import("assets/images_test.zig");
     _ = @import("audio/audio_test.zig");
     _ = @import("core/signals_test.zig");
