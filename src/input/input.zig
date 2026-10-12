@@ -827,6 +827,22 @@ pub fn anyPad(self: *const Input) Pad {
     return .{ .input = self, .slot = null };
 }
 
+/// Whether anything is held: a key, a button of the mouse or of a
+/// controller, or a stick or a trigger past the sticks' dead zone. What is
+/// held sends no news while it is, and a loop that waits for news - see
+/// `Time.idle_fps` - goes on drawing for it.
+pub fn anythingHeld(self: *const Input) bool {
+    if (self.down.count() != 0 or self.button_down.count() != 0) return true;
+    for (&self.pads) |*state| {
+        if (!state.connected) continue;
+        if (state.down.count() != 0) return true;
+        for (state.axes) |axis| {
+            if (@abs(axis) > self.stick_deadzone) return true;
+        }
+    }
+    return false;
+}
+
 // -------------------------------------------------------------------------
 // Being told
 // -------------------------------------------------------------------------

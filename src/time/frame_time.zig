@@ -71,6 +71,21 @@ max_fps: ?f32 = null,
 /// `max_fps`.
 background_fps: ?f32 = null,
 
+/// The frames a second while nothing happens: no key, button, pointer or
+/// window news for `idle_after` seconds, and nothing that asked to be drawn
+/// on with `stayAwake`. For a program that changes only when something is
+/// done to it - an editor, a menu - which then waits for the next thing
+/// rather than drawing the same picture again; whatever happens is drawn
+/// at once. Null draws every frame, as a game does.
+idle_fps: ?f32 = null,
+
+/// How long after the last thing that happened every frame is still drawn,
+/// for what it set going to come to rest.
+idle_after: f32 = 0.5,
+
+/// Until when every frame is drawn, `idle_fps` or not: see `stayAwake`.
+awake_until: std.Io.Timestamp = .zero,
+
 next_frame: std.Io.Timestamp = .zero,
 
 /// Set by `stepOnce`, and spent by the next frame.
@@ -161,6 +176,33 @@ pub fn alpha(self: Time) f32 {
 pub fn fps(self: Time) f32 {
     if (self.unscaled_delta <= 0) return 0;
     return 1 / self.unscaled_delta;
+}
+
+/// Draw every frame for `seconds` more, whatever `idle_fps` says: something
+/// happened, or something is moving by itself. Never shortens what an
+/// earlier call asked for.
+pub fn stayAwake(self: *Time, seconds: f32) void {
+    const io = switch (self.source) {
+        .clock => |io| io,
+        .fixed => return,
+    };
+    const until = std.Io.Timestamp.now(io, .awake).addDuration(.fromNanoseconds(@intFromFloat(@max(seconds, 0) * std.time.ns_per_s)));
+    if (self.awake_until.durationTo(until).nanoseconds > 0) self.awake_until = until;
+}
+
+/// How long the next frame may wait for something to happen, in
+/// milliseconds: a frame of `idle_fps`, once nothing has for `idle_after`
+/// seconds. Null while every frame is drawn - with no `idle_fps`, on a
+/// clock that is not the wall's, or while awake.
+pub fn idleWait(self: *const Time) ?u32 {
+    const held = self.idle_fps orelse return null;
+    if (held <= 0) return null;
+    const io = switch (self.source) {
+        .clock => |io| io,
+        .fixed => return null,
+    };
+    if (std.Io.Timestamp.now(io, .awake).durationTo(self.awake_until).nanoseconds > 0) return null;
+    return @intFromFloat(@max(1, 1000 / held));
 }
 
 pub fn sleepUntilNextFrame(self: *Time, target_fps: f32) std.Io.Cancelable!void {

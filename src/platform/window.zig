@@ -174,6 +174,10 @@ height: u32,
 /// Whether the framebuffer changed size since `App` last read this.
 resized: bool = false,
 
+/// Whether the last `pump` had any event at all, this window's or another's:
+/// what a loop that waits while nothing happens wakes for.
+heard: bool = false,
+
 /// Set by `requestClose`: the loop ends after this frame.
 closing: bool = false,
 
@@ -676,19 +680,27 @@ pub const Route = struct {
     event: *const fn (context: *anyopaque, ev: platform.Event) void,
 };
 
+/// How long a `pump` may wait for something to happen, on `io`'s clock.
+pub const Wait = struct { io: std.Io, ms: u32 };
+
 /// Drain the queue into `input`, and say whether the game should carry on.
-/// An event about another window of the context goes to `route`.
-pub fn pump(self: *Window, input: *Input, route: ?Route) bool {
-    self.ctx.pump() catch |err| {
+/// An event about another window of the context goes to `route`. With
+/// `wait`, it waits that long at most for the first event - for a loop
+/// that has nothing to draw until something happens - and `heard` says
+/// whether any came.
+pub fn pump(self: *Window, input: *Input, route: ?Route, wait: ?Wait) bool {
+    (if (wait) |held| self.pumpWithin(held) else self.ctx.pump()) catch |err| {
         log.err("the event loop failed: {t}", .{err});
         return false;
     };
+    self.heard = false;
 
     // The platform polled the controllers inside that pump, so a connection
     // and the state it announces arrive in the same frame.
     input.readPads(self.ctx.gamepads());
 
     while (self.ctx.poll()) |ev| {
+        self.heard = true;
         // Only this window's events, and those about no window in particular:
         // a tool window a game opens must not feed the game's input.
         const about = ev.window();
@@ -727,6 +739,22 @@ pub fn pump(self: *Window, input: *Input, route: ?Route) bool {
     }
 
     return !self.closing and !self.handle.shouldClose();
+}
+
+/// Pump until an event comes or `wait` is over. The window system wakes a
+/// wait for news of its own that is nobody's event - a frame shown, a
+/// property changed - and a frame drawn for each would be shown, and wake
+/// the next: so what woke it is read, and the wait goes on.
+fn pumpWithin(self: *Window, wait: Wait) platform.Error!void {
+    const until = std.Io.Timestamp.now(wait.io, .awake).addDuration(.fromNanoseconds(@as(i96, wait.ms) * std.time.ns_per_ms));
+    var left = wait.ms;
+    while (true) {
+        try self.ctx.pumpWait(left);
+        if (self.ctx.queue.pending()) return;
+        const remaining = std.Io.Timestamp.now(wait.io, .awake).durationTo(until).nanoseconds;
+        if (remaining <= 0) return;
+        left = @intCast(@divTrunc(remaining, std.time.ns_per_ms) + 1);
+    }
 }
 
 /// Ask for the loop to end after this frame.

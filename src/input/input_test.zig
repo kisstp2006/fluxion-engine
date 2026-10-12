@@ -1151,3 +1151,19 @@ test "an action is named by its input on what the player last used" {
     try testing.expectEqualStrings("", input.describeAction(&buffer, "fly"));
     try testing.expectEqualStrings("Pad A", input.describeAction(&buffer, "ui_accept"));
 }
+
+test "what is held is said to be, a key, a button or a stick past its dead zone: a loop that waits for news draws on for it" {
+    var input: Input = .{};
+    try testing.expect(!input.anythingHeld());
+    input.apply(pressOf(.w));
+    try testing.expect(input.anythingHeld());
+    input.down = .initEmpty();
+    // A stick at rest is not held, however worn; one leaning is.
+    input.pads[0].connected = true;
+    input.pads[0].axes[0] = 0.1;
+    try testing.expect(!input.anythingHeld());
+    input.pads[0].axes[0] = -0.6;
+    try testing.expect(input.anythingHeld());
+    input.pads[0].connected = false;
+    try testing.expect(!input.anythingHeld());
+}

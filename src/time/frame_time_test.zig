@@ -8,6 +8,7 @@ const testing = std.testing;
 const App = @import("../App.zig");
 const components = @import("../scene/components.zig");
 const ecs = @import("fluxion_ecs");
+const Time = @import("frame_time.zig");
 
 test "a fixed step runs as many times as the frame is worth" {
     const counter = struct {
@@ -140,4 +141,22 @@ test "time.delta is the step in the fixed stage and the frame everywhere else" {
     try testing.expectEqual(@as(f32, 1.0 / 32.0), Deltas.update);
     // And put back afterwards.
     try testing.expectEqual(@as(f32, 1.0 / 32.0), app.time.delta);
+}
+
+test "a loop with an idle rate waits a frame of it for the next thing, once nothing has happened for a while" {
+    var time: Time = .init(.{ .clock = testing.io });
+    // Every frame, with no idle rate: a game's.
+    try testing.expectEqual(@as(?u32, null), time.idleWait());
+    time.idle_fps = 10;
+    try testing.expectEqual(@as(?u32, 100), time.idleWait());
+    // Something happened: every frame for a while, and asking for less
+    // does not cut that short.
+    time.stayAwake(60);
+    try testing.expectEqual(@as(?u32, null), time.idleWait());
+    time.stayAwake(0);
+    try testing.expectEqual(@as(?u32, null), time.idleWait());
+    // A capture's clock is not the wall's: it draws every frame.
+    var fixed: Time = .init(.{ .fixed = 1.0 / 60.0 });
+    fixed.idle_fps = 10;
+    try testing.expectEqual(@as(?u32, null), fixed.idleWait());
 }

@@ -1166,10 +1166,14 @@ pub fn step(self: *App) anyerror!bool {
 /// size. False when the window is gone and the loop should end.
 fn readWindows(self: *App) !bool {
     if (self.window) |*window| {
-        if (!window.pump(&self.input, .{ .context = self, .event = ToolWindow.route })) {
+        const wait: ?Window.Wait = if (self.io) |io| (if (self.time.idleWait()) |ms| .{ .io = io, .ms = ms } else null) else null;
+        if (!window.pump(&self.input, .{ .context = self, .event = ToolWindow.route }, wait)) {
             self.running = false;
             return false;
         }
+        // Whatever happened is drawn on for a while, and so is what is held
+        // down or still being read, which sends no news of its own.
+        if (window.heard or self.input.anythingHeld() or self.loads.list.items.len != 0) self.time.stayAwake(self.time.idle_after);
         if (window.close_pressed) {
             window.close_pressed = false;
             if (!self.ask_before_closing) {
@@ -1194,6 +1198,9 @@ fn readWindows(self: *App) !bool {
 
 fn waitForNextFrame(self: *App, minimized: bool) !void {
     if (on_a_page) return;
+    // Idle, the wait is for the next thing to happen, as the windows are
+    // read: see `Time.idle_fps`.
+    if (!minimized and self.window != null and self.time.idleWait() != null) return;
     const target_fps: f32 = if (minimized) fps_while_minimized else self.frameCap() orelse return;
     try self.time.sleepUntilNextFrame(target_fps);
 }
@@ -2627,6 +2634,30 @@ pub fn setBackgroundFps(self: *App, limit: f32) void {
 /// The cap on frames a second in the background, nought for none.
 pub fn backgroundFps(self: *const App) f32 {
     return self.time.background_fps orelse 0;
+}
+
+/// Draw only `fps` frames a second while nothing happens - no key, button,
+/// pointer or window news for half a second - nought to draw every frame
+/// as ever: for a menu, a board game or a tool, which then waits for the
+/// next thing rather than drawing the same picture again. Whatever happens
+/// is drawn at once, and every frame is while anything is held. A
+/// controller sends no news, so its first press waits out the frame it
+/// falls in. What moves by itself asks to be drawn with `stayAwake`.
+/// `time.idle_fps` from Zig.
+pub fn setIdleFps(self: *App, limit: f32) void {
+    self.time.idle_fps = if (limit > 0) limit else null;
+}
+
+/// The frames a second drawn while nothing happens, nought for every one.
+pub fn idleFps(self: *const App) f32 {
+    return self.time.idle_fps orelse 0;
+}
+
+/// Draw every frame for `seconds` more, whatever `setIdleFps` says: for
+/// what moves by itself - an animation playing, a bar filling - asked again
+/// each frame it goes on.
+pub fn stayAwake(self: *App, seconds: f32) void {
+    self.time.stayAwake(seconds);
 }
 
 /// The most fixed steps one frame takes to catch up after a slow one.
@@ -6225,6 +6256,9 @@ pub const reflect_methods = .{
     .maxFps = .{},
     .setBackgroundFps = .{attr.Params{ .names = &.{"fps"} }},
     .backgroundFps = .{},
+    .setIdleFps = .{attr.Params{ .names = &.{"fps"} }},
+    .idleFps = .{},
+    .stayAwake = .{attr.Params{ .names = &.{"seconds"} }},
     .setMaxPhysicsStepsPerFrame = .{attr.Params{ .names = &.{"steps"} }},
     .maxPhysicsStepsPerFrame = .{},
     .setPhysicsTicksPerSecond = .{attr.Params{ .names = &.{"ticks"} }},
