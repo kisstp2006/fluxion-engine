@@ -1100,10 +1100,13 @@ pub fn apply(self: *Input, ev: platform.Event) void {
             if (self.pointer.locked) {
                 // Movement only, and only while the window has the keyboard:
                 // in the background, the hand on the mouse is using another
-                // program.
+                // program. A script hears it as any motion - what turns a
+                // first-person camera - from where the pointer is held.
                 if (self.focused) {
-                    self.pointer.dx += @as(f32, @floatCast(m.dx)) * self.area_ratio;
-                    self.pointer.dy += @as(f32, @floatCast(m.dy)) * self.area_ratio;
+                    const turned: math.Vec2 = .init(@as(f32, @floatCast(m.dx)) * self.area_ratio, @as(f32, @floatCast(m.dy)) * self.area_ratio);
+                    self.pointer.dx += turned.x;
+                    self.pointer.dy += turned.y;
+                    self.pushMotion(turned);
                 }
                 return;
             }

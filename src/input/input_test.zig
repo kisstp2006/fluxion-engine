@@ -834,6 +834,13 @@ test "a locked pointer holds still, and only its movement counts" {
     try testing.expectEqual(@as(f32, 80), input.pointer.y);
     try testing.expectEqual(@as(f32, 12), input.pointer.dx);
     try testing.expectEqual(@as(f32, -2), input.pointer.dy);
+    // A script hears the movement as one motion from where the pointer is
+    // held: what its first-person camera turns by.
+    const heard = input.pointerEvents();
+    try testing.expectEqual(@as(usize, 1), heard.len);
+    try testing.expectEqual(@as(f32, 12), heard[0].mouse_motion.relative.x);
+    try testing.expectEqual(@as(f32, -2), heard[0].mouse_motion.relative.y);
+    try testing.expectEqual(@as(f32, 120), heard[0].mouse_motion.position.x);
 
     // A click while locked does not move it either.
     input.apply(.{ .mouse_button = .{
@@ -857,6 +864,7 @@ test "a locked pointer does not turn anything while the window is in the backgro
     input.beginFrame();
     input.apply(cursorEvent(0, 0, 40, 40));
     try testing.expectEqual(@as(f32, 0), input.pointer.dx);
+    try testing.expectEqual(@as(usize, 0), input.pointerEvents().len);
 
     input.apply(.{ .focus = .{ .window = .none, .value = true } });
     input.apply(cursorEvent(0, 0, 3, 0));
