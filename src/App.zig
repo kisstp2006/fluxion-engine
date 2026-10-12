@@ -187,6 +187,7 @@ const project_files = @import("files/project_files.zig");
 
 // platform
 const Window = @import("platform/window.zig");
+const engine_version = @import("app/version.zig");
 const Clipboard = @import("platform/clipboard.zig");
 const dialog = @import("platform/dialog.zig");
 const pointer = @import("platform/cursors.zig");
@@ -846,6 +847,13 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
             if (options.project_diagnostics == null and err != error.OutOfMemory) log.err("{f}", .{own});
             return err;
         };
+    }
+    // A project an editor of another version marked last: said, and gone on
+    // with - an editor asks before it does.
+    if (self.project.settings) |held| {
+        const marked = held.application.engine_version;
+        if (marked.len > 0 and !std.mem.eql(u8, marked, engine_version.text))
+            log.warn("the project was last opened with Fluxion Engine {s}; this is {s}", .{ marked, engine_version.text });
     }
     // The project's actions over the built-in ones.
     const project_actions: []const Input.Action = if (!options.project_input) &.{} else if (self.project.settings) |held| held.input.actions else &.{};

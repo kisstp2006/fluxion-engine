@@ -113,6 +113,12 @@ pub const Application = struct {
     boot_splash: BootSplash = .{},
     user_folder: []const u8 = "",
     quit_on_close: bool = true,
+    /// The engine and the editor the project was last opened with in an
+    /// editor, as they write their versions - `0.3.2-alpha` - and empty for
+    /// one no editor has marked. An editor writes them, and says so when
+    /// they are another version's than its own.
+    engine_version: []const u8 = "",
+    editor_version: []const u8 = "",
 
     /// What the window shows while the game opens. See `App.openProject`.
     pub const BootSplash = struct {
@@ -139,6 +145,8 @@ pub const Application = struct {
         .boot_splash = .{attr.Doc{ .text = "What the window shows while the game opens." }},
         .user_folder = .{ attr.Advanced{}, attr.Doc{ .text = "The folder user:// is, in the system's folder for programs' data: empty for the project's name. Studio/Game keeps a studio's games together." } },
         .quit_on_close = .{ attr.Advanced{}, attr.Doc{ .text = "Whether the window's close button quits at once. Off, it only asks: app.closeRequested() says so, and the game quits with app.quit() when it agrees - after saving, say." } },
+        .engine_version = .{ attr.ReadOnly{}, attr.Advanced{}, attr.Doc{ .text = "The engine the project was last opened with in an editor, which writes it. An editor of another version says so before it goes on." } },
+        .editor_version = .{ attr.ReadOnly{}, attr.Advanced{}, attr.Doc{ .text = "The editor the project was last opened with, which writes it." } },
     };
 };
 
