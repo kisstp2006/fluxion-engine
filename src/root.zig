@@ -692,6 +692,7 @@ test {
     _ = @import("render/debug_views.zig");
     _ = @import("render/decals.zig");
     _ = @import("render/skyboxes.zig");
+    _ = @import("render/fog_backdrop.zig");
     _ = @import("render/drawing.zig");
     _ = @import("render/lighting.zig");
     _ = @import("render/lights.zig");

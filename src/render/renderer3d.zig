@@ -50,6 +50,8 @@
 //!
 //! **Fog volumes.** The eight `FogVolume`s nearest the camera are walked
 //! through on the way to each pixel of a surface: see `fog_volumes.zig`.
+//! Drawn over something - a skybox - they are over it too where no surface
+//! is: see `fog_backdrop.zig`.
 //!
 //! A surface's material is, first found: the material of a `Material3D`
 //! beside the `MeshInstance3D`, the surface's own, or plain. A material
@@ -81,6 +83,7 @@ const UniformBlocks = @import("uniform_blocks.zig").UniformBlocks;
 const View3D = @import("view3d.zig").View3D;
 const fog_volumes = @import("fog_volumes.zig");
 const decals = @import("decals.zig");
+const fog_backdrop = @import("fog_backdrop.zig");
 const worlds3d = @import("worlds3d.zig");
 const billboards = @import("billboards.zig");
 
@@ -600,6 +603,9 @@ pub const Renderer3D = struct {
     /// The decals' numbers, as `decals.Block` says, and the decals the
     /// draw keeps.
     decal_block: rhi.Buffer,
+    /// The fog volumes over what the world is drawn over: made the first
+    /// time it is. See `fog_backdrop.zig`.
+    fog_backdrop: ?fog_backdrop.FogBackdrop = null,
     decals_kept: std.ArrayList(decals.Kept) = .empty,
     /// Every picture a lamp or a decal of the draw shines: see
     /// `placePictures`.
@@ -740,6 +746,7 @@ pub const Renderer3D = struct {
         device.destroyBuffer(self.probes);
         device.destroyBuffer(self.fog);
         device.destroyBuffer(self.decal_block);
+        if (self.fog_backdrop) |*backdrop| backdrop.deinit(gpa, device);
         device.destroySampler(self.lightmap_sampler);
         if (self.atlas) |atlas| device.destroyTexture(atlas);
         if (self.shadow_cache) |*cache| cache.deinit(gpa);
@@ -889,6 +896,11 @@ pub const Renderer3D = struct {
             .depth = .{ .texture = targets.depth, .load = if (depth_first) .load else .clear },
         });
         try list.setViewport(.{ .width = @floatFromInt(drawn_width), .height = @floatFromInt(drawn_height) });
+        // Over what is behind, the fog on the way to it.
+        if (clear == null and self.fog_volumes_kept > 0) {
+            if (self.fog_backdrop == null) self.fog_backdrop = fog_backdrop.FogBackdrop.init(gpa, device) catch null;
+            if (self.fog_backdrop) |*backdrop| try backdrop.draw(gpa, device, list, drawn_view, self.frame, self.fog, post.light_format, depth_format, samples);
+        }
         const pass: billboards.Billboards.Pass = .{
             .list = list,
             .frame = self.frame,
