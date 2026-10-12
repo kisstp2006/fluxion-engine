@@ -211,6 +211,12 @@ pub fn moveAndSlide(app: *App, e: Entity) Error!bool {
 /// floor: what is left of `motion` when that worked. Undone when there is
 /// no room above, the edge is higher than the step, or there is no floor
 /// past it.
+///
+/// What is left of one step's move is often too short to carry a rounded
+/// shape's middle over the edge, and it comes down on the edge itself, which
+/// is no floor. That is a step all the same when there is a floor a little
+/// further on - `floorAhead` - so one who gathers speed slowly, or is nearly
+/// stopped at the foot of a stair, gets up it a little a step.
 fn stepUp(app: *App, e: Entity, body: physics3d.BodyId, motion: Vec3, up: Vec3, state: CharacterBody3D) Error!?Vec3 {
     const forward = motion.sub(up.scale(motion.dot(up)));
     if (forward.lenSq() < 1e-10) return null;
@@ -227,13 +233,28 @@ fn stepUp(app: *App, e: Entity, body: physics3d.BodyId, motion: Vec3, up: Vec3, 
     }
     try moveBy(app, e, body, went);
     const drop = raised.neg().sub(up.scale(margin * 2));
-    const below = try cast(app, body, drop, margin);
-    if (below == null or kindOf(state, up, below.?.normal) != .floor) {
-        try moveBy(app, e, body, went.add(raised).neg());
-        return null;
+    if (try cast(app, body, drop, margin)) |below| {
+        if (kindOf(state, up, below.normal) == .floor or try floorAhead(app, e, body, forward, drop, up, state)) {
+            try moveBy(app, e, body, drop.scale(below.fraction));
+            return forward.sub(went);
+        }
     }
-    try moveBy(app, e, body, drop.scale(below.?.fraction));
-    return forward.sub(went);
+    try moveBy(app, e, body, went.add(raised).neg());
+    return null;
+}
+
+/// Whether there is a floor to come down onto further the way of `forward`
+/// than the body, raised, has got: looked for as far on as it may step up,
+/// a stair's tread being no shorter than its rise. The body is left where
+/// it was.
+fn floorAhead(app: *App, e: Entity, body: physics3d.BodyId, forward: Vec3, drop: Vec3, up: Vec3, state: CharacterBody3D) Error!bool {
+    const reach = forward.norm().scale(state.max_step_height);
+    const on = if (try cast(app, body, reach, state.safe_margin)) |hit| reach.scale(hit.fraction) else reach;
+    if (on.len() < 1e-4) return false;
+    try moveBy(app, e, body, on);
+    const below = try cast(app, body, drop, state.safe_margin);
+    try moveBy(app, e, body, on.neg());
+    return below != null and kindOf(state, up, below.?.normal) == .floor;
 }
 
 /// A wall's normal with its up part taken out, so stopping at a wall that

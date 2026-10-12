@@ -171,6 +171,36 @@ test "a character walks up a ramp of triangles onto the ledge at its top, and st
     try testing.expect(body.on_floor and body.on_wall);
 }
 
+test "a character gets up a flight of stairs from a standstill at its foot" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try floorOf(app);
+    // Five stairs, each 0.2 up and 0.3 on, the first one's face at x = 1.
+    for (0..5) |n| {
+        const i: f32 = @floatFromInt(n);
+        const top = 0.2 * (i + 1);
+        _ = try app.world.spawnWith(.{ Transform3D.at(3 + 0.3 * i, top / 2, 0), Collider3D.box(.init(2, top / 2, 2)) });
+    }
+    var walker: CharacterBody3D = .{};
+    walker.max_step_height = 0.45;
+    const player = try app.world.spawnWith(.{ Transform3D.at(0.5, 0.9, 0), walker, Collider3D.capsule(0.35, 1.8) });
+    app.time.source = .{ .fixed = dt };
+    for (0..80) |_| {
+        // Gathering speed a little a step, as a game's own movement does:
+        // whatever a stair's face took off it has to be made up again.
+        const body = app.world.get(player, CharacterBody3D).?;
+        body.velocity.x = @min(body.velocity.x + 20 * dt, 4);
+        body.velocity.y -= 9.8 * dt;
+        _ = try app.moveAndSlide(player);
+        _ = try app.step();
+    }
+    const at = app.world.get(player, Transform3D).?.position;
+    // On the top one, a metre up, and on along it.
+    try testing.expect(at.x > 3);
+    try testing.expectApproxEqAbs(@as(f32, 0.9 + 1.0), at.y, 0.03);
+    try testing.expect(app.world.get(player, CharacterBody3D).?.on_floor);
+}
+
 test "a character walks up onto a kerb no higher than its step, and stops at one higher" {
     for ([_]f32{ 0.2, 0.5 }) |kerb| {
         const app = try headless();
