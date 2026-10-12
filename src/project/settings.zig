@@ -1045,3 +1045,44 @@ test "on a phone or in a browser the mobile settings take the place of their own
     off.mobile.enabled = false;
     try std.testing.expectEqual(Rendering.Msaa.x4, off.forPhone(true).msaa_3d);
 }
+
+/// The settings of `T` that say nothing of what they are, by their place -
+/// `rendering.mobile.msaa_3d` - and those of the structs it holds.
+fn undescribed(comptime T: type, comptime at: []const u8) []const []const u8 {
+    comptime {
+        var missing: []const []const u8 = &.{};
+        for (std.meta.fields(T)) |field| {
+            const place = at ++ "." ++ field.name;
+            var said = false;
+            if (@hasDecl(T, "reflect_fields") and @hasField(@TypeOf(T.reflect_fields), field.name)) {
+                for (@field(T.reflect_fields, field.name)) |held| {
+                    if (@TypeOf(held) == attr.Doc or @TypeOf(held) == attr.Hidden) said = true;
+                }
+            }
+            if (!said) missing = missing ++ .{place};
+            // What a setting is made of is shown a field at a time too: a
+            // section inside a section, a row of a list.
+            const Held = switch (@typeInfo(field.type)) {
+                .pointer => |pointer| pointer.child,
+                .optional => |optional| optional.child,
+                else => field.type,
+            };
+            // A colour is one thing, picked as one: its channels are not settings.
+            if (Held != Color and @typeInfo(Held) == .@"struct" and @hasDecl(Held, "reflect_fields")) missing = missing ++ undescribed(Held, place);
+        }
+        return missing;
+    }
+}
+
+test "every setting of a project says what it is, for the Project Settings to show it by" {
+    @setEvalBranchQuota(200_000);
+    var count: usize = 0;
+    inline for (std.meta.fields(Settings)) |section| {
+        if (@typeInfo(section.type) != .@"struct" or !@hasDecl(section.type, "reflect_fields")) continue;
+        for (comptime undescribed(section.type, section.name)) |place| {
+            std.debug.print("the setting {s} says nothing of what it is\n", .{place});
+            count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), count);
+}

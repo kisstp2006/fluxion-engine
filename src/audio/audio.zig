@@ -292,7 +292,9 @@ pub const Bus = struct {
     send: []const u8 = master,
 
     pub const reflect_fields = .{
-        .volume_db = .{ attr.Unit{ .text = "dB" }, attr.Range{ .min = silent_db, .max = loudest_db } },
+        .name = .{attr.Doc{ .text = "What it is called: what a player's bus and a script's setBusVolumeDb name it by" }},
+        .volume_db = .{ attr.Unit{ .text = "dB" }, attr.Range{ .min = silent_db, .max = loudest_db }, attr.Doc{ .text = "How loud what is mixed on it comes out: nought as it is, less quieter" } },
+        .mute = .{attr.Doc{ .text = "Whether it is silent, its volume kept" }},
         .send = .{ attr.AudioBus{}, attr.Doc{ .text = "The bus it is mixed into" } },
     };
 };
