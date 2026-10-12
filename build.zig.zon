@@ -141,8 +141,8 @@
         // compiled by Zig. Its fluxion-id is pinned where this one is, so a
         // clip's handle is one type.
         .fluxion_audio = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-audio#44ce36bf1186a92552eba0a6d21b3c0247b2053b",
-            .hash = "fluxion_audio-0.1.0-uP5dNy84BwDLe-KA0oeUVV1Qxie2nTxlI1xjqwPdtZkP",
+            .url = "git+https://github.com/kisstp2006/fluxion-audio#5772435bc67ac8d9966b0f7217b2983a6220e78e",
+            .hash = "fluxion_audio-0.1.0-uP5dN4JKBwBwTlggIiEJPl7ghL7rAxV63I0kt0bVb6or",
         },
 
         // Packs: a shipped game's files in one, sealed and signed if it
