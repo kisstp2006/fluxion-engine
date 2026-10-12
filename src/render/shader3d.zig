@@ -147,7 +147,9 @@ pub const Look = extern struct {
     /// read.
     feel: [4]f32,
     /// One where its back is lit as a side of its own: a material that
-    /// does not cull its back.
+    /// does not cull its back; and one where it is laid over what is behind
+    /// it by its alpha. A solid one covers what it is drawn over whatever its
+    /// picture's alpha: a world drawn over a skybox.
     facing: [4]f32,
 };
 
@@ -739,7 +741,7 @@ pub const prologue_len: u32 = prologue.len;
 /// What it ends with: the surface lit. One line, written before the
 /// stage's `}`.
 const epilogue = " if (ALPHA < FEEL.z) { discard; }" ++
-    " target = vec4(lit(decals(ALBEDO, WORLD_POSITION, WORLD_NORMAL, ddx(WORLD_POSITION), ddy(WORLD_POSITION)), METALLIC, ROUGHNESS, EMISSION, NORMAL_MAP, AO, WORLD_POSITION, WORLD_NORMAL, WORLD_TANGENT, LIGHT_LIST_0, LIGHT_LIST_1, GI_AT), ALPHA); ";
+    " target = vec4(lit(decals(ALBEDO, WORLD_POSITION, WORLD_NORMAL, ddx(WORLD_POSITION), ddy(WORLD_POSITION)), METALLIC, ROUGHNESS, EMISSION, NORMAL_MAP, AO, WORLD_POSITION, WORLD_NORMAL, WORLD_TANGENT, LIGHT_LIST_0, LIGHT_LIST_1, GI_AT), mix(1.0, ALPHA, FACING.y)); ";
 
 pub const epilogue_len: u32 = epilogue.len;
 

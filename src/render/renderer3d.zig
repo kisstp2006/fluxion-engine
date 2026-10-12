@@ -2039,7 +2039,7 @@ fn lookOf(look: Material3DData, normal_map: bool) Look {
             if (look.transparency == .scissor) look.alpha_scissor_threshold else 0,
             if (normal_map) 1 else 0,
         },
-        .facing = .{ if (look.cull == .back) 0 else 1, 0, 0, 0 },
+        .facing = .{ if (look.cull == .back) 0 else 1, if (look.transparency == .alpha) 1 else 0, 0, 0 },
     };
 }
 
