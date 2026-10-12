@@ -18,7 +18,8 @@
 //! show, and the unlit extension; a picture's coordinates moved and scaled
 //! by the texture-transform extension; PNG and JPEG pictures, in the file
 //! or beside it; nodes' places, turns and sizes, given apart or as a
-//! matrix; perspective and orthographic cameras; the punctual lights;
+//! matrix - a `/` in a node's name made `_`, since a path of names is cut
+//! at it; perspective and orthographic cameras; the punctual lights;
 //! skins - the nodes that are a skeleton's bones, each one's inverse bind
 //! matrix, and each vertex's four bones and weights - and animations, each
 //! channel a node's place, turn or size, stepped, straight or along a cubic
@@ -151,6 +152,17 @@ pub const Light = struct {
 
     pub const Kind = enum { directional, point, spot };
 };
+
+/// `name` with each `/` made `_`: an entity's name is one step of a path,
+/// and a path is cut at `/`. A model's node named after a file -
+/// `agents/models/ctm_sas/ctm_sas.vmdl_c` - is still one entity, and the
+/// tracks of the bones under it still find them.
+fn pathSafe(a: Allocator, name: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.indexOfScalar(u8, name, '/') == null) return name;
+    const out = try a.dupe(u8, name);
+    std.mem.replaceScalar(u8, out, '/', '_');
+    return out;
+}
 
 pub const Node = struct {
     name: []const u8,
@@ -577,7 +589,7 @@ pub fn parse(gpa: Allocator, bytes: []const u8, fetch: ?Fetch) Error!Model {
         if (given.mesh) |held| if (held >= doc.meshes.len) return error.BadModel;
         if (given.camera) |held| if (held >= doc.cameras.len) return error.BadModel;
         out.* = .{
-            .name = if (given.name.len > 0) given.name else try std.fmt.allocPrint(a, "Node {d}", .{at}),
+            .name = if (given.name.len > 0) try pathSafe(a, given.name) else try std.fmt.allocPrint(a, "Node {d}", .{at}),
             .transform = transformOf(given),
             .mesh = given.mesh,
             .skin = if (given.skin) |held| if (held < doc.skins.len) held else null else null,
@@ -1126,7 +1138,7 @@ fn triangleGltf(gpa: Allocator, extra_nodes: []const u8) ![]u8 {
 }
 
 test "a .gltf's triangle, its material, its nodes, a camera and a light are read" {
-    const text = try triangleGltf(testing.allocator, ", { \"name\": \"Eye\", \"camera\": 0 }, { \"name\": \"Sun\", \"extensions\": { \"KHR_lights_punctual\": { \"light\": 0 } } }");
+    const text = try triangleGltf(testing.allocator, ", { \"name\": \"models/eye.vmdl\", \"camera\": 0 }, { \"name\": \"Sun\", \"extensions\": { \"KHR_lights_punctual\": { \"light\": 0 } } }");
     defer testing.allocator.free(text);
     var model = try read(testing.allocator, text, null);
     defer model.deinit();
@@ -1148,6 +1160,7 @@ test "a .gltf's triangle, its material, its nodes, a camera and a light are read
 
     try testing.expectEqualSlices(u32, &.{0}, model.roots);
     try testing.expectEqualStrings("Holder", model.nodes[0].name);
+    try testing.expectEqualStrings("models_eye.vmdl", model.nodes[2].name);
     try testing.expect(model.nodes[0].transform.translation.approxEql(.init(1, 2, 3)));
     try testing.expectEqual(@as(?u32, 0), model.nodes[1].mesh);
     try testing.expectEqual(@as(?u32, 0), model.nodes[2].camera);
