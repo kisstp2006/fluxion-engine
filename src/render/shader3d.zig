@@ -129,7 +129,10 @@ pub const Frame = extern struct {
     /// The picture's width and height, in pixels.
     screen: [4]f32,
     time: f32,
-    _pad: [3]f32 = @splat(0),
+    /// How far toward a light a shadow is looked for from: nought, or the
+    /// camera's `front_shadow_reach` for what is drawn on its front layers.
+    shadow_reach: f32 = 0,
+    _pad: [2]f32 = @splat(0),
 };
 
 /// What a material tells the shader, per draw, as its `Material` block says.
@@ -245,6 +248,8 @@ const engine_head =
     \\    vec4 SCREEN;
     \\    // Seconds since the game started.
     \\    float TIME;
+    \\    // How far toward a light a shadow is looked for from, in metres.
+    \\    float SHADOW_REACH;
     \\}
     \\
     \\uniform Material : 1 {
@@ -380,7 +385,7 @@ const engine_head =
     \\    if (dot(ng, l) < 0.0) {
     \\        side = -ng;
     \\    }
-    \\    vec4 at = m * vec4(p + side * (how.y * texel) + l * (how.x * texel), 1.0);
+    \\    vec4 at = m * vec4(p + side * (how.y * texel) + l * (how.x * texel + SHADOW_REACH), 1.0);
     \\    vec3 here = at.xyz / at.w;
     \\    vec4 rect = SHADOW_RECTS[view];
     \\    float one = SHADOW_ATLAS.x;

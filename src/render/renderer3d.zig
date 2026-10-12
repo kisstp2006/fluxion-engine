@@ -470,6 +470,11 @@ pub const Renderer3D = struct {
     plain: ?shader3d.Compiled = null,
     post: ?post3d.Post3D = null,
     frame: rhi.Buffer,
+    /// The same, for what is drawn on the camera's front layers: its
+    /// shadows looked for `front_shadow_reach` toward each light.
+    front_frame: rhi.Buffer,
+    /// Which of the two the surfaces drawn now read.
+    frame_in_use: rhi.Buffer,
     lights: rhi.Buffer,
     instances: rhi.Buffer,
     /// How many instances the buffer has room for. Grown, never shrunk.
@@ -625,6 +630,8 @@ pub const Renderer3D = struct {
     pub fn init(gpa: Allocator, device: *rhi.Device) !Renderer3D {
         const frame = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(Frame), .dynamic = true, .label = "3D frame" });
         errdefer device.destroyBuffer(frame);
+        const front_frame = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(Frame), .dynamic = true, .label = "3D front frame" });
+        errdefer device.destroyBuffer(front_frame);
         const lights = try device.createBuffer(.{ .kind = .uniform, .size = @sizeOf(Lights), .dynamic = true, .label = "3D lights" });
         errdefer device.destroyBuffer(lights);
         const instances = try device.createBuffer(.{ .kind = .vertex, .size = initial_capacity * @sizeOf(Instance), .dynamic = true, .label = "3D instances" });
@@ -660,6 +667,8 @@ pub const Renderer3D = struct {
             .device = device,
             .depth_format = depthFormat(device),
             .frame = frame,
+            .front_frame = front_frame,
+            .frame_in_use = frame,
             .lights = lights,
             .instances = instances,
             .capacity = initial_capacity,
@@ -738,6 +747,7 @@ pub const Renderer3D = struct {
         self.look_offsets.deinit(gpa);
         self.param_offsets.deinit(gpa);
         device.destroyBuffer(self.frame);
+        device.destroyBuffer(self.front_frame);
         device.destroyBuffer(self.lights);
         device.destroyBuffer(self.instances);
         device.destroyTexture(self.white);
@@ -913,6 +923,7 @@ pub const Renderer3D = struct {
         var bind: Binder = .{ .list = list };
         var start: usize = 0;
         var fronted = false;
+        self.frame_in_use = self.frame;
         while (start < items.len) {
             // What is drawn over everything comes last: the world's own
             // pictures first, then a pass of its own, the picture kept and
@@ -931,6 +942,12 @@ pub const Renderer3D = struct {
                 });
                 try list.setViewport(.{ .width = @floatFromInt(drawn_width), .height = @floatFromInt(drawn_height) });
                 bind = .{ .list = list, .skipped = bind.skipped };
+                if (view.front_shadow_reach > 0) {
+                    var front = self.frame_data;
+                    front.shadow_reach = view.front_shadow_reach;
+                    try device.updateBuffer(self.front_frame, 0, std.mem.asBytes(&front));
+                    self.frame_in_use = self.front_frame;
+                }
             }
             var end = start + 1;
             while (end < items.len and Item.joins(items[start], items[end])) end += 1;
@@ -1006,7 +1023,7 @@ pub const Renderer3D = struct {
     /// look, the lights and its pictures, its vertices and its instances
     /// from `start`.
     fn bindSurface(self: *Renderer3D, bind: *Binder, first: Item, start: usize, shadow_map: rhi.Texture) !void {
-        try bind.uniform(0, self.frame);
+        try bind.uniform(0, self.frame_in_use);
         try self.bindMaterial(bind, first);
         try bind.texture(shader3d.shadow_map_slot, shadow_map, self.comparing);
         try bind.texture(shader3d.shadow_depth_slot, shadow_map, self.reading);

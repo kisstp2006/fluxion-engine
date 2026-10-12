@@ -340,6 +340,12 @@ pub const Camera3D = extern struct {
     /// `layers`, or an `Appearance`'s `render_layers` over it - casts no
     /// shadow into the world.
     front_layers: u32 = 0,
+    /// How far toward a light, in metres, what is on the front layers looks
+    /// for its shadow: what is nearer it than this throws none on it. The
+    /// body that holds a first-person weapon - a shadow of its own, around
+    /// the camera - then does not darken the hands; a wall or a roof still
+    /// does.
+    front_shadow_reach: f32 = 0,
 
     pub const Projection = enum(u8) {
         /// Further is smaller.
@@ -357,6 +363,7 @@ pub const Camera3D = extern struct {
         .current = .{attr.Doc{ .text = "The one the screen is seen through" }},
         .cull_mask = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it sees" } },
         .front_layers = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it draws over everything else, with a depth of their own: a first-person weapon" } },
+        .front_shadow_reach = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0, .max = 10 }, attr.Doc{ .text = "How far toward a light what is on the front layers looks for its shadow: nothing nearer it - the body holding a first-person weapon - shadows it" } },
     };
 };
 

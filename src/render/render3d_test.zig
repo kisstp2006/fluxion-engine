@@ -664,6 +664,12 @@ test "what is on a camera's front layers is drawn last, over the world, and cast
     try testing.expectEqual(@as(usize, 2), items.len);
     try testing.expect(!items[0].front and items[1].front);
     for (app.renderer3d.casters.items) |caster| try testing.expect(!caster.item.front);
+    // Its shadows looked for nearer the light, from a frame of its own: the
+    // body holding it shadows it no more.
+    try testing.expect(std.meta.eql(app.renderer3d.frame_in_use, app.renderer3d.frame));
+    app.world.get(eye, Camera3D).?.front_shadow_reach = 0.8;
+    _ = try app.step();
+    try testing.expect(std.meta.eql(app.renderer3d.frame_in_use, app.renderer3d.front_frame));
 }
 
 test "what is a shadow only casts one and is not seen, and what has none is seen and casts none, with all under it" {
