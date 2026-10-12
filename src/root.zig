@@ -239,6 +239,7 @@ pub const gltf = @import("assets/gltf.zig");
 pub const background_load = @import("assets/background_load.zig");
 /// The 3D layer's components: see `render/render3d_components.zig`.
 pub const MeshInstance3D = components.MeshInstance3D;
+pub const StreamMesh3D = components.StreamMesh3D;
 pub const PrimitiveMesh3D = components.PrimitiveMesh3D;
 /// Solids joined, cut and met: see `render/csg_shapes.zig`.
 pub const CSGShape3D = components.CSGShape3D;

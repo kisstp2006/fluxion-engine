@@ -36,6 +36,16 @@ pub const Frame = struct {
     systems_ms: f32,
     /// Drawing and showing it.
     draw_ms: f32,
+    /// Bringing streamed meshes in and letting them go: see
+    /// `assets/streaming.zig`.
+    stream_ms: f32 = 0,
+    /// The streamed meshes that are in, of those wanted.
+    streamed_meshes: u32 = 0,
+    /// The streamed meshes in that have levels of detail.
+    lod_meshes: u32 = 0,
+    /// The bytes streaming keeps: its meshes, and the pictures that are its
+    /// own.
+    stream_memory_bytes: u64 = 0,
     /// What the 3D layer drew, every view of it this frame together.
     meshes: u32,
     draw_calls: u32,
@@ -124,6 +134,10 @@ pub const FrameStats = struct {
         fixed_ms: Spread = .{},
         systems_ms: Spread = .{},
         draw_ms: Spread = .{},
+        stream_ms: Spread = .{},
+        streamed_meshes: f64 = 0,
+        lod_meshes: f64 = 0,
+        stream_memory_bytes: f64 = 0,
         /// Means over the frames.
         meshes: f64 = 0,
         draw_calls: f64 = 0,
@@ -140,11 +154,11 @@ pub const FrameStats = struct {
         if (kept.len == 0) return out;
         const numbers = try gpa.alloc(f64, kept.len);
         defer gpa.free(numbers);
-        inline for (.{ "frame_ms", "work_ms", "fixed_ms", "systems_ms", "draw_ms" }) |name| {
+        inline for (.{ "frame_ms", "work_ms", "fixed_ms", "systems_ms", "draw_ms", "stream_ms" }) |name| {
             for (kept, numbers) |frame, *n| n.* = @field(frame, name);
             @field(out, name) = spreadOf(numbers);
         }
-        inline for (.{ "meshes", "draw_calls", "triangles", "culled", "shadow_views_drawn" }) |name| {
+        inline for (.{ "meshes", "draw_calls", "triangles", "culled", "shadow_views_drawn", "streamed_meshes", "lod_meshes", "stream_memory_bytes" }) |name| {
             var sum: f64 = 0;
             for (kept) |frame| sum += @floatFromInt(@field(frame, name));
             @field(out, name) = sum / @as(f64, @floatFromInt(kept.len));

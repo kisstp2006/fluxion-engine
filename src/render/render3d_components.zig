@@ -76,6 +76,32 @@ pub const MeshInstance3D = extern struct {
     };
 };
 
+/// The mesh of the `MeshInstance3D` beside it brought in as the camera comes
+/// near, and let go as it leaves: a level too big to keep whole, cut into
+/// small models. Its `source` is one of them, by its path under the project
+/// - text, not a `MeshHandle`, so that naming it reads nothing. A collider
+/// is not streamed: what a level is walked on stays in the scene, and
+/// nothing falls through what is not drawn yet. See `assets/streaming.zig`.
+pub const StreamMesh3D = extern struct {
+    /// How far the model reaches from where it is, in metres: taken off its
+    /// distance to the camera, so a wide one comes in by its nearest side.
+    bounds_radius: f32 = 0,
+    /// How near the camera, in metres, it is read and drawn.
+    load_distance: f32 = 85,
+    /// How far from the camera, in metres, it is let go, a while after it
+    /// was last that near. Further than `load_distance`, so a camera on the
+    /// line between them does not read it again and again.
+    unload_distance: f32 = 115,
+
+    pub const reflect_name = "StreamMesh3D";
+    pub const reflect_attributes = .{attr.Text{ .name = "source" }};
+    pub const reflect_fields = .{
+        .bounds_radius = .{ attr.Range{ .min = 0, .max = 100_000 }, attr.Unit{ .text = "m" }, attr.Doc{ .text = "How far the model reaches from where it is; taken off its distance to the camera" } },
+        .load_distance = .{ attr.Range{ .min = 0, .max = 100_000 }, attr.Unit{ .text = "m" }, attr.Doc{ .text = "How near the camera it is read and drawn" } },
+        .unload_distance = .{ attr.Range{ .min = 0, .max = 100_000 }, attr.Unit{ .text = "m" }, attr.Doc{ .text = "How far from the camera it is let go, a while after it was last that near; further than load_distance" } },
+    };
+};
+
 /// How a mesh takes part in the light a `LightmapGI` bakes.
 pub const GiMode = enum(u8) {
     /// For what never moves: the light on it is held in the lightmap, and it

@@ -63,7 +63,11 @@ const Step = struct {
             .picture => load.decodePicture(self.index) catch |err| load.failStep(err),
             .sound => load.readSound(self.index) catch |err| load.failStep(err),
             .image => gltf.decodeImage(&load.prepared.?.model, self.index) catch |err| load.failStep(err),
-            .mesh => gltf.buildMesh(&load.prepared.?.model, self.index) catch |err| load.failStep(err),
+            .mesh => {
+                gltf.buildMesh(&load.prepared.?.model, self.index) catch |err| load.failStep(err);
+                if (load.streaming and load.prepared.?.model.meshes[self.index].built)
+                    load.cacheStreamLods(self.index) catch {};
+            },
         }
         load.stepDone();
     }
@@ -218,6 +222,14 @@ pub const Load = struct {
     /// The models a scene names, each a load of its own.
     children: []*Load = &.{},
     prepared: ?models.Prepared = null,
+    /// Small runtime packages opt into bounded, nonblocking GPU adoption.
+    streaming: bool = false,
+    stream_picture: usize = 0,
+    // Main-thread snapshot; workers never inspect mutable asset tables.
+    cached_pictures: std.StringHashMapUnmanaged(void) = .empty,
+    material_files: []MaterialFile = &.{},
+
+    pub const MaterialFile = struct { source: []u8, bytes: []u8 };
 
     /// A picture decoded, waiting for the GPU.
     pub const Decoded = struct {
@@ -320,12 +332,32 @@ pub const Load = struct {
                 break :made .{ .model = model, .settings = try models.settingsOf(self.gpa, self.files, self.source) };
             };
             const model = &self.prepared.?.model;
+            if (self.streaming) {
+                // One GPU mesh/material per package; large authoring models
+                // must be packed offline instead of creating an unbounded spike.
+                if (model.meshes.len != 1 or model.materials.len > 1 or model.images.len != 0)
+                    return error.StreamPackageTooLarge;
+                var vertices: usize = 0;
+                for (model.doc.meshes[0].primitives) |primitive| {
+                    if (primitive.attributes.POSITION) |at| vertices += model.doc.accessors[at].count;
+                }
+                if (vertices > 12000) return error.StreamPackageTooLarge;
+                try self.readStreamMaterials();
+            }
             model.unwrap_lightmap = self.prepared.?.settings.lightmap_uvs;
             model.lod_file = try models.lodFileOf(self.gpa, self.files, self.source);
-            const more: u32 = @intCast(model.images.len + model.meshes.len);
+            var picture_steps: usize = 0;
+            for (self.pictures) |path| if (!self.cached_pictures.contains(path)) {
+                picture_steps += 1;
+            };
+            const more: u32 = @intCast(model.images.len + model.meshes.len + picture_steps);
             self.expect(more);
             for (0..model.images.len) |at| try self.pool.push(.{ .load = self, .kind = .image, .index = @intCast(at) });
             for (0..model.meshes.len) |at| try self.pool.push(.{ .load = self, .kind = .mesh, .index = @intCast(at) });
+            for (self.pictures, 0..) |path, at| {
+                if (self.cached_pictures.contains(path)) continue;
+                try self.pool.push(.{ .load = self, .kind = .picture, .index = @intCast(at) });
+            }
             return;
         }
         self.bytes = try self.files.read(self.gpa, self.file, .limited(file_table.file_limit));
@@ -339,6 +371,71 @@ pub const Load = struct {
             .scene => try self.findNamed(),
             else => {},
         }
+    }
+
+    /// Material IO and PNG/JPEG decoding belong to the worker, including
+    /// native material overrides that ordinary glTF images do not cover.
+    fn readStreamMaterials(self: *Load) !void {
+        var files: std.ArrayListUnmanaged(MaterialFile) = .empty;
+        var pictures: std.ArrayListUnmanaged([]u8) = .empty;
+        errdefer {
+            for (files.items) |file| {
+                self.gpa.free(file.source);
+                self.gpa.free(file.bytes);
+            }
+            files.deinit(self.gpa);
+            for (pictures.items) |path| self.gpa.free(path);
+            pictures.deinit(self.gpa);
+        }
+        for (self.prepared.?.settings.materials) |override| {
+            const bytes = try self.files.read(self.gpa, override.material, .limited(64 * 1024));
+            errdefer self.gpa.free(bytes);
+            const source = try self.gpa.dupe(u8, override.material);
+            errdefer self.gpa.free(source);
+            var reader: json.Reader = .init(self.gpa, bytes, .{ .syntax = .json5 });
+            defer reader.deinit();
+            while (try reader.next()) |token| {
+                const path = switch (token) {
+                    .string => |held| held,
+                    else => continue,
+                };
+                if (!std.mem.startsWith(u8, path, Project.scheme)) continue;
+                if ((AssetKind.ofPath(path) orelse continue) != .texture or names(pictures.items, path)) continue;
+                const copy = try self.gpa.dupe(u8, path);
+                errdefer self.gpa.free(copy);
+                try pictures.append(self.gpa, copy);
+            }
+            try files.append(self.gpa, .{ .source = source, .bytes = bytes });
+        }
+        self.material_files = try files.toOwnedSlice(self.gpa);
+        self.pictures = try pictures.toOwnedSlice(self.gpa);
+        self.decoded = try self.gpa.alloc(?Decoded, self.pictures.len);
+        @memset(self.decoded, null);
+    }
+
+    /// Persist the native FXLODS cache on the worker. The original highest
+    /// detail mesh remains intact; subsequent runs read verified native LODs.
+    /// Atomic replacement prevents an editor/game pair seeing a partial file.
+    fn cacheStreamLods(self: *Load, at: u32) !void {
+        const model = &self.prepared.?.model;
+        if (self.files.pack != null or model.lod_file.len != 0) return;
+        const lods = @import("../render/lods.zig");
+        const held = model.meshes[at];
+        const bytes = try lods.write(self.gpa, &.{.{ .hash = lods.hashOf(held.vertices, held.indices), .levels = held.lods }});
+        defer self.gpa.free(bytes);
+        const path = try models.lodsPath(self.gpa, self.source);
+        defer self.gpa.free(path);
+        const file = try Project.underRoot(self.gpa, self.files.root, path);
+        defer self.gpa.free(file);
+        var suffix: u64 = undefined;
+        self.files.io.random(std.mem.asBytes(&suffix));
+        const temp = try std.fmt.allocPrint(self.gpa, "{s}.{x}.tmp", .{ file, suffix });
+        defer self.gpa.free(temp);
+        const dir = std.Io.Dir.cwd();
+        if (std.fs.path.dirname(file)) |folder| try dir.createDirPath(self.files.io, folder);
+        defer dir.deleteFile(self.files.io, temp) catch {};
+        try dir.writeFile(self.files.io, .{ .sub_path = temp, .data = bytes });
+        try dir.rename(temp, dir, file, self.files.io);
     }
 
     /// The pictures, sounds and models a scene names, wherever it names
@@ -467,6 +564,14 @@ pub const Load = struct {
         for (self.heard) |held| if (held) |sound| gpa.free(sound.bytes);
         gpa.free(self.heard);
         if (self.prepared) |*held| held.deinit();
+        for (self.material_files) |file| {
+            gpa.free(file.source);
+            gpa.free(file.bytes);
+        }
+        gpa.free(self.material_files);
+        var cached = self.cached_pictures.keyIterator();
+        while (cached.next()) |key| gpa.free(key.*);
+        self.cached_pictures.deinit(gpa);
     }
 };
 
@@ -570,6 +675,15 @@ pub const Report = struct {
 /// `App.loadInBackground`. `error.NotAnAsset` for a file the engine does
 /// not read by its ending.
 pub fn start(app: *App, path: []const u8) !void {
+    return startWithOptions(app, path, false);
+}
+
+pub fn startStreaming(app: *App, path: []const u8) !void {
+    if (!models.isModel(path)) return error.NotAnAsset;
+    return startWithOptions(app, path, true);
+}
+
+fn startWithOptions(app: *App, path: []const u8, streaming: bool) !void {
     if (app.io == null) return error.NoIo;
     const gpa = poolAllocator(app.gpa);
     const source = try app.project.canonical(gpa, path);
@@ -590,9 +704,78 @@ pub fn start(app: *App, path: []const u8) !void {
     pool.start();
     const load = try gpa.create(Load);
     errdefer gpa.destroy(load);
-    load.* = .{ .gpa = gpa, .pool = pool, .kind = kind, .model = model, .source = source, .file = file, .files = app.project.files() };
+    load.* = .{ .gpa = gpa, .pool = pool, .kind = kind, .model = model, .source = source, .file = file, .files = app.project.files(), .streaming = streaming };
+    errdefer {
+        var cached = load.cached_pictures.keyIterator();
+        while (cached.next()) |key| gpa.free(key.*);
+        load.cached_pictures.deinit(gpa);
+    }
+    if (streaming) {
+        var textures = app.assets.textures.iterator();
+        while (textures.next()) |texture| {
+            if (texture.value.source.len == 0 or load.cached_pictures.contains(texture.value.source)) continue;
+            const key = try gpa.dupe(u8, texture.value.source);
+            errdefer gpa.free(key);
+            try load.cached_pictures.put(gpa, key, {});
+        }
+    }
     try app.loads.list.append(app.gpa, load);
+    errdefer _ = app.loads.list.pop();
     try pool.push(.{ .load = load, .kind = .read });
+}
+
+/// A cached texture may have been evicted while a worker parsed the model.
+/// Requeue just that missing picture; never decode or wait on the frame thread.
+pub fn refreshStreamingTextures(app: *App, path: []const u8) !bool {
+    const load = app.loads.of(path) orelse return true;
+    if (!load.done()) return false;
+    if (load.failure != null) return true;
+    var queued = false;
+    for (load.pictures, load.decoded, 0..) |source, decoded, at| {
+        if (decoded != null or app.assets.findTexture(source) != null) continue;
+        load.expect(1);
+        load.pool.push(.{ .load = load, .kind = .picture, .index = @intCast(at) }) catch |err| {
+            _ = load.pending.fetchSub(1, .acq_rel);
+            return err;
+        };
+        queued = true;
+    }
+    return !queued;
+}
+
+/// Never waits or decodes on the game thread. One new texture (with GPU
+/// mipmaps), or one <=12k-vertex model, is adopted per call. The caller
+/// controls the time/operation budget and retains dependencies until eviction.
+pub fn commitStreaming(app: *App, path: []const u8) !bool {
+    const load = app.loads.of(path) orelse return app.scenes.find(path) != null;
+    if (!load.done()) return false;
+    if (load.failure) |err| {
+        app.loads.drop(load);
+        return err;
+    }
+    while (load.stream_picture < load.decoded.len) {
+        const at = load.stream_picture;
+        load.stream_picture += 1;
+        const picture = load.decoded[at] orelse continue;
+        if (app.assets.findTexture(load.pictures[at]) != null) continue;
+        if (picture.width > 1024 or picture.height > 1024) return error.StreamTextureTooLarge;
+        _ = try app.assets.adoptTexture(load.pictures[at], picture.width, picture.height, picture.pixels, .{ .mips = true, .wrap = .repeat, .uid = picture.uid });
+        return false;
+    }
+    defer app.loads.drop(load);
+    for (load.material_files) |file| {
+        if (app.materials.find(file.source) == null) _ = try app.materials.adoptFile(app, file.source, file.bytes);
+    }
+    _ = try models.take(app, path, &load.prepared.?);
+    return true;
+}
+
+/// Discard only completed work: no joining a worker in an interactive frame.
+pub fn discardStreaming(app: *App, path: []const u8) bool {
+    const load = app.loads.of(path) orelse return true;
+    if (!load.done()) return false;
+    app.loads.drop(load);
+    return true;
 }
 
 /// How far the file at `path` has got, from nought to one: one once it is

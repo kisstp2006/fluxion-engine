@@ -100,6 +100,14 @@ pub const Materials = struct {
         return self.keep(gpa, name, .{ .material = material, .params = .empty }, false);
     }
 
+    /// Material bytes read by a streaming worker; textures must already be
+    /// adopted. Keeps the normal editable file provenance without rereading IO.
+    pub fn adoptFile(self: *Materials, app: *App, path: []const u8, bytes: []const u8) !MaterialHandle {
+        var made = try read(app, bytes, null);
+        errdefer shaders.freeParams(app.gpa, &made.params);
+        return self.keep(app.gpa, path, made, true);
+    }
+
     /// Keep what was read, its numbers' names now the table's.
     fn keep(self: *Materials, gpa: Allocator, name: []const u8, made: Read, on_disc: bool) Allocator.Error!MaterialHandle {
         if (self.find(name)) |known| {

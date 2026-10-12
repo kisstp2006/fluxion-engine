@@ -112,6 +112,7 @@ pub const order = [_]Step{
     // then what the dead left let go of.
     .{ .pass = current_scene.openAsked },
     .{ .pass = backgroundLoads },
+    .{ .pass = @import("../assets/streaming.zig").update },
     .{ .pass = tree.despawnOrphans },
     .{ .pass = tile_chunks.despawnOrphans },
     .{ .pass = sound },

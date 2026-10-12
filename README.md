@@ -1353,6 +1353,40 @@ _ = try app.world.spawnWith(.{ eye, fx.Camera3D{ .current = true } });
   opens between its surfaces; a corner where such lines meet stays.
 - **`visibility_range`** on a `MeshInstance3D` stops drawing it, and its
   shadow, past that many metres from the camera.
+- **A `StreamMesh3D` beside a `MeshInstance3D` brings its mesh in as the
+  camera comes near, and lets it go as it leaves**: a level too big to keep
+  whole, cut into small models. Its `source` is one of them, by its path
+  under the project with no `res://` - `models/stream/a12.gltf` - read on
+  the loading threads once the camera, or where it is heading, is within
+  `load_distance` metres of it, less the `bounds_radius` it is given; and
+  let go eight seconds after it was last within `unload_distance`, one a
+  frame, the furthest first. The two distances apart are what keeps a
+  camera on the line from reading it again and again.
+  - A model that streams is one mesh of no more than 12,000 vertices, with
+    one material and no pictures of its own: its pictures are the ones the
+    material its `.import` file puts in place names, none wider or taller
+    than 1024. A bigger one is refused, with a warning, and not asked for
+    again.
+  - Nothing of it is waited for on the game's thread. The file, its
+    material and its pictures are read and decoded on the loading threads,
+    eight models at once at most, and what is ready reaches the GPU within a
+    millisecond and a half a frame - `app.streams.gpu_budget_ns` - the
+    nearest first, until `app.streams.memory_budget` bytes are kept: two
+    gigabytes, as it comes.
+  - A picture or a material two models share is kept until the last of them
+    is let go. One that was there before any of them asked for it is not
+    theirs, and stays.
+  - Its levels of detail are read from `.fluxion/imported/<model>.lods`, and
+    written there by the loading thread the first time, where there were
+    none.
+  - A collider is not streamed: what a level is walked on is in the scene as
+    ever, so nothing falls through what is not drawn yet.
+  - `streamingReady()` says whether everything near is in, and
+    `streamingProgress()` how much of it, from nought to one: what a loading
+    screen waits for, from a script as from Zig. A frame's statistics count
+    the time it took, the meshes in, those with levels of detail and the
+    bytes kept: `stream_ms`, `streamed_meshes`, `lod_meshes` and
+    `stream_memory_bytes`.
 - **The 3D world is drawn at the project's `scale_3d`** of the picture it
   goes into - from a quarter to twice - and stretched to fill it: smaller is
   faster and softer. The interface and the 2D world are drawn as they are.
@@ -4073,7 +4107,7 @@ what it is about:
 | `tiles/` | Tile sets, tile maps and their chunks |
 | `ui/` | Controls, themes, the interface, touch buttons and tool windows |
 | `script/` | What a script sees of the engine and how it gets there |
-| `assets/` | The tables of files of each kind, background loading, data files |
+| `assets/` | The tables of files of each kind, background loading, meshes streamed by their distance, data files |
 | `project/` | The project file and its settings, and plugins |
 | `net/` | The game's web requests and their answers |
 | `files/` | A game's own files, config files, sealed files and the pack a shipped game reads |

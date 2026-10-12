@@ -38,6 +38,7 @@ pub const Text2D = @import("../render/render_components.zig").Text2D;
 pub const Camera2D = @import("../render/render_components.zig").Camera2D;
 pub const RenderView = @import("../render/render_components.zig").RenderView;
 pub const MeshInstance3D = @import("../render/render3d_components.zig").MeshInstance3D;
+pub const StreamMesh3D = @import("../render/render3d_components.zig").StreamMesh3D;
 pub const PrimitiveMesh3D = @import("../render/render3d_components.zig").PrimitiveMesh3D;
 pub const CSGShape3D = @import("../render/csg_shapes.zig").CSGShape3D;
 pub const Material3D = @import("../render/render3d_components.zig").Material3D;

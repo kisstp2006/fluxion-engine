@@ -107,6 +107,58 @@ fn appIn(folder: *Folder) !*App {
     return App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = folder.root(), .width = 64, .height = 64 });
 }
 
+test "streaming shares PBR maps, budgets adoption, evicts after hysteresis and reloads native LOD cache" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const no_image = try std.mem.replaceOwned(u8, testing.allocator, try triangle(), "\"images\": [{ \"uri\": \"red.png\" }]", "\"images\": []");
+    defer testing.allocator.free(no_image);
+    const no_texture = try std.mem.replaceOwned(u8, testing.allocator, no_image, "\"textures\": [{ \"source\": 0 }]", "\"textures\": []");
+    defer testing.allocator.free(no_texture);
+    const package = try std.mem.replaceOwned(u8, testing.allocator, no_texture, "\"baseColorTexture\": { \"index\": 0 }", "\"baseColorFactor\": [1, 1, 1, 1]");
+    defer testing.allocator.free(package);
+    try folder.put("models/one.gltf", package);
+    try folder.put("models/two.gltf", package);
+    const settings = "{\"materials\":[{\"name\":\"Red\",\"material\":\"res://models/shared.mat3d\"}]}";
+    try folder.put("models/one.gltf.import", settings);
+    try folder.put("models/two.gltf.import", settings);
+    try folder.put("models/shared.mat3d", "{\"albedo_texture\":\"res://models/red.png\",\"roughness\":0.7}");
+    const app = try appIn(&folder);
+    defer app.destroy();
+    const camera = try app.world.spawnWith(.{ Transform3D.at(0, 0, 2), Camera3D{} });
+    const first = try app.world.spawnWith(.{ Transform3D{}, MeshInstance3D{}, components.StreamMesh3D{ .load_distance = 10, .unload_distance = 20 } });
+    const second = try app.world.spawnWith(.{ Transform3D.at(1, 0, 0), MeshInstance3D{}, components.StreamMesh3D{ .load_distance = 10, .unload_distance = 20 } });
+    try app.setText(first, components.StreamMesh3D, "source", "models/one.gltf");
+    try app.setText(second, components.StreamMesh3D, "source", "models/two.gltf");
+    for (0..10000) |_| {
+        try app.streams.update(app);
+        if (app.streams.desired == 2 and app.streams.ready == 2) break;
+        std.Thread.yield() catch {};
+    }
+    try testing.expectEqual(@as(usize, 2), app.streams.ready);
+    try testing.expect(folder.exists(".fluxion/imported/models/one.gltf.lods"));
+    const texture = app.assets.findTexture("res://models/red.png").?;
+    const mesh_one = app.world.get(first, MeshInstance3D).?.mesh;
+    app.world.get(first, Transform3D).?.position.x = 100;
+    app.time.elapsed += 9;
+    try app.streams.update(app);
+    try testing.expect(app.meshOf(mesh_one) == null);
+    try testing.expect(app.assets.get(texture) != null); // second still owns it
+    app.world.get(camera, Transform3D).?.position.x = 200;
+    app.time.elapsed += 9;
+    try app.streams.update(app);
+    try testing.expect(app.assets.get(texture) == null);
+    try testing.expectEqual(@as(usize, 0), app.streams.resident_bytes);
+    app.world.get(camera, Transform3D).?.position.x = 0;
+    for (0..10000) |_| {
+        try app.streams.update(app);
+        if (app.streams.desired == 1 and app.streams.ready == 1) break;
+        std.Thread.yield() catch {};
+    }
+    try testing.expectEqual(@as(usize, 1), app.streams.ready);
+    try testing.expect(app.assets.findTexture("res://models/red.png") != null);
+}
+
 test "a glTF model is a scene: its nodes an entity tree, its parts kept under its name" {
     var folder: Folder = undefined;
     try folder.init();
@@ -678,4 +730,47 @@ test "a picture read in the background has its .uid file read with it, so the ga
     const uid = (try app.project.uidOf("res://models/red.png")).?;
     var text: [36]u8 = undefined;
     try testing.expectEqualStrings("6f1c2a1e-5b7d-4e3a-9c2f-0a1b2c3d4e5f", std.fmt.bufPrint(&text, "{f}", .{uid}) catch unreachable);
+}
+
+test "streaming skips resident picture decoding and recovers eviction during preparation" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const no_image = try std.mem.replaceOwned(u8, testing.allocator, try triangle(), "\"images\": [{ \"uri\": \"red.png\" }]", "\"images\": []");
+    defer testing.allocator.free(no_image);
+    const no_texture = try std.mem.replaceOwned(u8, testing.allocator, no_image, "\"textures\": [{ \"source\": 0 }]", "\"textures\": []");
+    defer testing.allocator.free(no_texture);
+    const package = try std.mem.replaceOwned(u8, testing.allocator, no_texture, "\"baseColorTexture\": { \"index\": 0 }", "\"baseColorFactor\": [1, 1, 1, 1]");
+    defer testing.allocator.free(package);
+    try folder.put("models/one.gltf", package);
+    try folder.put("models/two.gltf", package);
+    const settings = "{\"materials\":[{\"name\":\"Red\",\"material\":\"res://models/shared.mat3d\"}]}";
+    try folder.put("models/one.gltf.import", settings);
+    try folder.put("models/two.gltf.import", settings);
+    try folder.put("models/shared.mat3d", "{\"albedo_texture\":\"res://models/red.png\",\"roughness\":0.7}");
+    const app = try appIn(&folder);
+    defer app.destroy();
+    const background = @import("background_load.zig");
+    const path = "res://models/one.gltf";
+    const existing = try app.assets.loadTexture("res://models/red.png", .{});
+    try background.startStreaming(app, path);
+    for (0..100000) |_| {
+        if (app.loads.of(path).?.done()) break;
+        std.Thread.yield() catch {};
+    }
+    const load = app.loads.of(path).?;
+    try testing.expect(load.done());
+    try testing.expect(load.decoded[0] == null); // reused, not decoded again
+    app.assets.unload(existing); // eviction while the worker prepared geometry
+    try testing.expect(!try background.refreshStreamingTextures(app, path));
+    for (0..100000) |_| {
+        if (load.done()) break;
+        std.Thread.yield() catch {};
+    }
+    try testing.expect(load.done());
+    try testing.expect(load.decoded[0] != null); // only missing map was requeued
+    while (!try background.commitStreaming(app, path)) {}
+    try testing.expect(app.assets.findTexture("res://models/red.png") != null);
+    const handle = app.findMesh("res://models/one.gltf#mesh/0").?;
+    try testing.expect(app.materialOf(app.meshOf(handle).?.surfaces[0].material).?.albedo_texture.isNone() == false);
 }

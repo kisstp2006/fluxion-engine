@@ -531,6 +531,9 @@ scenes: Scenes = .{},
 data_files: data_file.DataFiles = .{},
 /// Files reading in the background: see `loadInBackground`.
 loads: background_load.Loads = .{},
+/// The meshes a `StreamMesh3D` brings in as the camera comes near and lets
+/// go as it leaves: see `assets/streaming.zig`.
+streams: @import("assets/streaming.zig").Streams = .{},
 
 // The project: `project/`.
 /// Where the game's files are - `res://` - and the UUIDs of the ones that
@@ -612,6 +615,7 @@ pub const engine_components = .{
     components.RenderView,
     components.ViewTexture,
     components3d.MeshInstance3D,
+    components3d.StreamMesh3D,
     components3d.PrimitiveMesh3D,
     csg_shapes.CSGShape3D,
     components3d.Material3D,
@@ -989,6 +993,7 @@ pub fn destroy(self: *App) void {
     self.instances.deinit(gpa);
     self.current_scene.deinit(gpa);
     self.loads.deinit(gpa);
+    self.streams.deinit(gpa);
     self.scenes.deinit(gpa);
     self.data_files.deinit(gpa);
     self.audio.deinit();
@@ -1133,6 +1138,10 @@ pub fn step(self: *App) anyerror!bool {
             .fixed_ms = 0,
             .systems_ms = 0,
             .draw_ms = 0,
+            .stream_ms = @floatCast(@as(f64, @floatFromInt(self.streams.last_ns)) / 1e6),
+            .streamed_meshes = @intCast(self.streams.ready),
+            .lod_meshes = @intCast(self.streams.lod_meshes),
+            .stream_memory_bytes = self.streams.resident_bytes,
             .meshes = drew.meshes,
             .draw_calls = drew.draw_calls,
             .triangles = drew.triangles,
@@ -4493,6 +4502,20 @@ pub fn loadInBackground(self: *App, path: []const u8) !void {
     return background_load.start(self, path);
 }
 
+/// Whether every mesh a `StreamMesh3D` near the camera names is in: what a
+/// loading screen waits for before it lets the player go. It asks, and
+/// waits for nothing.
+pub fn streamingReady(self: *const App) bool {
+    return self.streams.isReady();
+}
+
+/// How many of the meshes a `StreamMesh3D` near the camera names are in,
+/// from nought to one: one where none is wanted.
+pub fn streamingProgress(self: *const App) f32 {
+    if (self.streams.desired == 0) return 1;
+    return @as(f32, @floatFromInt(self.streams.ready)) / @as(f32, @floatFromInt(self.streams.desired));
+}
+
 /// How far the file at `path` has got, from nought to one: one once it is
 /// read, in the background or not, and nought while nothing is reading it.
 pub fn loadProgress(self: *App, path: []const u8) f32 {
@@ -6401,6 +6424,8 @@ pub const reflect_methods = .{
     .scriptStats = .{attr.Params{ .names = &.{"vm"} }},
     // Files of every kind
     .loadInBackground = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+    .streamingReady = .{},
+    .streamingProgress = .{},
     .loadProgress = .{attr.Params{ .names = &.{"path"} }},
     .loadStatus = .{attr.Params{ .names = &.{"path"} }},
     .finishLoad = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
