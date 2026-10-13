@@ -52,6 +52,12 @@ pub const Frame = struct {
     triangles: u64,
     culled: u32,
     shadow_views_drawn: u32,
+    /// The step of the frame's order it spent longest in, and how long.
+    longest_step: u8 = 0,
+    longest_step_ms: f32 = 0,
+    /// The 3D draws' parts: gathering, shadows, the geometry pass, the
+    /// surfaces and the passes after.
+    draw_parts_ms: [5]f32 = @splat(0),
 };
 
 /// The frames, while there is somewhere to write them.
@@ -63,6 +69,13 @@ pub const FrameStats = struct {
     began: ?std.Io.Timestamp = null,
     fixed_ns: i96 = 0,
     draw_ns: i96 = 0,
+    /// How long each of the frame's own steps took, by its place in the
+    /// frame's order, and what each is called.
+    steps_ns: [most_steps]i96 = @splat(0),
+    step_names: []const []const u8 = &.{},
+
+    /// The most steps a frame's order has.
+    pub const most_steps = 64;
 
     /// The frames left out at the start.
     pub const warm_up = 10;
@@ -84,6 +97,12 @@ pub const FrameStats = struct {
         self.began = if (io) |held| std.Io.Timestamp.now(held, .awake) else null;
         self.fixed_ns = 0;
         self.draw_ns = 0;
+        self.steps_ns = @splat(0);
+    }
+
+    /// The frame's step at `at` in its order took `ns`.
+    pub fn stepTook(self: *FrameStats, step: usize, ns: i96) void {
+        if (step < most_steps) self.steps_ns[step] += ns;
     }
 
     /// When a part of the frame starts, to be given to `took`.
@@ -108,6 +127,12 @@ pub const FrameStats = struct {
         frame.fixed_ms = ms(self.fixed_ns);
         frame.draw_ms = ms(self.draw_ns);
         frame.systems_ms = ms(systems_ns);
+        var longest: usize = 0;
+        for (self.steps_ns, 0..) |ns, step| {
+            if (ns > self.steps_ns[longest]) longest = step;
+        }
+        frame.longest_step = @intCast(longest);
+        frame.longest_step_ms = ms(self.steps_ns[longest]);
         self.frames.append(gpa, frame) catch {};
     }
 
@@ -163,6 +188,17 @@ pub const FrameStats = struct {
         draw_calls: u32 = 0,
         shadow_views_drawn: u32 = 0,
         streamed_meshes: u32 = 0,
+        /// The step of the frame's order it spent longest in, and how long.
+        step: []const u8 = "",
+        step_ms: f32 = 0,
+        /// The 3D draws' parts: gathering and uploading, the shadows, the
+        /// geometry pass and the screen's occlusion, the surfaces, and the
+        /// passes that turn the light into a picture.
+        gather_ms: f32 = 0,
+        shadows_ms: f32 = 0,
+        geometry_ms: f32 = 0,
+        surfaces_ms: f32 = 0,
+        post_ms: f32 = 0,
     };
 
     /// The frames after the warm-up, summed up.
@@ -203,6 +239,13 @@ pub const FrameStats = struct {
                 .draw_calls = f.draw_calls,
                 .shadow_views_drawn = f.shadow_views_drawn,
                 .streamed_meshes = f.streamed_meshes,
+                .step = if (f.longest_step < self.step_names.len) self.step_names[f.longest_step] else "",
+                .step_ms = f.longest_step_ms,
+                .gather_ms = f.draw_parts_ms[0],
+                .shadows_ms = f.draw_parts_ms[1],
+                .geometry_ms = f.draw_parts_ms[2],
+                .surfaces_ms = f.draw_parts_ms[3],
+                .post_ms = f.draw_parts_ms[4],
             };
         }
         return out;

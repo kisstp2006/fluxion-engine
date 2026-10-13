@@ -28,6 +28,7 @@ const Allocator = std.mem.Allocator;
 
 const rhi = @import("fluxion_rhi");
 const image = @import("fluxion_image");
+const mip_maker_table = @import("mip_maker.zig");
 const id = @import("fluxion_id");
 const typeface = @import("fluxion_font");
 const platform = @import("fluxion_platform");
@@ -240,6 +241,9 @@ mip_samplers: Samplers,
 /// The textures `wantMips` asked a chain for, made before the next frame
 /// is drawn.
 mips_wanted: std.ArrayListUnmanaged(TextureHandle) = .empty,
+/// What reads the wanted pictures again, off this thread: started with the
+/// first asked.
+mip_maker: ?mip_maker_table.MipMaker(TextureHandle) = null,
 
 pub fn init(gpa: Allocator, device: *rhi.Device, io: ?std.Io, project: *Project) Error!Assets {
     var self: Assets = .{
@@ -322,6 +326,7 @@ pub fn deinit(self: *Assets) void {
             for (by_wrap.values) |sampler| if (!sampler.isNone()) self.device.destroySampler(sampler);
         }
     }
+    if (self.mip_maker) |*maker| maker.deinit();
     self.mips_wanted.deinit(self.gpa);
     self.* = undefined;
 }
@@ -399,21 +404,56 @@ pub fn wantMips(self: *Assets, handle: TextureHandle) void {
 /// The chains `wantMips` asked for, each texture made again under its
 /// handle with its levels. Between frames, as the engine does before it
 /// draws one.
+///
+/// Reading and decoding a picture's file again takes milliseconds, and a
+/// turn of the camera asks for dozens: a thread of its own does that
+/// (`mip_maker.zig`), and here only what is ready is given to the device,
+/// a few a frame within `mips_time_a_frame`, so no frame waits for a file.
+/// A picture keeps its one level a few frames longer.
 pub fn makeWantedMips(self: *Assets) void {
-    defer self.mips_wanted.clearRetainingCapacity();
-    for (self.mips_wanted.items) |handle| {
-        self.giveMips(handle) catch |err| log.warn("the levels of a texture were not made: {t}", .{err});
+    const io = self.io orelse {
+        // Nothing to read with: none can be made again.
+        self.mips_wanted.clearRetainingCapacity();
+        return;
+    };
+    if (self.mips_wanted.items.len > 0) {
+        if (self.mip_maker == null) self.mip_maker = .init(self.gpa, io, self.project.files(), picture_limit);
+        for (self.mips_wanted.items) |handle| {
+            const held = self.textures.get(handle.toId()) orelse continue;
+            if (held.mips or held.upside_down or held.source.len == 0) continue;
+            self.mip_maker.?.ask(handle, held.source) catch {};
+        }
+        self.mips_wanted.clearRetainingCapacity();
+    }
+    const maker = &(self.mip_maker orelse return);
+    // As many as fit in the frame's share of time: one at least, so a
+    // large picture that takes all of it still gets its turn.
+    const began = std.Io.Timestamp.now(io, .awake);
+    var given: usize = 0;
+    while (given < mips_a_frame) : (given += 1) {
+        var made = maker.take() orelse break;
+        defer made.deinit(self.gpa);
+        self.giveMips(made.handle, made.picture orelse continue) catch |err| log.warn("the levels of a texture were not made: {t}", .{err});
+        if (began.durationTo(std.Io.Timestamp.now(io, .awake)).nanoseconds > mips_time_a_frame) break;
     }
 }
 
-fn giveMips(self: *Assets, handle: TextureHandle) !void {
+/// How many pictures a frame gives their levels at most, and how long it
+/// spends on them before it leaves the rest for the next: a millisecond and
+/// a half.
+pub const mips_a_frame = 4;
+pub const mips_time_a_frame = 1_500_000;
+
+/// Whether every chain asked for has been made: for a test, or a tool that
+/// waits for the picture to settle.
+pub fn mipsPending(self: *Assets) usize {
+    return self.mips_wanted.items.len + if (self.mip_maker) |*maker| maker.pending() else 0;
+}
+
+fn giveMips(self: *Assets, handle: TextureHandle, decoded: image.Decoded) !void {
     const held = self.textures.get(handle.toId()) orelse return;
+    // Gone, or made again some other way, since it was asked for.
     if (held.mips or held.upside_down or held.source.len == 0) return;
-    // A picture with no file of its own - one of a model's - keeps what it has.
-    const bytes = self.project.readFileAlloc(self.gpa, held.source, .limited(picture_limit)) catch return;
-    defer self.gpa.free(bytes);
-    var decoded = try image.decode(self.gpa, bytes);
-    defer decoded.deinit(self.gpa);
     const made = try self.makeTexture(decoded.width, decoded.height, decoded.pixels, held.source, true);
     self.device.destroyTexture(held.gpu);
     held.gpu = made.gpu;

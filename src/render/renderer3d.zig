@@ -178,8 +178,17 @@ pub const Totals = struct {
     triangles: u64 = 0,
     culled: u32 = 0,
     shadow_views_drawn: u32 = 0,
+    /// How long the draws took, part by part, in nanoseconds: gathering and
+    /// uploading what is drawn, the shadows, the geometry pass and the
+    /// screen's occlusion, the surfaces, and turning the light into a
+    /// picture.
+    parts_ns: [parts]u64 = @splat(0),
+
+    pub const parts = 5;
+    pub const part_names = [parts][]const u8{ "gather", "shadows", "geometry", "surfaces", "post" };
 
     fn add(self: *Totals, drew: *const Renderer3D) void {
+        for (&self.parts_ns, drew.parts_ns) |*sum, ns| sum.* += ns;
         self.meshes += drew.drawn;
         self.draw_calls += drew.draw_calls;
         self.triangles += drew.triangles;
@@ -625,6 +634,8 @@ pub const Renderer3D = struct {
     sky_draw: ?sky.SkyDraw = null,
     /// Whether the last draw drew a sky: for the tests.
     sky_drawn: bool = false,
+    /// How long this draw's parts took: see `Totals.parts_ns`.
+    parts_ns: [Totals.parts]u64 = @splat(0),
     /// The sky over this draw, if any: what the sun is seen through.
     lit_sky: ?Sky3D = null,
     /// How much light from everywhere reaches each pixel, from the screen:
@@ -861,6 +872,8 @@ pub const Renderer3D = struct {
         self.gi_probed = 0;
         self.fog_volumes_kept = 0;
         self.geometry_draws = 0;
+        self.parts_ns = @splat(0);
+        var clock: PartClock = .start(app.io);
         if (width == 0 or height == 0) return;
         const gpa = app.gpa;
         const device = self.device;
@@ -927,7 +940,9 @@ pub const Renderer3D = struct {
         try device.updateBuffer(self.fog, 0, std.mem.asBytes(&fog));
         const flat = &self.billboards.?;
         try flat.gather(app, view, frustum, self.worlds);
+        self.parts_ns[0] = clock.lap();
         try self.drawShadows(gpa);
+        self.parts_ns[1] = clock.lap();
         const shadow_map = if (self.shadow_views > 0) self.atlas.? else self.no_shadow;
 
         const samples = if (lighting.antialias) post.samplesFor(rendering.msaa_3d.samples()) else 1;
@@ -966,6 +981,7 @@ pub const Renderer3D = struct {
                 try device.updateBuffer(self.frame, 0, std.mem.asBytes(&self.frame_data));
             }
         }
+        self.parts_ns[2] = clock.lap();
         const list = device.begin();
         // The sky, worked out into a picture of its own before the frame's
         // pass, by the draw that clears: under a skybox, the skybox's.
@@ -1073,6 +1089,8 @@ pub const Renderer3D = struct {
         try device.submit();
         self.drawn = @intCast(items.len);
         self.bindings_skipped += bind.skipped;
+        self.parts_ns[3] = clock.lap();
+        defer self.parts_ns[4] = clock.lap();
 
         try post.finish(gpa, targets, into, width, height, if (self.geometry_drawn) look else look.withoutGeometry(), clear == null);
         // What goes over it with a depth test reads its depth: where it is
@@ -2376,6 +2394,25 @@ fn materialOf(app: *App, handle: MaterialHandle) Material3DData {
 fn lightsMore(_: void, a: shadows3d.Lamp, b: shadows3d.Lamp) bool {
     return a.range / @max(a.distance, 0.001) > b.range / @max(b.distance, 0.001);
 }
+
+/// A clock for a draw's parts: each `lap` is how long since the one before.
+/// With no clock to read, every lap is nought.
+const PartClock = struct {
+    io: ?std.Io,
+    last: ?std.Io.Timestamp,
+
+    fn start(io: ?std.Io) PartClock {
+        return .{ .io = io, .last = if (io) |held| std.Io.Timestamp.now(held, .awake) else null };
+    }
+
+    fn lap(self: *PartClock) u64 {
+        const io = self.io orelse return 0;
+        const now = std.Io.Timestamp.now(io, .awake);
+        defer self.last = now;
+        const ns = self.last.?.durationTo(now).nanoseconds;
+        return if (ns > 0) @intCast(ns) else 0;
+    }
+};
 
 /// The `Sky3D` a draw that sees `worlds` through `view` is under: the
 /// first visible one in its world - or, for the main world and a skybox's,

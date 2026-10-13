@@ -137,6 +137,24 @@ pub const order = [_]Step{
     .{ .pass = draw },
 };
 
+/// What each of `order`'s steps is called, in its order: what a frame's
+/// stats name the step it spent longest in by.
+pub const order_names = [_][]const u8{
+    "tick", "fingers", "freshFrame", "feedInterface", "commands", "States.changeAsked",
+    "bodiesBeforeTheSteps", "scriptsHearInput", "stage input", "engineKeys", "pointerSpeed", "picking",
+    "fixed steps", "freshInherited", "gameClocks", "frameTimers", "tween.update", "animation.update",
+    "ragdolls3d.update", "skeleton.update", "sprite_frames.update", "scriptsUpdate", "stage update",
+    "stage late", "deferredSignals", "current_scene.openAsked", "backgroundLoads",
+    "streaming.update", "tree.despawnOrphans", "tile_chunks.despawnOrphans", "sound",
+    "emitters", "scriptsEndOfFrame", "forgetTheDead", "sprite_frames.show", "cameras.follow", "debugViews",
+    "freshInherited", "layOut", "skeleton.update", "skeleton.drawBones", "textureMips", "draw",
+};
+
+comptime {
+    std.debug.assert(order_names.len == order.len);
+}
+
+
 /// One fixed step.
 pub const fixed_step = [_]Step{
     .{ .pass = freshStep },
@@ -150,18 +168,26 @@ pub const fixed_step = [_]Step{
 
 /// Run `steps`, in order.
 pub fn run(app: *App, steps: []const Step) anyerror!void {
-    for (steps) |step| switch (step) {
-        .pass => |pass| {
-            try pass(app);
-            try app.signals.drain(app);
-        },
-        .stage => |stage| try app.schedule.run(stage, app),
-        .fixed_steps => |inner| {
-            const started = app.frame_stats.start(app.io);
-            defer app.frame_stats.fixed_ns += FrameStats.took(app.io, started);
-            try fixedSteps(app, inner);
-        },
-    };
+    // The frame's own steps are each timed while its stats are kept: which
+    // one a slow frame spent longest in.
+    const timed = steps.ptr == &order and app.frame_stats.keeping();
+    if (timed) app.frame_stats.step_names = &order_names;
+    for (steps, 0..) |step, at| {
+        const began = if (timed) app.frame_stats.start(app.io) else null;
+        defer if (timed) app.frame_stats.stepTook(at, FrameStats.took(app.io, began));
+        switch (step) {
+            .pass => |pass| {
+                try pass(app);
+                try app.signals.drain(app);
+            },
+            .stage => |stage| try app.schedule.run(stage, app),
+            .fixed_steps => |inner| {
+                const started = app.frame_stats.start(app.io);
+                defer app.frame_stats.fixed_ns += FrameStats.took(app.io, started);
+                try fixedSteps(app, inner);
+            },
+        }
+    }
 }
 
 fn fixedSteps(app: *App, steps: []const Step) anyerror!void {

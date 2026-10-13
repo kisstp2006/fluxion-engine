@@ -1160,6 +1160,11 @@ pub fn step(self: *App) anyerror!bool {
             .triangles = drew.triangles,
             .culled = drew.culled,
             .shadow_views_drawn = drew.shadow_views_drawn,
+            .draw_parts_ms = parts: {
+                var ms: [5]f32 = undefined;
+                for (&ms, drew.parts_ns) |*m, ns| m.* = @floatCast(@as(f64, @floatFromInt(ns)) / 1e6);
+                break :parts ms;
+            },
         });
     }
 

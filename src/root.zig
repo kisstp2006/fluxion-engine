@@ -699,6 +699,7 @@ test {
     _ = @import("render/skyboxes.zig");
     _ = @import("render/fog_backdrop.zig");
     _ = @import("render/sky.zig");
+    _ = @import("assets/mip_maker.zig");
     _ = @import("render/drawing.zig");
     _ = @import("render/lighting.zig");
     _ = @import("render/lights.zig");

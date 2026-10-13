@@ -499,7 +499,7 @@ test "the 3D components keep what they hold through a scene round trip" {
     try testing.expectEqualSlices(f32, &.{ 1, 2 }, copy.shader_params.get(shiny_back, "speed").?);
 }
 
-test "a surface's pictures are given a chain of levels, before the frame after the one that drew them" {
+test "a surface's pictures are given a chain of levels, a few frames after the one that drew them" {
     var files: helpers.Files = try .init();
     defer files.tmp.cleanup();
     var path: [192]u8 = undefined;
@@ -514,9 +514,15 @@ test "a surface's pictures are given a chain of levels, before the frame after t
     const surface = try app.addMaterial("brick", .{ .albedo_texture = brick, .emission_texture = loose });
     _ = try looking(app);
     _ = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), MeshInstance3D{}, PrimitiveMesh3D{}, Material3D{ .material = surface } });
-    // Drawn, and asked for; made before the next frame is drawn.
+    // Drawn, and asked for; read again off the game's thread, and made in a
+    // frame once it is ready - no frame waits for the file.
     _ = try app.step();
-    _ = try app.step();
+    var frames: usize = 0;
+    while (frames < 5000 and !app.assets.get(brick).?.mips) : (frames += 1) {
+        _ = try app.step();
+        if (app.assets.mipsPending() > 0) try testing.io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try testing.expectEqual(@as(usize, 0), app.assets.mipsPending());
     const held = app.assets.get(brick).?;
     try testing.expect(held.mips);
     try testing.expectEqual(@as(u32, 4), (try app.device.textureInfo(held.gpu)).mip_levels);
