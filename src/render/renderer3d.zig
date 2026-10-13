@@ -1305,7 +1305,7 @@ pub const Renderer3D = struct {
                 if (!looks.visible) continue;
                 const front = (instance.layers | looks.render_layers) & view.front_layers != 0;
                 const kept: *mesh.Kept = try app.meshDrawnBy(entity, instance) orelse continue;
-                if (kept.mesh.indices.len == 0) continue;
+                if (kept.mesh.indices.len == 0 and !kept.released) continue;
                 // A mesh a skeleton bends is drawn in the skeleton's space,
                 // its box made from its bones' as they are now.
                 const bent: ?Bent = if (!instance.skeleton.isNone() and kept.mesh.skin.len > 0) try self.bentBy(app, instance.skeleton, &kept.mesh, alpha) else null;

@@ -159,6 +159,50 @@ test "streaming shares PBR maps, budgets adoption, evicts after hysteresis and r
     try testing.expect(app.assets.findTexture("res://models/red.png") != null);
 }
 
+test "a streamed package only drawn lets its triangles go once they are on the GPU, and is drawn still" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const no_image = try std.mem.replaceOwned(u8, testing.allocator, try triangle(), "\"images\": [{ \"uri\": \"red.png\" }]", "\"images\": []");
+    defer testing.allocator.free(no_image);
+    const no_texture = try std.mem.replaceOwned(u8, testing.allocator, no_image, "\"textures\": [{ \"source\": 0 }]", "\"textures\": []");
+    defer testing.allocator.free(no_texture);
+    const package = try std.mem.replaceOwned(u8, testing.allocator, no_texture, "\"baseColorTexture\": { \"index\": 0 }", "\"baseColorFactor\": [1, 1, 1, 1]");
+    defer testing.allocator.free(package);
+    try folder.put("models/drawn.gltf", package);
+    try folder.put("models/solid.gltf", package);
+    const app = try appIn(&folder);
+    defer app.destroy();
+    const camera = try app.world.spawnWith(.{ Transform3D.at(0, 0, 2), Camera3D{} });
+    try app.makeCurrent3D(camera);
+    const drawn = try app.world.spawnWith(.{ Transform3D{}, MeshInstance3D{}, components.StreamMesh3D{ .load_distance = 10, .unload_distance = 20 } });
+    // One something collides with keeps its triangles.
+    const solid = try app.world.spawnWith(.{ Transform3D.at(0, -50, 0), MeshInstance3D{}, components.StreamMesh3D{ .load_distance = 100, .unload_distance = 200 }, components.Collider3D{ .shape = .mesh } });
+    try app.setText(drawn, components.StreamMesh3D, "source", "models/drawn.gltf");
+    try app.setText(solid, components.StreamMesh3D, "source", "models/solid.gltf");
+    for (0..10000) |_| {
+        try app.streams.update(app);
+        if (app.streams.desired == 2 and app.streams.ready == 2) break;
+        std.Thread.yield() catch {};
+    }
+    try testing.expectEqual(@as(usize, 2), app.streams.ready);
+    const light = app.meshes.keptOf(app.world.get(drawn, MeshInstance3D).?.mesh).?;
+    try testing.expect(light.released);
+    try testing.expect(light.gpu != null);
+    try testing.expectEqual(@as(usize, 0), light.mesh.vertices.len);
+    try testing.expectEqual(@as(usize, 0), light.mesh.indices.len);
+    try testing.expect(light.mesh.surfaces.len > 0);
+    const heavy = app.meshes.keptOf(app.world.get(solid, MeshInstance3D).?.mesh).?;
+    try testing.expect(!heavy.released);
+    try testing.expect(heavy.mesh.indices.len > 0);
+    // The same package held once, and twice: the budget counts what is held.
+    var once = heavy.mesh.vertices.len * @sizeOf(@TypeOf(heavy.mesh.vertices[0])) + heavy.mesh.indices.len * 4;
+    for (heavy.mesh.lods) |level| once += level.indices.len * 4;
+    try testing.expectEqual(3 * once, app.streams.resident_bytes);
+    _ = try app.step();
+    try testing.expect(app.renderer3d.drawn >= 1);
+}
+
 test "a glTF model is a scene: its nodes an entity tree, its parts kept under its name" {
     var folder: Folder = undefined;
     try folder.init();

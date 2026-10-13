@@ -147,6 +147,15 @@ pub const Streams = struct {
         self.release(app, entry);
     }
 
+    /// Whether nothing but drawing reads a package's triangles: none of
+    /// what streams it collides with it.
+    fn drawnOnly(app: *App, entry: *const Entry) bool {
+        for (entry.users.items) |entity| {
+            if (app.world.isAlive(entity) and app.world.has(entity, components.Collider3D)) return false;
+        }
+        return true;
+    }
+
     fn bind(app: *App, entry: *const Entry) void {
         for (entry.users.items) |entity| {
             if (!app.world.isAlive(entity)) continue;
@@ -255,8 +264,10 @@ pub const Streams = struct {
                     if (!entry.retained and load.failure == null) {
                         var bytes: usize = 0;
                         const held = load.prepared.?.model.meshes[0];
-                        bytes += (held.vertices.len * @sizeOf(mesh.Vertex) + held.indices.len * 4) * 2;
-                        for (held.lods) |lod| bytes += lod.indices.len * 8;
+                        // In its buffers, and - for one something but drawing reads - held here too.
+                        const copies: usize = if (drawnOnly(app, entry)) 1 else 2;
+                        bytes += (held.vertices.len * @sizeOf(mesh.Vertex) + held.indices.len * 4) * copies;
+                        for (held.lods) |lod| bytes += lod.indices.len * 4 * copies;
                         var texture_bytes: usize = 0;
                         for (load.pictures, load.decoded) |source, decoded| {
                             if (app.assets.findTexture(source) != null) continue;
@@ -303,6 +314,8 @@ pub const Streams = struct {
                                 self.evict(app, entry);
                                 return;
                             };
+                            // Only drawn, it is not held twice.
+                            if (drawnOnly(app, entry)) kept.releaseGeometry(app.gpa);
                         }
                         if (app.meshOf(entry.mesh_handle)) |made| {
                             entry.has_lods = made.lods.len > 0;

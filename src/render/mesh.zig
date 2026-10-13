@@ -911,6 +911,9 @@ pub const Kept = struct {
     /// is kept, read again or made again - `Meshes.stamp` - so what is made
     /// from one, a collider, is made again with it.
     stamp: u64 = 0,
+    /// Whether its vertices and indices were let go once its buffers were
+    /// made: see `releaseGeometry`.
+    released: bool = false,
 
     pub fn deinit(self: *Kept, gpa: Allocator, device: *rhi.Device) void {
         if (self.gpu) |gpu| gpu.deinit(device);
@@ -922,6 +925,25 @@ pub const Kept = struct {
         if (self.gpu) |gpu| return gpu;
         self.gpu = try .of(device, self.mesh, "mesh");
         return self.gpu.?;
+    }
+
+    /// Its vertices and indices, and its levels', let go once they are in
+    /// its buffers: for a mesh that is only drawn - a streamed package -
+    /// not to be held twice. Its box, surfaces, skin and levels' surfaces
+    /// stay, which is all drawing reads; what reads its triangles - a ray,
+    /// a mesh collider, a navigation bake, a lightmap - finds none. Nothing
+    /// before its buffers are made.
+    pub fn releaseGeometry(self: *Kept, gpa: Allocator) void {
+        if (self.gpu == null or self.released) return;
+        gpa.free(self.mesh.vertices);
+        self.mesh.vertices = &.{};
+        gpa.free(self.mesh.indices);
+        self.mesh.indices = &.{};
+        for (self.mesh.lods) |*level| {
+            gpa.free(level.indices);
+            level.indices = &.{};
+        }
+        self.released = true;
     }
 };
 
