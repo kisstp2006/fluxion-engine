@@ -5238,10 +5238,20 @@ pub fn resetPose(self: *App, entity: ecs.Entity) void {
 pub fn saveLightmap(self: *App, handle: lightmap_table.LightmapHandle, path: []const u8) !void {
     const io = self.io orelse return error.NoIo;
     const held = self.lightmaps.get(handle) orelse return error.NoSuchLightmap;
-    const bytes = try lightmap_table.write(self.gpa, held.*);
-    defer self.gpa.free(bytes);
     const file = try self.project.osPath(self.gpa, path);
     defer self.gpa.free(file);
+    // One whose picture is on the device alone was read from a file, and
+    // is that file as it was.
+    if (held.pixels.len == 0 and held.width > 0) {
+        const source = self.lightmaps.sourceOf(handle) orelse return error.NoSuchLightmap;
+        if (std.mem.eql(u8, source, path)) return;
+        const bytes = try self.project.readFileAlloc(self.gpa, source, .limited(256 << 20));
+        defer self.gpa.free(bytes);
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes });
+        return;
+    }
+    const bytes = try lightmap_table.write(self.gpa, held.*);
+    defer self.gpa.free(bytes);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes });
 }
 

@@ -37,6 +37,10 @@ const Uuid = id.Uuid;
 /// What a lightmap's file ends in.
 pub const extension = ".lightmap";
 
+fn toHalf(x: f32) u16 {
+    return @bitCast(@as(f16, @floatCast(std.math.clamp(x, -65504, 65504))));
+}
+
 /// A lightmap, the way a `TextureHandle` is a picture.
 pub const LightmapHandle = file_table.Handle("LightmapHandle");
 
@@ -52,9 +56,11 @@ pub const Place = struct {
 pub const Lightmap = struct {
     width: u32,
     height: u32,
-    /// Linear light as half floats, red, green, blue and one a texel, its
-    /// top row first: what the device is given.
-    pixels: []u16,
+    /// Linear light, a texel a word - red and green in eleven bits, blue in
+    /// ten, each a small float - its top row first: what the device is
+    /// given, at half the size of half floats. Let go of once it is on the
+    /// device: then empty.
+    pixels: []u32,
     places: []Place,
     probes: Probes = .{},
     /// Each place's mesh by its UUID.
@@ -107,14 +113,10 @@ pub fn write(gpa: Allocator, lightmap: Lightmap) Allocator.Error![]u8 {
     for (probes.valid) |v| writeAll(w, &.{@intFromBool(v)}) catch return error.OutOfMemory;
 
     // The picture, three bytes and a power of two a texel, compressed.
-    const shared = try gpa.alloc(u8, lightmap.pixels.len);
+    std.debug.assert(lightmap.pixels.len == @as(usize, lightmap.width) * lightmap.height);
+    const shared = try gpa.alloc(u8, lightmap.pixels.len * 4);
     defer gpa.free(shared);
-    var texel: usize = 0;
-    while (texel * 4 < lightmap.pixels.len) : (texel += 1) {
-        const h = lightmap.pixels[texel * 4 ..][0..3];
-        const rgb = [3]f32{ halfToFloat(h[0]), halfToFloat(h[1]), halfToFloat(h[2]) };
-        shared[texel * 4 ..][0..4].* = toShared(rgb);
-    }
+    for (lightmap.pixels, 0..) |texel, t| shared[t * 4 ..][0..4].* = toShared(unpack(texel));
     var compressed: std.Io.Writer.Allocating = try .initCapacity(gpa, shared.len / 4 + 4096);
     defer compressed.deinit();
     {
@@ -195,12 +197,9 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadLigh
         const got = inflate.reader.streamRemaining(&into) catch return error.BadLightmap;
         if (got != shared.len) return error.BadLightmap;
     }
-    const pixels = try gpa.alloc(u16, texels * 4);
+    const pixels = try gpa.alloc(u32, texels);
     errdefer gpa.free(pixels);
-    for (0..texels) |t| {
-        const rgb = fromShared(shared[t * 4 ..][0..4].*);
-        pixels[t * 4 ..][0..4].* = .{ floatToHalf(rgb[0]), floatToHalf(rgb[1]), floatToHalf(rgb[2]), floatToHalf(1) };
-    }
+    for (pixels, 0..) |*texel, t| texel.* = pack(fromShared(shared[t * 4 ..][0..4].*));
     var out: Lightmap = .{ .width = width, .height = height, .pixels = pixels, .places = places, .probes = probes };
     errdefer out.by_uuid.deinit(gpa);
     try out.index(gpa);
@@ -220,9 +219,9 @@ fn takeInts(bytes: []const u8, at: *usize, comptime n: usize) error{BadLightmap}
 /// What was baked, as a lightmap of half floats, each instance's place
 /// under the UUID given for it; instances not in the picture are left out.
 pub fn fromBaked(gpa: Allocator, baked: lightmapper.Result, uuids: []const Uuid) Allocator.Error!Lightmap {
-    const pixels = try gpa.alloc(u16, baked.pixels.len * 4);
+    const pixels = try gpa.alloc(u32, baked.pixels.len);
     errdefer gpa.free(pixels);
-    for (baked.pixels, 0..) |p, t| pixels[t * 4 ..][0..4].* = .{ floatToHalf(p[0]), floatToHalf(p[1]), floatToHalf(p[2]), floatToHalf(1) };
+    for (baked.pixels, pixels) |p, *texel| texel.* = pack(p);
     var count: usize = 0;
     for (baked.places) |place| {
         if (place[0] > 0) count += 1;
@@ -264,18 +263,38 @@ fn fromShared(texel: [4]u8) [3]f32 {
     return .{ (@as(f32, @floatFromInt(texel[0])) + 0.5) * f, (@as(f32, @floatFromInt(texel[1])) + 0.5) * f, (@as(f32, @floatFromInt(texel[2])) + 0.5) * f };
 }
 
-fn floatToHalf(x: f32) u16 {
-    return @bitCast(@as(f16, @floatCast(std.math.clamp(x, -65504, 65504))));
+/// Light as three small floats in a word: red and green as a half float's
+/// exponent and its top six bits, blue its top five, none of them signed -
+/// what devices call R11G11B10.
+pub fn pack(rgb: [3]f32) u32 {
+    var word: u32 = 0;
+    const shifts = [3]u5{ 0, 11, 22 };
+    const dropped = [3]u4{ 4, 4, 5 };
+    for (0..3) |c| {
+        const h: u32 = @as(u16, @bitCast(@as(f16, @floatCast(std.math.clamp(rgb[c], 0, 65000)))));
+        // Rounded to the nearest, the carry into the exponent as it falls.
+        const half_step = @as(u32, 1) << (dropped[c] - 1);
+        const most: u32 = if (c == 2) 0x3df else 0x7bf;
+        const small = @min((h + half_step) >> dropped[c], most);
+        word |= small << shifts[c];
+    }
+    return word;
 }
 
-fn halfToFloat(x: u16) f32 {
-    return @floatCast(@as(f16, @bitCast(x)));
+pub fn unpack(word: u32) [3]f32 {
+    const r: u16 = @intCast((word & 0x7ff) << 4);
+    const g: u16 = @intCast(((word >> 11) & 0x7ff) << 4);
+    const b: u16 = @intCast(((word >> 22) & 0x3ff) << 5);
+    return .{ @floatCast(@as(f16, @bitCast(r))), @floatCast(@as(f16, @bitCast(g))), @floatCast(@as(f16, @bitCast(b))) };
 }
 
 /// Every lightmap read or made, under its handle, and its picture on the
 /// device once drawn with.
 pub const Lightmaps = struct {
     table: Inner = .empty,
+    /// What its lightmaps were made with: what a picture let go of once on
+    /// the device is given back to.
+    gpa: Allocator = undefined,
 
     const Inner = id.handle.Table(Entry);
 
@@ -316,6 +335,7 @@ pub const Lightmaps = struct {
     }
 
     fn keep(self: *Lightmaps, gpa: Allocator, device: *rhi.Device, name: []const u8, lightmap: Lightmap, on_disc: bool) Allocator.Error!LightmapHandle {
+        self.gpa = gpa;
         if (self.find(name)) |known| {
             const held = self.table.get(toId(known)).?;
             held.lightmap.deinit(gpa);
@@ -397,15 +417,38 @@ pub const Lightmaps = struct {
     pub fn textureOf(self: *Lightmaps, device: *rhi.Device, handle: LightmapHandle) rhi.Error!?rhi.Texture {
         const held = self.table.get(toId(handle)) orelse return null;
         if (held.texture) |texture| return texture;
-        const lightmap = held.lightmap;
-        if (lightmap.width == 0 or lightmap.height == 0) return null;
-        held.texture = try device.createTexture(.{
-            .width = lightmap.width,
-            .height = lightmap.height,
-            .format = .rgba16_float,
-            .data = std.mem.sliceAsBytes(lightmap.pixels),
-            .label = "lightmap",
-        });
+        const lightmap = &held.lightmap;
+        if (lightmap.width == 0 or lightmap.height == 0 or lightmap.pixels.len == 0) return null;
+        const support = device.caps().formatSupport(.rg11b10_float);
+        if (support.sampled and support.filterable) {
+            held.texture = try device.createTexture(.{
+                .width = lightmap.width,
+                .height = lightmap.height,
+                .format = .rg11b10_float,
+                .data = std.mem.sliceAsBytes(lightmap.pixels),
+                .label = "lightmap",
+            });
+        } else {
+            // A device that reads no small floats is given half floats,
+            // made for it and let go of.
+            const halves = self.gpa.alloc(u16, lightmap.pixels.len * 4) catch return error.OutOfMemory;
+            defer self.gpa.free(halves);
+            for (lightmap.pixels, 0..) |texel, t| {
+                const rgb = unpack(texel);
+                halves[t * 4 ..][0..4].* = .{ toHalf(rgb[0]), toHalf(rgb[1]), toHalf(rgb[2]), toHalf(1) };
+            }
+            held.texture = try device.createTexture(.{
+                .width = lightmap.width,
+                .height = lightmap.height,
+                .format = .rgba16_float,
+                .data = std.mem.sliceAsBytes(halves),
+                .label = "lightmap",
+            });
+        }
+        // On the device it is not read again: the places and the probes are
+        // what is kept.
+        self.gpa.free(lightmap.pixels);
+        lightmap.pixels = &.{};
         return held.texture;
     }
 
@@ -460,8 +503,8 @@ test "a lightmap's file reads back as it was written, near enough, and one cut s
     // share one power of two.
     for (baked_pixels, 0..) |p, t| for (0..3) |c| {
         const was = p[c];
-        const now = halfToFloat(back.pixels[t * 4 + c]);
-        try testing.expectApproxEqAbs(was, now, @max(@max(p[0], p[1], p[2]) / 128, 0.002));
+        const now = unpack(back.pixels[t])[c];
+        try testing.expectApproxEqAbs(was, now, @max(@max(p[0], p[1], p[2]) / 128, was / 24, 0.002));
     };
 
     try testing.expectError(error.BadLightmap, read(gpa, bytes[0 .. bytes.len - 1]));
