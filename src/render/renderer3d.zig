@@ -625,6 +625,8 @@ pub const Renderer3D = struct {
     sky_draw: ?sky.SkyDraw = null,
     /// Whether the last draw drew a sky: for the tests.
     sky_drawn: bool = false,
+    /// The sky over this draw, if any: what the sun is seen through.
+    lit_sky: ?Sky3D = null,
     /// How much light from everywhere reaches each pixel, from the screen:
     /// for this draw, where it asks for it.
     screen_ao: ?rhi.Texture = null,
@@ -893,6 +895,7 @@ pub const Renderer3D = struct {
         // Under a sky, its first sun is what lights the world now: the sun
         // through the air by day, the moon by night - and casts its shadow.
         const lit: ?sky.Lit = if (skyFor(app, self.worlds, view)) |found| self.litBy(app, found) else null;
+        self.lit_sky = if (lit) |held| held.sky else null;
         if (lit) |held| if (self.suns.items.len > 0) {
             const now = sky.nowOf(held);
             const first = &self.suns.items[0];
@@ -1238,11 +1241,23 @@ pub const Renderer3D = struct {
         };
         var camera: post3d.Camera = .{ .view_projection = view_projection, .eye = view.position, .forward = forward, .right = right, .up = up };
         if (self.suns.items.len > 0) {
+            const first = self.suns.items[0];
+            camera.sun_toward = first.toward;
+            camera.sun_color = first.color[0..3].*;
+            // Its shadow, where it has one this draw: what lights the air.
+            if (first.shadow != null and self.shadow_views > 0 and self.plan.block.suns[0][0] >= 0) {
+                camera.shadows = self.shadows;
+                camera.shadow_depth = self.atlas;
+            }
+        }
+        if (self.suns.items.len > 0) {
             const toward = self.suns.items[0].toward;
             if (toward.y > -0.05) if (ndcOf(view_projection, view.position.add(toward.scale(view.far * 0.5)))) |ndc| {
                 const flip = screenFlip(self.device);
                 camera.sun_uv = .{ ndc[0] * 0.5 + 0.5, ndc[1] * 0.5 * flip + 0.5 };
-                camera.sun_light = self.suns.items[0].color[0..3].*;
+                // The sun as it is seen, not the colour its light was given.
+                const sky_now: Sky3D = self.lit_sky orelse .{};
+                camera.sun_light = sky.discColor(sky_now, toward, self.suns.items[0].color[0..3].*);
                 const off = @max(@abs(ndc[0]), @abs(ndc[1]));
                 camera.sun_seen = std.math.clamp(1.6 - off * 0.6, 0, 1) * std.math.clamp(toward.y * 10 + 0.5, 0, 1);
             };

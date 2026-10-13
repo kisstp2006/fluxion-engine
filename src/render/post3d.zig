@@ -47,6 +47,7 @@ const rhi = @import("fluxion_rhi");
 const shader = @import("fluxion_shader");
 
 const material = @import("material.zig");
+const shader3d = @import("shader3d.zig");
 const Environment = @import("render3d_components.zig").Environment;
 const UniformBlocks = @import("uniform_blocks.zig").UniformBlocks;
 
@@ -90,8 +91,16 @@ pub const Camera = struct {
     /// nought behind the camera or far off the screen.
     sun_uv: [2]f32 = .{ 0, 0 },
     sun_seen: f32 = 0,
-    /// The sun's light.
+    /// The sun as it is seen, for its disc's rays and flare.
     sun_light: [3]f32 = .{ 0, 0, 0 },
+    /// Toward the first sun, and the light it gives the world: what the air
+    /// scatters toward the eye.
+    sun_toward: math.Vec3 = .zero,
+    sun_color: [3]f32 = .{ 0, 0, 0 },
+    /// The shadows' numbers and their atlas, read as it is: where the air
+    /// the sun lights is found. Null with no shadow of the first sun.
+    shadows: ?rhi.Buffer = null,
+    shadow_depth: ?rhi.Texture = null,
 };
 
 /// The three corners of a triangle that covers the whole target.
@@ -351,35 +360,182 @@ const reflect_source = vertex_part ++
     \\}
 ;
 
-/// The sun's rays, at half the size: toward the sun on the screen, at
-/// `KNOBS.xy`, what is brighter than white where nothing is drawn, dimming
-/// with distance, times `KNOBS.z`. Where the picture's alpha is nought -
-/// the world drawn over a skybox, which holds the sky - the sun itself is
-/// put there, `MORE.rgb` its light: a disc round where it is.
+/// The sun's light at half the size: its rays toward it on the screen, at
+/// `KNOBS.xy`, `KNOBS.z` of them - from what is far brighter than white
+/// where nothing near is drawn, the sun's disc; where the picture's alpha is
+/// nought, the world drawn over a skybox that holds the sky, the disc is put
+/// there, `MORE.rgb` its light - its lens flare, `KNOBS.w` of it, as much as
+/// the sun is seen; and the light in the air, `RAYS`, added.
 const shafts_source = vertex_part ++
     \\texture2d SOURCE : 0;
     \\
 ++ geometry_part ++
+    \\texture2d RAYS : 2;
+    \\
+    \\// How much of the sun's disc is seen at `uv`: none behind what is drawn.
+    \\float sunAt(vec2 uv) {
+    \\    if (!onScreen(uv)) {
+    \\        return 0.0;
+    \\    }
+    \\    vec4 c = sample_level(SOURCE, uv, 0.0);
+    \\    if (c.a < 0.5) {
+    \\        return 1.0;
+    \\    }
+    \\    float bright = max(c.r, max(c.g, c.b));
+    \\    if (sample_level(GEOMETRY, uv, 0.0).z > 0.0) {
+    \\        return 0.0;
+    \\    }
+    \\    return clamp((bright - 3.0) / 6.0, 0.0, 1.0);
+    \\}
+    \\
+    \\// A soft round spot `size` across at `at`, in the picture's own
+    \\// proportions.
+    \\float spot(vec2 uv, vec2 at, float size, float aspect) {
+    \\    vec2 off = (uv - at) * vec2(aspect, 1.0);
+    \\    return smoothstep(size, size * 0.4, length(off));
+    \\}
+    \\
     \\fragment {
-    \\    vec2 delta = (KNOBS.xy - UV) / 32.0;
-    \\    vec2 at = UV;
-    \\    float decay = 1.0;
-    \\    vec3 sum = vec3(0.0);
-    \\    for (int i = 0; i < 32; i = i + 1) {
-    \\        at = at + delta;
-    \\        if (onScreen(at) && sample_level(GEOMETRY, at, 0.0).z <= 0.0) {
-    \\            vec4 c = sample_level(SOURCE, at, 0.0);
-    \\            if (c.a < 0.5) {
-    \\                vec2 off = (at - KNOBS.xy) * vec2(TEXEL.y / TEXEL.x, 1.0);
-    \\                sum = sum + MORE.rgb * (decay * smoothstep(0.07, 0.0, length(off)) * 6.0);
-    \\            } else {
-    \\                float bright = max(c.r, max(c.g, c.b));
-    \\                sum = sum + c.rgb * (decay * max(bright - 1.0, 0.0) / max(bright, 0.0001));
+    \\    vec2 sun = KNOBS.xy;
+    \\    float aspect = TEXEL.y / TEXEL.x;
+    \\    vec3 sum = sample_level(RAYS, UV, 0.0).rgb;
+    \\    if (KNOBS.z > 0.0) {
+    \\        vec2 delta = (sun - UV) / 32.0;
+    \\        // Each pixel starts a little further along than its neighbours,
+    \\        // so the steps blur into grain, not into bands and blotches.
+    \\        vec2 pixel = floor(UV / TEXEL.xy * 0.5);
+    \\        float jitter = fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+    \\        vec2 at = UV + delta * jitter;
+    \\        float decay = 1.0;
+    \\        vec3 rays = vec3(0.0);
+    \\        for (int i = 0; i < 32; i = i + 1) {
+    \\            at = at + delta;
+    \\            float seen = sunAt(at) * spot(at, sun, 0.08, aspect);
+    \\            rays = rays + MORE.rgb * (seen * decay);
+    \\            decay = decay * 0.95;
+    \\        }
+    \\        sum = sum + rays * (KNOBS.z * 6.0 / 32.0);
+    \\    }
+    \\    if (KNOBS.w > 0.0) {
+    \\        // How much of the disc is seen: a ring of readings round it.
+    \\        float seen = 0.0;
+    \\        for (int i = 0; i < 12; i = i + 1) {
+    \\            float a = float(i) * 0.5235988;
+    \\            seen = seen + sunAt(sun + vec2(cos(a) / aspect, sin(a)) * 0.006);
+    \\        }
+    \\        seen = seen / 12.0;
+    \\        if (seen > 0.0) {
+    \\            vec2 toward = vec2(0.5) - sun;
+    \\            vec3 flare = vec3(0.0);
+    \\            // Ghosts along the line through the middle, each its own size and tint.
+    \\            flare = flare + vec3(0.5, 0.8, 1.0) * spot(UV, sun + toward * 0.45, 0.03, aspect) * 0.2;
+    \\            flare = flare + vec3(1.0, 0.7, 0.4) * spot(UV, sun + toward * 0.8, 0.05, aspect) * 0.1;
+    \\            flare = flare + vec3(0.6, 1.0, 0.6) * spot(UV, sun + toward * 1.25, 0.02, aspect) * 0.16;
+    \\            flare = flare + vec3(0.7, 0.6, 1.0) * spot(UV, sun + toward * 1.6, 0.07, aspect) * 0.06;
+    \\            flare = flare + vec3(1.0, 0.9, 0.7) * spot(UV, sun + toward * 2.1, 0.035, aspect) * 0.12;
+    \\            // A halo round the sun, and a streak across it.
+    \\            vec2 off = (UV - sun) * vec2(aspect, 1.0);
+    \\            float d = length(off);
+    \\            flare = flare + vec3(1.0, 0.95, 0.85) * (exp(-d * 22.0) * 0.35);
+    \\            flare = flare + vec3(0.8, 0.9, 1.0) * (exp(-abs(off.y) * 160.0) * exp(-abs(off.x) * 4.0) * 0.3);
+    \\            float ring = smoothstep(0.015, 0.0, abs(d - 0.32)) * 0.04;
+    \\            flare = flare + vec3(0.9, 0.7, 1.0) * ring;
+    \\            float bright = max(MORE.r, max(MORE.g, MORE.b));
+    \\            sum = sum + flare * (MORE.rgb / max(bright, 0.0001)) * (min(bright, 3.0) * seen * KNOBS.w);
+    \\        }
+    \\    }
+    \\    target = vec4(sum, 1.0);
+    \\}
+;
+
+/// The light of the first sun the air scatters toward the eye, at half the
+/// size: along the way from the eye to what is drawn - no further than
+/// `KNOBS.y` - two dozen points, each lit or not as the sun's shadow says
+/// there, the air `KNOBS.x` thick a metre, thrown forward as haze is,
+/// `KNOBS.z` of it. Shafts of light through a window, a door, the gaps of a
+/// roof: the light in the air, and its shadows.
+const rays_source = vertex_part ++
+    \\uniform Shadows : 1 {
+++ shader3d.shadows_fields ++
+    \\}
+    \\
+    \\texture2d UNUSED : 0;
+    \\
+++ geometry_part ++
+    \\texture2d SHADOW_DEPTH : 2;
+    \\
+    \\// Whether the first sun sees `q`: one, nought behind what casts its
+    \\// shadow, one past its shadow's reach.
+    \\float sunSees(vec3 q) {
+    \\    vec4 s = SUN_SHADOWS[0];
+    \\    if (s.x < 0.0) {
+    \\        return 1.0;
+    \\    }
+    \\    int first = int(s.x + 0.5);
+    \\    int count = int(s.y + 0.5);
+    \\    float result = -1.0;
+    \\    for (int c = 0; c < count; c = c + 1) {
+    \\        if (result < 0.0) {
+    \\            vec4 at = SHADOW_MATRICES[first + c] * vec4(q, 1.0);
+    \\            vec4 rect = SHADOW_RECTS[first + c];
+    \\            if (at.x > rect.x && at.y > rect.y && at.x < rect.z && at.y < rect.w && at.z < 1.0) {
+    \\                float depth = sample_level(SHADOW_DEPTH, at.xy, 0.0).r;
+    \\                result = at.z <= depth + 0.0005 ? 1.0 : 0.0;
     \\            }
     \\        }
-    \\        decay = decay * 0.95;
     \\    }
-    \\    target = vec4(sum * (KNOBS.z / 32.0), 1.0);
+    \\    return result < 0.0 ? 1.0 : result;
+    \\}
+    \\
+    \\fragment {
+    \\    vec4 g = sample_level(GEOMETRY, UV, 0.0) + sample_level(UNUSED, UV, 0.0) * 0.0;
+    \\    float reach = KNOBS.y;
+    \\    float depth = reach;
+    \\    if (g.z > 0.0) {
+    \\        depth = min(g.z, reach);
+    \\    }
+    \\    // What is on the camera's front layers is held at the eye: no air
+    \\    // between.
+    \\    if (g.w >= 2.0) {
+    \\        depth = 0.0;
+    \\    }
+    \\    vec3 way = placeAt(UV, 1.0) - EYE.xyz;
+    \\    vec2 pixel = floor(UV / TEXEL.xy);
+    \\    float jitter = fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+    \\    float lit = 0.0;
+    \\    for (int i = 0; i < 24; i = i + 1) {
+    \\        float f = (float(i) + jitter) / 24.0;
+    \\        lit = lit + sunSees(EYE.xyz + way * (depth * f));
+    \\    }
+    \\    lit = lit / 24.0;
+    \\    float through = depth * length(way);
+    \\    float mu = dot(normalize(way), GRADE.xyz);
+    \\    float g2 = 0.36;
+    \\    float phase = (1.0 - g2) / (12.5663706 * pow(max(1.0 + g2 - 1.2 * mu, 0.0001), 1.5));
+    \\    float amount = 1.0 - exp(-KNOBS.x * through);
+    \\    target = vec4(MORE.rgb * (lit * amount * phase * KNOBS.z), 1.0);
+    \\}
+;
+
+/// The light in the air smoothed over four by four of its pixels, each
+/// counted as much as its depth is like the middle one's: its readings'
+/// grain gone, its edges kept.
+const rays_blur_source = vertex_part ++
+    \\texture2d SOURCE : 0;
+    \\
+++ geometry_part ++
+    \\fragment {
+    \\    float middle = sample_level(GEOMETRY, UV, 0.0).z;
+    \\    vec3 sum = vec3(0.0);
+    \\    float weight = 0.0;
+    \\    for (int i = 0; i < 16; i = i + 1) {
+    \\        vec2 off = vec2(float(i % 4) - 1.5, float(i / 4) - 1.5) * TEXEL.xy;
+    \\        float d = sample_level(GEOMETRY, UV + off, 0.0).z;
+    \\        float w = exp(-abs(d - middle) / max(middle * 0.05, 0.05));
+    \\        sum = sum + sample_level(SOURCE, UV + off, 0.0).rgb * w;
+    \\        weight = weight + w;
+    \\    }
+    \\    target = vec4(sum / max(weight, 0.0001), 1.0);
     \\}
 ;
 
@@ -405,6 +561,14 @@ const tone_source = vertex_part ++
     \\    return mix(low, high, step(vec3(0.0031308), x));
     \\}
     \\
+    \\// The sun's light from its picture at half the size, four readings
+    \\// round the pixel: the grain of its steps smoothed away.
+    \\vec3 sunLight(vec2 uv) {
+    \\    vec2 t = TEXEL.xy * 1.5;
+    \\    return (sample(SHAFTS, uv + vec2(-t.x, -t.y)).rgb + sample(SHAFTS, uv + vec2(t.x, -t.y)).rgb
+    \\        + sample(SHAFTS, uv + vec2(-t.x, t.y)).rgb + sample(SHAFTS, uv + t).rgb) * 0.25;
+    \\}
+    \\
     \\fragment {
     \\    vec4 light = sample(SOURCE, UV);
     \\    vec3 c = light.rgb;
@@ -414,7 +578,7 @@ const tone_source = vertex_part ++
     \\            + sample(SOURCE, UV + vec2(0.0, TEXEL.y)).rgb + sample(SOURCE, UV - vec2(0.0, TEXEL.y)).rgb;
     \\        c = max(c + (c - around * 0.25) * MORE.w, vec3(0.0));
     \\    }
-    \\    vec3 seen = (c + sample(GLOW, UV).rgb * KNOBS.w + sample(SHAFTS, UV).rgb) * KNOBS.x * GRADE.rgb;
+    \\    vec3 seen = (c + sample(GLOW, UV).rgb * KNOBS.w + sunLight(UV)) * KNOBS.x * GRADE.rgb;
     \\    vec3 toned = seen;
     \\    if (KNOBS.z > 2.5) {
     \\        toned = aces(seen);
@@ -480,6 +644,8 @@ const Pass = struct {
     source_count: u8,
     /// Which sources are read texel by texel, not blended: the geometry's.
     nearest: u8 = 0,
+    /// A second block, at slot 1: the shadows' numbers.
+    second: ?rhi.Buffer = null,
     knobs: Post,
     /// Where its numbers are in the buffer, once they are written.
     at: u32 = 0,
@@ -529,6 +695,8 @@ pub const Targets = struct {
     occlusion: [2]?rhi.Texture = .{ null, null },
     reflected: ?rhi.Texture = null,
     shafts: ?rhi.Texture = null,
+    /// The light in the air, at half the size, and smoothed.
+    rays: [2]?rhi.Texture = .{ null, null },
     glow_levels: u32 = 0,
     /// The frame it was last drawn with.
     used: u64,
@@ -539,7 +707,7 @@ pub const Targets = struct {
         device.destroyTexture(self.depth);
         if (self.toned) |held| device.destroyTexture(held);
         for (self.glow) |held| if (held) |texture| device.destroyTexture(texture);
-        for ([_]?rhi.Texture{ self.geometry, self.geometry_depth, self.occlusion[0], self.occlusion[1], self.reflected, self.shafts }) |held| {
+        for ([_]?rhi.Texture{ self.geometry, self.geometry_depth, self.occlusion[0], self.occlusion[1], self.reflected, self.shafts, self.rays[0], self.rays[1] }) |held| {
             if (held) |texture| device.destroyTexture(texture);
         }
     }
@@ -575,6 +743,11 @@ pub const Look = struct {
     ssr_distance: f32 = 30,
     sun_shafts: bool = false,
     sun_shafts_intensity: f32 = 0.6,
+    god_rays: bool = false,
+    god_rays_density: f32 = 0.015,
+    god_rays_intensity: f32 = 1,
+    lens_flare: bool = false,
+    lens_flare_intensity: f32 = 0.5,
     saturation: f32 = 1,
     contrast: f32 = 1,
     temperature: f32 = 0,
@@ -583,7 +756,7 @@ pub const Look = struct {
 
     /// Whether anything it asks for reads the geometry pass.
     pub fn readsGeometry(self: Look) bool {
-        return self.ssao or self.ssr or self.sun_shafts;
+        return self.ssao or self.ssr or self.sun_shafts or self.god_rays or self.lens_flare;
     }
 
     /// How far from the camera the geometry pass draws: what occlusion is
@@ -599,6 +772,8 @@ pub const Look = struct {
         out.ssao = false;
         out.ssr = false;
         out.sun_shafts = false;
+        out.god_rays = false;
+        out.lens_flare = false;
         return out;
     }
 
@@ -613,6 +788,11 @@ pub const Look = struct {
             .ssr_distance = std.math.clamp(held.ssr_distance, 1, 500),
             .sun_shafts = held.sun_shafts and held.sun_shafts_intensity > 0,
             .sun_shafts_intensity = held.sun_shafts_intensity,
+            .god_rays = held.god_rays and held.god_rays_intensity > 0 and held.god_rays_density > 0,
+            .god_rays_density = std.math.clamp(held.god_rays_density, 0, 1),
+            .god_rays_intensity = held.god_rays_intensity,
+            .lens_flare = held.lens_flare and held.lens_flare_intensity > 0,
+            .lens_flare_intensity = held.lens_flare_intensity,
             .saturation = @max(held.saturation, 0),
             .contrast = std.math.clamp(held.contrast, 0.1, 4),
             .temperature = std.math.clamp(held.temperature, -1, 1),
@@ -649,6 +829,8 @@ pub const Post3D = struct {
     occlusion_blur: Stage = .{},
     reflect: Stage = .{},
     shafts: Stage = .{},
+    rays: Stage = .{},
+    rays_blur: Stage = .{},
     /// What the geometry is read with: texel by texel.
     nearest: rhi.Sampler,
     /// The camera of the draw being finished, for the passes that read the
@@ -691,6 +873,8 @@ pub const Post3D = struct {
         try self.compile(gpa, &self.occlusion_blur, occlusion_blur_source, .rgba8_unorm, false, "3D occlusion, smoothed");
         try self.compile(gpa, &self.reflect, reflect_source, light_format, false, "3D reflections");
         try self.compile(gpa, &self.shafts, shafts_source, light_format, false, "3D sun's rays");
+        try self.compile(gpa, &self.rays, rays_source, light_format, false, "3D light in the air");
+        try self.compile(gpa, &self.rays_blur, rays_blur_source, light_format, false, "3D light in the air, smoothed");
         return self;
     }
 
@@ -700,7 +884,7 @@ pub const Post3D = struct {
         self.targets.deinit(gpa);
         self.blocks.deinit(gpa, device);
         self.passes.deinit(gpa);
-        for ([_]*Stage{ &self.bright, &self.down, &self.up, &self.tone, &self.smooth, &self.occlusion, &self.occlusion_blur, &self.reflect, &self.shafts }) |stage| stage.deinit(device);
+        for ([_]*Stage{ &self.bright, &self.down, &self.up, &self.tone, &self.smooth, &self.occlusion, &self.occlusion_blur, &self.reflect, &self.shafts, &self.rays, &self.rays_blur }) |stage| stage.deinit(device);
         device.destroySampler(self.nearest);
         device.destroySampler(self.sampler);
         device.destroyTexture(self.black);
@@ -837,21 +1021,43 @@ pub const Post3D = struct {
             source = targets.reflected.?;
         };
         const glow: Glow = if (look.glow) try self.glowOf(gpa, targets, source, look, flip) else .{ .texture = self.black, .weight = 1 };
-        // The sun's rays, where the sun is near enough the screen.
+        // The sun's light in the air, its rays and its flare, at half the
+        // size: one picture added in the tone pass.
         var shafts = self.black;
-        if (look.sun_shafts and self.camera.sun_seen > 0) if (targets.geometry) |geometry| {
+        const c = self.camera;
+        const in_air = look.god_rays and c.shadows != null and c.shadow_depth != null;
+        const at_sun = (look.sun_shafts or look.lens_flare) and c.sun_seen > 0;
+        if (in_air or at_sun) if (targets.geometry) |geometry| {
             const size = targets.half();
-            if (targets.shafts == null) targets.shafts = try device.createTexture(.{
-                .width = size[0],
-                .height = size[1],
-                .format = self.light_format,
-                .usage = .{ .sampled = true, .render_target = true },
-                .label = "3D sun's rays",
-            });
-            try self.queueReading(gpa, self.shafts.pipeline, .{ .texture = targets.shafts.? }, size[0], size[1], .dont_care, &.{ source, geometry }, 0b10, .{
+            const half_texel: [4]f32 = .{ 1 / @as(f32, @floatFromInt(size[0])), 1 / @as(f32, @floatFromInt(size[1])), flip, 0 };
+            for ([_]*?rhi.Texture{ &targets.shafts, &targets.rays[0], &targets.rays[1] }) |made| if (made.* == null) {
+                made.* = try device.createTexture(.{
+                    .width = size[0],
+                    .height = size[1],
+                    .format = self.light_format,
+                    .usage = .{ .sampled = true, .render_target = true },
+                    .label = "3D sun's light",
+                });
+            };
+            var air = self.black;
+            if (in_air) {
+                try self.queueReading(gpa, self.rays.pipeline, .{ .texture = targets.rays[0].? }, size[0], size[1], .dont_care, &.{ geometry, geometry, c.shadow_depth.? }, 0b111, .{
+                    .texel = half_texel,
+                    .knobs = .{ look.god_rays_density, look.geometryReach() * 1.5, look.god_rays_intensity, 0 },
+                    .more = .{ c.sun_color[0], c.sun_color[1], c.sun_color[2], 0 },
+                    .grade = .{ c.sun_toward.x, c.sun_toward.y, c.sun_toward.z, 0 },
+                });
+                self.passes.items[self.passes.items.len - 1].second = c.shadows.?;
+                try self.queueReading(gpa, self.rays_blur.pipeline, .{ .texture = targets.rays[1].? }, size[0], size[1], .dont_care, &.{ targets.rays[0].?, geometry }, 0b10, .{
+                    .texel = half_texel,
+                    .knobs = @splat(0),
+                });
+                air = targets.rays[1].?;
+            }
+            try self.queueReading(gpa, self.shafts.pipeline, .{ .texture = targets.shafts.? }, size[0], size[1], .dont_care, &.{ source, geometry, air }, 0b10, .{
                 .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
-                .knobs = .{ self.camera.sun_uv[0], self.camera.sun_uv[1], look.sun_shafts_intensity * self.camera.sun_seen, 0 },
-                .more = .{ self.camera.sun_light[0], self.camera.sun_light[1], self.camera.sun_light[2], 0 },
+                .knobs = .{ c.sun_uv[0], c.sun_uv[1], if (look.sun_shafts) look.sun_shafts_intensity * c.sun_seen else 0, if (look.lens_flare) look.lens_flare_intensity * c.sun_seen else 0 },
+                .more = .{ c.sun_light[0], c.sun_light[1], c.sun_light[2], 0 },
             });
             shafts = targets.shafts.?;
         };
@@ -1061,6 +1267,7 @@ pub const Post3D = struct {
             try list.setViewport(.{ .width = @floatFromInt(held.width), .height = @floatFromInt(held.height) });
             try list.setPipeline(held.pipeline);
             try list.setUniformBufferRange(0, buffer, held.at, @sizeOf(Post));
+            if (held.second) |second| try list.setUniformBuffer(1, second);
             for (held.sources[0..held.source_count], 0..) |source, slot| {
                 const texel_by_texel = held.nearest & (@as(u8, 1) << @intCast(slot)) != 0;
                 try list.setTexture(@intCast(slot), source, if (texel_by_texel) self.nearest else self.sampler);
@@ -1085,7 +1292,7 @@ fn whiteOf(temperature: f32) [4]f32 {
 }
 
 test "every pass's shader compiles for every backend, and its numbers are laid out as the engine writes them" {
-    for ([_][]const u8{ bright_source, down_source, up_source, tone_source, smooth_source, occlusion_source, occlusion_blur_source, reflect_source, shafts_source }) |source| {
+    for ([_][]const u8{ bright_source, down_source, up_source, tone_source, smooth_source, occlusion_source, occlusion_blur_source, reflect_source, shafts_source, rays_source, rays_blur_source }) |source| {
         var said: std.Io.Writer.Allocating = .init(testing.allocator);
         defer said.deinit();
         var module = shader.compile(testing.allocator, source, &said.writer) catch |err| {

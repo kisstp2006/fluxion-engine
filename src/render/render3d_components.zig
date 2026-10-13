@@ -1014,6 +1014,16 @@ pub const Environment = extern struct {
     /// Rays of the sun through what stands before it.
     sun_shafts: bool = false,
     sun_shafts_intensity: f32 = 0.6,
+    /// The first sun's light in the air, and the air's shadows: shafts of
+    /// it through a window, a door or the gaps of a roof, seen from any
+    /// side. `god_rays_density` is how thick the air is, a metre.
+    god_rays: bool = false,
+    god_rays_density: f32 = 0.015,
+    god_rays_intensity: f32 = 1,
+    /// The glare a camera's lens makes of the sun in view: a halo, a streak
+    /// and ghosts across the picture.
+    lens_flare: bool = false,
+    lens_flare_intensity: f32 = 0.5,
     /// The picture graded after it is toned: how colourful, how
     /// contrasting, warmer or cooler, darker toward its corners, and
     /// sharper.
@@ -1067,6 +1077,11 @@ pub const Environment = extern struct {
         .ssr_distance = .{ attr.Label{ .text = "SSR distance" }, attr.Unit{ .text = "m" }, attr.Range{ .min = 1, .max = 500 }, attr.Doc{ .text = "How far a reflection is looked for" } },
         .sun_shafts = .{attr.Doc{ .text = "Rays of the sun through what stands before it" }},
         .sun_shafts_intensity = .{ attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How bright the sun's rays are" } },
+        .god_rays = .{attr.Doc{ .text = "The sun's light in the air and the air's shadows: shafts of it through windows and doors" }},
+        .god_rays_density = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How thick the air is, a metre: more is hazier" } },
+        .god_rays_intensity = .{ attr.Range{ .min = 0, .max = 8 }, attr.Doc{ .text = "How bright the light in the air is" } },
+        .lens_flare = .{attr.Doc{ .text = "The glare a lens makes of the sun in view: a halo, a streak and ghosts" }},
+        .lens_flare_intensity = .{ attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How strong the flare is" } },
         .saturation = .{ attr.Group{ .name = "Grading" }, attr.Range{ .min = 0, .max = 2 }, attr.Doc{ .text = "How colourful the picture is: one as it is, nought grey" } },
         .contrast = .{ attr.Range{ .min = 0.5, .max = 2 }, attr.Doc{ .text = "How far apart its darks and lights are: one as it is" } },
         .temperature = .{ attr.Range{ .min = -1, .max = 1 }, attr.Doc{ .text = "Warmer, above nought, or cooler, below" } },

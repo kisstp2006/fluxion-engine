@@ -141,6 +141,8 @@ const sky_head =
     \\    vec4 SKY_MOON_COLOR;
     \\    // The night sky's own glow, and in `w` how bright the stars are.
     \\    vec4 SKY_NIGHT;
+    \\    // The sun's disc as it is seen: its light through the air to the eye.
+    \\    vec4 SKY_DISC;
     \\}
     \\
     \\vertex {
@@ -402,7 +404,7 @@ const over_source = sky_head ++
     \\    float rim = clamp((mu - SKY_SUN.w) / max(edge, 0.000001), 0.0, 1.0);
     \\    float limb = 0.6 + 0.4 * sqrt(rim);
     \\    float above = smoothstep(-0.01, 0.01, d.y);
-    \\    vec3 sun = SKY_SUN_COLOR.rgb * (SKY_SUN_COLOR.w * disc * limb * above);
+    \\    vec3 sun = SKY_DISC.rgb * (SKY_SUN_COLOR.w * disc * limb * above);
     \\    // The moon: its disc, with its darker seas.
     \\    float moon_mu = dot(d, SKY_MOON.xyz);
     \\    float moon_edge = 1.0 - SKY_MOON.w;
@@ -438,6 +440,7 @@ pub const Block = extern struct {
     moon: [4]f32,
     moon_color: [4]f32,
     night: [4]f32,
+    disc: [4]f32,
 };
 
 /// A sky, and the sun it is lit by: toward it, and its light, linear.
@@ -602,6 +605,19 @@ pub fn nowOf(lit: Lit) Now {
     };
 }
 
+/// The colour of the sun's disc in the sky, as bright as `light`: white -
+/// a little warm, as sunlight is - reddened by the air between it and the
+/// eye, much at the horizon and hardly at all overhead. Whatever colour the
+/// light it gives the world was set to.
+pub fn discColor(sky: Sky3D, toward: Vec3, light: [3]f32) [3]f32 {
+    const bright = 0.2126 * light[0] + 0.7152 * light[1] + 0.0722 * light[2];
+    const through = sunThrough(sky, toward);
+    const warm = [3]f32{ 1.0, 0.96, 0.9 };
+    var out: [3]f32 = undefined;
+    for (0..3) |i| out[i] = warm[i] * through[i] * bright;
+    return out;
+}
+
 /// The sun's light as the air takes it: as `sunLight`, but faded out
 /// further under the horizon, where the sky is still lit after the ground.
 fn twilight(lit: Lit) [3]f32 {
@@ -681,6 +697,11 @@ pub fn blockOf(lit: Lit, view: View3D, view_projection: math.Mat4, eye: Vec3, se
         .moon = .{ now.moon_toward.x, now.moon_toward.y, now.moon_toward.z, @cos(moon_half) },
         .moon_color = .{ 0.9 * moon_shown, 0.92 * moon_shown, moon_shown, 0 },
         .night = .{ glow[0], glow[1], glow[2], @max(sky.stars, 0) * now.night },
+        .disc = blk: {
+            const c = discColor(sky, toward, lit.light);
+            const up = std.math.clamp(toward.y * 12 + 0.6, 0, 1);
+            break :blk .{ c[0] * up, c[1] * up, c[2] * up, 0 };
+        },
     };
 }
 

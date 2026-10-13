@@ -219,6 +219,21 @@ pub const Probes = extern struct {
     energy: [4]f32,
 };
 
+/// The fields of the `Shadows` block, `shadows3d.Shadows`: what a pass
+/// that reads the shadows' atlas declares, at a slot of its own.
+pub const shadows_fields =
+    \\    mat4 SHADOW_MATRICES[128];
+    \\    vec4 SHADOW_RECTS[128];
+    \\    vec4 SHADOW_VIEWS[128];
+    \\    vec4 LAMP_SHADOWS[64];
+    \\    vec4 LAMP_SOFTNESS[64];
+    \\    vec4 SUN_SHADOWS[4];
+    \\    vec4 SUN_SPLITS[4];
+    \\    vec4 SUN_SOFTNESS[4];
+    \\    vec4 SHADOW_ATLAS;
+    \\
+;
+
 const engine_part = engine_head ++ sky.cloud_part ++ fog_volumes.shader_part ++ decals.shader_part ++ engine_tail;
 
 const engine_head =
@@ -297,15 +312,7 @@ const engine_head =
     \\}
     \\
     \\uniform Shadows : 4 {
-    \\    mat4 SHADOW_MATRICES[128];
-    \\    vec4 SHADOW_RECTS[128];
-    \\    vec4 SHADOW_VIEWS[128];
-    \\    vec4 LAMP_SHADOWS[64];
-    \\    vec4 LAMP_SOFTNESS[64];
-    \\    vec4 SUN_SHADOWS[4];
-    \\    vec4 SUN_SPLITS[4];
-    \\    vec4 SUN_SOFTNESS[4];
-    \\    vec4 SHADOW_ATLAS;
+++ shadows_fields ++
     \\}
     \\
     \\uniform Probes : 5 {
