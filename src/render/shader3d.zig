@@ -81,9 +81,9 @@ pub const shadows_slot = 4;
 pub const shadow_map_slot = 5;
 pub const shadow_depth_slot = 6;
 /// How many textures a 3D shader reads: the material's five, the shadow
-/// atlas twice, the lights' cookies, the lightmap, the sky's noise and the
-/// screen's occlusion.
-pub const texture_count = 11;
+/// atlas twice, the lights' cookies, the lightmap, the sky's noise, the
+/// screen's occlusion and the lightmap's baked shadow of the sun.
+pub const texture_count = 12;
 pub const cookie_slot = 7;
 /// The light from everywhere baked for a frame: the lightmap at this slot,
 /// and the probes' samples, `Probes`, the block at this one.
@@ -94,6 +94,9 @@ pub const sky_noise_slot = 9;
 /// How much of the light from everywhere reaches each pixel of the screen,
 /// worked out from the geometry pass: `render/post3d.zig`'s occlusion.
 pub const screen_ao_slot = 10;
+/// How much of the first sun's light reaches each texel of the lightmap,
+/// baked: `render/lightmaps.zig`.
+pub const lightmap_sun_slot = 11;
 /// For a mesh a skeleton bends: its bones, `Skin`, are the block at this
 /// slot, and each vertex's bones and weights are a third vertex buffer.
 pub const skin_slot = 6;
@@ -332,6 +335,8 @@ const engine_head =
     \\texture2d SKY_NOISE : 9;
     \\// How much of the light from everywhere reaches each pixel.
     \\texture2d SCREEN_AO : 10;
+    \\// How much of the first sun's light reaches the lightmap's texels, baked.
+    \\texture2d LIGHTMAP_SUN : 11;
     \\
     \\const float PI = 3.14159265;
     \\
@@ -403,6 +408,13 @@ const engine_head =
     \\// between, nought where something does. `how` is the light's bias toward
     \\// it and along the surface, in texels, its blur in texels, and its size;
     \\// `turn` turns the readings, pixel by pixel.
+    \\//
+    \\// A reading beside the point is compared with the depth the surface
+    \\// itself has there - its plane, followed across the shadow's picture -
+    \\// not the point's own: so a surface leaning from the light does not
+    \\// shadow itself however wide the filter, and the push that keeps it out
+    \\// of its own shadow can be small, which is what lets no light in at the
+    \\// foot of a wall.
     \\float shadowOf(int view, vec3 p, vec3 ng, vec3 l, vec4 how, float turn) {
     \\    vec4 info = SHADOW_VIEWS[view];
     \\    mat4 m = SHADOW_MATRICES[view];
@@ -411,13 +423,40 @@ const engine_head =
     \\    // Pushed off the surface, out of its own shadow: away from it on the
     \\    // side it faces - toward the light only for a surface of two sides,
     \\    // lit from behind. One of one side turned from the light is pushed
-    \\    // further into its shadow, not through itself into the light.
+    \\    // further into its shadow, not through itself into the light. The
+    \\    // push is as large as the light falls aslant: none where it falls
+    \\    // straight on.
     \\    vec3 side = ng;
     \\    if (FACING.x > 0.5 && dot(ng, l) < 0.0) {
     \\        side = -ng;
     \\    }
-    \\    vec4 at = m * vec4(p + side * (how.y * texel) + l * (how.x * texel + SHADOW_REACH), 1.0);
+    \\    float straight = clamp(dot(side, l), 0.0, 1.0);
+    \\    float aslant = sqrt(1.0 - straight * straight);
+    \\    vec4 at = m * vec4(p + side * (how.y * texel * aslant) + l * (how.x * texel + SHADOW_REACH), 1.0);
     \\    vec3 here = at.xyz / at.w;
+    \\    // How the surface's depth changes across the picture, for a sun's
+    \\    // view: its plane through the point, as the view's matrix sees it.
+    \\    vec2 lean = vec2(0.0);
+    \\    if (info.w < 0.5) {
+    \\        vec4 c0 = m * vec4(1.0, 0.0, 0.0, 0.0);
+    \\        vec4 c1 = m * vec4(0.0, 1.0, 0.0, 0.0);
+    \\        vec4 c2 = m * vec4(0.0, 0.0, 1.0, 0.0);
+    \\        vec3 r0 = vec3(c0.x, c1.x, c2.x);
+    \\        vec3 r1 = vec3(c0.y, c1.y, c2.y);
+    \\        vec3 r2 = vec3(c0.z, c1.z, c2.z);
+    \\        vec3 a = cross(r1, side);
+    \\        vec3 b = cross(side, r0);
+    \\        float det = dot(r0, a);
+    \\        if (abs(det) > 0.0) {
+    \\            lean = vec2(dot(r2, a), dot(r2, b)) / det;
+    \\            // Not steeper than a surface nearly edge on to the light.
+    \\            float most = 8.0 * length(r2) / max(length(r0), 0.0000001);
+    \\            float steep = length(lean);
+    \\            if (steep > most) {
+    \\                lean = lean * (most / steep);
+    \\            }
+    \\        }
+    \\    }
     \\    vec4 rect = SHADOW_RECTS[view];
     \\    float one = SHADOW_ATLAS.x;
     \\    float radius = how.z;
@@ -428,9 +467,9 @@ const engine_head =
     \\        float blockers = 0.0;
     \\        float found = 0.0;
     \\        for (int i = 0; i < taps; i = i + 1) {
-    \\            vec2 tap = here.xy + spiral(i, taps, turn) * (search * one);
-    \\            float depth = sample_level(SHADOW_DEPTH, clamp(tap, rect.xy, rect.zw), 0.0).r;
-    \\            if (depth < here.z) {
+    \\            vec2 off = spiral(i, taps, turn) * (search * one);
+    \\            float depth = sample_level(SHADOW_DEPTH, clamp(here.xy + off, rect.xy, rect.zw), 0.0).r;
+    \\            if (depth < here.z + dot(lean, off)) {
     \\                blockers = blockers + depth;
     \\                found = found + 1.0;
     \\            }
@@ -448,8 +487,8 @@ const engine_head =
     \\    }
     \\    float amount = 0.0;
     \\    for (int i = 0; i < taps; i = i + 1) {
-    \\        vec2 tap = here.xy + spiral(i, taps, turn) * (radius * one);
-    \\        amount = amount + sample_compare(SHADOW_MAP, clamp(tap, rect.xy, rect.zw), here.z);
+    \\        vec2 off = spiral(i, taps, turn) * (radius * one);
+    \\        amount = amount + sample_compare(SHADOW_MAP, clamp(here.xy + off, rect.xy, rect.zw), here.z + dot(lean, off));
     \\    }
     \\    return amount / float(taps);
     \\}
@@ -696,7 +735,14 @@ const engine_tail =
     \\    }
     \\    float m = clamp(metallic, 0.0, 1.0);
     \\    float turn = pixelTurn(p);
-    \\    vec3 light = sun(0, p, ng, n, v, albedo, m, roughness, turn) + sun(1, p, ng, n, v, albedo, m, roughness, turn)
+    \\    // A still surface's own baked shadow of the first sun, where the
+    \\    // lightmap holds it: what stands between the two for good hides the
+    \\    // sun however coarse, far or biased the live shadow is there.
+    \\    float baked_sun = 1.0;
+    \\    if (GI_ENERGY.y > 0.5 && gi_at.w > 0.5 && gi_at.w < 1.5) {
+    \\        baked_sun = sample_level(LIGHTMAP_SUN, gi_at.xy, 0.0).r;
+    \\    }
+    \\    vec3 light = sun(0, p, ng, n, v, albedo, m, roughness, turn) * baked_sun + sun(1, p, ng, n, v, albedo, m, roughness, turn)
     \\        + sun(2, p, ng, n, v, albedo, m, roughness, turn) + sun(3, p, ng, n, v, albedo, m, roughness, turn);
     \\    light = light + lamp(lamps_0.x, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_0.y, p, ng, n, v, albedo, m, roughness, turn)
     \\        + lamp(lamps_0.z, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_0.w, p, ng, n, v, albedo, m, roughness, turn);

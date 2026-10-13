@@ -61,6 +61,10 @@ pub const Lightmap = struct {
     /// given, at half the size of half floats. Let go of once it is on the
     /// device: then empty.
     pixels: []u32,
+    /// How much of the first sun's light reaches each texel, a byte each -
+    /// its shadow, baked: what stands between it and the sun for good.
+    /// Empty where the file holds none, and once it is on the device.
+    sun: []u8 = &.{},
     places: []Place,
     probes: Probes = .{},
     /// Each place's mesh by its UUID.
@@ -68,6 +72,7 @@ pub const Lightmap = struct {
 
     pub fn deinit(self: *Lightmap, gpa: Allocator) void {
         gpa.free(self.pixels);
+        gpa.free(self.sun);
         gpa.free(self.places);
         self.probes.deinit(gpa);
         self.by_uuid.deinit(gpa);
@@ -95,13 +100,18 @@ pub const Lightmap = struct {
 
 /// What a `.lightmap` file starts with, its version in the last two letters.
 pub const magic = "FXLMAP01";
+/// The same file with, after the picture, how much of the first sun's light
+/// reaches each texel: its length compressed, and a byte a texel, nought
+/// hidden and 255 lit, laid out as the picture is. A length of nought is
+/// none.
+pub const magic_with_sun = "FXLMAP02";
 
 /// A lightmap as its file's bytes, the caller's.
 pub fn write(gpa: Allocator, lightmap: Lightmap) Allocator.Error![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     const w = &out.writer;
-    writeAll(w, magic) catch return error.OutOfMemory;
+    writeAll(w, if (lightmap.sun.len > 0) magic_with_sun else magic) catch return error.OutOfMemory;
     const probes = lightmap.probes;
     for ([_]u32{ lightmap.width, lightmap.height, @intCast(lightmap.places.len), probes.counts[0], probes.counts[1], probes.counts[2] }) |n| try int(w, n);
     for (probes.origin ++ [1]f32{probes.spacing}) |x| try int(w, @bitCast(x));
@@ -130,6 +140,20 @@ pub fn write(gpa: Allocator, lightmap: Lightmap) Allocator.Error![]u8 {
     }
     try int(w, @intCast(compressed.written().len));
     writeAll(w, compressed.written()) catch return error.OutOfMemory;
+    if (lightmap.sun.len > 0) {
+        std.debug.assert(lightmap.sun.len == lightmap.pixels.len);
+        var packed_sun: std.Io.Writer.Allocating = try .initCapacity(gpa, lightmap.sun.len / 8 + 4096);
+        defer packed_sun.deinit();
+        const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
+        defer gpa.free(window);
+        const deflate = try gpa.create(std.compress.flate.Compress);
+        defer gpa.destroy(deflate);
+        deflate.* = std.compress.flate.Compress.init(&packed_sun.writer, window, .zlib, .default) catch return error.OutOfMemory;
+        deflate.writer.writeAll(lightmap.sun) catch return error.OutOfMemory;
+        deflate.finish() catch return error.OutOfMemory;
+        try int(w, @intCast(packed_sun.written().len));
+        writeAll(w, packed_sun.written()) catch return error.OutOfMemory;
+    }
     return out.toOwnedSlice();
 }
 
@@ -146,7 +170,9 @@ fn int(w: *std.Io.Writer, n: u32) error{OutOfMemory}!void {
 /// A `.lightmap` file's bytes as a lightmap, the caller's.
 /// `error.BadLightmap` for one that is not one, or is cut short.
 pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadLightmap})!Lightmap {
-    if (bytes.len < magic.len or !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadLightmap;
+    if (bytes.len < magic.len) return error.BadLightmap;
+    const with_sun = std.mem.eql(u8, bytes[0..magic.len], magic_with_sun);
+    if (!with_sun and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadLightmap;
     var at: usize = magic.len;
     const head = try takeInts(bytes, &at, 10);
     const width = head[0];
@@ -184,12 +210,13 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadLigh
     at += probes.valid.len;
 
     const compressed_len = (try takeInts(bytes, &at, 1))[0];
-    if (at + compressed_len != bytes.len) return error.BadLightmap;
+    if (at + compressed_len > bytes.len or (!with_sun and at + compressed_len != bytes.len)) return error.BadLightmap;
+    const picture_end = at + compressed_len;
     const texels = @as(usize, width) * height;
     const shared = try gpa.alloc(u8, texels * 4);
     defer gpa.free(shared);
     {
-        var in: std.Io.Reader = .fixed(bytes[at..]);
+        var in: std.Io.Reader = .fixed(bytes[at..picture_end]);
         var into: std.Io.Writer = .fixed(shared);
         const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
         defer gpa.free(window);
@@ -200,7 +227,25 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadLigh
     const pixels = try gpa.alloc(u32, texels);
     errdefer gpa.free(pixels);
     for (pixels, 0..) |*texel, t| texel.* = pack(fromShared(shared[t * 4 ..][0..4].*));
-    var out: Lightmap = .{ .width = width, .height = height, .pixels = pixels, .places = places, .probes = probes };
+    // The sun's baked shadow, where the file has it.
+    var sun: []u8 = &.{};
+    errdefer gpa.free(sun);
+    if (with_sun) {
+        at = picture_end;
+        const sun_len = (try takeInts(bytes, &at, 1))[0];
+        if (at + sun_len != bytes.len) return error.BadLightmap;
+        if (sun_len > 0) {
+            sun = try gpa.alloc(u8, texels);
+            var in: std.Io.Reader = .fixed(bytes[at..]);
+            var into: std.Io.Writer = .fixed(sun);
+            const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
+            defer gpa.free(window);
+            var inflate: std.compress.flate.Decompress = .init(&in, .zlib, window);
+            const got = inflate.reader.streamRemaining(&into) catch return error.BadLightmap;
+            if (got != sun.len) return error.BadLightmap;
+        }
+    }
+    var out: Lightmap = .{ .width = width, .height = height, .pixels = pixels, .sun = sun, .places = places, .probes = probes };
     errdefer out.by_uuid.deinit(gpa);
     try out.index(gpa);
     return out;
@@ -303,6 +348,10 @@ pub const Lightmaps = struct {
         on_disc: bool,
         lightmap: Lightmap,
         texture: ?rhi.Texture = null,
+        /// The sun's baked shadow on the device, where the lightmap has one.
+        sun_texture: ?rhi.Texture = null,
+        /// Whether it has one, kept once the bytes are let go of.
+        has_sun: bool = false,
         /// Counts up each time it is replaced, for what keeps something of it.
         version: u32 = 0,
     };
@@ -326,6 +375,7 @@ pub const Lightmaps = struct {
         gpa.free(entry.source);
         entry.lightmap.deinit(gpa);
         if (entry.texture) |texture| device.destroyTexture(texture);
+        if (entry.sun_texture) |texture| device.destroyTexture(texture);
     }
 
     /// Keep `lightmap`, which is the table's from here, under `name`: a
@@ -341,6 +391,9 @@ pub const Lightmaps = struct {
             held.lightmap.deinit(gpa);
             if (held.texture) |texture| device.destroyTexture(texture);
             held.texture = null;
+            if (held.sun_texture) |texture| device.destroyTexture(texture);
+            held.sun_texture = null;
+            held.has_sun = false;
             held.lightmap = lightmap;
             held.on_disc = on_disc;
             held.version +%= 1;
@@ -411,6 +464,26 @@ pub const Lightmaps = struct {
     pub fn versionOf(self: *Lightmaps, handle: LightmapHandle) u32 {
         const held = self.table.get(toId(handle)) orelse return 0;
         return held.version;
+    }
+
+    /// The sun's baked shadow on the device, made the first time it is asked
+    /// for; null where the lightmap holds none.
+    pub fn sunTextureOf(self: *Lightmaps, device: *rhi.Device, handle: LightmapHandle) rhi.Error!?rhi.Texture {
+        const held = self.table.get(toId(handle)) orelse return null;
+        if (held.sun_texture) |texture| return texture;
+        const lightmap = &held.lightmap;
+        if (lightmap.sun.len == 0 or lightmap.width == 0 or lightmap.height == 0) return null;
+        held.sun_texture = try device.createTexture(.{
+            .width = lightmap.width,
+            .height = lightmap.height,
+            .format = .r8_unorm,
+            .data = lightmap.sun,
+            .label = "lightmap, sun",
+        });
+        held.has_sun = true;
+        self.gpa.free(lightmap.sun);
+        lightmap.sun = &.{};
+        return held.sun_texture;
     }
 
     /// Its picture on the device, made the first time it is asked for.
@@ -509,4 +582,18 @@ test "a lightmap's file reads back as it was written, near enough, and one cut s
 
     try testing.expectError(error.BadLightmap, read(gpa, bytes[0 .. bytes.len - 1]));
     try testing.expectError(error.BadLightmap, read(gpa, "FXLMAP99"));
+
+    // With the sun's baked shadow, a byte a texel, after the picture.
+    try testing.expectEqual(@as(usize, 0), back.sun.len);
+    var shaded = try read(gpa, bytes);
+    defer shaded.deinit(gpa);
+    shaded.sun = try gpa.dupe(u8, &.{ 0, 255, 128, 7 });
+    const with_sun = try write(gpa, shaded);
+    defer gpa.free(with_sun);
+    try testing.expectEqualStrings(magic_with_sun, with_sun[0..magic_with_sun.len]);
+    var again = try read(gpa, with_sun);
+    defer again.deinit(gpa);
+    try testing.expectEqualSlices(u8, &.{ 0, 255, 128, 7 }, again.sun);
+    try testing.expectEqual([4]f32{ 0.5, 0.5, 0, 0 }, again.placeOf(uuids[0]).?);
+    try testing.expectError(error.BadLightmap, read(gpa, with_sun[0 .. with_sun.len - 1]));
 }

@@ -530,6 +530,8 @@ pub const Renderer3D = struct {
     probes: rhi.Buffer,
     probe_data: shader3d.Probes = .{ .samples = @splat(@splat(0)), .energy = .{ 1, 0, 0, 0 } },
     lightmap: ?rhi.Texture = null,
+    /// The first sun's baked shadow on the lightmap's texels, where it holds one.
+    lightmap_sun: ?rhi.Texture = null,
     lightmap_sampler: rhi.Sampler,
     /// What the first `LightmapGI` with its data baked, which this draw
     /// reads; null for none.
@@ -1154,6 +1156,7 @@ pub const Renderer3D = struct {
         try bind.texture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
         if (self.sky_draw) |*held| try bind.texture(shader3d.sky_noise_slot, held.noise, held.repeating);
         try bind.texture(shader3d.screen_ao_slot, self.screen_ao orelse self.white, self.lightmap_sampler);
+        try bind.texture(shader3d.lightmap_sun_slot, self.lightmap_sun orelse self.white, self.lightmap_sampler);
     }
 
     /// The geometry pass: the solid surfaces - and, after them, what is on
@@ -1317,6 +1320,7 @@ pub const Renderer3D = struct {
     fn findBaked(self: *Renderer3D, app: *App) !void {
         self.baked = null;
         self.lightmap = null;
+        self.lightmap_sun = null;
         self.probe_data.energy = .{ 1, 0, 0, 0 };
         var it = try ecs.Query(.{LightmapGI}).over(&app.world);
         while (it.next()) |chunk| {
@@ -1327,7 +1331,9 @@ pub const Renderer3D = struct {
                 const held = app.lightmaps.get(gi.data) orelse continue;
                 self.baked = held;
                 self.lightmap = try app.lightmaps.textureOf(self.device, gi.data);
-                self.probe_data.energy = .{ @max(gi.energy, 0), 0, 0, 0 };
+                // The sun's baked shadow with it, where the lightmap holds one.
+                self.lightmap_sun = try app.lightmaps.sunTextureOf(self.device, gi.data);
+                self.probe_data.energy = .{ @max(gi.energy, 0), if (self.lightmap_sun != null) 1 else 0, 0, 0 };
                 return;
             }
         }
