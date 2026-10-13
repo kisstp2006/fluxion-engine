@@ -938,6 +938,12 @@ pub const Renderer3D = struct {
             front.front_layer = 1;
             front.ao_strength = 0;
             if (view.front_shadow_reach > 0) front.shadow_reach = view.front_shadow_reach;
+            // Seen through a field of view of its own, where the camera has one.
+            if (view.front_fov > 0 and view.projection == .perspective) {
+                var narrower = drawn_view;
+                narrower.fov = std.math.clamp(view.front_fov, 0.01, std.math.pi - 0.01);
+                front.view_projection = narrower.matrix(clip);
+            }
             try device.updateBuffer(self.front_frame, 0, std.mem.asBytes(&front));
             self.front_data = front;
         }

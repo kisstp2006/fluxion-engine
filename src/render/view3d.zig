@@ -55,6 +55,8 @@ pub const View3D = struct {
     front_layers: u32 = 0,
     /// See `Camera3D.front_shadow_reach`.
     front_shadow_reach: f32 = 0,
+    /// See `Camera3D.front_fov`.
+    front_fov: f32 = 0,
     /// The `RenderView` this is drawn for, if it is one's.
     render_view: ecs.Entity = .none,
     /// The `World3D` it sees, `.none` for the main world: the one its
@@ -78,6 +80,7 @@ pub const View3D = struct {
             .cull_mask = camera.cull_mask,
             .front_layers = camera.front_layers,
             .front_shadow_reach = camera.front_shadow_reach,
+            .front_fov = camera.front_fov,
         };
     }
 

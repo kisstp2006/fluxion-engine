@@ -346,6 +346,11 @@ pub const Camera3D = extern struct {
     /// the camera - then does not darken the hands; a wall or a roof still
     /// does.
     front_shadow_reach: f32 = 0,
+    /// The field of view what is on the front layers is drawn with, from
+    /// the bottom of the picture to the top; nought for the camera's own.
+    /// A first-person weapon is drawn narrower than the world, as games
+    /// draw it: the arms holding it are seen no further back than the hands.
+    front_fov: f32 = 0,
 
     pub const Projection = enum(u8) {
         /// Further is smaller.
@@ -364,6 +369,7 @@ pub const Camera3D = extern struct {
         .cull_mask = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it sees" } },
         .front_layers = .{ attr.Layers{ .names = .render_3d }, attr.Doc{ .text = "The render layers it draws over everything else, with a depth of their own: a first-person weapon" } },
         .front_shadow_reach = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0, .max = 10 }, attr.Doc{ .text = "How far toward a light what is on the front layers looks for its shadow: nothing nearer it - the body holding a first-person weapon - shadows it" } },
+        .front_fov = .{ attr.Angle{}, attr.Range{ .min = 0, .max = std.math.degreesToRadians(179.0) }, attr.Doc{ .text = "The field of view what is on the front layers is drawn with; nought for the camera's own" } },
     };
 };
 

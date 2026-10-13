@@ -705,6 +705,12 @@ test "what is on a camera's front layers is drawn last, over the world, and cast
     app.world.get(eye, Camera3D).?.front_shadow_reach = 0.8;
     _ = try app.step();
     try testing.expectEqual(@as(f32, 0.8), app.renderer3d.front_data.shadow_reach);
+    // A field of view of its own: a narrower one makes the same point
+    // further from the middle of the picture.
+    try testing.expect(std.meta.eql(app.renderer3d.front_data.view_projection, app.renderer3d.frame_data.view_projection));
+    app.world.get(eye, Camera3D).?.front_fov = std.math.degreesToRadians(40.0);
+    _ = try app.step();
+    try testing.expect(app.renderer3d.front_data.view_projection.cols[0].x > app.renderer3d.frame_data.view_projection.cols[0].x);
 
     // A picture on the weapon - the screen of a bomb in hand - is drawn with
     // it, over the world; one in the world is not.
