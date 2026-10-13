@@ -58,6 +58,8 @@ pub const Frame = struct {
     /// The 3D draws' parts: gathering, shadows, the geometry pass, the
     /// surfaces and the passes after.
     draw_parts_ms: [5]f32 = @splat(0),
+    /// Of the draw: letting go of meshes and targets no longer used.
+    tidy_ms: f32 = 0,
 };
 
 /// The frames, while there is somewhere to write them.
@@ -69,6 +71,8 @@ pub const FrameStats = struct {
     began: ?std.Io.Timestamp = null,
     fixed_ns: i96 = 0,
     draw_ns: i96 = 0,
+    /// Of the draw: letting go of meshes and targets no longer used.
+    tidy_ns: i96 = 0,
     /// How long each of the frame's own steps took, by its place in the
     /// frame's order, and what each is called.
     steps_ns: [most_steps]i96 = @splat(0),
@@ -97,6 +101,7 @@ pub const FrameStats = struct {
         self.began = if (io) |held| std.Io.Timestamp.now(held, .awake) else null;
         self.fixed_ns = 0;
         self.draw_ns = 0;
+        self.tidy_ns = 0;
         self.steps_ns = @splat(0);
     }
 
@@ -133,6 +138,7 @@ pub const FrameStats = struct {
         }
         frame.longest_step = @intCast(longest);
         frame.longest_step_ms = ms(self.steps_ns[longest]);
+        frame.tidy_ms = ms(self.tidy_ns);
         self.frames.append(gpa, frame) catch {};
     }
 
@@ -199,6 +205,8 @@ pub const FrameStats = struct {
         geometry_ms: f32 = 0,
         surfaces_ms: f32 = 0,
         post_ms: f32 = 0,
+        /// Of the draw: letting go of meshes and targets no longer used.
+        tidy_ms: f32 = 0,
     };
 
     /// The frames after the warm-up, summed up.
@@ -246,6 +254,7 @@ pub const FrameStats = struct {
                 .geometry_ms = f.draw_parts_ms[2],
                 .surfaces_ms = f.draw_parts_ms[3],
                 .post_ms = f.draw_parts_ms[4],
+                .tidy_ms = f.tidy_ms,
             };
         }
         return out;

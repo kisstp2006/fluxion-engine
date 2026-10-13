@@ -466,6 +466,10 @@ fn draw(app: *App) anyerror!void {
     defer app.frame_stats.draw_ns += FrameStats.took(app.io, started);
     if (app.windowMode() != .minimized and !app.input.surface_lost) try layers.render(app);
     for (app.tool_windows.items) |tool| try tool.render(app);
+    // Letting go of what the draw no longer needs is timed apart: meshes
+    // unused for a while give their buffers back here.
+    const tidying = app.frame_stats.start(app.io);
     app.meshes.tick(app.gpa, &app.device);
     app.renderer3d.tick(app.gpa);
+    app.frame_stats.tidy_ns += FrameStats.took(app.io, tidying);
 }
