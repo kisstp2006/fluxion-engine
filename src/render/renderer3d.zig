@@ -1670,13 +1670,15 @@ pub const Renderer3D = struct {
                 try list.setScissor(.{ .x = @intCast(tile.x), .y = @intCast(tile.y), .width = tile.size, .height = tile.size });
             }
             var first = shadowed.item;
-            const way = Way.of(first.way);
+            // Both sides of every surface cast, whichever its material
+            // draws: a wall or a roof made of one side stops the light that
+            // comes at its back, as a solid one does.
             // A shader whose caster the device refuses casts as the engine's.
-            const pipeline = first.compiled.casterPipelineOf(device, format, way.cull, first.solid) catch |err| blk: {
+            const pipeline = first.compiled.casterPipelineOf(device, format, .disabled, first.solid) catch |err| blk: {
                 const plain = &self.plain.?;
                 if (first.compiled == plain) return err;
                 first.params = no_params;
-                break :blk try plain.casterPipelineOf(device, format, way.cull, false);
+                break :blk try plain.casterPipelineOf(device, format, .disabled, false);
             };
             try bind.setPipeline(pipeline);
             try bind.uniformRange(0, self.shadow_frames.buffer.?, self.frame_offsets.items[shadowed.view], @sizeOf(Frame));

@@ -381,8 +381,12 @@ const engine_head =
     \\    mat4 m = SHADOW_MATRICES[view];
     \\    vec4 seen = m * vec4(p, 1.0);
     \\    float texel = info.z * mix(1.0, seen.w, info.w);
+    \\    // Pushed off the surface, out of its own shadow: away from it on the
+    \\    // side it faces - toward the light only for a surface of two sides,
+    \\    // lit from behind. One of one side turned from the light is pushed
+    \\    // further into its shadow, not through itself into the light.
     \\    vec3 side = ng;
-    \\    if (dot(ng, l) < 0.0) {
+    \\    if (FACING.x > 0.5 && dot(ng, l) < 0.0) {
     \\        side = -ng;
     \\    }
     \\    vec4 at = m * vec4(p + side * (how.y * texel) + l * (how.x * texel + SHADOW_REACH), 1.0);
@@ -423,8 +427,10 @@ const engine_head =
     \\    return amount / float(taps);
     \\}
     \\
-    \\// How lit `p` is by sun `which`: its cascade for how far along the
-    \\// camera's view `p` is, fading out toward the end of its shadow.
+    \\// How lit `p` is by sun `which`: by the sharpest of its cascades whose
+    \\// tile holds `p` with room for the filter round it - often a nearer one
+    \\// than how far along the camera's view `p` is would pick - fading out
+    \\// toward the end of its shadow.
     \\float sunShadow(int which, vec3 p, vec3 ng, float turn) {
     \\    vec4 s = SUN_SHADOWS[which];
     \\    if (s.x < 0.0) {
@@ -435,43 +441,35 @@ const engine_head =
     \\    if (d >= soft.w) {
     \\        return 1.0;
     \\    }
-    \\    vec4 splits = SUN_SPLITS[which];
-    \\    int cascade = 0;
-    \\    if (d > splits.x) {
-    \\        cascade = 1;
+    \\    int first = int(s.x + 0.5);
+    \\    int count = int(s.y + 0.5);
+    \\    // The filter's reach, and the normal's push, kept inside the tile.
+    \\    float margin = (soft.x + s.w + 4.0) * SHADOW_ATLAS.x;
+    \\    int cascade = count;
+    \\    float edge = 0.0;
+    \\    for (int c = 0; c < count; c = c + 1) {
+    \\        if (cascade == count) {
+    \\            vec4 at = SHADOW_MATRICES[first + c] * vec4(p, 1.0);
+    \\            vec4 rect = SHADOW_RECTS[first + c];
+    \\            vec2 low = rect.xy + vec2(margin);
+    \\            vec2 high = rect.zw - vec2(margin);
+    \\            if (at.x > low.x && at.y > low.y && at.x < high.x && at.y < high.y && at.z < 1.0) {
+    \\                cascade = c;
+    \\                vec2 off = abs(at.xy - (low + high) * 0.5) / max((high - low) * 0.5, vec2(0.000001));
+    \\                edge = max(off.x, off.y);
+    \\            }
+    \\        }
     \\    }
-    \\    if (d > splits.y) {
-    \\        cascade = 2;
-    \\    }
-    \\    if (d > splits.z) {
-    \\        cascade = 3;
-    \\    }
-    \\    if (cascade >= int(s.y + 0.5)) {
+    \\    if (cascade >= count) {
     \\        return 1.0;
     \\    }
-    \\    int first = int(s.x + 0.5);
     \\    vec3 l = SUN_DIRECTIONS[which].xyz;
     \\    vec4 how = vec4(s.z, s.w, soft.x, soft.y);
     \\    float amount = shadowOf(first + cascade, p, ng, l, how, turn);
-    \\    // Over the last tenth of a cascade the next is mixed in, so where one
-    \\    // ends does not show.
-    \\    float begin = 0.0;
-    \\    float end = splits.x;
-    \\    if (cascade == 1) {
-    \\        begin = splits.x;
-    \\        end = splits.y;
-    \\    }
-    \\    if (cascade == 2) {
-    \\        begin = splits.y;
-    \\        end = splits.z;
-    \\    }
-    \\    if (cascade == 3) {
-    \\        begin = splits.z;
-    \\        end = splits.w;
-    \\    }
-    \\    float band = (end - begin) * 0.1;
-    \\    if (cascade + 1 < int(s.y + 0.5) && d > end - band) {
-    \\        amount = mix(amount, shadowOf(first + cascade + 1, p, ng, l, how, turn), (d - (end - band)) / band);
+    \\    // Toward the edge of a tile the next cascade is mixed in, so where
+    \\    // one ends does not show.
+    \\    if (cascade + 1 < count && edge > 0.85) {
+    \\        amount = mix(amount, shadowOf(first + cascade + 1, p, ng, l, how, turn), (edge - 0.85) / 0.15);
     \\    }
     \\    return mix(amount, 1.0, smoothstep(soft.z, soft.w, d));
     \\}
