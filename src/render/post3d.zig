@@ -90,6 +90,8 @@ pub const Camera = struct {
     /// nought behind the camera or far off the screen.
     sun_uv: [2]f32 = .{ 0, 0 },
     sun_seen: f32 = 0,
+    /// The sun's light.
+    sun_light: [3]f32 = .{ 0, 0, 0 },
 };
 
 /// The three corners of a triangle that covers the whole target.
@@ -351,7 +353,9 @@ const reflect_source = vertex_part ++
 
 /// The sun's rays, at half the size: toward the sun on the screen, at
 /// `KNOBS.xy`, what is brighter than white where nothing is drawn, dimming
-/// with distance, times `KNOBS.z`.
+/// with distance, times `KNOBS.z`. Where the picture's alpha is nought -
+/// the world drawn over a skybox, which holds the sky - the sun itself is
+/// put there, `MORE.rgb` its light: a disc round where it is.
 const shafts_source = vertex_part ++
     \\texture2d SOURCE : 0;
     \\
@@ -364,9 +368,14 @@ const shafts_source = vertex_part ++
     \\    for (int i = 0; i < 32; i = i + 1) {
     \\        at = at + delta;
     \\        if (onScreen(at) && sample_level(GEOMETRY, at, 0.0).z <= 0.0) {
-    \\            vec3 c = sample_level(SOURCE, at, 0.0).rgb;
-    \\            float bright = max(c.r, max(c.g, c.b));
-    \\            sum = sum + c * (decay * max(bright - 1.0, 0.0) / max(bright, 0.0001));
+    \\            vec4 c = sample_level(SOURCE, at, 0.0);
+    \\            if (c.a < 0.5) {
+    \\                vec2 off = (at - KNOBS.xy) * vec2(TEXEL.y / TEXEL.x, 1.0);
+    \\                sum = sum + MORE.rgb * (decay * smoothstep(0.07, 0.0, length(off)) * 6.0);
+    \\            } else {
+    \\                float bright = max(c.r, max(c.g, c.b));
+    \\                sum = sum + c.rgb * (decay * max(bright - 1.0, 0.0) / max(bright, 0.0001));
+    \\            }
     \\        }
     \\        decay = decay * 0.95;
     \\    }
@@ -842,6 +851,7 @@ pub const Post3D = struct {
             try self.queueReading(gpa, self.shafts.pipeline, .{ .texture = targets.shafts.? }, size[0], size[1], .dont_care, &.{ source, geometry }, 0b10, .{
                 .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
                 .knobs = .{ self.camera.sun_uv[0], self.camera.sun_uv[1], look.sun_shafts_intensity * self.camera.sun_seen, 0 },
+                .more = .{ self.camera.sun_light[0], self.camera.sun_light[1], self.camera.sun_light[2], 0 },
             });
             shafts = targets.shafts.?;
         };

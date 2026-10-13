@@ -1233,6 +1233,7 @@ pub const Renderer3D = struct {
             if (toward.y > -0.05) if (ndcOf(view_projection, view.position.add(toward.scale(view.far * 0.5)))) |ndc| {
                 const flip = screenFlip(self.device);
                 camera.sun_uv = .{ ndc[0] * 0.5 + 0.5, ndc[1] * 0.5 * flip + 0.5 };
+                camera.sun_light = self.suns.items[0].color[0..3].*;
                 const off = @max(@abs(ndc[0]), @abs(ndc[1]));
                 camera.sun_seen = std.math.clamp(1.6 - off * 0.6, 0, 1) * std.math.clamp(toward.y * 10 + 0.5, 0, 1);
             };

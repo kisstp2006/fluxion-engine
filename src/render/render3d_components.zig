@@ -880,7 +880,9 @@ pub const Sky3D = extern struct {
     /// How bright the disc is, against the light the sun gives.
     sun_brightness: f32 = 40,
     /// Redden the sun's light by the air it comes through when it is low,
-    /// on the clouds and on the world.
+    /// on the clouds and on the world. Off, the light keeps the colour it
+    /// was given, and the air is lit as by a white sun as bright: a warm
+    /// light set by hand leaves the sky blue.
     tint_sun: bool = true,
     /// The light from everywhere taken from the sky, times this, in place of
     /// the `Environment`'s; nought leaves the Environment's.

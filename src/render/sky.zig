@@ -605,10 +605,18 @@ pub fn nowOf(lit: Lit) Now {
 /// The sun's light as the air takes it: as `sunLight`, but faded out
 /// further under the horizon, where the sky is still lit after the ground.
 fn twilight(lit: Lit) [3]f32 {
-    const through = if (lit.sky.tint_sun) sunThrough(lit.sky, lit.toward) else [3]f32{ 1, 1, 1 };
     const up = std.math.clamp(lit.toward.y * 8 + 0.9, 0, 1);
     var light: [3]f32 = undefined;
-    for (0..3) |i| light[i] = lit.light[i] * through[i] * up;
+    if (lit.sky.tint_sun) {
+        const through = sunThrough(lit.sky, lit.toward);
+        for (0..3) |i| light[i] = lit.light[i] * through[i] * up;
+    } else {
+        // A light whose colour is its own - a warm sun set by hand - is
+        // taken as already coloured by the air: over the air it is white,
+        // as bright, and the sky under it as blue as under any sun.
+        const bright = 0.2126 * lit.light[0] + 0.7152 * lit.light[1] + 0.0722 * lit.light[2];
+        for (0..3) |i| light[i] = bright * up;
+    }
     return light;
 }
 
