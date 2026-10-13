@@ -992,6 +992,28 @@ pub const Environment = extern struct {
     glow_intensity: f32 = 0.8,
     /// How far it spreads: one is the whole of it, less keeps it close.
     glow_spread: f32 = 1,
+    /// Ambient occlusion from the screen: the light from everywhere kept
+    /// out of corners, creases and the space under and between things, up
+    /// to `ssao_radius` metres from what hides it.
+    ssao: bool = false,
+    ssao_radius: f32 = 0.6,
+    ssao_intensity: f32 = 1,
+    /// Reflections from the screen on smooth surfaces: what is on the
+    /// screen seen in them, up to `ssr_distance` metres away.
+    ssr: bool = false,
+    ssr_intensity: f32 = 1,
+    ssr_distance: f32 = 30,
+    /// Rays of the sun through what stands before it.
+    sun_shafts: bool = false,
+    sun_shafts_intensity: f32 = 0.6,
+    /// The picture graded after it is toned: how colourful, how
+    /// contrasting, warmer or cooler, darker toward its corners, and
+    /// sharper.
+    saturation: f32 = 1,
+    contrast: f32 = 1,
+    temperature: f32 = 0,
+    vignette: f32 = 0,
+    sharpen: f32 = 0,
 
     pub const Background = enum(u8) {
         /// The project's clear colour.
@@ -1029,5 +1051,18 @@ pub const Environment = extern struct {
         .glow_threshold = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "Light brighter than this glows" } },
         .glow_intensity = .{ attr.Range{ .min = 0, .max = 8 }, attr.Doc{ .text = "How much of the glow is added back" } },
         .glow_spread = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How far it spreads: one is the whole of it, less keeps it close" } },
+        .ssao = .{ attr.Group{ .name = "Screen effects" }, attr.Label{ .text = "SSAO" }, attr.Doc{ .text = "Ambient occlusion from the screen: the light from everywhere kept out of corners and creases" } },
+        .ssao_radius = .{ attr.Label{ .text = "SSAO radius" }, attr.Unit{ .text = "m" }, attr.Range{ .min = 0.05, .max = 8 }, attr.Doc{ .text = "How far from what hides it a surface is darkened" } },
+        .ssao_intensity = .{ attr.Label{ .text = "SSAO intensity" }, attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How dark the occlusion is" } },
+        .ssr = .{ attr.Label{ .text = "SSR" }, attr.Doc{ .text = "Reflections from the screen on smooth surfaces" } },
+        .ssr_intensity = .{ attr.Label{ .text = "SSR intensity" }, attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How strong the reflections are" } },
+        .ssr_distance = .{ attr.Label{ .text = "SSR distance" }, attr.Unit{ .text = "m" }, attr.Range{ .min = 1, .max = 500 }, attr.Doc{ .text = "How far a reflection is looked for" } },
+        .sun_shafts = .{attr.Doc{ .text = "Rays of the sun through what stands before it" }},
+        .sun_shafts_intensity = .{ attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How bright the sun's rays are" } },
+        .saturation = .{ attr.Group{ .name = "Grading" }, attr.Range{ .min = 0, .max = 2 }, attr.Doc{ .text = "How colourful the picture is: one as it is, nought grey" } },
+        .contrast = .{ attr.Range{ .min = 0.5, .max = 2 }, attr.Doc{ .text = "How far apart its darks and lights are: one as it is" } },
+        .temperature = .{ attr.Range{ .min = -1, .max = 1 }, attr.Doc{ .text = "Warmer, above nought, or cooler, below" } },
+        .vignette = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much darker the picture is toward its corners" } },
+        .sharpen = .{ attr.Range{ .min = 0, .max = 2 }, attr.Doc{ .text = "How much its edges are sharpened" } },
     };
 };

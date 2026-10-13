@@ -13,9 +13,24 @@
 //!   way it came, each step spread a little: bloom. What the levels add up
 //!   to is divided by how many there are, so the glow is as strong whatever
 //!   the size of the picture.
+//! - **Occlusion** (SSAO), before the frame's light is worked out, from the
+//!   geometry pass: round each pixel a dozen points in the half above its
+//!   surface, each looked for on the screen; those behind what is drawn
+//!   there are hidden. At half the size, then smoothed where the depth is
+//!   alike. The 3D surfaces read it as how much light from everywhere
+//!   reaches them - not the sun's, which their shadows say.
+//! - **Reflections** (SSR): from each smooth pixel the view's ray bounced
+//!   off it is followed across the screen until it goes behind what is
+//!   drawn there; what is seen there is added, as much as the surface's
+//!   Fresnel says, fading toward the screen's edges and with distance.
+//! - **The sun's rays**: from each pixel toward the sun on the screen, what
+//!   is brighter than white and nothing stands in front of - the sky, its
+//!   sun - added up and dimming with distance: shafts through what stands
+//!   before it.
 //! - **Tone**: the light times the exposure, with the glow added, brought
 //!   into what a screen shows - as it is, Reinhard, filmic or ACES - and
-//!   written as a picture's colours are.
+//!   written as a picture's colours are - sharpened, graded for
+//!   colourfulness, contrast and warmth, and darkened toward its corners.
 //! - **Smoothing**, where the project asks for it: an edge smoother over
 //!   the toned picture.
 //!
@@ -27,6 +42,7 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
+const math = @import("fluxion_math");
 const rhi = @import("fluxion_rhi");
 const shader = @import("fluxion_shader");
 
@@ -46,6 +62,34 @@ const Post = extern struct {
     /// read, as `material.screenFlip` says; nought.
     texel: [4]f32,
     knobs: [4]f32,
+    /// The tone pass's grading: colourfulness, contrast, vignette and
+    /// sharpening; and its white's colour.
+    more: [4]f32 = @splat(0),
+    grade: [4]f32 = .{ 1, 1, 1, 0 },
+    /// The camera, for the passes that read the geometry: a point's place
+    /// on the screen, and the way through a pixel - `forward`, with `right`
+    /// and `up` as far as the picture's edges are from it a unit along.
+    view_projection: math.Mat4 = .identity,
+    eye: [4]f32 = @splat(0),
+    forward: [4]f32 = @splat(0),
+    right: [4]f32 = @splat(0),
+    up: [4]f32 = @splat(0),
+};
+
+/// What the passes reading the geometry are told of the camera, and of the
+/// sun for its rays.
+pub const Camera = struct {
+    view_projection: math.Mat4 = .identity,
+    eye: math.Vec3 = .zero,
+    forward: math.Vec3 = .zero,
+    /// As far as the picture's right and top edges are from the middle, a
+    /// unit along `forward`.
+    right: math.Vec3 = .zero,
+    up: math.Vec3 = .zero,
+    /// Where the sun is on the screen, and how much of its rays are seen:
+    /// nought behind the camera or far off the screen.
+    sun_uv: [2]f32 = .{ 0, 0 },
+    sun_seen: f32 = 0,
 };
 
 /// The three corners of a triangle that covers the whole target.
@@ -57,6 +101,13 @@ const vertex_part =
     \\uniform Post : 0 {
     \\    vec4 TEXEL;
     \\    vec4 KNOBS;
+    \\    vec4 MORE;
+    \\    vec4 GRADE;
+    \\    mat4 VIEW_PROJECTION;
+    \\    vec4 EYE;
+    \\    vec4 FORWARD;
+    \\    vec4 RIGHT;
+    \\    vec4 UP;
     \\}
     \\vertex {
     \\    UV = vec2(CORNER.x * 0.5 + 0.5, CORNER.y * 0.5 * TEXEL.z + 0.5);
@@ -129,9 +180,204 @@ const up_source = vertex_part ++
 /// The light, times the exposure in `KNOBS.x`, with `KNOBS.w` of the glow,
 /// toned by the curve `KNOBS.z` names with the white in `KNOBS.y`, and
 /// written as a picture's colours are.
+/// What the passes reading the geometry share: a surface's way back out
+/// of its two numbers, its place from where on the screen it is and how
+/// far, and a place's spot on the screen.
+const geometry_part =
+    \\texture2d GEOMETRY : 1;
+    \\
+    \\vec3 normalFrom(vec2 e) {
+    \\    vec3 n = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    \\    if (n.z < 0.0) {
+    \\        vec2 folded = (vec2(1.0) - abs(vec2(n.y, n.x))) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    \\        n = vec3(folded.x, folded.y, n.z);
+    \\    }
+    \\    return normalize(n);
+    \\}
+    \\
+    \\vec3 placeAt(vec2 uv, float depth) {
+    \\    vec2 ndc = vec2(uv.x * 2.0 - 1.0, (uv.y - 0.5) * 2.0 * TEXEL.z);
+    \\    return EYE.xyz + (FORWARD.xyz + RIGHT.xyz * ndc.x + UP.xyz * ndc.y) * depth;
+    \\}
+    \\
+    \\vec2 uvOf(vec3 p) {
+    \\    vec4 c = VIEW_PROJECTION * vec4(p, 1.0);
+    \\    vec2 ndc = c.xy / max(c.w, 0.0001);
+    \\    return vec2(ndc.x * 0.5 + 0.5, ndc.y * 0.5 * TEXEL.z + 0.5);
+    \\}
+    \\
+    \\float alongView(vec3 p) {
+    \\    return dot(p - EYE.xyz, FORWARD.xyz);
+    \\}
+    \\
+    \\bool onScreen(vec2 uv) {
+    \\    return uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= 1.0 && uv.y <= 1.0;
+    \\}
+    \\
+;
+
+/// How much light from everywhere reaches each pixel, at half the size:
+/// `KNOBS.x` the radius, `KNOBS.y` how dark. `TEXEL` is the geometry's.
+const occlusion_source = vertex_part ++
+    \\texture2d UNUSED : 0;
+    \\
+++ geometry_part ++
+    \\fragment {
+    \\    vec4 g = sample_level(GEOMETRY, UV, 0.0);
+    \\    float ao = 1.0 + sample_level(UNUSED, UV, 0.0).a * 0.0;
+    \\    if (g.z > 0.0 && g.w < 2.0) {
+    \\        vec3 p = placeAt(UV, g.z);
+    \\        vec3 n = normalFrom(g.xy);
+    \\        vec3 side = abs(n.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    \\        vec3 t = normalize(cross(n, side));
+    \\        vec3 b = cross(n, t);
+    \\        vec2 pixel = floor(UV / TEXEL.xy);
+    \\        float turn = fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715)))) * 6.2831853;
+    \\        float radius = KNOBS.x;
+    \\        float hidden = 0.0;
+    \\        for (int i = 0; i < 12; i = i + 1) {
+    \\            float f = (float(i) + 0.5) / 12.0;
+    \\            float a = float(i) * 2.39996323 + turn;
+    \\            float lift = 0.3 + 0.7 * fract(f * 7.31);
+    \\            vec3 way = normalize(t * cos(a) + b * sin(a) + n * lift);
+    \\            vec3 at = p + n * (0.02 * radius) + way * (radius * (0.2 + 0.8 * f * f));
+    \\            vec2 there = uvOf(at);
+    \\            if (onScreen(there)) {
+    \\                vec4 sg = sample_level(GEOMETRY, there, 0.0);
+    \\                float own = alongView(at);
+    \\                if (sg.z > 0.0 && sg.w < 2.0 && sg.z < own - 0.02 * radius) {
+    \\                    hidden = hidden + clamp(radius / max(abs(g.z - sg.z), 0.0001), 0.0, 1.0);
+    \\                }
+    \\            }
+    \\        }
+    \\        ao = clamp(1.0 - hidden / 12.0 * KNOBS.y, 0.0, 1.0);
+    \\    }
+    \\    target = vec4(ao, ao, ao, 1.0);
+    \\}
+;
+
+/// The occlusion smoothed over four by four of its pixels, each counted as
+/// much as its depth is like the middle one's. `TEXEL` is the occlusion's.
+const occlusion_blur_source = vertex_part ++
+    \\texture2d SOURCE : 0;
+    \\
+++ geometry_part ++
+    \\fragment {
+    \\    float middle = sample_level(GEOMETRY, UV, 0.0).z;
+    \\    float sum = 0.0;
+    \\    float weight = 0.0;
+    \\    for (int i = 0; i < 16; i = i + 1) {
+    \\        vec2 off = vec2(float(i % 4) - 1.5, float(i / 4) - 1.5) * TEXEL.xy;
+    \\        float d = sample_level(GEOMETRY, UV + off, 0.0).z;
+    \\        float w = exp(-abs(d - middle) / max(middle * 0.03, 0.01));
+    \\        sum = sum + sample_level(SOURCE, UV + off, 0.0).r * w;
+    \\        weight = weight + w;
+    \\    }
+    \\    float ao = sum / max(weight, 0.0001);
+    \\    target = vec4(ao, ao, ao, 1.0);
+    \\}
+;
+
+/// The light, with what smooth surfaces reflect of the screen added:
+/// `KNOBS.x` how far a reflection is looked for, `KNOBS.y` how strong.
+const reflect_source = vertex_part ++
+    \\texture2d SOURCE : 0;
+    \\
+++ geometry_part ++
+    \\fragment {
+    \\    vec4 light = sample_level(SOURCE, UV, 0.0);
+    \\    vec4 g = sample_level(GEOMETRY, UV, 0.0);
+    \\    vec3 result = light.rgb;
+    \\    float gloss = abs(g.w);
+    \\    if (g.z > 0.0 && gloss < 2.0 && gloss > 0.35) {
+    \\        vec3 p = placeAt(UV, g.z);
+    \\        vec3 n = normalFrom(g.xy);
+    \\        vec3 v = normalize(p - EYE.xyz);
+    \\        vec3 r = reflect(v, n);
+    \\        vec3 from = p + n * (0.01 + g.z * 0.002);
+    \\        float reach = KNOBS.x;
+    \\        float t = 0.1;
+    \\        float before = 0.0;
+    \\        float stride = reach / 60.0;
+    \\        float found = 0.0;
+    \\        vec2 hit = UV;
+    \\        for (int i = 0; i < 40; i = i + 1) {
+    \\            if (found == 0.0) {
+    \\                vec3 q = from + r * t;
+    \\                vec2 there = uvOf(q);
+    \\                float own = alongView(q);
+    \\                if (!onScreen(there) || own <= 0.0 || t > reach) {
+    \\                    found = -1.0;
+    \\                } else {
+    \\                    float depth = sample_level(GEOMETRY, there, 0.0).z;
+    \\                    if (depth > 0.0 && own > depth && own - depth < max(0.3, stride * 1.5)) {
+    \\                        found = 1.0;
+    \\                        hit = there;
+    \\                    } else {
+    \\                        before = t;
+    \\                        t = t + stride;
+    \\                        stride = stride * 1.07;
+    \\                    }
+    \\                }
+    \\            }
+    \\        }
+    \\        if (found > 0.5) {
+    \\            float low = before;
+    \\            float high = t;
+    \\            for (int k = 0; k < 5; k = k + 1) {
+    \\                float mid = (low + high) * 0.5;
+    \\                vec3 q = from + r * mid;
+    \\                vec2 there = uvOf(q);
+    \\                float depth = sample_level(GEOMETRY, there, 0.0).z;
+    \\                if (depth > 0.0 && alongView(q) > depth) {
+    \\                    high = mid;
+    \\                    hit = there;
+    \\                } else {
+    \\                    low = mid;
+    \\                }
+    \\            }
+    \\            vec3 seen = sample_level(SOURCE, hit, 0.0).rgb;
+    \\            float facing = clamp(dot(-v, n), 0.0, 1.0);
+    \\            float f0 = g.w < 0.0 ? 0.6 : 0.04;
+    \\            float fresnel = f0 + (1.0 - f0) * pow(1.0 - facing, 5.0);
+    \\            vec2 edge = min(hit, vec2(1.0) - hit);
+    \\            float fade = clamp(min(edge.x, edge.y) * 10.0, 0.0, 1.0) * clamp(1.0 - high / reach, 0.0, 1.0) * clamp((gloss - 0.35) / 0.3, 0.0, 1.0);
+    \\            result = result + seen * (fresnel * fade * KNOBS.y);
+    \\        }
+    \\    }
+    \\    target = vec4(result, light.a);
+    \\}
+;
+
+/// The sun's rays, at half the size: toward the sun on the screen, at
+/// `KNOBS.xy`, what is brighter than white where nothing is drawn, dimming
+/// with distance, times `KNOBS.z`.
+const shafts_source = vertex_part ++
+    \\texture2d SOURCE : 0;
+    \\
+++ geometry_part ++
+    \\fragment {
+    \\    vec2 delta = (KNOBS.xy - UV) / 32.0;
+    \\    vec2 at = UV;
+    \\    float decay = 1.0;
+    \\    vec3 sum = vec3(0.0);
+    \\    for (int i = 0; i < 32; i = i + 1) {
+    \\        at = at + delta;
+    \\        if (onScreen(at) && sample_level(GEOMETRY, at, 0.0).z <= 0.0) {
+    \\            vec3 c = sample_level(SOURCE, at, 0.0).rgb;
+    \\            float bright = max(c.r, max(c.g, c.b));
+    \\            sum = sum + c * (decay * max(bright - 1.0, 0.0) / max(bright, 0.0001));
+    \\        }
+    \\        decay = decay * 0.95;
+    \\    }
+    \\    target = vec4(sum * (KNOBS.z / 32.0), 1.0);
+    \\}
+;
+
 const tone_source = vertex_part ++
     \\texture2d SOURCE : 0;
     \\texture2d GLOW : 1;
+    \\texture2d SHAFTS : 2;
     \\
     \\// The film industry's curve, as Krzysztof Narkowicz fitted it.
     \\vec3 aces(vec3 x) {
@@ -152,7 +398,14 @@ const tone_source = vertex_part ++
     \\
     \\fragment {
     \\    vec4 light = sample(SOURCE, UV);
-    \\    vec3 seen = (light.rgb + sample(GLOW, UV).rgb * KNOBS.w) * KNOBS.x;
+    \\    vec3 c = light.rgb;
+    \\    // Sharpened: the pixel pushed away from its neighbours' mean.
+    \\    if (MORE.w > 0.0) {
+    \\        vec3 around = sample(SOURCE, UV + vec2(TEXEL.x, 0.0)).rgb + sample(SOURCE, UV - vec2(TEXEL.x, 0.0)).rgb
+    \\            + sample(SOURCE, UV + vec2(0.0, TEXEL.y)).rgb + sample(SOURCE, UV - vec2(0.0, TEXEL.y)).rgb;
+    \\        c = max(c + (c - around * 0.25) * MORE.w, vec3(0.0));
+    \\    }
+    \\    vec3 seen = (c + sample(GLOW, UV).rgb * KNOBS.w + sample(SHAFTS, UV).rgb) * KNOBS.x * GRADE.rgb;
     \\    vec3 toned = seen;
     \\    if (KNOBS.z > 2.5) {
     \\        toned = aces(seen);
@@ -161,6 +414,13 @@ const tone_source = vertex_part ++
     \\    } else if (KNOBS.z > 0.5) {
     \\        toned = seen * (vec3(1.0) + seen / vec3(KNOBS.y * KNOBS.y)) / (vec3(1.0) + seen);
     \\    }
+    \\    // Graded: colourfulness about its brightness, contrast about the
+    \\    // middle grey, and the corners darkened.
+    \\    float luma = dot(toned, vec3(0.2126, 0.7152, 0.0722));
+    \\    toned = max(mix(vec3(luma), toned, MORE.x), vec3(0.0));
+    \\    toned = max((toned - vec3(0.18)) * MORE.y + vec3(0.18), vec3(0.0));
+    \\    vec2 off = UV - vec2(0.5);
+    \\    toned = toned * clamp(1.0 - dot(off, off) * MORE.z * 2.2, 0.0, 1.0);
     \\    target = vec4(toSrgb(toned), light.a);
     \\}
 ;
@@ -207,8 +467,10 @@ const Pass = struct {
     width: u32,
     height: u32,
     load: rhi.LoadOp,
-    sources: [2]rhi.Texture,
+    sources: [3]rhi.Texture,
     source_count: u8,
+    /// Which sources are read texel by texel, not blended: the geometry's.
+    nearest: u8 = 0,
     knobs: Post,
     /// Where its numbers are in the buffer, once they are written.
     at: u32 = 0,
@@ -248,6 +510,16 @@ pub const Targets = struct {
     toned: ?rhi.Texture = null,
     /// The glow, each half the one before; none until glow is asked for.
     glow: [most_glow_levels]?rhi.Texture = @splat(null),
+    /// What the geometry pass draws - which way each pixel's surface faces,
+    /// how far and how smooth - and the depth it is tested against, one
+    /// sample a pixel; the occlusion at half the size, and smoothed; the
+    /// light with its reflections; the sun's rays at half the size. Made
+    /// the first time they are asked for.
+    geometry: ?rhi.Texture = null,
+    geometry_depth: ?rhi.Texture = null,
+    occlusion: [2]?rhi.Texture = .{ null, null },
+    reflected: ?rhi.Texture = null,
+    shafts: ?rhi.Texture = null,
     glow_levels: u32 = 0,
     /// The frame it was last drawn with.
     used: u64,
@@ -258,6 +530,14 @@ pub const Targets = struct {
         device.destroyTexture(self.depth);
         if (self.toned) |held| device.destroyTexture(held);
         for (self.glow) |held| if (held) |texture| device.destroyTexture(texture);
+        for ([_]?rhi.Texture{ self.geometry, self.geometry_depth, self.occlusion[0], self.occlusion[1], self.reflected, self.shafts }) |held| {
+            if (held) |texture| device.destroyTexture(texture);
+        }
+    }
+
+    /// Half its size, a side, at least one.
+    pub fn half(self: Targets) [2]u32 {
+        return .{ @max(self.width / 2, 1), @max(self.height / 2, 1) };
     }
 
     /// What the meshes are drawn into: the samples, or the light itself.
@@ -278,10 +558,57 @@ pub const Look = struct {
     glow_spread: f32 = 1,
     /// Smooth the edges of the toned picture.
     smooth: bool = false,
+    ssao: bool = false,
+    ssao_radius: f32 = 0.6,
+    ssao_intensity: f32 = 1,
+    ssr: bool = false,
+    ssr_intensity: f32 = 1,
+    ssr_distance: f32 = 30,
+    sun_shafts: bool = false,
+    sun_shafts_intensity: f32 = 0.6,
+    saturation: f32 = 1,
+    contrast: f32 = 1,
+    temperature: f32 = 0,
+    vignette: f32 = 0,
+    sharpen: f32 = 0,
+
+    /// Whether anything it asks for reads the geometry pass.
+    pub fn readsGeometry(self: Look) bool {
+        return self.ssao or self.ssr or self.sun_shafts;
+    }
+
+    /// How far from the camera the geometry pass draws: what occlusion is
+    /// seen on, and what reflections are looked for as far as.
+    pub fn geometryReach(self: Look) f32 {
+        return if (self.ssr) @max(self.ssr_distance, 40) else 40;
+    }
+
+    /// The same, with nothing that reads the geometry pass: for a draw that
+    /// drew none.
+    pub fn withoutGeometry(self: Look) Look {
+        var out = self;
+        out.ssao = false;
+        out.ssr = false;
+        out.sun_shafts = false;
+        return out;
+    }
 
     pub fn of(environment: ?Environment, smooth: bool) Look {
         const held = environment orelse return .{ .smooth = smooth };
         return .{
+            .ssao = held.ssao and held.ssao_intensity > 0,
+            .ssao_radius = std.math.clamp(held.ssao_radius, 0.05, 8),
+            .ssao_intensity = held.ssao_intensity,
+            .ssr = held.ssr and held.ssr_intensity > 0,
+            .ssr_intensity = held.ssr_intensity,
+            .ssr_distance = std.math.clamp(held.ssr_distance, 1, 500),
+            .sun_shafts = held.sun_shafts and held.sun_shafts_intensity > 0,
+            .sun_shafts_intensity = held.sun_shafts_intensity,
+            .saturation = @max(held.saturation, 0),
+            .contrast = std.math.clamp(held.contrast, 0.1, 4),
+            .temperature = std.math.clamp(held.temperature, -1, 1),
+            .vignette = std.math.clamp(held.vignette, 0, 1),
+            .sharpen = std.math.clamp(held.sharpen, 0, 4),
             .tonemap = held.tonemap,
             .exposure = held.exposure,
             .white = @max(held.white, 0.01),
@@ -309,6 +636,15 @@ pub const Post3D = struct {
     up: Stage = .{},
     tone: Stage = .{},
     smooth: Stage = .{},
+    occlusion: Stage = .{},
+    occlusion_blur: Stage = .{},
+    reflect: Stage = .{},
+    shafts: Stage = .{},
+    /// What the geometry is read with: texel by texel.
+    nearest: rhi.Sampler,
+    /// The camera of the draw being finished, for the passes that read the
+    /// geometry.
+    camera: Camera = .{},
     targets: std.ArrayList(Targets) = .empty,
     /// This draw's passes, recorded into one list once their numbers are
     /// written.
@@ -334,6 +670,7 @@ pub const Post3D = struct {
             .corners = buffer,
             .black = black,
             .sampler = try device.createSampler(.{ .min_filter = .linear, .mag_filter = .linear, .wrap_u = .clamp_to_edge, .wrap_v = .clamp_to_edge }),
+            .nearest = try device.createSampler(.nearest),
         };
         errdefer self.deinit(gpa);
         try self.compile(gpa, &self.bright, bright_source, light_format, false, "3D glow, bright");
@@ -341,6 +678,10 @@ pub const Post3D = struct {
         try self.compile(gpa, &self.up, up_source, light_format, true, "3D glow, up");
         try self.compile(gpa, &self.tone, tone_source, .rgba8_unorm, false, "3D tone");
         try self.compile(gpa, &self.smooth, smooth_source, .rgba8_unorm, false, "3D smoothing");
+        try self.compile(gpa, &self.occlusion, occlusion_source, .rgba8_unorm, false, "3D occlusion");
+        try self.compile(gpa, &self.occlusion_blur, occlusion_blur_source, .rgba8_unorm, false, "3D occlusion, smoothed");
+        try self.compile(gpa, &self.reflect, reflect_source, light_format, false, "3D reflections");
+        try self.compile(gpa, &self.shafts, shafts_source, light_format, false, "3D sun's rays");
         return self;
     }
 
@@ -350,7 +691,8 @@ pub const Post3D = struct {
         self.targets.deinit(gpa);
         self.blocks.deinit(gpa, device);
         self.passes.deinit(gpa);
-        for ([_]*Stage{ &self.bright, &self.down, &self.up, &self.tone, &self.smooth }) |stage| stage.deinit(device);
+        for ([_]*Stage{ &self.bright, &self.down, &self.up, &self.tone, &self.smooth, &self.occlusion, &self.occlusion_blur, &self.reflect, &self.shafts }) |stage| stage.deinit(device);
+        device.destroySampler(self.nearest);
         device.destroySampler(self.sampler);
         device.destroyTexture(self.black);
         device.destroyBuffer(self.corners);
@@ -469,7 +811,40 @@ pub const Post3D = struct {
         const width = targets.width;
         const height = targets.height;
 
-        const glow: Glow = if (look.glow) try self.glowOf(gpa, targets, look, flip) else .{ .texture = self.black, .weight = 1 };
+        // The light with what smooth surfaces reflect, where asked for.
+        var source = targets.light;
+        if (look.ssr) if (targets.geometry) |geometry| {
+            if (targets.reflected == null) targets.reflected = try device.createTexture(.{
+                .width = width,
+                .height = height,
+                .format = self.light_format,
+                .usage = .{ .sampled = true, .render_target = true },
+                .label = "3D reflected",
+            });
+            try self.queueReading(gpa, self.reflect.pipeline, .{ .texture = targets.reflected.? }, width, height, .dont_care, &.{ targets.light, geometry }, 0b10, .{
+                .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
+                .knobs = .{ look.ssr_distance, look.ssr_intensity, 0, 0 },
+            });
+            source = targets.reflected.?;
+        };
+        const glow: Glow = if (look.glow) try self.glowOf(gpa, targets, source, look, flip) else .{ .texture = self.black, .weight = 1 };
+        // The sun's rays, where the sun is near enough the screen.
+        var shafts = self.black;
+        if (look.sun_shafts and self.camera.sun_seen > 0) if (targets.geometry) |geometry| {
+            const size = targets.half();
+            if (targets.shafts == null) targets.shafts = try device.createTexture(.{
+                .width = size[0],
+                .height = size[1],
+                .format = self.light_format,
+                .usage = .{ .sampled = true, .render_target = true },
+                .label = "3D sun's rays",
+            });
+            try self.queueReading(gpa, self.shafts.pipeline, .{ .texture = targets.shafts.? }, size[0], size[1], .dont_care, &.{ source, geometry }, 0b10, .{
+                .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
+                .knobs = .{ self.camera.sun_uv[0], self.camera.sun_uv[1], look.sun_shafts_intensity * self.camera.sun_seen, 0 },
+            });
+            shafts = targets.shafts.?;
+        };
 
         // Toned into the picture - or into a picture of its own first,
         // where it is smoothed after.
@@ -489,9 +864,11 @@ pub const Post3D = struct {
             .filmic => 2,
             .aces => 3,
         };
-        try self.queue(gpa, if (over and !smoothing) self.tone.over else self.tone.pipeline, tone_into, tone_width, tone_height, if (over and !smoothing) .load else .dont_care, &.{ targets.light, glow.texture }, .{
+        try self.queue(gpa, if (over and !smoothing) self.tone.over else self.tone.pipeline, tone_into, tone_width, tone_height, if (over and !smoothing) .load else .dont_care, &.{ source, glow.texture, shafts }, .{
             .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
             .knobs = .{ look.exposure, look.white, curve, if (look.glow) look.glow_intensity / glow.weight else 0 },
+            .more = .{ look.saturation, look.contrast, look.vignette, look.sharpen },
+            .grade = whiteOf(look.temperature),
         });
         if (smoothing) try self.queue(gpa, if (over) self.smooth.over else self.smooth.pipeline, into, out_width, out_height, if (over) .load else .dont_care, &.{targets.toned.?}, .{
             .texel = .{ 1 / @as(f32, @floatFromInt(width)), 1 / @as(f32, @floatFromInt(height)), flip, 0 },
@@ -500,13 +877,70 @@ pub const Post3D = struct {
         try self.run(gpa);
     }
 
+    /// The geometry pass's targets, at the targets' size, one sample a
+    /// pixel: made the first time.
+    pub fn geometryOf(self: *Post3D, targets: *Targets) !struct { color: rhi.Texture, depth: rhi.Texture } {
+        const device = self.device;
+        if (targets.geometry == null) targets.geometry = try device.createTexture(.{
+            .width = targets.width,
+            .height = targets.height,
+            .format = .rgba16_float,
+            .usage = .{ .sampled = true, .render_target = true },
+            .label = "3D geometry",
+        });
+        if (targets.geometry_depth == null) targets.geometry_depth = try device.createTexture(.{
+            .width = targets.width,
+            .height = targets.height,
+            .format = self.depth_format,
+            .usage = .{ .sampled = false, .render_target = true },
+            .label = "3D geometry depth",
+        });
+        return .{ .color = targets.geometry.?, .depth = targets.geometry_depth.? };
+    }
+
+    /// Whether the device draws the geometry pass: half floats it draws
+    /// into and reads.
+    pub fn drawsGeometry(self: *const Post3D) bool {
+        const support = self.device.caps().formatSupport(.rgba16_float);
+        return support.render_target and support.sampled;
+    }
+
+    /// How much light from everywhere reaches each pixel, from the geometry
+    /// drawn into `targets`, at half the size and smoothed: what the 3D
+    /// surfaces read as the screen's occlusion. Run at once.
+    pub fn occlusionOf(self: *Post3D, gpa: Allocator, targets: *Targets, look: Look) !rhi.Texture {
+        const device = self.device;
+        const flip = material.screenFlip(device);
+        const size = targets.half();
+        for (&targets.occlusion) |*held| if (held.* == null) {
+            held.* = try device.createTexture(.{
+                .width = size[0],
+                .height = size[1],
+                .usage = .{ .sampled = true, .render_target = true },
+                .label = "3D occlusion",
+            });
+        };
+        const geometry = targets.geometry.?;
+        self.passes.clearRetainingCapacity();
+        try self.queueReading(gpa, self.occlusion.pipeline, .{ .texture = targets.occlusion[0].? }, size[0], size[1], .dont_care, &.{ geometry, geometry }, 0b11, .{
+            .texel = .{ 1 / @as(f32, @floatFromInt(size[0])), 1 / @as(f32, @floatFromInt(size[1])), flip, 0 },
+            .knobs = .{ look.ssao_radius, look.ssao_intensity, 0, 0 },
+        });
+        try self.queueReading(gpa, self.occlusion_blur.pipeline, .{ .texture = targets.occlusion[1].? }, size[0], size[1], .dont_care, &.{ targets.occlusion[0].?, geometry }, 0b10, .{
+            .texel = .{ 1 / @as(f32, @floatFromInt(size[0])), 1 / @as(f32, @floatFromInt(size[1])), flip, 0 },
+            .knobs = @splat(0),
+        });
+        try self.run(gpa);
+        return targets.occlusion[1].?;
+    }
+
     /// The glow, and what its levels add up to: what it is divided by.
     const Glow = struct { texture: rhi.Texture, weight: f32 };
 
     /// The glow of what is bright in `targets`: taken out at half the size,
     /// made smaller level by level, and added back up the way it came. The
     /// half-size level, which holds all of it, and how many times over.
-    fn glowOf(self: *Post3D, gpa: Allocator, targets: *Targets, look: Look, flip: f32) !Glow {
+    fn glowOf(self: *Post3D, gpa: Allocator, targets: *Targets, source: rhi.Texture, look: Look, flip: f32) !Glow {
         const device = self.device;
         if (targets.glow_levels == 0) {
             var w = @max(targets.width / 2, 1);
@@ -540,7 +974,7 @@ pub const Post3D = struct {
 
         // What is bright, at half the size.
         const first = sizeOf(targets, 0);
-        try self.queue(gpa, self.bright.pipeline, .{ .texture = targets.glow[0].? }, first[0], first[1], .dont_care, &.{targets.light}, .{
+        try self.queue(gpa, self.bright.pipeline, .{ .texture = targets.glow[0].? }, first[0], first[1], .dont_care, &.{source}, .{
             .texel = .{ 1 / @as(f32, @floatFromInt(targets.width)), 1 / @as(f32, @floatFromInt(targets.height)), flip, 0 },
             .knobs = .{ look.glow_threshold, look.exposure, 0, 0 },
         });
@@ -583,7 +1017,20 @@ pub const Post3D = struct {
 
     /// One pass over the whole of `into`, reading `sources`: kept for `run`.
     fn queue(self: *Post3D, gpa: Allocator, pipeline: rhi.Pipeline, into: rhi.RenderTarget, width: u32, height: u32, load: rhi.LoadOp, sources: []const rhi.Texture, knobs: Post) !void {
-        var held: Pass = .{ .pipeline = pipeline, .into = into, .width = width, .height = height, .load = load, .sources = undefined, .source_count = @intCast(sources.len), .knobs = knobs };
+        return self.queueReading(gpa, pipeline, into, width, height, load, sources, 0, knobs);
+    }
+
+    /// `queue`, the sources whose bits are set in `nearest` read texel by
+    /// texel; with the camera told.
+    fn queueReading(self: *Post3D, gpa: Allocator, pipeline: rhi.Pipeline, into: rhi.RenderTarget, width: u32, height: u32, load: rhi.LoadOp, sources: []const rhi.Texture, nearest: u8, given: Post) !void {
+        var knobs = given;
+        const c = self.camera;
+        knobs.view_projection = c.view_projection;
+        knobs.eye = .{ c.eye.x, c.eye.y, c.eye.z, 0 };
+        knobs.forward = .{ c.forward.x, c.forward.y, c.forward.z, 0 };
+        knobs.right = .{ c.right.x, c.right.y, c.right.z, 0 };
+        knobs.up = .{ c.up.x, c.up.y, c.up.z, 0 };
+        var held: Pass = .{ .pipeline = pipeline, .into = into, .width = width, .height = height, .load = load, .sources = undefined, .source_count = @intCast(sources.len), .nearest = nearest, .knobs = knobs };
         @memcpy(held.sources[0..sources.len], sources);
         try self.passes.append(gpa, held);
     }
@@ -604,7 +1051,10 @@ pub const Post3D = struct {
             try list.setViewport(.{ .width = @floatFromInt(held.width), .height = @floatFromInt(held.height) });
             try list.setPipeline(held.pipeline);
             try list.setUniformBufferRange(0, buffer, held.at, @sizeOf(Post));
-            for (held.sources[0..held.source_count], 0..) |source, slot| try list.setTexture(@intCast(slot), source, self.sampler);
+            for (held.sources[0..held.source_count], 0..) |source, slot| {
+                const texel_by_texel = held.nearest & (@as(u8, 1) << @intCast(slot)) != 0;
+                try list.setTexture(@intCast(slot), source, if (texel_by_texel) self.nearest else self.sampler);
+            }
             try list.setVertexBuffer(0, self.corners, 0);
             try list.draw(.{ .vertex_count = 3 });
             try list.endPass();
@@ -613,8 +1063,19 @@ pub const Post3D = struct {
     }
 };
 
+/// The colour white is graded to at `temperature`, from cool at minus one
+/// to warm at one, as bright as white.
+fn whiteOf(temperature: f32) [4]f32 {
+    const t = std.math.clamp(temperature, -1, 1);
+    const r = 1 + 0.16 * t;
+    const g = 1 + 0.02 * t;
+    const b = 1 - 0.16 * t;
+    const bright = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    return .{ r / bright, g / bright, b / bright, 0 };
+}
+
 test "every pass's shader compiles for every backend, and its numbers are laid out as the engine writes them" {
-    for ([_][]const u8{ bright_source, down_source, up_source, tone_source, smooth_source }) |source| {
+    for ([_][]const u8{ bright_source, down_source, up_source, tone_source, smooth_source, occlusion_source, occlusion_blur_source, reflect_source, shafts_source }) |source| {
         var said: std.Io.Writer.Allocating = .init(testing.allocator);
         defer said.deinit();
         var module = shader.compile(testing.allocator, source, &said.writer) catch |err| {

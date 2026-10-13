@@ -354,6 +354,21 @@ test "the first visible environment is the one drawn with" {
     try testing.expectEqual(@as(u32, 1), app.renderer3d.samples);
 }
 
+test "screen effects draw the geometry pass first, and the screen's occlusion only for the world" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    _ = try app.step();
+    try testing.expect(!app.renderer3d.geometry_drawn);
+    _ = try app.world.spawnWith(.{Environment{ .ssao = true, .ssr = true, .sun_shafts = true }});
+    _ = try app.step();
+    try testing.expect(app.renderer3d.geometry_drawn);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.geometry_draws);
+    try testing.expect(app.renderer3d.screen_ao != null);
+    try testing.expectEqual(@as(f32, 1), app.renderer3d.frame_data.ao_strength);
+}
+
 test "a sky is drawn behind the world, and a hidden one is not" {
     const app = try headless();
     defer app.destroy();
@@ -681,12 +696,15 @@ test "what is on a camera's front layers is drawn last, over the world, and cast
     try testing.expectEqual(@as(usize, 2), items.len);
     try testing.expect(!items[0].front and items[1].front);
     for (app.renderer3d.casters.items) |caster| try testing.expect(!caster.item.front);
-    // Its shadows looked for nearer the light, from a frame of its own: the
-    // body holding it shadows it no more.
-    try testing.expect(std.meta.eql(app.renderer3d.frame_in_use, app.renderer3d.frame));
+    // Drawn from a frame of its own, which reads no occlusion from the
+    // screen - the world's behind it - and its shadows looked for nearer
+    // the light: the body holding it shadows it no more.
+    try testing.expect(std.meta.eql(app.renderer3d.frame_in_use, app.renderer3d.front_frame));
+    try testing.expectEqual(@as(f32, 1), app.renderer3d.front_data.front_layer);
+    try testing.expectEqual(@as(f32, 0), app.renderer3d.front_data.shadow_reach);
     app.world.get(eye, Camera3D).?.front_shadow_reach = 0.8;
     _ = try app.step();
-    try testing.expect(std.meta.eql(app.renderer3d.frame_in_use, app.renderer3d.front_frame));
+    try testing.expectEqual(@as(f32, 0.8), app.renderer3d.front_data.shadow_reach);
 
     // A picture on the weapon - the screen of a bomb in hand - is drawn with
     // it, over the world; one in the world is not.

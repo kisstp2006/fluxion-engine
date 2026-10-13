@@ -81,8 +81,9 @@ pub const shadows_slot = 4;
 pub const shadow_map_slot = 5;
 pub const shadow_depth_slot = 6;
 /// How many textures a 3D shader reads: the material's five, the shadow
-/// atlas twice, the lights' cookies, the lightmap and the sky's noise.
-pub const texture_count = 10;
+/// atlas twice, the lights' cookies, the lightmap, the sky's noise and the
+/// screen's occlusion.
+pub const texture_count = 11;
 pub const cookie_slot = 7;
 /// The light from everywhere baked for a frame: the lightmap at this slot,
 /// and the probes' samples, `Probes`, the block at this one.
@@ -90,6 +91,9 @@ pub const lightmap_slot = 8;
 pub const probes_slot = 5;
 /// The sky's noise, which the clouds' shadow is read from: `render/sky.zig`.
 pub const sky_noise_slot = 9;
+/// How much of the light from everywhere reaches each pixel of the screen,
+/// worked out from the geometry pass: `render/post3d.zig`'s occlusion.
+pub const screen_ao_slot = 10;
 /// For a mesh a skeleton bends: its bones, `Skin`, are the block at this
 /// slot, and each vertex's bones and weights are a third vertex buffer.
 pub const skin_slot = 6;
@@ -135,7 +139,12 @@ pub const Frame = extern struct {
     /// How far toward a light a shadow is looked for from: nought, or the
     /// camera's `front_shadow_reach` for what is drawn on its front layers.
     shadow_reach: f32 = 0,
-    _pad: [2]f32 = @splat(0),
+    /// One for what is drawn on the camera's front layers: the screen's
+    /// occlusion is the world's behind it, and not read.
+    front_layer: f32 = 0,
+    /// How much the screen's occlusion darkens the light from everywhere:
+    /// nought for none.
+    ao_strength: f32 = 0,
     /// The sky's clouds, as `sky.cloudsOf` says them: nought for none.
     clouds: [4]f32 = @splat(0),
     cloud_shape: [4]f32 = @splat(0),
@@ -256,6 +265,10 @@ const engine_head =
     \\    float TIME;
     \\    // How far toward a light a shadow is looked for from, in metres.
     \\    float SHADOW_REACH;
+    \\    // One on the camera's front layers.
+    \\    float FRONT_LAYER;
+    \\    // How much the screen's occlusion darkens the light from everywhere.
+    \\    float AO_STRENGTH;
     \\    // The sky's clouds: their coverage, thickness and heights; their
     \\    // size, where the wind has taken them, and how dark their shadow is.
     \\    vec4 CLOUDS;
@@ -317,6 +330,8 @@ const engine_head =
     \\texture2d LIGHTMAP : 8;
     \\// The sky's noise: where its clouds are.
     \\texture2d SKY_NOISE : 9;
+    \\// How much of the light from everywhere reaches each pixel.
+    \\texture2d SCREEN_AO : 10;
     \\
     \\const float PI = 3.14159265;
     \\
@@ -623,6 +638,46 @@ const engine_head =
 ;
 
 const engine_tail =
+    \\// How much of the light from everywhere reaches `p`, as the screen's
+    \\// occlusion says where it is drawn.
+    \\float screenAo(vec3 p) {
+    \\    if (AO_STRENGTH <= 0.0 || FRONT_LAYER > 0.5) {
+    \\        return 1.0;
+    \\    }
+    \\    vec4 onto = VIEW_PROJECTION * vec4(p, 1.0);
+    \\    vec2 ndc = onto.xy / onto.w;
+    \\    vec2 uv = vec2(ndc.x * 0.5 + 0.5, ndc.y * 0.5 * SCREEN.z + 0.5);
+    \\    return mix(1.0, sample_level(SCREEN_AO, uv, 0.0).r, AO_STRENGTH);
+    \\}
+    \\
+    \\// A unit vector in two numbers: folded onto an octahedron and flat.
+    \\vec2 octahedral(vec3 n) {
+    \\    vec2 p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
+    \\    if (n.z < 0.0) {
+    \\        p = (vec2(1.0) - abs(vec2(p.y, p.x))) * vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    \\    }
+    \\    return p;
+    \\}
+    \\
+    \\// What the geometry pass keeps of a surface: which way it faces, how far
+    \\// along the camera's view it is, and how smooth - negative for a metal,
+    \\// and past two for one on the front layers.
+    \\vec4 geometryOf(vec3 p, vec3 normal, float roughness, float metallic) {
+    \\    vec3 n = normalize(normal);
+    \\    if (FACING.x > 0.5 && dot(n, CAMERA_POSITION.xyz - p) < 0.0) {
+    \\        n = -n;
+    \\    }
+    \\    float depth = max(dot(p - CAMERA_POSITION.xyz, CAMERA_FORWARD.xyz), 0.0001);
+    \\    float smoothness = clamp(1.0 - roughness, 0.0, 1.0) * 0.98 + 0.01;
+    \\    if (metallic > 0.5) {
+    \\        smoothness = -smoothness;
+    \\    }
+    \\    if (FRONT_LAYER > 0.5) {
+    \\        smoothness = 3.0;
+    \\    }
+    \\    return vec4(octahedral(n), depth, smoothness);
+    \\}
+    \\
     \\// A surface lit: by the suns, its lamps and the light from everywhere,
     \\// with what it gives off, in the fog and the fog volumes.
     \\vec3 lit(vec3 albedo, float metallic, float roughness, vec3 emission, vec3 normal_map, float ao,
@@ -648,7 +703,7 @@ const engine_tail =
     \\    light = light + lamp(lamps_1.x, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.y, p, ng, n, v, albedo, m, roughness, turn)
     \\        + lamp(lamps_1.z, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.w, p, ng, n, v, albedo, m, roughness, turn);
     \\    vec3 f0 = mix(vec3(0.04), albedo, m);
-    \\    light = light + (albedo * (1.0 - m) + f0) * indirect(n, gi_at) * ao;
+    \\    light = light + (albedo * (1.0 - m) + f0) * indirect(n, gi_at) * (ao * screenAo(p));
     \\    vec3 color = mix(light, albedo, FEEL.x) + emission;
     \\    float far = length(p - CAMERA_POSITION.xyz);
     \\    float thick = FOG_COLOR.w + max(FOG_HEIGHT.x - p.y, 0.0) * FOG_HEIGHT.y;
@@ -764,6 +819,10 @@ pub const epilogue_len: u32 = epilogue.len;
 /// compiled to give no colour at all.
 const caster_epilogue = " if (ALPHA < FEEL.z) { discard; } ";
 
+/// What the geometry pass's ends with: what its alpha leaves out, and of
+/// the rest which way it faces, how far and how smooth.
+const geometry_epilogue = " if (ALPHA < FEEL.z) { discard; } target = geometryOf(WORLD_POSITION, WORLD_NORMAL, ROUGHNESS, METALLIC); ";
+
 /// What a `.shader3d` file is compiled as: the surface lit, or what casts
 /// its shadow - the same surface, its depth alone.
 ///
@@ -771,7 +830,13 @@ const caster_epilogue = " if (ALPHA < FEEL.z) { discard; } ";
 /// alpha: no picture is read and nothing is left out, so a GPU tests the
 /// depth before running it and skips what is hidden, as it cannot where a
 /// shader may `discard`.
-pub const Variant = enum { lit, caster, solid };
+///
+/// `geometry` draws what the screen's effects read: which way a surface
+/// faces, how far it is and how smooth, into `geometry_format`.
+pub const Variant = enum { lit, caster, solid, geometry };
+
+/// What the geometry pass draws into.
+pub const geometry_format: rhi.Format = .rgba16_float;
 
 /// What the solid caster ends with: the pictures it does not read.
 const solid_unread = "\nvec4 solidUnread() { vec2 at = vec2(0.0, 0.0); return sample(ALBEDO_TEXTURE, at) + sample(EMISSION_TEXTURE, at) + sample(SURFACE_TEXTURE, at) + sample(NORMAL_TEXTURE, at) + sample(OCCLUSION_TEXTURE, at); }\n";
@@ -900,6 +965,7 @@ pub fn wholeOf(gpa: Allocator, text: []const u8, variant: Variant, skinned: bool
             .lit => epilogue,
             .caster => caster_epilogue,
             .solid => "",
+            .geometry => geometry_epilogue,
         }) catch return error.OutOfMemory;
         w.writeAll(text[end..]) catch return error.OutOfMemory;
     } else w.writeAll(text) catch return error.OutOfMemory;
@@ -970,6 +1036,10 @@ pub const Compiled = struct {
     reads_time: bool = false,
     /// Whether it is the variant that bends a mesh a skeleton bends.
     skin: bool = false,
+    /// What the geometry pass draws it with: compiled the first time it is
+    /// drawn there, by the side culled.
+    geometry: ?Caster = null,
+    geometry_refused: bool = false,
     /// That variant of it, compiled the first time a skinned mesh is drawn
     /// with it; see `skinnedOf`.
     skinned: ?*Compiled = null,
@@ -1007,6 +1077,11 @@ pub const Compiled = struct {
             device.destroyShader(solid.gpu);
             solid.module.deinit();
         }
+        if (self.geometry) |*held| {
+            for (held.pipelines) |pipeline| if (!pipeline.isNone()) device.destroyPipeline(pipeline);
+            device.destroyShader(held.gpu);
+            held.module.deinit();
+        }
         device.destroyShader(self.gpu);
         device.destroyShader(self.caster.gpu);
         self.module.deinit();
@@ -1032,6 +1107,38 @@ pub const Compiled = struct {
         };
         self.skinned = made;
         return made;
+    }
+
+    /// The pipeline the geometry pass draws it with, into `geometry_format`
+    /// and `depth_format`, one sample a pixel: its variant compiled the
+    /// first time.
+    pub fn geometryPipelineOf(self: *Compiled, device: *rhi.Device, depth_format: rhi.Format, cull: Material3DData.Cull) !rhi.Pipeline {
+        if (self.geometry == null) {
+            if (self.geometry_refused) return error.ShaderFailed;
+            var problems: std.Io.Writer.Allocating = .init(self.gpa);
+            defer problems.deinit();
+            const made = compileAs(self.gpa, device, self.text, self.label, .geometry, self.skin, &problems.writer) catch |err| {
+                self.geometry_refused = true;
+                log.err("a 3D shader's geometry variant did not compile: {s}", .{problems.written()});
+                return err;
+            };
+            self.geometry = .{ .module = made.module, .gpu = made.gpu };
+        }
+        const held = &self.geometry.?;
+        const pipeline = &held.pipelines[@intFromEnum(cull)];
+        if (!pipeline.isNone()) return pipeline.*;
+        pipeline.* = makePipeline(device, &held.module, held.gpu, self.skin, .{
+            .depth = .{ .test_enabled = true, .write = true, .compare = .less },
+            .cull = cullOf(cull),
+            .color_format = geometry_format,
+            .depth_format = depth_format,
+            .label = "3D geometry",
+        }) catch |err| {
+            self.geometry_refused = true;
+            log.err("the graphics driver refused a 3D shader's geometry pipeline: {s}", .{device.diagnostics()});
+            return err;
+        };
+        return pipeline.*;
     }
 
     /// The pipeline it is drawn with into `color_format` and `depth_format`,
@@ -1292,7 +1399,7 @@ fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []con
     }
     var said: std.Io.Writer.Allocating = .init(gpa);
     defer said.deinit();
-    var module = shader.compileWith(gpa, built.source, &said.writer, .{ .depth_only = variant != .lit }) catch |err| switch (err) {
+    var module = shader.compileWith(gpa, built.source, &said.writer, .{ .depth_only = variant == .caster or variant == .solid }) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.CompileFailed => {
             material.tellOfLines(said.written(), built.engine_line, problems);
@@ -1339,6 +1446,7 @@ fn checkLayout(module: *const shader.Module) void {
         .{ "SUN_DIRECTIONS", "sun_directions" },   .{ "SUN_COLORS", "sun_colors" },           .{ "AMBIENT", "ambient" },
         .{ "FOG_COLOR", "fog_color" },             .{ "FOG_HEIGHT", "fog_height" },           .{ "SCREEN", "screen" },
         .{ "TIME", "time" },                       .{ "CLOUDS", "clouds" },                   .{ "CLOUD_SHAPE", "cloud_shape" },
+        .{ "FRONT_LAYER", "front_layer" },         .{ "AO_STRENGTH", "ao_strength" },
     }) |pair| std.debug.assert(frame.offsetOf(pair[0]).? == @offsetOf(Frame, pair[1]));
     std.debug.assert(frame.size <= @sizeOf(Frame));
     const look = module.block("Material").?;

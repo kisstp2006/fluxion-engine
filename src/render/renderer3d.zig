@@ -76,6 +76,7 @@ const components3d = @import("render3d_components.zig");
 const lightmaps = @import("lightmaps.zig");
 const mesh = @import("mesh.zig");
 const post3d = @import("post3d.zig");
+const screenFlip = @import("material.zig").screenFlip;
 const shader3d = @import("shader3d.zig");
 const shaders = @import("shaders.zig");
 const shadows3d = @import("shadows3d.zig");
@@ -283,6 +284,8 @@ const Item = struct {
     params: u32,
     /// How far in front of the camera its middle is.
     depth: f32,
+    /// How far from the camera its nearest point is.
+    near: f32 = 0,
     /// Where its `Instance` is in `gathered`.
     instance: u32,
     /// The bones it is bent by, among this draw's skins, or `no_skin`.
@@ -620,6 +623,14 @@ pub const Renderer3D = struct {
     sky_draw: ?sky.SkyDraw = null,
     /// Whether the last draw drew a sky: for the tests.
     sky_drawn: bool = false,
+    /// How much light from everywhere reaches each pixel, from the screen:
+    /// for this draw, where it asks for it.
+    screen_ao: ?rhi.Texture = null,
+    /// Whether this draw drew the geometry pass, and with how many draws.
+    geometry_drawn: bool = false,
+    geometry_draws: u32 = 0,
+    /// What the front layers' frame says, this draw.
+    front_data: Frame = undefined,
     decals_kept: std.ArrayList(decals.Kept) = .empty,
     /// Every picture a lamp or a decal of the draw shines: see
     /// `placePictures`.
@@ -845,6 +856,7 @@ pub const Renderer3D = struct {
         self.gi_lightmapped = 0;
         self.gi_probed = 0;
         self.fog_volumes_kept = 0;
+        self.geometry_draws = 0;
         if (width == 0 or height == 0) return;
         const gpa = app.gpa;
         const device = self.device;
@@ -916,6 +928,33 @@ pub const Renderer3D = struct {
         const samples = if (lighting.antialias) post.samplesFor(rendering.msaa_3d.samples()) else 1;
         self.samples = samples;
         const targets = try post.targetsAt(gpa, drawn_width, drawn_height, samples);
+        const look: post3d.Look = .of(environment, lighting.antialias and rendering.screen_space_aa == .fxaa);
+        // What is drawn on the front layers: its own frame, the screen's
+        // occlusion - the world's behind it - not read.
+        {
+            var front = self.frame_data;
+            front.front_layer = 1;
+            front.ao_strength = 0;
+            if (view.front_shadow_reach > 0) front.shadow_reach = view.front_shadow_reach;
+            try device.updateBuffer(self.front_frame, 0, std.mem.asBytes(&front));
+            self.front_data = front;
+        }
+        // What the screen's effects read, drawn first: which way each pixel's
+        // surface faces, how far and how smooth; and from it, how much light
+        // from everywhere reaches each.
+        self.screen_ao = null;
+        self.geometry_drawn = false;
+        if (look.readsGeometry() and post.drawsGeometry() and view.projection == .perspective) {
+            post.camera = self.cameraOf(drawn_view, view_projection);
+            const geometry = try post.geometryOf(targets);
+            try self.drawGeometry(geometry.color, geometry.depth, depth_format, drawn_width, drawn_height, shadow_map, look.geometryReach());
+            self.geometry_drawn = true;
+            if (look.ssao) {
+                self.screen_ao = try post.occlusionOf(gpa, targets, look);
+                self.frame_data.ao_strength = 1;
+                try device.updateBuffer(self.frame, 0, std.mem.asBytes(&self.frame_data));
+            }
+        }
         const list = device.begin();
         // The sky, worked out into a picture of its own before the frame's
         // pass, by the draw that clears: under a skybox, the skybox's.
@@ -981,12 +1020,7 @@ pub const Renderer3D = struct {
                 });
                 try list.setViewport(.{ .width = @floatFromInt(drawn_width), .height = @floatFromInt(drawn_height) });
                 bind = .{ .list = list, .skipped = bind.skipped };
-                if (view.front_shadow_reach > 0) {
-                    var front = self.frame_data;
-                    front.shadow_reach = view.front_shadow_reach;
-                    try device.updateBuffer(self.front_frame, 0, std.mem.asBytes(&front));
-                    self.frame_in_use = self.front_frame;
-                }
+                self.frame_in_use = self.front_frame;
             }
             var end = start + 1;
             while (end < items.len and Item.joins(items[start], items[end])) end += 1;
@@ -1029,7 +1063,7 @@ pub const Renderer3D = struct {
         self.drawn = @intCast(items.len);
         self.bindings_skipped += bind.skipped;
 
-        try post.finish(gpa, targets, into, width, height, .of(environment, lighting.antialias and rendering.screen_space_aa == .fxaa), clear == null);
+        try post.finish(gpa, targets, into, width, height, if (self.geometry_drawn) look else look.withoutGeometry(), clear == null);
         // What goes over it with a depth test reads its depth: where it is
         // one sample a pixel, and as large as the picture.
         self.last_depth = if (samples == 1 and drawn_width == width and drawn_height == height) targets.depth else null;
@@ -1119,6 +1153,91 @@ pub const Renderer3D = struct {
         try bind.uniform(decals.slot, self.decal_block);
         try bind.texture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
         if (self.sky_draw) |*held| try bind.texture(shader3d.sky_noise_slot, held.noise, held.repeating);
+        try bind.texture(shader3d.screen_ao_slot, self.screen_ao orelse self.white, self.lightmap_sampler);
+    }
+
+    /// The geometry pass: the solid surfaces - and, after them, what is on
+    /// the camera's front layers, its depth its own - drawn as which way
+    /// they face, how far and how smooth, into `color`.
+    ///
+    /// Only what comes within `reach` of the camera: what the effects are
+    /// seen on near by, at a fraction of the frame's draws. Further off the
+    /// screen reads as nothing drawn.
+    fn drawGeometry(self: *Renderer3D, color: rhi.Texture, depth: rhi.Texture, depth_format: rhi.Format, width: u32, height: u32, shadow_map: rhi.Texture, reach: f32) !void {
+        const device = self.device;
+        const items = self.items.items;
+        const list = device.begin();
+        try list.beginPass(.{ .color = .{ .target = .{ .texture = color }, .load = .clear, .clear_color = .{ 0, 0, 0, 0 } }, .depth = .{ .texture = depth, .load = .clear } });
+        try list.setViewport(.{ .width = @floatFromInt(width), .height = @floatFromInt(height) });
+        var bind: Binder = .{ .list = list };
+        self.frame_in_use = self.frame;
+        var fronted = false;
+        var start: usize = 0;
+        while (start < items.len) {
+            var end = start + 1;
+            while (end < items.len and Item.joins(items[start], items[end])) end += 1;
+            defer start = end;
+            const first = items[start];
+            if (first.transparent) continue;
+            // Nearest first within a run: what is past the reach is left.
+            var last = start;
+            while (last < end and (items[last].front or items[last].near <= reach)) last += 1;
+            if (last == start) continue;
+            if (first.front and !fronted) {
+                fronted = true;
+                try list.endPass();
+                try list.beginPass(.{ .color = .{ .target = .{ .texture = color }, .load = .load }, .depth = .{ .texture = depth, .load = .clear } });
+                try list.setViewport(.{ .width = @floatFromInt(width), .height = @floatFromInt(height) });
+                self.bindings_skipped += bind.skipped;
+                bind = .{ .list = list };
+                self.frame_in_use = self.front_frame;
+            }
+            const pipeline = first.compiled.geometryPipelineOf(device, depth_format, Way.of(first.way).cull) catch continue;
+            try bind.setPipeline(pipeline);
+            try self.bindSurface(&bind, first, start, shadow_map);
+            try list.drawIndexed(.{ .index_count = first.index_count, .first_index = first.first_index, .instance_count = @intCast(last - start) });
+            self.geometry_draws += 1;
+        }
+        try list.endPass();
+        try device.submit();
+        self.bindings_skipped += bind.skipped;
+        self.frame_in_use = self.frame;
+    }
+
+    /// What the screen's effects are told of `view`: the way through each
+    /// pixel - checked against `view_projection`, so a device that turns
+    /// the picture upside down is read so - and where the first sun is on
+    /// the screen.
+    fn cameraOf(self: *Renderer3D, view: View3D, view_projection: math.Mat4) post3d.Camera {
+        const forward = view.forward();
+        const tall = @tan(view.fov / 2);
+        const aspect = if (view.height > 0) view.width / view.height else 1;
+        var right = view.right().scale(tall * aspect);
+        var up = view.up().scale(tall);
+        const ndcOf = struct {
+            fn at(m: math.Mat4, p: math.Vec3) ?[2]f32 {
+                const c = m.mulVec4(p.vec4(1));
+                if (c.w <= 0.0001) return null;
+                return .{ c.x / c.w, c.y / c.w };
+            }
+        }.at;
+        if (ndcOf(view_projection, view.position.add(forward).add(up))) |ndc| if (ndc[1] < 0) {
+            up = up.neg();
+        };
+        if (ndcOf(view_projection, view.position.add(forward).add(right))) |ndc| if (ndc[0] < 0) {
+            right = right.neg();
+        };
+        var camera: post3d.Camera = .{ .view_projection = view_projection, .eye = view.position, .forward = forward, .right = right, .up = up };
+        if (self.suns.items.len > 0) {
+            const toward = self.suns.items[0].toward;
+            if (toward.y > -0.05) if (ndcOf(view_projection, view.position.add(toward.scale(view.far * 0.5)))) |ndc| {
+                const flip = screenFlip(self.device);
+                camera.sun_uv = .{ ndc[0] * 0.5 + 0.5, ndc[1] * 0.5 * flip + 0.5 };
+                const off = @max(@abs(ndc[0]), @abs(ndc[1]));
+                camera.sun_seen = std.math.clamp(1.6 - off * 0.6, 0, 1) * std.math.clamp(toward.y * 10 + 0.5, 0, 1);
+            };
+        }
+        return camera;
     }
 
     /// The frame's numbers: the camera, the suns, the light from
@@ -1134,7 +1253,7 @@ pub const Renderer3D = struct {
             .ambient = .{ ambient.r, ambient.g, ambient.b, 1 },
             .fog_color = @splat(0),
             .fog_height = @splat(0),
-            .screen = .{ view.width, view.height, 0, 0 },
+            .screen = .{ view.width, view.height, screenFlip(self.device), 0 },
             .time = @floatCast(app.interface.seconds),
         };
         for (self.suns.items, 0..) |sun, at| {
@@ -1379,6 +1498,7 @@ pub const Renderer3D = struct {
                 kept.used = app.meshes.clock;
                 const gpu = try kept.uploaded(self.device);
                 const depth = bounds.center().sub(view.position).dot(forward);
+                const near = distanceTo(bounds, view.position);
                 const own: MaterialHandle = if (app.world.get(entity, Material3D)) |held| held.material else .none;
                 // Far off, a coarser level in its place.
                 const level = lodOf(&kept.mesh, bounds, model, view, lod_threshold * @max(instance.lod_bias, 0));
@@ -1418,6 +1538,7 @@ pub const Renderer3D = struct {
                         .look = drawn.look,
                         .params = try self.paramSetOf(app, compiled, chosen, entity),
                         .depth = depth,
+                        .near = near,
                         .instance = at,
                         .skin = skin,
                         .solid = drawn.solid and compiled.solid != null,
