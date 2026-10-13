@@ -23,6 +23,7 @@ const DirectionalLight3D = components.DirectionalLight3D;
 const PointLight3D = components.PointLight3D;
 const SpotLight3D = components.SpotLight3D;
 const Environment = components.Environment;
+const Sky3D = components.Sky3D;
 const RenderView = components.RenderView;
 const renderer3d = @import("renderer3d.zig");
 const helpers = @import("../test_helpers.zig");
@@ -351,6 +352,22 @@ test "the first visible environment is the one drawn with" {
     try testing.expectEqual(@as(u32, 1), app.renderer3d.drawn);
     // Smoothed as the project says; a headless one says nothing.
     try testing.expectEqual(@as(u32, 1), app.renderer3d.samples);
+}
+
+test "a sky is drawn behind the world, and a hidden one is not" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    _ = try app.step();
+    try testing.expect(!app.renderer3d.sky_drawn);
+    const sky = try app.world.spawnWith(.{Sky3D{ .cloud_quality = .low }});
+    _ = try app.step();
+    try testing.expect(app.renderer3d.sky_drawn);
+    try testing.expectEqual(@as(u32, 1), app.renderer3d.drawn);
+    try app.world.add(sky, Appearance{ .visible = false });
+    _ = try app.step();
+    try testing.expect(!app.renderer3d.sky_drawn);
 }
 
 test "a material naming a 3D shader draws with it, given its numbers by the material and by the mesh's entity" {

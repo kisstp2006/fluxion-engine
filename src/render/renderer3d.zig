@@ -84,6 +84,8 @@ const View3D = @import("view3d.zig").View3D;
 const fog_volumes = @import("fog_volumes.zig");
 const decals = @import("decals.zig");
 const fog_backdrop = @import("fog_backdrop.zig");
+const sky = @import("sky.zig");
+const skyboxes = @import("skyboxes.zig");
 const worlds3d = @import("worlds3d.zig");
 const billboards = @import("billboards.zig");
 
@@ -97,6 +99,8 @@ const SpotLight3D = components3d.SpotLight3D;
 const Falloff = components3d.Falloff;
 const lightmapper = @import("fluxion_lightmapper");
 const Environment = components3d.Environment;
+const Sky3D = components3d.Sky3D;
+const SkyBox3D = components3d.SkyBox3D;
 const GiMode = components3d.GiMode;
 const LightmapGI = components3d.LightmapGI;
 
@@ -611,6 +615,11 @@ pub const Renderer3D = struct {
     /// The fog volumes over what the world is drawn over: made the first
     /// time it is. See `fog_backdrop.zig`.
     fog_backdrop: ?fog_backdrop.FogBackdrop = null,
+    /// The sky's noise, which every surface reads the clouds' shadow from,
+    /// and what draws a `Sky3D`.
+    sky_draw: ?sky.SkyDraw = null,
+    /// Whether the last draw drew a sky: for the tests.
+    sky_drawn: bool = false,
     decals_kept: std.ArrayList(decals.Kept) = .empty,
     /// Every picture a lamp or a decal of the draw shines: see
     /// `placePictures`.
@@ -698,6 +707,8 @@ pub const Renderer3D = struct {
         errdefer self.plain.?.deinit(device);
         self.post = try .init(gpa, device, depth_format);
         errdefer self.post.?.deinit(gpa);
+        self.sky_draw = try .init(gpa, device);
+        errdefer self.sky_draw.?.deinit(gpa, device);
         self.billboards = try .init(gpa, device);
         return self;
     }
@@ -757,6 +768,7 @@ pub const Renderer3D = struct {
         device.destroyBuffer(self.fog);
         device.destroyBuffer(self.decal_block);
         if (self.fog_backdrop) |*backdrop| backdrop.deinit(gpa, device);
+        if (self.sky_draw) |*held| held.deinit(gpa, device);
         device.destroySampler(self.lightmap_sampler);
         if (self.atlas) |atlas| device.destroyTexture(atlas);
         if (self.shadow_cache) |*cache| cache.deinit(gpa);
@@ -864,6 +876,16 @@ pub const Renderer3D = struct {
         try self.findBaked(app);
         try self.gatherLamps(app, view, frustum);
         try self.gatherSuns(app);
+        // Under a sky, its first sun is what lights the world now: the sun
+        // through the air by day, the moon by night - and casts its shadow.
+        const lit: ?sky.Lit = if (skyFor(app, self.worlds, view)) |found| self.litBy(app, found) else null;
+        if (lit) |held| if (self.suns.items.len > 0) {
+            const now = sky.nowOf(held);
+            const first = &self.suns.items[0];
+            first.toward = now.toward;
+            first.color = .{ now.light[0], now.light[1], now.light[2], 1 };
+            if (first.shadow) |*shadow| shadow.toward = now.toward;
+        };
         try self.planShadows(gpa, view, rendering);
         try self.gather(app, drawn_view, frustum, self.plan.views.items.len > 0, rendering.lod_threshold);
         try self.gatherShadowItems(gpa);
@@ -882,7 +904,7 @@ pub const Renderer3D = struct {
         // Down to a tile of four pixels: a decal of a few is a soft dot.
         const smallest: f32 = if (self.atlasMips()) 6 else 0;
         try device.updateBuffer(self.decal_block, 0, std.mem.asBytes(&decals.blockOf(self.decals_kept.items, cookie_size * cookie_across, smallest)));
-        try self.uploadFrame(app, drawn_view, view_projection, environment, lighting);
+        try self.uploadFrame(app, drawn_view, view_projection, environment, lighting, lit);
         const fog = try fog_volumes.gather(app, view, frustum, @floatCast(app.interface.seconds), self.worlds);
         self.fog_volumes_kept = @intFromFloat(fog.count[0]);
         try device.updateBuffer(self.fog, 0, std.mem.asBytes(&fog));
@@ -895,6 +917,16 @@ pub const Renderer3D = struct {
         self.samples = samples;
         const targets = try post.targetsAt(gpa, drawn_width, drawn_height, samples);
         const list = device.begin();
+        // The sky, worked out into a picture of its own before the frame's
+        // pass, by the draw that clears: under a skybox, the skybox's.
+        self.sky_drawn = false;
+        if (clear != null) if (lit) |held| if (self.sky_draw) |*drawer| {
+            const size = sky.pictureSize(held.sky, drawn_width, drawn_height);
+            const eye = skyboxes.seenFrom(app, view) orelse view.position;
+            const block = sky.blockOf(held, drawn_view, view_projection, eye, app.interface.seconds, size[0], size[1], sky.flipOf(device));
+            self.sky_drawn = try drawer.drawPicture(gpa, device, list, drawn_view, block, size, post.light_format);
+        };
+        var sky_waits = self.sky_drawn;
         const depth_first = rendering.depth_prepass and try self.drawDepthFirst(list, targets.depth, depth_format, samples, drawn_width, drawn_height, shadow_map);
         try list.beginPass(.{
             .color = .{
@@ -925,6 +957,13 @@ pub const Renderer3D = struct {
         var fronted = false;
         self.frame_in_use = self.frame;
         while (start < items.len) {
+            // The sky where no solid surface was drawn: before what is seen
+            // through, and before what is drawn over everything.
+            if (sky_waits and (items[start].transparent or items[start].front)) {
+                sky_waits = false;
+                try self.sky_draw.?.drawOver(gpa, device, list, post.light_format, depth_format, samples);
+                bind = .{ .list = list, .skipped = bind.skipped };
+            }
             // What is drawn over everything comes last: the world's own
             // pictures first, then a pass of its own, the picture kept and
             // the depth cleared.
@@ -980,6 +1019,7 @@ pub const Renderer3D = struct {
             self.triangles += @as(u64, first.index_count / 3) * (end - start);
             start = end;
         }
+        if (sky_waits) try self.sky_draw.?.drawOver(gpa, device, list, post.light_format, depth_format, samples);
         if (!fronted) try flat.drawRest(pass);
         // The pictures and words over everything, with the surfaces there -
         // in the world's pass where none of those is.
@@ -1078,11 +1118,12 @@ pub const Renderer3D = struct {
         try bind.uniform(fog_volumes.slot, self.fog);
         try bind.uniform(decals.slot, self.decal_block);
         try bind.texture(shader3d.lightmap_slot, self.lightmap orelse self.white, self.lightmap_sampler);
+        if (self.sky_draw) |*held| try bind.texture(shader3d.sky_noise_slot, held.noise, held.repeating);
     }
 
     /// The frame's numbers: the camera, the suns, the light from
     /// everywhere and the fog - and every lamp kept.
-    fn uploadFrame(self: *Renderer3D, app: *App, view: View3D, view_projection: math.Mat4, environment: ?Environment, lighting: Lighting) !void {
+    fn uploadFrame(self: *Renderer3D, app: *App, view: View3D, view_projection: math.Mat4, environment: ?Environment, lighting: Lighting, lit: ?sky.Lit) !void {
         const forward = view.forward();
         var frame: Frame = .{
             .view_projection = view_projection,
@@ -1106,12 +1147,23 @@ pub const Renderer3D = struct {
             frame.sun_colors[0] = linear(preview_light.color);
         }
         if (environment) |held| {
-            const sky = linear(held.ambient_color);
-            frame.ambient = .{ sky[0] * held.ambient_energy, sky[1] * held.ambient_energy, sky[2] * held.ambient_energy, 1 };
+            const around = linear(held.ambient_color);
+            frame.ambient = .{ around[0] * held.ambient_energy, around[1] * held.ambient_energy, around[2] * held.ambient_energy, 1 };
             if (held.fog) {
                 const fog = linear(held.fog_color);
                 frame.fog_color = .{ fog[0], fog[1], fog[2], @max(held.fog_density, 0) };
                 frame.fog_height = .{ held.fog_height, @max(held.fog_height_density, 0), 1, 0 };
+            }
+        }
+        // A sky's clouds, the sun's light through its air, and the light
+        // it sheds from everywhere.
+        if (lit) |held| {
+            const clouds = sky.cloudsOf(held.sky, app.interface.seconds);
+            frame.clouds = clouds.clouds;
+            frame.cloud_shape = clouds.shape;
+            if (held.sky.ambient_energy > 0) {
+                const from_sky = sky.ambientOf(held);
+                frame.ambient = .{ from_sky[0], from_sky[1], from_sky[2], 1 };
             }
         }
         try self.device.updateBuffer(self.frame, 0, std.mem.asBytes(&frame));
@@ -1479,6 +1531,32 @@ pub const Renderer3D = struct {
                 });
             }
         }
+    }
+
+    /// `found` lit by the draw's first sun - or, where its world has none,
+    /// by the first anywhere, or by the preview's light.
+    fn litBy(self: *Renderer3D, app: *App, found: Sky3D) sky.Lit {
+        if (self.suns.items.len > 0) {
+            const first = self.suns.items[0];
+            return .{ .sky = found, .toward = first.toward, .light = first.color[0..3].* };
+        }
+        var it = ecs.Query(.{ Transform3D, DirectionalLight3D }).over(&app.world) catch return previewLit(found);
+        while (it.next()) |chunk| {
+            for (chunk.slice(DirectionalLight3D), chunk.entities) |light, entity| {
+                if (!app.inherited.of(app.gpa, &app.world, entity).visible) continue;
+                const placed = placedLight(app, entity) orelse continue;
+                const toward = placed.back().tryNorm() orelse continue;
+                const c = linear(light.color);
+                const e = @max(light.energy, 0);
+                return .{ .sky = found, .toward = toward, .light = .{ c[0] * e, c[1] * e, c[2] * e } };
+            }
+        }
+        return previewLit(found);
+    }
+
+    fn previewLit(found: Sky3D) sky.Lit {
+        const c = linear(preview_light.color);
+        return .{ .sky = found, .toward = preview_light.toward.norm(), .light = c[0..3].* };
     }
 
     /// The views of the atlas this draw's shadows take: the suns' and the
@@ -2148,6 +2226,25 @@ fn materialOf(app: *App, handle: MaterialHandle) Material3DData {
 /// for how far it reaches. Its shadow gets the larger tile.
 fn lightsMore(_: void, a: shadows3d.Lamp, b: shadows3d.Lamp) bool {
     return a.range / @max(a.distance, 0.001) > b.range / @max(b.distance, 0.001);
+}
+
+/// The `Sky3D` a draw that sees `worlds` through `view` is under: the
+/// first visible one in its world - or, for the main world and a skybox's,
+/// in either of the two, as the one sky over both.
+fn skyFor(app: *App, worlds: worlds3d.Filter, view: View3D) ?Sky3D {
+    const main_or_skybox = view.world.isNone() or app.world.getConst(view.world, SkyBox3D) != null;
+    var fallback: ?Sky3D = null;
+    var it = ecs.Query(.{Sky3D}).over(&app.world) catch return null;
+    while (it.next()) |chunk| {
+        for (chunk.slice(Sky3D), chunk.entities) |held, entity| {
+            if (!app.inherited.of(app.gpa, &app.world, entity).visible) continue;
+            if (worlds.admits(app, entity)) return held;
+            if (!main_or_skybox or fallback != null) continue;
+            const world = worlds3d.worldOf(app, entity);
+            if (world.isNone() or app.world.getConst(world, SkyBox3D) != null) fallback = held;
+        }
+    }
+    return fallback;
 }
 
 /// The first visible `Environment`, if there is one.

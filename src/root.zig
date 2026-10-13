@@ -266,6 +266,7 @@ pub const FogVolume = components.FogVolume;
 pub const Decal = components.Decal;
 pub const World3D = components.World3D;
 pub const SkyBox3D = components.SkyBox3D;
+pub const Sky3D = components.Sky3D;
 pub const Sprite3D = components.Sprite3D;
 pub const Label3D = components.Label3D;
 pub const Particles3D = components.Particles3D;
@@ -315,6 +316,7 @@ pub const fog_volumes = @import("render/fog_volumes.zig");
 pub const decals = @import("render/decals.zig");
 pub const worlds3d = @import("render/worlds3d.zig");
 pub const skyboxes = @import("render/skyboxes.zig");
+pub const sky = @import("render/sky.zig");
 
 /// Light in the 2D world, and the shadows it casts: see `lights.zig`.
 pub const lights = @import("render/lights.zig");
@@ -696,6 +698,7 @@ test {
     _ = @import("render/decals.zig");
     _ = @import("render/skyboxes.zig");
     _ = @import("render/fog_backdrop.zig");
+    _ = @import("render/sky.zig");
     _ = @import("render/drawing.zig");
     _ = @import("render/lighting.zig");
     _ = @import("render/lights.zig");

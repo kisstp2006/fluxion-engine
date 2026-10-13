@@ -46,6 +46,16 @@ pub fn viewFor(app: *App, seen: View3D) ?View3D {
     return null;
 }
 
+/// Where in the main world a view drawn through a skybox is seen from: the
+/// game's camera, as `through` placed it. Null for a view of any other
+/// world.
+pub fn seenFrom(app: *App, view: View3D) ?math.Vec3 {
+    if (view.world.isNone()) return null;
+    const sky = app.world.getConst(view.world, SkyBox3D) orelse return null;
+    const placed = hierarchy.worldTransform3D(&app.world, view.world) orelse return null;
+    return placed.unapply(view.position).sub(sky.origin).scale(sky.scale);
+}
+
 /// `seen` from inside a skybox placed at `placed`.
 pub fn through(sky: SkyBox3D, placed: Transform3D, seen: View3D, entity: ecs.Entity) View3D {
     var out = seen;

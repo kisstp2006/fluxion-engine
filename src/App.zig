@@ -630,6 +630,7 @@ pub const engine_components = .{
     components3d.Decal,
     components3d.World3D,
     components3d.SkyBox3D,
+    components3d.Sky3D,
     components3d.Sprite3D,
     components3d.Label3D,
     particles_3d.Particles3D,

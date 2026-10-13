@@ -64,6 +64,7 @@ const material = @import("material.zig");
 const mesh = @import("mesh.zig");
 const shadows3d = @import("shadows3d.zig");
 const fog_volumes = @import("fog_volumes.zig");
+const sky = @import("sky.zig");
 const decals = @import("decals.zig");
 const Material3DData = @import("render3d_components.zig").Material3DData;
 
@@ -80,13 +81,15 @@ pub const shadows_slot = 4;
 pub const shadow_map_slot = 5;
 pub const shadow_depth_slot = 6;
 /// How many textures a 3D shader reads: the material's five, the shadow
-/// atlas twice, the lights' cookies and the lightmap.
-pub const texture_count = 9;
+/// atlas twice, the lights' cookies, the lightmap and the sky's noise.
+pub const texture_count = 10;
 pub const cookie_slot = 7;
 /// The light from everywhere baked for a frame: the lightmap at this slot,
 /// and the probes' samples, `Probes`, the block at this one.
 pub const lightmap_slot = 8;
 pub const probes_slot = 5;
+/// The sky's noise, which the clouds' shadow is read from: `render/sky.zig`.
+pub const sky_noise_slot = 9;
 /// For a mesh a skeleton bends: its bones, `Skin`, are the block at this
 /// slot, and each vertex's bones and weights are a third vertex buffer.
 pub const skin_slot = 6;
@@ -133,6 +136,9 @@ pub const Frame = extern struct {
     /// camera's `front_shadow_reach` for what is drawn on its front layers.
     shadow_reach: f32 = 0,
     _pad: [2]f32 = @splat(0),
+    /// The sky's clouds, as `sky.cloudsOf` says them: nought for none.
+    clouds: [4]f32 = @splat(0),
+    cloud_shape: [4]f32 = @splat(0),
 };
 
 /// What a material tells the shader, per draw, as its `Material` block says.
@@ -201,7 +207,7 @@ pub const Probes = extern struct {
     energy: [4]f32,
 };
 
-const engine_part = engine_head ++ fog_volumes.shader_part ++ decals.shader_part ++ engine_tail;
+const engine_part = engine_head ++ sky.cloud_part ++ fog_volumes.shader_part ++ decals.shader_part ++ engine_tail;
 
 const engine_head =
     \\// The engine's part: what a 3D shader's file reads, and the vertex stage.
@@ -250,6 +256,10 @@ const engine_head =
     \\    float TIME;
     \\    // How far toward a light a shadow is looked for from, in metres.
     \\    float SHADOW_REACH;
+    \\    // The sky's clouds: their coverage, thickness and heights; their
+    \\    // size, where the wind has taken them, and how dark their shadow is.
+    \\    vec4 CLOUDS;
+    \\    vec4 CLOUD_SHAPE;
     \\}
     \\
     \\uniform Material : 1 {
@@ -305,6 +315,8 @@ const engine_head =
     \\texture2d COOKIE_ATLAS : 7;
     \\// The light from everywhere, baked.
     \\texture2d LIGHTMAP : 8;
+    \\// The sky's noise: where its clouds are.
+    \\texture2d SKY_NOISE : 9;
     \\
     \\const float PI = 3.14159265;
     \\
@@ -513,7 +525,7 @@ const engine_head =
     \\    if (light.r + light.g + light.b <= 0.0) {
     \\        return light;
     \\    }
-    \\    return light * sunShadow(which, p, ng, turn);
+    \\    return light * (sunShadow(which, p, ng, turn) * cloudShadow(p, SUN_DIRECTIONS[which].xyz));
     \\}
     \\
     \\// One lamp's light on a surface at `p`: none for -1.
@@ -1326,7 +1338,7 @@ fn checkLayout(module: *const shader.Module) void {
         .{ "VIEW_PROJECTION", "view_projection" }, .{ "CAMERA_POSITION", "camera_position" }, .{ "CAMERA_FORWARD", "camera_forward" },
         .{ "SUN_DIRECTIONS", "sun_directions" },   .{ "SUN_COLORS", "sun_colors" },           .{ "AMBIENT", "ambient" },
         .{ "FOG_COLOR", "fog_color" },             .{ "FOG_HEIGHT", "fog_height" },           .{ "SCREEN", "screen" },
-        .{ "TIME", "time" },
+        .{ "TIME", "time" },                       .{ "CLOUDS", "clouds" },                   .{ "CLOUD_SHAPE", "cloud_shape" },
     }) |pair| std.debug.assert(frame.offsetOf(pair[0]).? == @offsetOf(Frame, pair[1]));
     std.debug.assert(frame.size <= @sizeOf(Frame));
     const look = module.block("Material").?;
@@ -1359,7 +1371,7 @@ fn checkLayout(module: *const shader.Module) void {
 // -------------------------------------------------------------------------
 
 test "the blocks and an instance are laid out as the shader reads them" {
-    try testing.expectEqual(@as(usize, 304), @sizeOf(Frame));
+    try testing.expectEqual(@as(usize, 336), @sizeOf(Frame));
     try testing.expectEqual(@as(usize, 96), @sizeOf(Look));
     try testing.expectEqual(@as(usize, 6144), @sizeOf(Lights));
     // Under the sixteen kilobytes every device binds a block of.

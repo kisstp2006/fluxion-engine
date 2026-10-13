@@ -105,7 +105,8 @@ const hidden_3d = [_][]const u8{
     "UV_PLACE",   "SURFACE",     "FEEL",         "FACING",          "LIGHT_PLACES",   "LIGHT_COLORS",
     "LIGHT_AIMS", "LIGHT_CONES", "LIGHT_LIST_0", "LIGHT_LIST_1",    "WORLD_TANGENT",  "shine",
     "sun",        "lamp",        "lit",          "PI",              "attribute",      "varying",
-    "vertex",     "position",    "target",
+    "vertex",     "position",    "target",      "CLOUDS",          "CLOUD_SHAPE",    "SKY_NOISE",
+    "cloudCover", "cloudShadow",
 };
 
 /// The engine's textures, declared only in a file that names them: offered

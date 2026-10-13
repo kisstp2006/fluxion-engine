@@ -857,6 +857,107 @@ pub const SkyBox3D = extern struct {
     };
 };
 
+/// A sky worked out as it is drawn, behind the 3D world of its own: the air
+/// lit by the world's first `DirectionalLight3D` - blue overhead, paler
+/// toward the horizon, red as the sun sets - the sun's disc, and clouds of
+/// volume, lit through by the sun, drifting on the wind and throwing their
+/// shadows on the world below. The first one found is drawn, in place of
+/// the `Environment`'s background, and sheds the light from everywhere. See
+/// `render/sky.zig`.
+pub const Sky3D = extern struct {
+    /// How bright the air is: one is a clear day's.
+    energy: f32 = 1,
+    /// How much the air scatters blue: more is a deeper blue overhead and a
+    /// redder sunset.
+    rayleigh: f32 = 1,
+    /// Dust and water in the air: more is paler, with a wider glow round the
+    /// sun.
+    haze: f32 = 1,
+    /// What is seen under the horizon, lit by the sun and the sky.
+    ground_color: Color = .{ .r = 0.42, .g = 0.38, .b = 0.33, .a = 1 },
+    /// How wide the sun's disc looks across, in radians.
+    sun_size: f32 = 0.02,
+    /// How bright the disc is, against the light the sun gives.
+    sun_brightness: f32 = 40,
+    /// Redden the sun's light by the air it comes through when it is low,
+    /// on the clouds and on the world.
+    tint_sun: bool = true,
+    /// The light from everywhere taken from the sky, times this, in place of
+    /// the `Environment`'s; nought leaves the Environment's.
+    ambient_energy: f32 = 1,
+    /// A moon opposite the sun: once the sun has set, it lights the clouds
+    /// and the world in its place, with a bluish light.
+    moon: bool = true,
+    /// How wide its disc looks across, in radians.
+    moon_size: f32 = 0.03,
+    /// How bright its light is, against a sun of one.
+    moon_energy: f32 = 0.12,
+    /// How bright the stars and the galaxy's band are at night; nought
+    /// for none.
+    stars: f32 = 1,
+    /// The night sky's own glow, times `night_energy`.
+    night_color: Color = .{ .r = 0.1, .g = 0.13, .b = 0.22, .a = 1 },
+    night_energy: f32 = 1,
+    clouds: bool = true,
+    /// How much of the sky the clouds cover, nought to one.
+    cloud_coverage: f32 = 0.45,
+    /// How thick they are: more is darker underneath, and less is seen
+    /// through.
+    cloud_density: f32 = 1,
+    /// The heights their layer is between, in metres.
+    cloud_bottom: f32 = 1200,
+    cloud_top: f32 = 2800,
+    /// About how wide a large cloud is, in metres.
+    cloud_size: f32 = 2500,
+    /// How fast, in metres a second, and which way the wind takes them.
+    wind_speed: f32 = 8,
+    wind_direction: f32 = 0,
+    /// How dark their shadows on the world are, nought to one.
+    cloud_shadows: f32 = 0.8,
+    /// How far clouds are seen, in metres.
+    cloud_distance: f32 = 40000,
+    /// How finely they are worked out: finer is smoother, and costs more.
+    cloud_quality: CloudQuality = .medium,
+
+    pub const CloudQuality = enum(u8) {
+        /// A third of the frame a side, 24 steps a ray.
+        low,
+        /// Half the frame a side, 40 steps.
+        medium,
+        /// Half the frame a side, 64 steps.
+        high,
+    };
+
+    pub const reflect_name = "Sky3D";
+    pub const reflect_fields = .{
+        .energy = .{ attr.Group{ .name = "Air" }, attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the air is: one is a clear day's" } },
+        .rayleigh = .{ attr.Range{ .min = 0, .max = 8 }, attr.Doc{ .text = "How much the air scatters blue: more is a deeper blue and a redder sunset" } },
+        .haze = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "Dust and water in the air: more is paler, with a wider glow round the sun" } },
+        .ground_color = .{attr.Doc{ .text = "What is seen under the horizon, lit by the sun and the sky" }},
+        .sun_size = .{ attr.Group{ .name = "Sun" }, attr.Angle{}, attr.Range{ .min = 0, .max = 0.5 }, attr.Doc{ .text = "How wide the sun's disc looks across" } },
+        .sun_brightness = .{ attr.Range{ .min = 0, .max = 1000 }, attr.Doc{ .text = "How bright the disc is, against the light the sun gives" } },
+        .tint_sun = .{attr.Doc{ .text = "Redden the sun's light by the air it comes through when it is low" }},
+        .ambient_energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "The light from everywhere taken from the sky, times this; nought leaves the Environment's" } },
+        .moon = .{ attr.Group{ .name = "Night" }, attr.Doc{ .text = "A moon opposite the sun, lighting the clouds and the world once the sun has set" } },
+        .moon_size = .{ attr.Angle{}, attr.Range{ .min = 0, .max = 0.5 }, attr.Doc{ .text = "How wide the moon's disc looks across" } },
+        .moon_energy = .{ attr.Range{ .min = 0, .max = 4 }, attr.Doc{ .text = "How bright the moon's light is, against a sun of one" } },
+        .stars = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the stars and the galaxy's band are at night" } },
+        .night_color = .{attr.Doc{ .text = "The night sky's own glow" }},
+        .night_energy = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "How bright the night sky's glow is" } },
+        .clouds = .{ attr.Group{ .name = "Clouds" }, attr.Doc{ .text = "Clouds of volume, lit through by the sun, throwing shadows on the world" } },
+        .cloud_coverage = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How much of the sky the clouds cover" } },
+        .cloud_density = .{ attr.Range{ .min = 0, .max = 8 }, attr.Doc{ .text = "How thick they are: more is darker underneath" } },
+        .cloud_bottom = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = -10000, .max = 100000 }, attr.Doc{ .text = "The height their layer starts at" } },
+        .cloud_top = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = -10000, .max = 100000 }, attr.Doc{ .text = "The height their layer ends at" } },
+        .cloud_size = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 1, .max = 100000 }, attr.Doc{ .text = "About how wide a large cloud is" } },
+        .wind_speed = .{ attr.Unit{ .text = "m/s" }, attr.Range{ .min = 0, .max = 200 }, attr.Doc{ .text = "How fast the wind takes them" } },
+        .wind_direction = .{ attr.Angle{}, attr.Doc{ .text = "Which way the wind takes them, round the up axis from +x" } },
+        .cloud_shadows = .{ attr.Range{ .min = 0, .max = 1 }, attr.Doc{ .text = "How dark their shadows on the world are" } },
+        .cloud_distance = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 100, .max = 1000000 }, attr.Doc{ .text = "How far clouds are seen" } },
+        .cloud_quality = .{attr.Doc{ .text = "How finely they are worked out: finer is smoother, and costs more" }},
+    };
+};
+
 /// What surrounds the 3D world: the colour behind it, the light that comes
 /// from everywhere, fog, glow round what is bright, and how the light
 /// worked out is turned into a picture. The first one found is the world's;
