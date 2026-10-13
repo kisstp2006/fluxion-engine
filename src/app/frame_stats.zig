@@ -144,6 +144,25 @@ pub const FrameStats = struct {
         triangles: f64 = 0,
         culled: f64 = 0,
         shadow_views_drawn: f64 = 0,
+        /// The frames that worked longest, the slowest first, each with what
+        /// it spent its time on: where a stutter comes from.
+        slowest: [slowest_kept]Slow = @splat(.{}),
+    };
+
+    /// How many of the slowest frames a report names.
+    pub const slowest_kept = 12;
+
+    /// One slow frame: its number from the first kept, and its parts.
+    pub const Slow = struct {
+        frame: usize = 0,
+        work_ms: f32 = 0,
+        fixed_ms: f32 = 0,
+        systems_ms: f32 = 0,
+        draw_ms: f32 = 0,
+        stream_ms: f32 = 0,
+        draw_calls: u32 = 0,
+        shadow_views_drawn: u32 = 0,
+        streamed_meshes: u32 = 0,
     };
 
     /// The frames after the warm-up, summed up.
@@ -162,6 +181,29 @@ pub const FrameStats = struct {
             var sum: f64 = 0;
             for (kept) |frame| sum += @floatFromInt(@field(frame, name));
             @field(out, name) = sum / @as(f64, @floatFromInt(kept.len));
+        }
+        // The slowest, by the work in them.
+        const order = try gpa.alloc(u32, kept.len);
+        defer gpa.free(order);
+        for (order, 0..) |*o, i| o.* = @intCast(i);
+        std.mem.sort(u32, order, kept, struct {
+            fn slower(frames: []const Frame, a: u32, b: u32) bool {
+                return frames[a].work_ms > frames[b].work_ms;
+            }
+        }.slower);
+        for (order[0..@min(order.len, slowest_kept)], 0..) |at_frame, i| {
+            const f = kept[at_frame];
+            out.slowest[i] = .{
+                .frame = at_frame,
+                .work_ms = f.work_ms,
+                .fixed_ms = f.fixed_ms,
+                .systems_ms = f.systems_ms,
+                .draw_ms = f.draw_ms,
+                .stream_ms = f.stream_ms,
+                .draw_calls = f.draw_calls,
+                .shadow_views_drawn = f.shadow_views_drawn,
+                .streamed_meshes = f.streamed_meshes,
+            };
         }
         return out;
     }
