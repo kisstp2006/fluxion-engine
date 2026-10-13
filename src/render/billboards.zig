@@ -96,14 +96,19 @@ const Batch = struct {
     /// Its place among the frame's batches, which keeps a label's shadows,
     /// outline and letters in the order they were laid.
     sequence: u32,
+    /// On one of the view's `front_layers`: drawn with what is drawn over
+    /// everything - the weapon in hand, the words on it - in that pass.
+    front: bool = false,
 
     fn solid(self: Batch) bool {
         return self.way.depth == .written;
     }
 
-    /// The solid ones first, then the furthest; in the order they were made
-    /// where those are the same.
+    /// The world's before what is drawn over it; of each, the solid ones
+    /// first, then the furthest; in the order they were made where those
+    /// are the same.
     fn before(_: void, a: Batch, b: Batch) bool {
+        if (a.front != b.front) return !a.front;
         if (a.solid() != b.solid()) return a.solid();
         if (!a.solid() and a.depth != b.depth) return a.depth > b.depth;
         return a.sequence < b.sequence;
@@ -193,6 +198,8 @@ pub const Billboards = struct {
     batches: std.ArrayList(Batch) = .empty,
     /// Where the see-through ones the pass has not drawn yet start.
     next: usize = 0,
+    /// Where the batches drawn over everything begin, after the world's.
+    front_from: usize = 0,
     solid_drawn: bool = false,
     /// The fonts whose atlases this frame's labels emptied.
     emptied: std.ArrayList(*Assets.Font) = .empty,
@@ -285,8 +292,13 @@ pub const Billboards = struct {
         std.mem.sort(Batch, self.batches.items, {}, Batch.before);
         self.quads = @intCast(self.vertices.items.len / 6);
         try self.upload();
+        self.front_from = self.batches.items.len;
+        for (self.batches.items, 0..) |batch, at| if (batch.front) {
+            self.front_from = at;
+            break;
+        };
         // The see-through ones start after the solid ones.
-        while (self.next < self.batches.items.len and self.batches.items[self.next].solid()) self.next += 1;
+        while (self.next < self.front_from and self.batches.items[self.next].solid()) self.next += 1;
     }
 
     fn upload(self: *Billboards) !void {
@@ -320,7 +332,7 @@ pub const Billboards = struct {
         if (self.solid_drawn) return false;
         self.solid_drawn = true;
         var drew = false;
-        for (self.batches.items) |batch| {
+        for (self.batches.items[0..self.front_from]) |batch| {
             if (!batch.solid()) break;
             drew = try self.drawBatch(pass, batch) or drew;
         }
@@ -331,7 +343,7 @@ pub const Billboards = struct {
     /// see-through surface that far away. Whether any was drawn.
     pub fn drawFurtherThan(self: *Billboards, pass: Pass, depth: f32) !bool {
         var drew = try self.drawSolid(pass);
-        while (self.next < self.batches.items.len) : (self.next += 1) {
+        while (self.next < self.front_from) : (self.next += 1) {
             const batch = self.batches.items[self.next];
             if (batch.depth <= depth) return drew;
             drew = try self.drawBatch(pass, batch) or drew;
@@ -339,9 +351,15 @@ pub const Billboards = struct {
         return drew;
     }
 
-    /// Whatever is left, at the end of the pass.
+    /// Whatever is left of the world's, at the end of the pass.
     pub fn drawRest(self: *Billboards, pass: Pass) !void {
         _ = try self.drawFurtherThan(pass, -std.math.inf(f32));
+    }
+
+    /// Those on the view's `front_layers`, in the pass drawn over
+    /// everything, after the surfaces in it: the solid, then the furthest.
+    pub fn drawFront(self: *Billboards, pass: Pass) !void {
+        for (self.batches.items[self.front_from..]) |batch| _ = try self.drawBatch(pass, batch);
     }
 
     fn drawBatch(self: *Billboards, pass: Pass, batch: Batch) !bool {
@@ -438,6 +456,7 @@ pub const Billboards = struct {
                     .way = way,
                     .depth = depthOf(view, middle),
                     .sequence = @intCast(self.batches.items.len),
+                    .front = (held.layers | looks.render_layers) & view.front_layers != 0,
                 });
             }
         }
@@ -488,9 +507,12 @@ pub const Billboards = struct {
                     tint[3] *= shade[3] * glyph.opacity;
                     if (!(tint[3] > 0)) continue;
                     // The glyph's box in the words' box, in metres: across
-                    // from its left, up from its bottom.
-                    const left = glyph.x / words.width;
-                    const right = (glyph.x + glyph.width) / words.width;
+                    // from its left, up from its bottom. Its lines are laid
+                    // out from where they are aligned to: the words' left,
+                    // middle or right.
+                    const from = words.width * alignedAt(held.alignment);
+                    const left = (glyph.x + from) / words.width;
+                    const right = (glyph.x + glyph.width + from) / words.width;
                     const top = 1 - glyph.y / words.height;
                     const bottom = 1 - (glyph.y + glyph.height) / words.height;
                     const quad = whole.part(left, right, bottom, top);
@@ -507,6 +529,7 @@ pub const Billboards = struct {
                         .way = way,
                         .depth = depth,
                         .sequence = @intCast(self.batches.items.len),
+                        .front = (held.layers | looks.render_layers) & view.front_layers != 0,
                     };
                     try self.addQuad(gpa, quad, glyph.uv, tint, .{ 0, 0 });
                     batch.?.count += 6;
@@ -607,6 +630,7 @@ pub const Billboards = struct {
                     .way = .{ .blend = settings.blend, .depth = if (settings.no_depth_test) .none else .tested },
                     .depth = depthOf(view, bounds.center()),
                     .sequence = @intCast(self.batches.items.len),
+                    .front = (settings.layers | looks.render_layers) & view.front_layers != 0,
                 });
             }
         }
@@ -711,6 +735,16 @@ pub fn quadOf(app: *App, entity: Entity, view: View3D) ?Quad {
 
 /// A box `width` by `height` round a pivot: its left, right, bottom and top
 /// in its own plane, `y` up.
+/// How far across its words a label's lines are laid out from: nought at
+/// their left, a half at their middle, one at their right.
+fn alignedAt(alignment: Label3D.Alignment) f32 {
+    return switch (alignment) {
+        .left => 0,
+        .center => 0.5,
+        .right => 1,
+    };
+}
+
 fn boxOf(width: f32, height: f32, pivot_x: f32, pivot_y: f32) [4]f32 {
     return .{ -pivot_x * width, (1 - pivot_x) * width, -(1 - pivot_y) * height, pivot_y * height };
 }

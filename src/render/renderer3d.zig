@@ -981,6 +981,9 @@ pub const Renderer3D = struct {
             start = end;
         }
         if (!fronted) try flat.drawRest(pass);
+        // The pictures and words over everything, with the surfaces there -
+        // in the world's pass where none of those is.
+        try flat.drawFront(.{ .list = list, .frame = self.frame_in_use, .fog = self.fog, .color_format = post.light_format, .depth_format = depth_format, .samples = samples });
         try list.endPass();
         try device.submit();
         self.drawn = @intCast(items.len);

@@ -670,6 +670,17 @@ test "what is on a camera's front layers is drawn last, over the world, and cast
     app.world.get(eye, Camera3D).?.front_shadow_reach = 0.8;
     _ = try app.step();
     try testing.expect(std.meta.eql(app.renderer3d.frame_in_use, app.renderer3d.front_frame));
+
+    // A picture on the weapon - the screen of a bomb in hand - is drawn with
+    // it, over the world; one in the world is not.
+    const screen = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0.6), components.Sprite3D{ .texture = app.assets.white } });
+    try app.world.add(screen, components.Parent.of(weapon));
+    _ = try app.world.spawnWith(.{ Transform3D.at(0.5, 0, 0), components.Sprite3D{ .texture = app.assets.white } });
+    _ = try app.step();
+    const flat = &app.renderer3d.billboards.?;
+    try testing.expectEqual(@as(usize, 2), flat.batches.items.len);
+    try testing.expectEqual(@as(usize, 1), flat.front_from);
+    try testing.expect(!flat.batches.items[0].front and flat.batches.items[1].front);
 }
 
 test "what is a shadow only casts one and is not seen, and what has none is seen and casts none, with all under it" {
@@ -798,4 +809,28 @@ test "a solid surface's depth is drawn by the engine's solid caster, reading no 
     }
     try testing.expectEqual(@as(usize, 1), solid);
     try testing.expectEqual(@as(usize, 1), cut);
+}
+
+test "a label's letters are where its pivot puts them, however its lines are aligned" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const app = try App.create(testing.allocator, .{ .headless = true, .width = 64, .height = 64, .io = threaded.io() });
+    defer app.destroy();
+    _ = try looking(app);
+    _ = app.assets.loadFont(Assets.systemFontPath(), .{ .atlas = 512 }) catch return error.SkipZigTest;
+    const sign = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), components.Label3D{ .size = 48, .pixel_size = 0.01 } });
+    try app.setText(sign, components.Label3D, "text", "7355608");
+    inline for (.{ .center, .left, .right }) |alignment| {
+        app.world.get(sign, components.Label3D).?.alignment = alignment;
+        _ = try app.step();
+        // Pivoted at their middle, the letters reach as far either way.
+        var low: f32 = std.math.inf(f32);
+        var high: f32 = -std.math.inf(f32);
+        for (app.renderer3d.billboards.?.vertices.items) |vertex| {
+            low = @min(low, vertex.position[0]);
+            high = @max(high, vertex.position[0]);
+        }
+        try testing.expect(high - low > 0.5);
+        try testing.expectApproxEqAbs(-low, high, 0.15);
+    }
 }
