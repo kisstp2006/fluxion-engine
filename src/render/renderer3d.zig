@@ -76,6 +76,7 @@ const components3d = @import("render3d_components.zig");
 const lightmaps = @import("lightmaps.zig");
 const mesh = @import("mesh.zig");
 const post3d = @import("post3d.zig");
+const reflection_probes = @import("reflection_probes.zig");
 const screenFlip = @import("material.zig").screenFlip;
 const shader3d = @import("shader3d.zig");
 const shaders = @import("shaders.zig");
@@ -478,6 +479,13 @@ pub const Lighting = struct {
     /// Smooth its edges as the project says: `msaa_3d` and
     /// `screen_space_aa`. Off, one sample a pixel and nothing over it.
     antialias: bool = false,
+    /// A reflection probe's face: the light as it is drawn, before the
+    /// screen's effects, kept in `captured` rather than drawn into the
+    /// target; no reflection probe read, and nothing the geometry pass
+    /// feeds. See `render/reflection_probes.zig`.
+    capture: bool = false,
+    /// Whether the lights' live shadows are drawn.
+    shadows: bool = true,
 };
 
 pub const Renderer3D = struct {
@@ -488,6 +496,11 @@ pub const Renderer3D = struct {
     /// The engine's own shader: a material with none of its own.
     plain: ?shader3d.Compiled = null,
     post: ?post3d.Post3D = null,
+    /// What smooth surfaces reflect: see `render/reflection_probes.zig`.
+    reflections: ?reflection_probes.Reflections = null,
+    /// The light of the last draw with `Lighting.capture`, until the next
+    /// draw of its size.
+    captured: ?rhi.Texture = null,
     frame: rhi.Buffer,
     /// The same, for what is drawn on the camera's front layers: its
     /// shadows looked for `front_shadow_reach` toward each light.
@@ -744,6 +757,7 @@ pub const Renderer3D = struct {
         self.sky_draw = try .init(gpa, device);
         errdefer self.sky_draw.?.deinit(gpa, device);
         self.billboards = try .init(gpa, device);
+        self.reflections = try .init(gpa, device);
         return self;
     }
 
@@ -803,6 +817,7 @@ pub const Renderer3D = struct {
         device.destroyBuffer(self.decal_block);
         if (self.fog_backdrop) |*backdrop| backdrop.deinit(gpa, device);
         if (self.sky_draw) |*held| held.deinit(gpa, device);
+        if (self.reflections) |*held| held.deinit();
         device.destroySampler(self.lightmap_sampler);
         if (self.atlas) |atlas| device.destroyTexture(atlas);
         if (self.shadow_cache) |*cache| cache.deinit(gpa);
@@ -944,7 +959,11 @@ pub const Renderer3D = struct {
             first.color = .{ now.light[0], now.light[1], now.light[2], 1 };
             if (first.shadow) |*shadow| shadow.toward = now.toward;
         };
-        try self.planShadows(gpa, view, rendering);
+        if (lighting.shadows) try self.planShadows(gpa, view, rendering) else {
+            self.plan.views.clearRetainingCapacity();
+            self.plan.block = .none();
+        }
+        if (self.reflections) |*held| try held.show(app, view.position, frustum, self.baked);
         try self.gather(app, drawn_view, frustum, self.plan.views.items.len > 0, rendering.lod_threshold);
         try self.gatherShadowItems(gpa);
         try sortStable(Item, gpa, &self.items, &self.sorted_items, &self.sort_order, Item.lessThan);
@@ -976,7 +995,7 @@ pub const Renderer3D = struct {
         const samples = if (lighting.antialias) post.samplesFor(rendering.msaa_3d.samples()) else 1;
         self.samples = samples;
         const targets = try post.targetsAt(gpa, drawn_width, drawn_height, samples);
-        const look: post3d.Look = .of(environment, lighting.antialias and rendering.screen_space_aa == .fxaa);
+        const look: post3d.Look = if (lighting.capture) post3d.Look.of(environment, false).withoutGeometry() else .of(environment, lighting.antialias and rendering.screen_space_aa == .fxaa);
         // What is drawn on the front layers: its own frame, the screen's
         // occlusion - the world's behind it - not read.
         {
@@ -1120,6 +1139,11 @@ pub const Renderer3D = struct {
         self.parts_ns[3] = clock.lap();
         defer self.parts_ns[4] = clock.lap();
 
+        // A capture keeps its light as it is: a reflection probe folds it.
+        if (lighting.capture) {
+            self.captured = targets.light;
+            return;
+        }
         try post.finish(gpa, targets, into, width, height, if (self.geometry_drawn) look else look.withoutGeometry(), clear == null);
         // What goes over it with a depth test reads its depth: where it is
         // one sample a pixel, and as large as the picture.
@@ -1212,6 +1236,10 @@ pub const Renderer3D = struct {
         if (self.sky_draw) |*held| try bind.texture(shader3d.sky_noise_slot, held.noise, held.repeating);
         try bind.texture(shader3d.screen_ao_slot, self.screen_ao orelse self.white, self.lightmap_sampler);
         try bind.texture(shader3d.lightmap_sun_slot, self.lightmap_sun orelse self.white, self.lightmap_sampler);
+        if (self.reflections) |*held| {
+            try bind.uniform(reflection_probes.slot, held.block);
+            try bind.texture(reflection_probes.atlas_slot, held.atlasOr(self.white), held.sampler);
+        }
     }
 
     /// The geometry pass: the solid surfaces - and, after them, what is on

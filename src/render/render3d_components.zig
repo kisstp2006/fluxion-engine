@@ -624,6 +624,66 @@ pub const LightmapGI = extern struct {
     };
 };
 
+/// What smooth surfaces reflect, in a box of the world beside a
+/// `Transform3D`: the world seen all round from its middle, laid onto every
+/// surface inside - a room's walls in its polished floor, the street in a
+/// car's paint. Captured once the world is there, or over and over; read
+/// by each surface it holds, rougher ones seeing it blurred, and bent to its
+/// box so a room's reflections stand where its walls are. Its box is along
+/// the world's axes, whatever its turn. See `render/reflection_probes.zig`.
+pub const ReflectionProbe3D = extern struct {
+    /// Half its box's size along the world's axes, in metres, before its
+    /// transform's scale: the surfaces inside take its reflections.
+    extents: math.Vec3 = .init(5, 3, 5),
+    /// Where it sees the world from, from its middle: a point clear of
+    /// anything, at a person's eye in a room.
+    capture_offset: math.Vec3 = .zero,
+    /// Whether a reflected ray is followed to its box's side and looked up
+    /// from where it saw: right for a room, whose walls are its box.
+    box_projection: bool = true,
+    /// How far in from its sides its reflections fade in, in metres: a
+    /// probe's reflections blend into the next one's where boxes overlap.
+    blend_distance: f32 = 1,
+    /// What its reflections are multiplied by.
+    intensity: f32 = 1,
+    /// Where boxes overlap, the higher is taken first; the smaller box of
+    /// two the same.
+    priority: i32 = 0,
+    /// When it is captured.
+    update: Update = .once,
+    /// Whether the lights' live shadows are drawn into what it captures: off
+    /// is quicker, and right where the lightmap holds the shadows.
+    shadows: bool = true,
+    /// The render layers it sees.
+    cull_mask: u32 = 1,
+    /// The nearest and furthest it sees, in metres.
+    near: f32 = 0.1,
+    far: f32 = 300,
+
+    pub const Update = enum(u8) {
+        /// Once the world is in, and when `App.captureReflectionProbes`
+        /// asks: light that does not change.
+        once,
+        /// Over and over, a face a frame between the realtime probes.
+        realtime,
+    };
+
+    pub const reflect_name = "ReflectionProbe3D";
+    pub const reflect_fields = .{
+        .extents = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "Half its box's size along the world's axes: the surfaces inside take its reflections" } },
+        .capture_offset = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "Where it sees the world from, from its middle: a point clear of anything" } },
+        .box_projection = .{attr.Doc{ .text = "Whether reflections are bent to its box, so a room's stand where its walls are" }},
+        .blend_distance = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0, .max = 50 }, attr.Doc{ .text = "How far in from its sides its reflections fade in" } },
+        .intensity = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "What its reflections are multiplied by" } },
+        .priority = .{attr.Doc{ .text = "Where boxes overlap, the higher is taken first" }},
+        .update = .{attr.Doc{ .text = "Once, when the world is in, or over and over, a face a frame" }},
+        .shadows = .{attr.Doc{ .text = "Whether the lights' live shadows are drawn into what it captures" }},
+        .cull_mask = .{attr.Doc{ .text = "The render layers it sees" }},
+        .near = .{ attr.Group{ .name = "Capture" }, attr.Unit{ .text = "m" }, attr.Range{ .min = 0.01, .max = 10 }, attr.Doc{ .text = "The nearest it sees" } },
+        .far = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 1, .max = 10000 }, attr.Doc{ .text = "The furthest it sees" } },
+    };
+};
+
 /// A box - or a ball - of fog in the 3D world, beside a `Transform3D`: mist
 /// in a room, smoke down a corridor, haze over water. What is seen through
 /// it fades into its colour, more the more of it is in the way; its edges

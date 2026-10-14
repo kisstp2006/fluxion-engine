@@ -82,8 +82,9 @@ pub const shadow_map_slot = 5;
 pub const shadow_depth_slot = 6;
 /// How many textures a 3D shader reads: the material's five, the shadow
 /// atlas twice, the lights' cookies, the lightmap, the sky's noise, the
-/// screen's occlusion and the lightmap's baked shadow of the sun.
-pub const texture_count = 12;
+/// screen's occlusion, the lightmap's baked shadow of the sun and the
+/// reflection probes' atlas.
+pub const texture_count = 13;
 pub const cookie_slot = 7;
 /// The light from everywhere baked for a frame: the lightmap at this slot,
 /// and the probes' samples, `Probes`, the block at this one.
@@ -97,6 +98,11 @@ pub const screen_ao_slot = 10;
 /// How much of the first sun's light reaches each texel of the lightmap,
 /// baked: `render/lightmaps.zig`.
 pub const lightmap_sun_slot = 11;
+/// What smooth surfaces reflect: the reflection probes' numbers are the
+/// block at this slot, their atlas the texture at this one. See
+/// `render/reflection_probes.zig`.
+pub const reflections_slot = 9;
+pub const reflection_atlas_slot = 12;
 /// For a mesh a skeleton bends: its bones, `Skin`, are the block at this
 /// slot, and each vertex's bones and weights are a third vertex buffer.
 pub const skin_slot = 6;
@@ -346,6 +352,16 @@ const engine_head =
     \\texture2d SCREEN_AO : 10;
     \\// How much of the first sun's light reaches the lightmap's texels, baked.
     \\texture2d LIGHTMAP_SUN : 11;
+    \\// The reflection probes round what is drawn: how many, and one over
+    \\// their atlas's width and height; four `vec4`s each - the low corner of
+    \\// its box and how far in it fades, the high corner and its strength,
+    \\// where it saw from and whether it bends reflections to its box, and
+    \\// where its block is in the atlas.
+    \\uniform Reflections : 9 {
+    \\    vec4 REFLECTION_INFO;
+    \\    vec4 REFLECTION_PROBES[32];
+    \\}
+    \\texture2d REFLECTION_ATLAS : 12;
     \\
     \\const float PI = 3.14159265;
     \\
@@ -707,6 +723,81 @@ const engine_tail =
     \\    return p;
     \\}
     \\
+    \\// Karis's fit, for phones, of the split sum's second half: what of the
+    \\// light round it a surface of `roughness` reflects seen at `nv`, as a
+    \\// scale of its colour at a glance and what is added to it.
+    \\vec2 envBrdf(float roughness, float nv) {
+    \\    vec4 r = vec4(-1.0, -0.0275, -0.572, 0.022) * roughness + vec4(1.0, 0.0425, 1.04, -0.04);
+    \\    float a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+    \\    return vec2(-1.04, 1.04) * a004 + vec2(r.z, r.w);
+    \\}
+    \\
+    \\// Where square `level` of a reflection probe's block is, from its corner,
+    \\// and how many texels across: each rougher one half the one before.
+    \\vec3 probeSquareOf(float level) {
+    \\    if (level < 0.5) {
+    \\        return vec3(0.0, 0.0, 128.0);
+    \\    }
+    \\    if (level < 1.5) {
+    \\        return vec3(128.0, 0.0, 64.0);
+    \\    }
+    \\    if (level < 2.5) {
+    \\        return vec3(128.0, 64.0, 32.0);
+    \\    }
+    \\    if (level < 3.5) {
+    \\        return vec3(160.0, 64.0, 16.0);
+    \\    }
+    \\    return vec3(176.0, 64.0, 8.0);
+    \\}
+    \\
+    \\// What a probe whose block is at `block` saw along `way`, in square `level`.
+    \\vec3 probeSeen(vec4 block, vec3 way, float level) {
+    \\    vec3 square = probeSquareOf(level);
+    \\    vec2 unfolded = octahedral(way) * 0.5 + vec2(0.5);
+    \\    vec2 texel = block.xy + square.xy + vec2(0.5) + unfolded * (square.z - 1.0);
+    \\    return sample_level(REFLECTION_ATLAS, texel * REFLECTION_INFO.yz, 0.0).rgb;
+    \\}
+    \\
+    \\// The light the reflection probes round `p` reflect along `r` off a
+    \\// surface of `roughness`: their sum, each by how far inside its box `p`
+    \\// is, until a whole one - and in `a` how much of a whole one it is. A
+    \\// probe that knows how bright the light from everywhere was where it
+    \\// saw from is darkened by how much darker `around` is here: the shade,
+    \\// a corner, a room off a bright street.
+    \\vec4 probesReflect(vec3 p, vec3 r, float roughness, vec3 around) {
+    \\    float here = dot(around, vec3(0.2126, 0.7152, 0.0722));
+    \\    vec3 sum = vec3(0.0);
+    \\    float weight = 0.0;
+    \\    float level = clamp(roughness, 0.0, 1.0) * 4.0;
+    \\    float low = floor(level);
+    \\    float high = min(low + 1.0, 4.0);
+    \\    vec3 safe = vec3(abs(r.x) < 0.00001 ? 0.00001 : r.x, abs(r.y) < 0.00001 ? 0.00001 : r.y, abs(r.z) < 0.00001 ? 0.00001 : r.z);
+    \\    for (int i = 0; i < 8; i = i + 1) {
+    \\        if (float(i) < REFLECTION_INFO.x && weight < 0.999) {
+    \\            vec4 corner_low = REFLECTION_PROBES[i * 4];
+    \\            vec4 corner_high = REFLECTION_PROBES[i * 4 + 1];
+    \\            vec4 seen_from = REFLECTION_PROBES[i * 4 + 2];
+    \\            vec4 block = REFLECTION_PROBES[i * 4 + 3];
+    \\            vec3 inside = min(p - corner_low.xyz, corner_high.xyz - p);
+    \\            float edge = min(min(inside.x, inside.y), inside.z);
+    \\            if (edge > 0.0) {
+    \\                float w = min(edge / corner_low.w, 1.0) * (1.0 - weight);
+    \\                vec3 way = r;
+    \\                if (seen_from.w > 0.5) {
+    \\                    vec3 leaves = max((corner_high.xyz - p) / safe, (corner_low.xyz - p) / safe);
+    \\                    float t = min(min(leaves.x, leaves.y), leaves.z);
+    \\                    way = p + r * t - seen_from.xyz;
+    \\                }
+    \\                vec3 seen = mix(probeSeen(block, way, low), probeSeen(block, way, high), level - low);
+    \\                float normalized = block.z > 0.0001 ? clamp(here / (block.z * GI_ENERGY.x), 0.0, 1.5) : 1.0;
+    \\                sum = sum + seen * (w * corner_high.w * normalized);
+    \\                weight = weight + w;
+    \\            }
+    \\        }
+    \\    }
+    \\    return vec4(sum, weight);
+    \\}
+    \\
     \\// What the geometry pass keeps of a surface: which way it faces, how far
     \\// along the camera's view it is, and how smooth - negative for a metal,
     \\// and past two for one on the front layers.
@@ -764,7 +855,21 @@ const engine_tail =
     \\    light = light + lamp(lamps_1.x, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.y, p, ng, n, v, albedo, m, roughness, turn)
     \\        + lamp(lamps_1.z, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.w, p, ng, n, v, albedo, m, roughness, turn);
     \\    vec3 f0 = mix(vec3(0.04), albedo, m);
-    \\    light = light + (albedo * (1.0 - m) + f0) * indirect(n, gi_at) * (ao * screenAo(p));
+    \\    vec3 around = indirect(n, gi_at);
+    \\    // What it mirrors: the reflection probes' light round it, where they
+    \\    // hold it - hidden below its own horizon - and the light from
+    \\    // everywhere where they do not.
+    \\    vec3 mirrored = f0 * around;
+    \\    if (REFLECTION_INFO.x > 0.5) {
+    \\        vec3 r = reflect(-v, n);
+    \\        vec4 seen = probesReflect(p, r, roughness, around);
+    \\        if (seen.a > 0.0) {
+    \\            vec2 ab = envBrdf(roughness, max(dot(n, v), 0.0));
+    \\            float horizon = clamp(1.0 + dot(r, ng), 0.0, 1.0);
+    \\            mirrored = seen.rgb * (f0 * ab.x + vec3(ab.y)) * (horizon * horizon) + mirrored * (1.0 - seen.a);
+    \\        }
+    \\    }
+    \\    light = light + (albedo * (1.0 - m) * around + mirrored) * (ao * screenAo(p));
     \\    vec3 color = mix(light, albedo, FEEL.x) + emission;
     \\    float far = length(p - CAMERA_POSITION.xyz);
     \\    float thick = FOG_COLOR.w + max(FOG_HEIGHT.x - p.y, 0.0) * FOG_HEIGHT.y;
@@ -1352,7 +1457,7 @@ fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, sk
 /// block there, which the device binds nothing to.
 fn blockNames(module: *shader.Module) ![]const [:0]const u8 {
     const arena = module.arena.allocator();
-    const names = try arena.alloc([:0]const u8, @max(@max(@max(@max(shadows_slot, probes_slot), skin_slot), fog_volumes.slot), decals.slot) + 1);
+    const names = try arena.alloc([:0]const u8, @max(@max(@max(@max(@max(shadows_slot, probes_slot), skin_slot), fog_volumes.slot), decals.slot), reflections_slot) + 1);
     @memset(names, "");
     for (module.blocks) |block| names[block.slot] = try arena.dupeZ(u8, block.name);
     return names;
@@ -1472,7 +1577,7 @@ fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []con
     // One block of its own, at its slot, and no textures but the engine's.
     var params: ?shader.Block = null;
     for (module.blocks) |block| {
-        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot or block.slot == fog_volumes.slot or block.slot == decals.slot or (skinned and block.slot == skin_slot)) continue;
+        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot or block.slot == fog_volumes.slot or block.slot == decals.slot or block.slot == reflections_slot or (skinned and block.slot == skin_slot)) continue;
         if (block.slot != params_slot or params != null) {
             problems.print("a 3D shader's own numbers are one uniform block, at slot {d}: `{s}` is at {d}\n", .{ params_slot, block.name, block.slot }) catch {};
             return error.ShaderFailed;

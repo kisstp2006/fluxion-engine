@@ -930,3 +930,26 @@ test "a label's letters are where its pivot puts them, however its lines are ali
         try testing.expectApproxEqAbs(-low, high, 0.15);
     }
 }
+
+const fmath = @import("fluxion_math");
+
+test "a reflection probe is given a place as it comes, read once it is captured, and let go of as it goes" {
+    const app = try headless();
+    defer app.destroy();
+    const probe = try app.world.spawnWith(.{ Transform3D.at(0, 1, 0), components.ReflectionProbe3D{} });
+    const reflections = &app.renderer3d.reflections.?;
+    const everywhere: fmath.Frustum = .fromViewProjection(fmath.Mat4.identity, .gl);
+    try reflections.show(app, .zero, everywhere, null);
+    try testing.expectEqual(@as(f32, 0), reflections.shown.info[0]);
+    // Its six faces, a whole probe a frame.
+    try reflections.capture(app);
+    try testing.expectEqual(@as(usize, 1), reflections.slots.items.len);
+    try testing.expect(reflections.slots.items[0].ready);
+    try reflections.show(app, .zero, everywhere, null);
+    try testing.expectEqual(@as(f32, 1), reflections.shown.info[0]);
+    app.world.despawn(probe);
+    try reflections.capture(app);
+    try testing.expectEqual(@as(usize, 0), reflections.slots.items.len);
+    try reflections.show(app, .zero, everywhere, null);
+    try testing.expectEqual(@as(f32, 0), reflections.shown.info[0]);
+}

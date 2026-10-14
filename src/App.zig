@@ -633,6 +633,7 @@ pub const engine_components = .{
     components3d.SpotLight3D,
     components3d.Environment,
     components3d.LightmapGI,
+    components3d.ReflectionProbe3D,
     components3d.FogVolume,
     components3d.Decal,
     components3d.World3D,
@@ -4673,6 +4674,14 @@ pub fn streamingReady(self: *const App) bool {
     return self.streams.isReady();
 }
 
+/// Every `ReflectionProbe3D` captured again, from the start, a probe a
+/// frame: after the world's light changed - a lamp put out, the time of day
+/// moved - for those that are captured once. See
+/// `render/reflection_probes.zig`.
+pub fn captureReflectionProbes(self: *App) void {
+    if (self.renderer3d.reflections) |*held| held.captureAgain();
+}
+
 /// How many of the meshes a `StreamMesh3D` near the camera names are in,
 /// from nought to one: one where none is wanted.
 pub fn streamingProgress(self: *const App) f32 {
@@ -6614,6 +6623,7 @@ pub const reflect_methods = .{
     // Files of every kind
     .loadInBackground = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
     .streamingReady = .{},
+    .captureReflectionProbes = .{},
     .streamingProgress = .{},
     .loadProgress = .{attr.Params{ .names = &.{"path"} }},
     .loadStatus = .{attr.Params{ .names = &.{"path"} }},

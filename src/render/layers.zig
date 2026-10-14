@@ -51,6 +51,8 @@ fn drawLayers(app: *App, into: rhi.RenderTarget, width: f32, height: f32) !void 
     app.sprites.time = @floatCast(app.interface.seconds);
     app.screen_texture.copies = 0;
     try view_textures.drawAll(app);
+    // What the reflection probes see, before what reflects it is drawn.
+    if (app.world_on_screen) if (app.renderer3d.reflections) |*held| try held.capture(app);
     // The game area for a target this size: the window's, or a capture's.
     const area = app.stretch.areaOf(@intFromFloat(width), @intFromFloat(height));
     const area_width: f32 = @floatFromInt(area.width);
