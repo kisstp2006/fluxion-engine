@@ -124,6 +124,13 @@ pub const LightBake = enum(u8) {
     /// All of it: on the still meshes from the lightmap, on those that move
     /// from the probes, and not drawn once there is a lightmap.
     all,
+    /// A sun's light drawn as it falls, and its shadow baked - a game's
+    /// "stationary" sun: the still meshes take it from the lightmap, what
+    /// moves from the probes, and its live shadow is cast by what moves
+    /// alone, which costs a frame little. Baked as `indirect`; the first sun
+    /// only, and only where the lightmap holds its shadow - elsewhere it is
+    /// drawn as `indirect`.
+    shadows,
 };
 
 /// A mesh made from a few numbers, drawn by the `MeshInstance3D` beside it:
@@ -551,7 +558,7 @@ pub const SpotLight3D = extern struct {
     };
 };
 
-const bake_doc = "What of its light a LightmapGI bakes: none, its light bounced, or all of it - then it is not drawn over the lightmap";
+const bake_doc = "What of its light a LightmapGI bakes: none, its light bounced, all of it - then it is not drawn over the lightmap - or, for the first sun, its shadow: the still meshes' from the lightmap, what moves from the probes, its live shadow cast by what moves alone";
 
 /// The light from everywhere, baked once and read back: on the meshes that
 /// never move (`MeshInstance3D.gi_mode` static), the light that falls on

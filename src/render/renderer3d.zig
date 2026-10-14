@@ -423,6 +423,9 @@ const ShadowItem = struct {
 const Caster = struct {
     item: Item,
     bounds: math.Aabb,
+    /// Whether it is a still mesh the lightmap holds - whose shadow is in
+    /// the bake, and which a baked sun's live shadow leaves out.
+    still: bool = false,
 
     fn lessThan(a: Caster, b: Caster) bool {
         return Item.order(a.item, b.item) == .lt;
@@ -541,6 +544,11 @@ pub const Renderer3D = struct {
     lightmap: ?rhi.Texture = null,
     /// The first sun's baked shadow on the lightmap's texels, where it holds one.
     lightmap_sun: ?rhi.Texture = null,
+    /// Whether the first sun's shadow is the bake's this draw - its
+    /// `bake` is `shadows`, and the lightmap holds its shadow: the still
+    /// meshes take it from the lightmap, what moves from the probes, and
+    /// its live shadow is cast by what moves alone.
+    sun_baked: bool = false,
     lightmap_sampler: rhi.Sampler,
     /// What the first `LightmapGI` with its data baked, which this draw
     /// reads; null for none.
@@ -905,6 +913,7 @@ pub const Renderer3D = struct {
         try self.findBaked(app);
         try self.gatherLamps(app, view, frustum);
         try self.gatherSuns(app);
+        self.probe_data.energy[2] = if (self.sun_baked) 1 else 0;
         // Under a sky, its first sun is what lights the world now: the sun
         // through the air by day, the moon by night - and casts its shadow.
         const lit: ?sky.Lit = if (skyFor(app, self.worlds, view)) |found| self.litBy(app, found) else null;
@@ -1378,6 +1387,13 @@ pub const Renderer3D = struct {
         }
     }
 
+    /// Whether the lightmap holds the mesh of `entity`: it has a place there.
+    fn inBake(self: *const Renderer3D, app: *App, entity: ecs.Entity) bool {
+        const baked = self.baked orelse return false;
+        const uuid = app.uuidOf(entity) orelse return false;
+        return baked.placeOf(uuid) != null;
+    }
+
     /// Where a mesh's light from everywhere is read, as `Instance.gi` says:
     /// its place in the lightmap, the probes' light round it - one more of
     /// the frame's probe samples - or the environment's.
@@ -1393,7 +1409,10 @@ pub const Renderer3D = struct {
         const at = self.gi_probed;
         self.gi_probed += 1;
         for (0..3) |c| self.probe_data.samples[at * 3 + c] = light[c * 4 ..][0..4].*;
-        return .{ -@as(f32, @floatFromInt(at)) - 1, 0, 0, 0 };
+        // With it, how much of the first sun reaches it, where the probes
+        // baked that: what a baked sun's light on it is times.
+        const sun = baked.probeSun(bounds.center().array()) orelse 1;
+        return .{ -@as(f32, @floatFromInt(at)) - 1, sun, 0, 0 };
     }
 
     /// The point and spot lights the camera sees some of, nearest first,
@@ -1541,6 +1560,9 @@ pub const Renderer3D = struct {
                 const casts = casting and instance.cast_shadow and looks.shadows != .none and !front;
                 if (!seen) self.culled += 1;
                 if (!seen and !casts) continue;
+                // A still mesh the lightmap holds: a baked sun's live shadow
+                // leaves it out.
+                const still = casts and self.sun_baked and instance.gi_mode == .static and self.inBake(app, entity);
                 kept.used = app.meshes.clock;
                 const gpu = try kept.uploaded(self.device);
                 const depth = bounds.center().sub(view.position).dot(forward);
@@ -1592,7 +1614,7 @@ pub const Renderer3D = struct {
                     const blend = drawn.blend;
                     if (seen) try self.items.append(gpa, item);
                     // What is laid over what is behind it casts no shadow.
-                    if (casts and !blend) try self.casters.append(gpa, .{ .item = item, .bounds = bounds });
+                    if (casts and !blend) try self.casters.append(gpa, .{ .item = item, .bounds = bounds, .still = still });
                 }
             }
         }
@@ -1668,6 +1690,7 @@ pub const Renderer3D = struct {
     /// what its shadow is where it casts one.
     fn gatherSuns(self: *Renderer3D, app: *App) !void {
         self.suns.clearRetainingCapacity();
+        self.sun_baked = false;
         var it = try ecs.Query(.{ Transform3D, DirectionalLight3D }).over(&app.world);
         while (it.next()) |chunk| {
             for (chunk.slice(DirectionalLight3D), chunk.entities) |light, entity| {
@@ -1679,6 +1702,7 @@ pub const Renderer3D = struct {
                 const c = linear(light.color);
                 const e = @max(light.energy, 0);
                 const index: u32 = @intCast(self.suns.items.len);
+                if (index == 0) self.sun_baked = light.bake == .shadows and self.lightmap_sun != null;
                 try self.suns.append(app.gpa, .{
                     .toward = toward,
                     .color = .{ c[0] * e, c[1] * e, c[2] * e, 1 },
@@ -1789,7 +1813,11 @@ pub const Renderer3D = struct {
         // after another, as `ShadowItem.before` wants them.
         if (self.plan.views.items.len > 0) try sortStable(Caster, gpa, &self.casters, &self.sorted_casters, &self.sort_order, Caster.lessThan);
         for (self.plan.views.items, 0..) |shadow_view, at| {
+            // A baked sun's own shadow is the bake's: what moves alone casts
+            // into its views.
+            const baked_sun = self.sun_baked and shadow_view.key.light == shadows3d.sunKey(0);
             for (self.casters.items) |caster| {
+                if (baked_sun and caster.still) continue;
                 if (shadow_view.reach) |reach| if (!reach.intersectsAabb(caster.bounds)) continue;
                 if (shadow_view.frustum.testAabb(caster.bounds) == .outside) continue;
                 try self.shadow_items.append(gpa, .{ .view = @intCast(at), .item = caster.item });

@@ -96,6 +96,12 @@ pub const Lightmap = struct {
     pub fn probeLight(self: *const Lightmap, at: [3]f32) ?[12]f32 {
         return lightmapper.probeLight(self.probes, at);
     }
+
+    /// How much of the first sun reaches what moves at `at`, from the
+    /// probes round it; null where they hold none.
+    pub fn probeSun(self: *const Lightmap, at: [3]f32) ?f32 {
+        return lightmapper.probeSun(self.probes, at);
+    }
 };
 
 /// What a `.lightmap` file starts with, its version in the last two letters.
@@ -105,13 +111,19 @@ pub const magic = "FXLMAP01";
 /// hidden and 255 lit, laid out as the picture is. A length of nought is
 /// none.
 pub const magic_with_sun = "FXLMAP02";
+/// The same with, after the sun's shadow on the picture, its shadow at
+/// each probe - how much of the sun reaches what moves there: its length
+/// compressed, and a byte a probe, in the probes' order. A length of
+/// nought is none.
+pub const magic_with_probe_sun = "FXLMAP03";
 
 /// A lightmap as its file's bytes, the caller's.
 pub fn write(gpa: Allocator, lightmap: Lightmap) Allocator.Error![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     const w = &out.writer;
-    writeAll(w, if (lightmap.sun.len > 0) magic_with_sun else magic) catch return error.OutOfMemory;
+    const probe_sun = lightmap.probes.sun.len > 0;
+    writeAll(w, if (probe_sun) magic_with_probe_sun else if (lightmap.sun.len > 0) magic_with_sun else magic) catch return error.OutOfMemory;
     const probes = lightmap.probes;
     for ([_]u32{ lightmap.width, lightmap.height, @intCast(lightmap.places.len), probes.counts[0], probes.counts[1], probes.counts[2] }) |n| try int(w, n);
     for (probes.origin ++ [1]f32{probes.spacing}) |x| try int(w, @bitCast(x));
@@ -140,21 +152,51 @@ pub fn write(gpa: Allocator, lightmap: Lightmap) Allocator.Error![]u8 {
     }
     try int(w, @intCast(compressed.written().len));
     writeAll(w, compressed.written()) catch return error.OutOfMemory;
-    if (lightmap.sun.len > 0) {
-        std.debug.assert(lightmap.sun.len == lightmap.pixels.len);
-        var packed_sun: std.Io.Writer.Allocating = try .initCapacity(gpa, lightmap.sun.len / 8 + 4096);
-        defer packed_sun.deinit();
-        const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
-        defer gpa.free(window);
-        const deflate = try gpa.create(std.compress.flate.Compress);
-        defer gpa.destroy(deflate);
-        deflate.* = std.compress.flate.Compress.init(&packed_sun.writer, window, .zlib, .default) catch return error.OutOfMemory;
-        deflate.writer.writeAll(lightmap.sun) catch return error.OutOfMemory;
-        deflate.finish() catch return error.OutOfMemory;
-        try int(w, @intCast(packed_sun.written().len));
-        writeAll(w, packed_sun.written()) catch return error.OutOfMemory;
+    if (lightmap.sun.len > 0 or probe_sun) {
+        std.debug.assert(lightmap.sun.len == 0 or lightmap.sun.len == lightmap.pixels.len);
+        try writeCompressed(gpa, w, lightmap.sun);
+    }
+    if (probe_sun) {
+        std.debug.assert(lightmap.probes.sun.len == lightmap.probes.valid.len);
+        try writeCompressed(gpa, w, lightmap.probes.sun);
     }
     return out.toOwnedSlice();
+}
+
+/// `bytes` zlib-compressed after their compressed length; none, a length
+/// of nought.
+fn writeCompressed(gpa: Allocator, w: *std.Io.Writer, bytes: []const u8) Allocator.Error!void {
+    if (bytes.len == 0) return int(w, 0);
+    var packed_bytes: std.Io.Writer.Allocating = try .initCapacity(gpa, bytes.len / 8 + 4096);
+    defer packed_bytes.deinit();
+    const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
+    defer gpa.free(window);
+    const deflate = try gpa.create(std.compress.flate.Compress);
+    defer gpa.destroy(deflate);
+    deflate.* = std.compress.flate.Compress.init(&packed_bytes.writer, window, .zlib, .default) catch return error.OutOfMemory;
+    deflate.writer.writeAll(bytes) catch return error.OutOfMemory;
+    deflate.finish() catch return error.OutOfMemory;
+    try int(w, @intCast(packed_bytes.written().len));
+    try writeAll(w, packed_bytes.written());
+}
+
+/// What a block `writeCompressed` wrote holds, `count` bytes - or nothing,
+/// for one of length nought - after the block's end is `at`.
+fn readCompressed(gpa: Allocator, bytes: []const u8, at: *usize, count: usize) (Allocator.Error || error{BadLightmap})![]u8 {
+    const len = (try takeInts(bytes, at, 1))[0];
+    if (at.* + len > bytes.len) return error.BadLightmap;
+    defer at.* += len;
+    if (len == 0) return &.{};
+    const out = try gpa.alloc(u8, count);
+    errdefer gpa.free(out);
+    var in: std.Io.Reader = .fixed(bytes[at.*..][0..len]);
+    var into: std.Io.Writer = .fixed(out);
+    const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
+    defer gpa.free(window);
+    var inflate: std.compress.flate.Decompress = .init(&in, .zlib, window);
+    const got = inflate.reader.streamRemaining(&into) catch return error.BadLightmap;
+    if (got != out.len) return error.BadLightmap;
+    return out;
 }
 
 fn writeAll(w: *std.Io.Writer, bytes: []const u8) error{OutOfMemory}!void {
@@ -171,7 +213,8 @@ fn int(w: *std.Io.Writer, n: u32) error{OutOfMemory}!void {
 /// `error.BadLightmap` for one that is not one, or is cut short.
 pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadLightmap})!Lightmap {
     if (bytes.len < magic.len) return error.BadLightmap;
-    const with_sun = std.mem.eql(u8, bytes[0..magic.len], magic_with_sun);
+    const with_probe_sun = std.mem.eql(u8, bytes[0..magic.len], magic_with_probe_sun);
+    const with_sun = with_probe_sun or std.mem.eql(u8, bytes[0..magic.len], magic_with_sun);
     if (!with_sun and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadLightmap;
     var at: usize = magic.len;
     const head = try takeInts(bytes, &at, 10);
@@ -201,6 +244,7 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadLigh
     errdefer gpa.free(probes.samples);
     probes.valid = try gpa.alloc(bool, @intCast(probe_count));
     errdefer gpa.free(probes.valid);
+    errdefer gpa.free(probes.sun);
     for (probes.samples) |*sample| {
         const numbers = try takeInts(bytes, &at, 12);
         for (sample, numbers) |*x, n| x.* = @bitCast(n);
@@ -227,23 +271,16 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadLigh
     const pixels = try gpa.alloc(u32, texels);
     errdefer gpa.free(pixels);
     for (pixels, 0..) |*texel, t| texel.* = pack(fromShared(shared[t * 4 ..][0..4].*));
-    // The sun's baked shadow, where the file has it.
+    // The sun's baked shadow, where the file has it, and at the probes.
     var sun: []u8 = &.{};
     errdefer gpa.free(sun);
     if (with_sun) {
         at = picture_end;
-        const sun_len = (try takeInts(bytes, &at, 1))[0];
-        if (at + sun_len != bytes.len) return error.BadLightmap;
-        if (sun_len > 0) {
-            sun = try gpa.alloc(u8, texels);
-            var in: std.Io.Reader = .fixed(bytes[at..]);
-            var into: std.Io.Writer = .fixed(sun);
-            const window = try gpa.alloc(u8, std.compress.flate.max_window_len);
-            defer gpa.free(window);
-            var inflate: std.compress.flate.Decompress = .init(&in, .zlib, window);
-            const got = inflate.reader.streamRemaining(&into) catch return error.BadLightmap;
-            if (got != sun.len) return error.BadLightmap;
+        sun = try readCompressed(gpa, bytes, &at, texels);
+        if (with_probe_sun) {
+            probes.sun = try readCompressed(gpa, bytes, &at, probes.valid.len);
         }
+        if (at != bytes.len) return error.BadLightmap;
     }
     var out: Lightmap = .{ .width = width, .height = height, .pixels = pixels, .sun = sun, .places = places, .probes = probes };
     errdefer out.by_uuid.deinit(gpa);
@@ -596,4 +633,31 @@ test "a lightmap's file reads back as it was written, near enough, and one cut s
     try testing.expectEqualSlices(u8, &.{ 0, 255, 128, 7 }, again.sun);
     try testing.expectEqual([4]f32{ 0.5, 0.5, 0, 0 }, again.placeOf(uuids[0]).?);
     try testing.expectError(error.BadLightmap, read(gpa, with_sun[0 .. with_sun.len - 1]));
+    try testing.expect(again.probeSun(.{ 1, 2, 3 }) == null);
+
+    // And the sun's shadow at each probe, after that: read where what moves
+    // is, from the probes round it in the open - the second is inside
+    // something, so the first's holds across.
+    again.probes.sun = try gpa.dupe(u8, &.{ 255, 0 });
+    const with_probes = try write(gpa, again);
+    defer gpa.free(with_probes);
+    try testing.expectEqualStrings(magic_with_probe_sun, with_probes[0..magic_with_probe_sun.len]);
+    var probed = try read(gpa, with_probes);
+    defer probed.deinit(gpa);
+    try testing.expectEqualSlices(u8, &.{ 255, 0 }, probed.probes.sun);
+    try testing.expectEqualSlices(u8, &.{ 0, 255, 128, 7 }, probed.sun);
+    try testing.expectEqual(@as(f32, 1), probed.probeSun(.{ 2, 2, 3 }).?);
+    probed.probes.valid[1] = true;
+    try testing.expectApproxEqAbs(@as(f32, 0.5), probed.probeSun(.{ 2, 2, 3 }).?, 0.001);
+    try testing.expectApproxEqAbs(@as(f32, 0), probed.probeSun(.{ 3, 2, 3 }).?, 0.001);
+    try testing.expectError(error.BadLightmap, read(gpa, with_probes[0 .. with_probes.len - 1]));
+    // A sun on the probes alone, none on the picture: an empty block for it.
+    gpa.free(again.sun);
+    again.sun = &.{};
+    const probes_only = try write(gpa, again);
+    defer gpa.free(probes_only);
+    var only = try read(gpa, probes_only);
+    defer only.deinit(gpa);
+    try testing.expectEqual(@as(usize, 0), only.sun.len);
+    try testing.expectEqualSlices(u8, &.{ 255, 0 }, only.probes.sun);
 }

@@ -202,10 +202,14 @@ pub const Probes = struct {
     samples: [][12]f32 = &.{},
     /// Whether each is in the open; one inside something is not read.
     valid: []bool = &.{},
+    /// How much of the first sun reaches each, nought hidden and 255 lit:
+    /// its shadow on what moves, baked. Empty where none was baked.
+    sun: []u8 = &.{},
 
     pub fn deinit(self: *Probes, gpa: Allocator) void {
         gpa.free(self.samples);
         gpa.free(self.valid);
+        gpa.free(self.sun);
         self.* = .{};
     }
 };
@@ -1153,6 +1157,28 @@ fn bakeProbes(gpa: Allocator, world: *const World, settings: Settings, control: 
 /// there are none.
 pub fn probeLight(probes: Probes, at: [3]f32) ?[12]f32 {
     if (probes.samples.len == 0) return null;
+    return probeBlend(probes, at, 12, probeSamples);
+}
+
+/// How much of the first sun reaches `at`, from the probes round it as
+/// `probeLight` takes their light: null where the probes hold none.
+pub fn probeSun(probes: Probes, at: [3]f32) ?f32 {
+    if (probes.sun.len != probes.valid.len or probes.sun.len == 0) return null;
+    const blended = probeBlend(probes, at, 1, probeSunOf) orelse return null;
+    return blended[0];
+}
+
+fn probeSamples(probes: Probes, index: usize) [12]f32 {
+    return probes.samples[index];
+}
+
+fn probeSunOf(probes: Probes, index: usize) [1]f32 {
+    return .{@as(f32, @floatFromInt(probes.sun[index])) / 255};
+}
+
+/// What `take` gives of the nearest eight probes round `at`, by how near,
+/// those inside something left out.
+fn probeBlend(probes: Probes, at: [3]f32, comptime width: usize, take: fn (Probes, usize) [width]f32) ?[width]f32 {
     var cell: [3]usize = undefined;
     var frac: [3]f32 = undefined;
     for (0..3) |a| {
@@ -1167,7 +1193,7 @@ pub fn probeLight(probes: Probes, at: [3]f32) ?[12]f32 {
         cell[a] = lo;
         frac[a] = g - @as(f32, @floatFromInt(lo));
     }
-    var sum: [12]f32 = @splat(0);
+    var sum: [width]f32 = @splat(0);
     var weights: f32 = 0;
     for (0..8) |corner| {
         var index: usize = 0;
@@ -1182,7 +1208,7 @@ pub fn probeLight(probes: Probes, at: [3]f32) ?[12]f32 {
             w *= if (up) frac[a] else 1 - frac[a];
         }
         if (w <= 0 or !probes.valid[index]) continue;
-        for (&sum, probes.samples[index]) |*s, v| s.* += v * w;
+        for (&sum, take(probes, index)) |*s, v| s.* += v * w;
         weights += w;
     }
     if (weights <= 0) return null;

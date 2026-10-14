@@ -140,3 +140,80 @@ test "a mesh with no lightmap UVs is said, and lit by the probes" {
     const baked = try bake.finish(app);
     try testing.expectEqual(@as(usize, 0), app.lightmapOf(baked).?.places.len);
 }
+
+test "a sun whose shadow is baked: the still walls take it from the lightmap, what moves from the probes, and only what moves casts it live" {
+    const lightmaps = @import("lightmaps.zig");
+    const DirectionalLight3D = components3d.DirectionalLight3D;
+    const shadows3d = @import("shadows3d.zig");
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const gpa = testing.allocator;
+    const app = try App.create(gpa, .{ .headless = true, .io = testing.io, .root = folder.root(), .width = 64, .height = 64 });
+    defer app.destroy();
+
+    try room(app);
+    _ = try app.world.spawnWith(.{ Transform3D.at(0, -1, 0), MeshInstance3D{ .gi_mode = .dynamic }, PrimitiveMesh3D{ .shape = .sphere } });
+    var eye: Transform3D = .at(0, 0, 2.5);
+    eye.lookAt(.init(0, -1, 0), .unit_y);
+    _ = try app.world.spawnWith(.{ eye, Camera3D{} });
+    var high: Transform3D = .at(0, 10, 0);
+    high.lookAt(.init(1, 0, 0.5), .unit_y);
+    const sun = try app.world.spawnWith(.{ high, DirectionalLight3D{ .shadow = true, .bake = .shadows, .shadow_cascades = .two } });
+    const gi = try app.world.spawnWith(.{LightmapGI{ .texels_per_unit = 2, .quality = .low, .bounces = 1, .probe_spacing = 2 }});
+    const bake = try app.bakeLightmap(gi, "res://room.lightmap");
+    const baked = try bake.finish(app);
+
+    // The engine's bake holds no shadow of the sun: drawn as `indirect`,
+    // every wall casting live.
+    _ = try app.step();
+    try testing.expect(!app.renderer3d.sun_baked);
+    const every = app.renderer3d.shadow_casters;
+    try testing.expect(every > 0);
+
+    // The same lightmap with the sun's shadow in it, as a game's tools write
+    // one: the walls' picture lit, the probes' hidden.
+    // (Drawn once, its picture is on the device and gone from it: read again.)
+    app.unloadLightmap(baked);
+    const reread = try app.loadLightmap("res://room.lightmap");
+    var made = app.lightmapOf(reread).?.*;
+    const lit = try gpa.alloc(u8, @as(usize, made.width) * made.height);
+    defer gpa.free(lit);
+    @memset(lit, 255);
+    const hidden = try gpa.alloc(u8, made.probes.valid.len);
+    defer gpa.free(hidden);
+    @memset(hidden, 0);
+    made.sun = lit;
+    made.probes.sun = hidden;
+    const bytes = try lightmaps.write(gpa, made);
+    defer gpa.free(bytes);
+    var path: [192]u8 = undefined;
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = try std.fmt.bufPrint(&path, "{s}/sunlit.lightmap", .{folder.root()}), .data = bytes });
+    app.world.get(gi, LightmapGI).?.data = try app.loadLightmap("res://sunlit.lightmap");
+    app.unloadLightmap(reread);
+
+    _ = try app.step();
+    try testing.expect(app.renderer3d.sun_baked);
+    try testing.expectEqual(@as(f32, 1), app.renderer3d.probe_data.energy[2]);
+    // The ball takes the probes' shadow - hidden here - and is all the sun's
+    // live shadow draws: no wall casts into its views.
+    var probed = false;
+    for (app.renderer3d.gathered.items) |instance| if (instance.gi[0] < 0) {
+        probed = true;
+        try testing.expectEqual(@as(f32, 0), instance.gi[1]);
+    };
+    try testing.expect(probed);
+    for (app.renderer3d.shadow_items.items) |shadowed| {
+        const view = app.renderer3d.plan.views.items[shadowed.view];
+        if (view.key.light != shadows3d.sunKey(0)) continue;
+        try testing.expect(app.renderer3d.gathered.items[shadowed.item.instance].gi[0] <= 0);
+    }
+    try testing.expect(app.renderer3d.shadow_casters < every);
+
+    // Its shadow drawn live again: every wall casts, and the probes' shadow is not read.
+    app.world.get(sun, DirectionalLight3D).?.bake = .indirect;
+    _ = try app.step();
+    try testing.expect(!app.renderer3d.sun_baked);
+    try testing.expectEqual(@as(f32, 0), app.renderer3d.probe_data.energy[2]);
+    try testing.expectEqual(every, app.renderer3d.shadow_casters);
+}

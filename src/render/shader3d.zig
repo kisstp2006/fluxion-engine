@@ -215,7 +215,9 @@ pub const Instance = extern struct {
 pub const Probes = extern struct {
     /// Each sample's red, green and blue, one after another.
     samples: [most_probe_samples * 3][4]f32,
-    /// What everything baked is multiplied by, in `x`.
+    /// What everything baked is multiplied by, in `x`; in `y`, whether the
+    /// lightmap holds the first sun's shadow; in `z`, whether that shadow is
+    /// the bake's alone, what moves taking it from the probes.
     energy: [4]f32,
 };
 
@@ -744,10 +746,16 @@ const engine_tail =
     \\    float turn = pixelTurn(p);
     \\    // A still surface's own baked shadow of the first sun, where the
     \\    // lightmap holds it: what stands between the two for good hides the
-    \\    // sun however coarse, far or biased the live shadow is there.
+    \\    // sun however coarse, far or biased the live shadow is there. Where
+    \\    // the sun's shadow is the bake's alone (`GI_ENERGY.z`), what moves
+    \\    // takes it from the probes round it: the sun's live shadow is then
+    \\    // cast by what moves alone.
     \\    float baked_sun = 1.0;
     \\    if (GI_ENERGY.y > 0.5 && gi_at.w > 0.5 && gi_at.w < 1.5) {
     \\        baked_sun = sample_level(LIGHTMAP_SUN, gi_at.xy, 0.0).r;
+    \\    }
+    \\    if (GI_ENERGY.z > 0.5 && gi_at.w > 1.5) {
+    \\        baked_sun = gi_at.x;
     \\    }
     \\    vec3 light = sun(0, p, ng, n, v, albedo, m, roughness, turn) * baked_sun + sun(1, p, ng, n, v, albedo, m, roughness, turn)
     \\        + sun(2, p, ng, n, v, albedo, m, roughness, turn) + sun(3, p, ng, n, v, albedo, m, roughness, turn);
@@ -790,7 +798,7 @@ const engine_tail =
     \\        GI_AT = vec4(VERTEX_UV2 * GI.xy + GI.zw, 0.0, 1.0);
     \\    }
     \\    if (GI.x < 0.0) {
-    \\        GI_AT = vec4(0.0, 0.0, -GI.x - 1.0, 2.0);
+    \\        GI_AT = vec4(GI.y, 0.0, -GI.x - 1.0, 2.0);
     \\    }
     \\    position = VIEW_PROJECTION * world;
     \\}
