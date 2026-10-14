@@ -82,9 +82,9 @@ pub const shadow_map_slot = 5;
 pub const shadow_depth_slot = 6;
 /// How many textures a 3D shader reads: the material's five, the shadow
 /// atlas twice, the lights' cookies, the lightmap, the sky's noise, the
-/// screen's occlusion, the lightmap's baked shadow of the sun and the
-/// reflection probes' atlas.
-pub const texture_count = 13;
+/// screen's occlusion, the lightmap's baked shadow of the sun, the
+/// reflection probes' atlas, and the probe volume's light and distances.
+pub const texture_count = 15;
 pub const cookie_slot = 7;
 /// The light from everywhere baked for a frame: the lightmap at this slot,
 /// and the probes' samples, `Probes`, the block at this one.
@@ -103,6 +103,12 @@ pub const lightmap_sun_slot = 11;
 /// `render/reflection_probes.zig`.
 pub const reflections_slot = 9;
 pub const reflection_atlas_slot = 12;
+/// The light from everywhere of a probe volume: its numbers the block at
+/// this slot, its light and its distances the textures at these. See
+/// `render/probe_volumes.zig`.
+pub const volume_slot = 10;
+pub const volume_light_slot = 13;
+pub const volume_depth_slot = 14;
 /// For a mesh a skeleton bends: its bones, `Skin`, are the block at this
 /// slot, and each vertex's bones and weights are a third vertex buffer.
 pub const skin_slot = 6;
@@ -352,16 +358,30 @@ const engine_head =
     \\texture2d SCREEN_AO : 10;
     \\// How much of the first sun's light reaches the lightmap's texels, baked.
     \\texture2d LIGHTMAP_SUN : 11;
-    \\// The reflection probes round what is drawn: how many, and one over
-    \\// their atlas's width and height; four `vec4`s each - the low corner of
-    \\// its box and how far in it fades, the high corner and its strength,
-    \\// where it saw from and whether it bends reflections to its box, and
-    \\// where its block is in the atlas.
+    \\// The reflection probes round what is drawn: how many, one over their
+    \\// atlas's width and height, and whether its rows are stored bottom
+    \\// first, as drawn into on such a device; four `vec4`s each - the low
+    \\// corner of its box and how far in it fades, the high corner and its
+    \\// strength, where it saw from and whether it bends reflections to its
+    \\// box, and where its block is in the atlas, how lit it was where it
+    \\// saw from and its sharpest square's side.
     \\uniform Reflections : 9 {
     \\    vec4 REFLECTION_INFO;
     \\    vec4 REFLECTION_PROBES[32];
     \\}
     \\texture2d REFLECTION_ATLAS : 12;
+    \\// The probe volume the surfaces are in: where its first probe is and
+    \\// how far apart they are; how many each way and whether one is read;
+    \\// its strength, whether it is read over the lightmap - realtime - and
+    \\// one over its pictures' widths; one over their heights.
+    \\uniform Volume : 10 {
+    \\    vec4 VOLUME_ORIGIN;
+    \\    vec4 VOLUME_COUNTS;
+    \\    vec4 VOLUME_KNOBS;
+    \\    vec4 VOLUME_SIZES;
+    \\}
+    \\texture2d VOLUME_LIGHT : 13;
+    \\texture2d VOLUME_DEPTH : 14;
     \\
     \\const float PI = 3.14159265;
     \\
@@ -685,9 +705,77 @@ const engine_head =
     \\    return mean * (a + (1.0 - a) * (p + 1.0) * pow(q, p));
     \\}
     \\
-    \\// The light from everywhere on a surface facing `n`: baked into the
-    \\// lightmap, the probes' round a mesh that moves, or the environment's.
-    \\vec3 indirect(vec3 n, vec4 at) {
+    \\// How far probe `g` saw along `way`: the mean of the distance and of
+    \\// its square, from its tile of the depth picture.
+    \\vec2 volumeDepth(vec3 g, vec3 way) {
+    \\    vec2 unfolded = octahedral(way) * 0.5 + vec2(0.5);
+    \\    vec2 texel = vec2(g.x * 8.0, (g.y + g.z * VOLUME_COUNTS.y) * 8.0) + vec2(0.5) + unfolded * 7.0;
+    \\    return sample_level(VOLUME_DEPTH, texel * vec2(VOLUME_KNOBS.w, VOLUME_SIZES.y), 0.0).xy;
+    \\}
+    \\
+    \\// The volume's light at `p` on a surface facing `n`, seen from `v`:
+    \\// the eight probes round it, each by how near it is, how much the
+    \\// surface faces it and how likely nothing stands between - and in `a`
+    \\// whether there was any.
+    \\vec4 volumeLight(vec3 p, vec3 n, vec3 v) {
+    \\    float spacing = VOLUME_ORIGIN.w;
+    \\    vec3 biased = p + (n * 0.2 + v * 0.8) * (0.3 * spacing);
+    \\    vec3 grid = (biased - VOLUME_ORIGIN.xyz) / spacing;
+    \\    vec3 most = VOLUME_COUNTS.xyz - vec3(1.0);
+    \\    // Outside its box - half a probe past the last - it has nothing.
+    \\    vec3 out_low = vec3(-0.5) - grid;
+    \\    vec3 out_high = grid - most - vec3(0.5);
+    \\    if (max(max(out_low.x, out_low.y), out_low.z) > 0.0 || max(max(out_high.x, out_high.y), out_high.z) > 0.0) {
+    \\        return vec4(0.0);
+    \\    }
+    \\    vec3 base = clamp(floor(grid), vec3(0.0), most);
+    \\    vec3 f = clamp(grid - base, vec3(0.0), vec3(1.0));
+    \\    vec3 sum = vec3(0.0);
+    \\    float weight = 0.0;
+    \\    for (int i = 0; i < 8; i = i + 1) {
+    \\        vec3 corner = vec3(float(i - (i / 2) * 2), float((i / 2) - (i / 4) * 2), float(i / 4));
+    \\        vec3 g = min(base + corner, most);
+    \\        vec3 at = VOLUME_ORIGIN.xyz + g * spacing;
+    \\        vec3 trilinear = mix(vec3(1.0) - f, f, corner);
+    \\        float w = trilinear.x * trilinear.y * trilinear.z;
+    \\        vec3 to = at - p;
+    \\        float toward = dot(normalize(to), n);
+    \\        w = w * ((toward + 1.0) * 0.5 * (toward + 1.0) * 0.5 + 0.2);
+    \\        vec3 from_probe = biased - at;
+    \\        float d = length(from_probe);
+    \\        vec2 seen = volumeDepth(g, from_probe / max(d, 0.0001));
+    \\        if (d > seen.x) {
+    \\            float variance = abs(seen.x * seen.x - seen.y);
+    \\            float apart = d - seen.x;
+    \\            float chance = variance / (variance + apart * apart);
+    \\            w = w * max(chance * chance * chance, 0.0);
+    \\        }
+    \\        vec2 texel = vec2(g.x * 3.0 + 0.5, g.y + g.z * VOLUME_COUNTS.y + 0.5);
+    \\        vec4 red = sample_level(VOLUME_LIGHT, texel * vec2(VOLUME_KNOBS.z, VOLUME_SIZES.x), 0.0);
+    \\        if (red.x >= 0.0 && w > 0.0) {
+    \\            vec4 green = sample_level(VOLUME_LIGHT, (texel + vec2(1.0, 0.0)) * vec2(VOLUME_KNOBS.z, VOLUME_SIZES.x), 0.0);
+    \\            vec4 blue = sample_level(VOLUME_LIGHT, (texel + vec2(2.0, 0.0)) * vec2(VOLUME_KNOBS.z, VOLUME_SIZES.x), 0.0);
+    \\            sum = sum + vec3(leaning(red, n), leaning(green, n), leaning(blue, n)) * w;
+    \\            weight = weight + w;
+    \\        }
+    \\    }
+    \\    if (weight <= 0.0001) {
+    \\        return vec4(0.0);
+    \\    }
+    \\    return vec4(sum / weight * VOLUME_KNOBS.x, 1.0);
+    \\}
+    \\
+    \\// The light from everywhere on a surface at `p` facing `n`, seen from
+    \\// `v`: a probe volume's where it is realtime, or where it holds it and
+    \\// the surface has no lightmap; else baked into the lightmap, the
+    \\// probes' round a mesh that moves, or the environment's.
+    \\vec3 indirect(vec3 p, vec3 n, vec3 v, vec4 at) {
+    \\    if (VOLUME_COUNTS.w > 0.5 && (VOLUME_KNOBS.y > 0.5 || at.w < 0.5 || at.w > 1.5)) {
+    \\        vec4 held = volumeLight(p, n, v);
+    \\        if (held.a > 0.5) {
+    \\            return held.rgb;
+    \\        }
+    \\    }
     \\    if (at.w > 1.5) {
     \\        int i = int(at.z + 0.5) * 3;
     \\        vec3 c = vec3(leaning(PROBE_SAMPLES[i], n), leaning(PROBE_SAMPLES[i + 1], n), leaning(PROBE_SAMPLES[i + 2], n));
@@ -733,28 +821,32 @@ const engine_tail =
     \\}
     \\
     \\// Where square `level` of a reflection probe's block is, from its corner,
-    \\// and how many texels across: each rougher one half the one before.
-    \\vec3 probeSquareOf(float level) {
+    \\// and how many texels across, its sharpest `s`: each rougher one half
+    \\// the one before.
+    \\vec3 probeSquareOf(float level, float s) {
     \\    if (level < 0.5) {
-    \\        return vec3(0.0, 0.0, 128.0);
+    \\        return vec3(0.0, 0.0, s);
     \\    }
     \\    if (level < 1.5) {
-    \\        return vec3(128.0, 0.0, 64.0);
+    \\        return vec3(s, 0.0, s * 0.5);
     \\    }
     \\    if (level < 2.5) {
-    \\        return vec3(128.0, 64.0, 32.0);
+    \\        return vec3(s, s * 0.5, s * 0.25);
     \\    }
     \\    if (level < 3.5) {
-    \\        return vec3(160.0, 64.0, 16.0);
+    \\        return vec3(s * 1.25, s * 0.5, s * 0.125);
     \\    }
-    \\    return vec3(176.0, 64.0, 8.0);
+    \\    return vec3(s * 1.375, s * 0.5, s * 0.0625);
     \\}
     \\
     \\// What a probe whose block is at `block` saw along `way`, in square `level`.
     \\vec3 probeSeen(vec4 block, vec3 way, float level) {
-    \\    vec3 square = probeSquareOf(level);
+    \\    vec3 square = probeSquareOf(level, block.w);
     \\    vec2 unfolded = octahedral(way) * 0.5 + vec2(0.5);
     \\    vec2 texel = block.xy + square.xy + vec2(0.5) + unfolded * (square.z - 1.0);
+    \\    if (REFLECTION_INFO.w > 0.5) {
+    \\        texel.y = 1.0 / REFLECTION_INFO.z - block.y - square.y - square.z + 0.5 + unfolded.y * (square.z - 1.0);
+    \\    }
     \\    return sample_level(REFLECTION_ATLAS, texel * REFLECTION_INFO.yz, 0.0).rgb;
     \\}
     \\
@@ -855,7 +947,7 @@ const engine_tail =
     \\    light = light + lamp(lamps_1.x, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.y, p, ng, n, v, albedo, m, roughness, turn)
     \\        + lamp(lamps_1.z, p, ng, n, v, albedo, m, roughness, turn) + lamp(lamps_1.w, p, ng, n, v, albedo, m, roughness, turn);
     \\    vec3 f0 = mix(vec3(0.04), albedo, m);
-    \\    vec3 around = indirect(n, gi_at);
+    \\    vec3 around = indirect(p, n, v, gi_at);
     \\    // What it mirrors: the reflection probes' light round it, where they
     \\    // hold it - hidden below its own horizon - and the light from
     \\    // everywhere where they do not.
@@ -1457,7 +1549,7 @@ fn makePipeline(device: *rhi.Device, module: *shader.Module, gpu: rhi.Shader, sk
 /// block there, which the device binds nothing to.
 fn blockNames(module: *shader.Module) ![]const [:0]const u8 {
     const arena = module.arena.allocator();
-    const names = try arena.alloc([:0]const u8, @max(@max(@max(@max(@max(shadows_slot, probes_slot), skin_slot), fog_volumes.slot), decals.slot), reflections_slot) + 1);
+    const names = try arena.alloc([:0]const u8, @max(@max(@max(@max(@max(@max(shadows_slot, probes_slot), skin_slot), fog_volumes.slot), decals.slot), reflections_slot), volume_slot) + 1);
     @memset(names, "");
     for (module.blocks) |block| names[block.slot] = try arena.dupeZ(u8, block.name);
     return names;
@@ -1577,7 +1669,7 @@ fn compileAs(gpa: Allocator, device: *rhi.Device, text: []const u8, label: []con
     // One block of its own, at its slot, and no textures but the engine's.
     var params: ?shader.Block = null;
     for (module.blocks) |block| {
-        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot or block.slot == fog_volumes.slot or block.slot == decals.slot or block.slot == reflections_slot or (skinned and block.slot == skin_slot)) continue;
+        if (block.slot < params_slot or block.slot == shadows_slot or block.slot == probes_slot or block.slot == fog_volumes.slot or block.slot == decals.slot or block.slot == reflections_slot or block.slot == volume_slot or (skinned and block.slot == skin_slot)) continue;
         if (block.slot != params_slot or params != null) {
             problems.print("a 3D shader's own numbers are one uniform block, at slot {d}: `{s}` is at {d}\n", .{ params_slot, block.name, block.slot }) catch {};
             return error.ShaderFailed;

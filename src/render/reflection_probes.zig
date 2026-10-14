@@ -69,28 +69,36 @@ pub const slot = shader3d.reflections_slot;
 pub const atlas_slot = shader3d.reflection_atlas_slot;
 /// The most probes a frame's surfaces take reflections from.
 pub const most_shown = 8;
-/// A face, and the sharpest square, this many texels across.
-pub const face_size = 128;
+/// A face, and the sharpest square, as many texels across as the project's
+/// `reflection_probe_size` says: sharper reflections for more memory and a
+/// dearer capture.
+pub const sides = [_]u32{ 64, 128, 256 };
 /// The squares of a probe: their roughness one of `levels - 1` apart, their
-/// sides halved each, and where each is in its probe's block.
+/// sides halved each.
 pub const levels = 5;
-const level_places = [levels][3]u32{ .{ 0, 0, 128 }, .{ 128, 0, 64 }, .{ 128, 64, 32 }, .{ 160, 64, 16 }, .{ 176, 64, 8 } };
-/// A probe's block: 192 by 128 texels.
-const block_width = 192;
-const block_height = 128;
+/// Where each square of a probe whose sharpest is `side` across is in its
+/// block, and its side: the sharpest first, the next right of it, the rest
+/// under that one, side by side.
+fn levelPlaces(side: u32) [levels][3]u32 {
+    return .{ .{ 0, 0, side }, .{ side, 0, side / 2 }, .{ side, side / 2, side / 4 }, .{ side + side / 4, side / 2, side / 8 }, .{ side + side / 4 + side / 8, side / 2, side / 16 } };
+}
+/// A probe's block: half as wide again as its sharpest square, and as tall.
+fn blockWidth(side: u32) u32 {
+    return side + side / 2;
+}
 const atlas_width = 2048;
-const blocks_across = atlas_width / block_width;
 /// The most probes kept at once.
 pub const most_probes = 160;
 /// GGX samples a texel of a rougher square takes from the one before.
 const prefilter_samples = 32;
 
-/// What the 3D shader's `Reflections` block holds: five `vec4`s a probe -
+/// What the 3D shader's `Reflections` block holds: four `vec4`s a probe -
 /// its box's low corner and how far in it fades, its high corner and its
 /// strength, where it saw from and whether it bends reflections to its
 /// box, and where its block is in the atlas.
 pub const Block = extern struct {
-    /// How many, and one over the atlas's width and height.
+    /// How many, one over the atlas's width and height, and whether its
+    /// rows are stored bottom first.
     info: [4]f32 = .{ 0, 0, 0, 0 },
     probes: [most_shown * 4][4]f32 = @splat(.{ 0, 0, 0, 0 }),
 };
@@ -112,6 +120,8 @@ pub const Reflections = struct {
     format: rhi.Format,
     atlas: ?rhi.Texture = null,
     atlas_rows: u32 = 0,
+    /// The sharpest square's side, and a face's: see `sides`.
+    side: u32 = 128,
     faces: [6]?rhi.Texture = @splat(null),
     scratch: [levels]?rhi.Texture = @splat(null),
     slots: std.ArrayList(Slot) = .empty,
@@ -212,6 +222,7 @@ pub const Reflections = struct {
     /// realtime ones, a face each frame between them.
     pub fn capture(self: *Reflections, app: *App) !void {
         if (self.refused) return;
+        self.resize(app.renderingNow().reflection_probe_size.pixels());
         try self.keepSlots(app);
         if (self.slots.items.len == 0) return;
         // A capture of a world still coming in would keep what is missing.
@@ -247,6 +258,33 @@ pub const Reflections = struct {
         }
     }
 
+    /// Every picture made again at squares `side` across, and every probe
+    /// captured again into them, where that is not their size already.
+    fn resize(self: *Reflections, side: u32) void {
+        if (side == self.side) return;
+        const device = self.device;
+        for (&self.faces) |*held| if (held.*) |texture| {
+            device.destroyTexture(texture);
+            held.* = null;
+        };
+        for (&self.scratch) |*held| if (held.*) |texture| {
+            device.destroyTexture(texture);
+            held.* = null;
+        };
+        if (self.atlas) |texture| device.destroyTexture(texture);
+        self.atlas = null;
+        self.atlas_rows = 0;
+        self.side = side;
+        for (self.slots.items) |*held| {
+            held.ready = false;
+            held.faces = 0;
+        }
+    }
+
+    fn blocksAcross(self: *const Reflections) usize {
+        return atlas_width / blockWidth(self.side);
+    }
+
     /// The slots kept in step with the probes there are: a new one given
     /// one, one gone let go of.
     fn keepSlots(self: *Reflections, app: *App) !void {
@@ -279,7 +317,7 @@ pub const Reflections = struct {
     };
 
     /// The view of face `face` from `from`: a quarter turn across, square.
-    fn faceView(probe: ReflectionProbe3D, from: Vec3, face: usize) View3D {
+    fn faceView(probe: ReflectionProbe3D, from: Vec3, face: usize, side: u32) View3D {
         var placed: Transform3D = .{ .position = from };
         placed.lookAt(from.add(face_ways[face][0]), face_ways[face][1]);
         return .{
@@ -288,8 +326,8 @@ pub const Reflections = struct {
             .fov = std.math.pi / 2.0,
             .near = probe.near,
             .far = probe.far,
-            .width = face_size,
-            .height = face_size,
+            .width = @floatFromInt(side),
+            .height = @floatFromInt(side),
             .cull_mask = probe.cull_mask,
         };
     }
@@ -302,7 +340,7 @@ pub const Reflections = struct {
         const placed = hierarchy.resolve3D(&app.world, &app.snapshots3d, held.entity, local, 1) orelse return false;
         const from = placed.position.add(probe.capture_offset);
         const target = try self.faceTexture(face);
-        const view = faceView(probe, from, face);
+        const view = faceView(probe, from, face, self.side);
         app.renderer3d.captured = null;
         self.capturing = true;
         defer self.capturing = false;
@@ -311,19 +349,19 @@ pub const Reflections = struct {
             return false;
         };
         const device = self.device;
-        var pass: Pass = .{ .texel = .{ 1.0 / @as(f32, face_size), material.screenFlip(device), 0, 0 }, .faces = @splat(.{ 0, 0, 0, 0 }), .samples = @splat(.{ 0, 0, 0, 0 }) };
+        var pass: Pass = .{ .texel = .{ 1.0 / @as(f32, @floatFromInt(self.side)), material.screenFlip(device), 0, 0 }, .faces = @splat(.{ 0, 0, 0, 0 }), .samples = @splat(.{ 0, 0, 0, 0 }) };
         try device.updateBuffer(self.passes, 0, std.mem.asBytes(&pass));
         // The skybox's world first, with the sky - then the world over it,
         // where it drew anything. The light drawn is the renderer's own,
         // kept until its next draw of this size: copied out at once.
         var clear: ?Color = app.clear_color;
         if (skyboxes.viewFor(app, view)) |sky| {
-            try app.renderer3d.draw(app, .{ .texture = target }, face_size, face_size, sky, clear, .{ .capture = true, .shadows = probe.shadows });
+            try app.renderer3d.draw(app, .{ .texture = target }, self.side, self.side, sky, clear, .{ .capture = true, .shadows = probe.shadows });
             try self.copyInto(target, shaders.copy_pipeline, app.renderer3d.captured orelse return false);
             clear = null;
         }
         app.renderer3d.captured = null;
-        try app.renderer3d.draw(app, .{ .texture = target }, face_size, face_size, view, clear, .{ .capture = true, .shadows = probe.shadows });
+        try app.renderer3d.draw(app, .{ .texture = target }, self.side, self.side, view, clear, .{ .capture = true, .shadows = probe.shadows });
         try self.copyInto(target, if (clear == null) shaders.over_pipeline else shaders.copy_pipeline, app.renderer3d.captured orelse return false);
         held.faces |= @as(u8, 1) << face;
         return true;
@@ -335,7 +373,7 @@ pub const Reflections = struct {
         const device = self.device;
         const list = device.begin();
         try list.beginPass(.{ .color = .{ .target = .{ .texture = target }, .load = .load } });
-        try list.setViewport(.{ .width = face_size, .height = face_size });
+        try list.setViewport(.{ .width = @floatFromInt(self.side), .height = @floatFromInt(self.side) });
         try list.setPipeline(pipeline);
         try list.setUniformBuffer(0, self.passes);
         try list.setTexture(0, light, self.sampler);
@@ -348,8 +386,8 @@ pub const Reflections = struct {
     fn faceTexture(self: *Reflections, face: usize) !rhi.Texture {
         if (self.faces[face]) |held| return held;
         const made = try self.device.createTexture(.{
-            .width = face_size,
-            .height = face_size,
+            .width = self.side,
+            .height = self.side,
             .format = self.format,
             .usage = .{ .sampled = true, .render_target = true },
             .label = "reflection probe face",
@@ -360,7 +398,7 @@ pub const Reflections = struct {
 
     fn scratchTexture(self: *Reflections, level: usize) !rhi.Texture {
         if (self.scratch[level]) |held| return held;
-        const side = level_places[level][2];
+        const side = levelPlaces(self.side)[level][2];
         const made = try self.device.createTexture(.{
             .width = side,
             .height = side,
@@ -380,7 +418,7 @@ pub const Reflections = struct {
         const wanted = @max(rows, 2);
         self.atlas = try self.device.createTexture(.{
             .width = atlas_width,
-            .height = wanted * block_height,
+            .height = wanted * self.side,
             .format = self.format,
             .usage = .{ .sampled = true, .render_target = true },
             .label = "reflection probe atlas",
@@ -401,7 +439,7 @@ pub const Reflections = struct {
             self.refused = true;
             return;
         };
-        const atlas = try self.atlasFor(@intCast(@divFloor(self.slots.items.len + blocks_across - 1, blocks_across)));
+        const atlas = try self.atlasFor(@intCast(@divFloor(self.slots.items.len + self.blocksAcross() - 1, self.blocksAcross())));
         // The atlas made again lets every capture go.
         if (!self.slots.items[at].ready and self.slots.items[at].faces != 0b111111) return;
         const device = self.device;
@@ -409,7 +447,7 @@ pub const Reflections = struct {
         var pass: Pass = .{ .texel = .{ 0, flip, 0, 0 }, .faces = undefined, .samples = @splat(.{ 0, 0, 0, 0 }) };
         const clip = device.clip();
         for (0..6) |face| {
-            var view = faceView(.{}, Vec3.zero, face);
+            var view = faceView(.{}, Vec3.zero, face, self.side);
             view.near = 0.05;
             view.far = 10;
             const columns = view.matrix(clip).array();
@@ -417,12 +455,12 @@ pub const Reflections = struct {
         }
         // The faces folded onto the sharpest square.
         {
-            pass.texel[0] = 1.0 / @as(f32, face_size);
+            pass.texel[0] = 1.0 / @as(f32, @floatFromInt(self.side));
             try device.updateBuffer(self.passes, 0, std.mem.asBytes(&pass));
             const list = device.begin();
             const into = try self.scratchTexture(0);
             try list.beginPass(.{ .color = .{ .target = .{ .texture = into }, .load = .dont_care } });
-            try list.setViewport(.{ .width = face_size, .height = face_size });
+            try list.setViewport(.{ .width = @floatFromInt(self.side), .height = @floatFromInt(self.side) });
             try list.setPipeline(shaders.fold_pipeline);
             try list.setUniformBuffer(0, self.passes);
             for (0..6) |face| try list.setTexture(@intCast(face), self.faces[face].?, self.sampler);
@@ -434,8 +472,8 @@ pub const Reflections = struct {
         // Each rougher one blurred from the one before, by the lobe that
         // widens the one before's to its own.
         for (1..levels) |level| {
-            const side = level_places[level][2];
-            pass.texel = .{ 1.0 / @as(f32, @floatFromInt(side)), flip, @floatFromInt(level), 1.0 / @as(f32, @floatFromInt(level_places[level - 1][2])) };
+            const side = levelPlaces(self.side)[level][2];
+            pass.texel = .{ 1.0 / @as(f32, @floatFromInt(side)), flip, @floatFromInt(level), 1.0 / @as(f32, @floatFromInt(levelPlaces(self.side)[level - 1][2])) };
             pass.samples = ggxSamples(roughnessStep(level));
             try device.updateBuffer(self.passes, 0, std.mem.asBytes(&pass));
             const list = device.begin();
@@ -450,9 +488,9 @@ pub const Reflections = struct {
             try device.submit();
         }
         // All of them into the probe's block.
-        const origin = blockOrigin(at);
+        const origin = blockOrigin(at, self.side);
         for (0..levels) |level| {
-            const place = level_places[level];
+            const place = levelPlaces(self.side)[level];
             const list = device.begin();
             try list.beginPass(.{ .color = .{ .target = .{ .texture = atlas }, .load = .load } });
             try list.setViewport(.{
@@ -470,12 +508,15 @@ pub const Reflections = struct {
             try device.submit();
         }
         const held = &self.slots.items[at];
+        // Said once when the last whole one comes in: not again for each
+        // turn of a realtime probe.
+        const new = !held.ready or held.again;
         held.ready = true;
         held.again = false;
         const all_ready = for (self.slots.items) |one| {
             if (!one.ready) break false;
         } else true;
-        if (all_ready) log.info("{d} reflection probes captured", .{self.slots.items.len});
+        if (new and all_ready) log.info("{d} reflection probes captured", .{self.slots.items.len});
     }
 
     fn compiled(self: *Reflections) !*Shaders {
@@ -577,10 +618,13 @@ pub const Reflections = struct {
                 }
             }.less;
             std.mem.sort(Candidate, kept, {}, strongest_first);
-            const height: f32 = @floatFromInt(self.atlas_rows * block_height);
-            block.info = .{ @floatFromInt(kept.len), 1.0 / @as(f32, atlas_width), 1.0 / height, 0 };
+            const height: f32 = @floatFromInt(self.atlas_rows * self.side);
+            // A square is put in its block down from the top; a device that
+            // stores rows bottom first has the blocks' rows the other way up.
+            const bottom_first: f32 = if (material.screenFlip(self.device) > 0) 1 else 0;
+            block.info = .{ @floatFromInt(kept.len), 1.0 / @as(f32, atlas_width), 1.0 / height, bottom_first };
             for (kept, 0..) |one, i| {
-                const origin = blockOrigin(one.at);
+                const origin = blockOrigin(one.at, self.side);
                 block.probes[i * 4 + 0] = .{ one.lo.x, one.lo.y, one.lo.z, @max(one.probe.blend_distance, 0.001) };
                 block.probes[i * 4 + 1] = .{ one.hi.x, one.hi.y, one.hi.z, @max(one.probe.intensity, 0) };
                 block.probes[i * 4 + 2] = .{ one.from.x, one.from.y, one.from.z, if (one.probe.box_projection) 1 else 0 };
@@ -588,7 +632,7 @@ pub const Reflections = struct {
                 if (baked) |held| if (held.probeLight(one.from.array())) |light| {
                     there = 0.2126 * light[0] + 0.7152 * light[4] + 0.0722 * light[8];
                 };
-                block.probes[i * 4 + 3] = .{ @floatFromInt(origin[0]), @floatFromInt(origin[1]), there, 0 };
+                block.probes[i * 4 + 3] = .{ @floatFromInt(origin[0]), @floatFromInt(origin[1]), there, @floatFromInt(self.side) };
             }
         }
         if (std.mem.eql(u8, std.mem.asBytes(&block), std.mem.asBytes(&self.shown))) return;
@@ -597,9 +641,11 @@ pub const Reflections = struct {
     }
 };
 
-/// Where probe `at`'s block is in the atlas, in texels.
-fn blockOrigin(at: usize) [2]u32 {
-    return .{ @intCast((at % blocks_across) * block_width), @intCast((at / blocks_across) * block_height) };
+/// Where probe `at`'s block is in the atlas, in texels, its squares'
+/// sharpest `side` across.
+fn blockOrigin(at: usize, side: u32) [2]u32 {
+    const across = atlas_width / blockWidth(side);
+    return .{ @intCast((at % across) * blockWidth(side)), @intCast((at / across) * side) };
 }
 
 /// The roughness of each square: nought, then a quarter more each.
@@ -751,13 +797,24 @@ test "the capture's shaders compile" {
     }
 }
 
-test "a probe's squares fit its block, and the blocks the atlas" {
-    for (level_places) |place| {
-        try testing.expect(place[0] + place[2] <= block_width);
-        try testing.expect(place[1] + place[2] <= block_height);
+test "a probe's squares fit its block, and the blocks the atlas, at every size" {
+    for (sides) |side| {
+        const places = levelPlaces(side);
+        try testing.expectEqual(side, places[0][2]);
+        for (places, 0..) |place, level| {
+            try testing.expect(place[0] + place[2] <= blockWidth(side));
+            try testing.expect(place[1] + place[2] <= side);
+            if (level > 0) try testing.expectEqual(places[level - 1][2] / 2, place[2]);
+            // Side by side, none over another.
+            for (places[0..level]) |before| {
+                const apart = place[0] >= before[0] + before[2] or before[0] >= place[0] + place[2] or
+                    place[1] >= before[1] + before[2] or before[1] >= place[1] + place[2];
+                try testing.expect(apart);
+            }
+        }
+        try testing.expect(blockOrigin(most_probes - 1, side)[0] + blockWidth(side) <= atlas_width);
+        try testing.expect(blockOrigin(most_probes - 1, side)[1] + side <= 8192);
     }
-    try testing.expectEqual(@as(u32, 128), level_places[0][2]);
-    try testing.expect(blockOrigin(most_probes - 1)[0] + block_width <= atlas_width);
 }
 
 test "each rougher square's blur, added to the one before, makes its own roughness" {

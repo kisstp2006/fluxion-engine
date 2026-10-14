@@ -148,6 +148,12 @@ pub const Scene = struct {
     materials: []const Material,
     images: []const Image,
     lights: []const Light,
+    /// The probe volumes baked with it: see `bakeVolume`.
+    volumes: []const VolumeGrid = &.{},
+    /// The lights whose sight from each volume ray's end is kept - every
+    /// one, those whose light is not baked and those dark now as well, so
+    /// that one lit later lights the volume - the first `volume_lights`.
+    volume_lights: []const Light = &.{},
 };
 
 pub const Settings = struct {
@@ -182,11 +188,15 @@ pub const Result = struct {
     /// and `y`, moved by `z` and `w`. Nought for one not in it.
     places: [][4]f32,
     probes: Probes,
+    /// The scene's probe volumes, in its order.
+    volumes: []Volume = &.{},
 
     pub fn deinit(self: *Result, gpa: Allocator) void {
         gpa.free(self.pixels);
         gpa.free(self.places);
         self.probes.deinit(gpa);
+        for (self.volumes) |*volume| volume.deinit(gpa);
+        gpa.free(self.volumes);
         self.* = undefined;
     }
 };
@@ -331,6 +341,17 @@ pub fn bake(gpa: Allocator, scene: Scene, settings: Settings, control: *Control)
     errdefer probes.deinit(gpa);
     if (control.cancelled.load(.acquire)) return error.Cancelled;
 
+    const volumes = try gpa.alloc(Volume, scene.volumes.len);
+    var made: usize = 0;
+    errdefer {
+        for (volumes[0..made]) |*volume| volume.deinit(gpa);
+        gpa.free(volumes);
+    }
+    for (scene.volumes) |grid| {
+        volumes[made] = try bakeVolumeIn(gpa, &world, settings, grid, scene.volume_lights, control);
+        made += 1;
+    }
+
     const places = try gpa.alloc([4]f32, scene.instances.len);
     errdefer gpa.free(places);
     const size: f32 = @floatFromInt(atlas.size);
@@ -342,7 +363,7 @@ pub fn bake(gpa: Allocator, scene: Scene, settings: Settings, control: *Control)
             @as(f32, @floatFromInt(rect.y)) / size,
         };
     }
-    return .{ .width = atlas.size, .height = atlas.size, .pixels = pixels, .places = places, .probes = probes };
+    return .{ .width = atlas.size, .height = atlas.size, .pixels = pixels, .places = places, .probes = probes, .volumes = volumes };
 }
 
 // -------------------------------------------------------------------------
@@ -495,6 +516,20 @@ const World = struct {
                     if (!self.tree.blocked(p, toward / splat(far), far * 0.999, holes_filter)) seen += 1;
                 }
                 return color * splat(facing * fade * seen / @as(f32, @floatFromInt(count)));
+            },
+        }
+    }
+
+    /// Whether nothing stands between `light` - its middle - and `p`, and
+    /// `p` is within its reach: whatever its colour now.
+    fn sees(self: *const World, light: Light, p: Vec3) bool {
+        switch (light.kind) {
+            .sun => return !self.tree.blocked(p, normalize(vec(light.direction)), std.math.floatMax(f32), self.holes()),
+            .point, .spot => {
+                const to = vec(light.position) - p;
+                const d = length(to);
+                if (d <= 0 or d >= light.range) return false;
+                return !self.tree.blocked(p, to / splat(d), d * 0.999, self.holes());
             },
         }
     }
@@ -1125,6 +1160,200 @@ const ProbeJob = struct {
     }
 };
 
+// -------------------------------------------------------------------------
+// Probe volumes
+// -------------------------------------------------------------------------
+
+/// How many rays each probe of a volume sends unless its grid says - the
+/// same ways for every probe, `volumeWay` - for what they meet and how far
+/// it is; and the most it may.
+pub const volume_rays = 64;
+pub const most_volume_rays = 128;
+/// A probe's distances: an unfolded octahedron this many texels across.
+pub const volume_depth_side = 8;
+/// The most lights whose sight from each ray's end is kept: a bit each.
+pub const volume_lights = 16;
+
+/// A grid of probes over a box of the world, baked for a probe volume.
+pub const VolumeGrid = struct {
+    origin: [3]f32,
+    spacing: f32,
+    counts: [3]u32,
+    /// How many rays each probe sends: more see smaller things and leak
+    /// less, for a longer bake, more memory and a dearer realtime relight.
+    /// At most `most_volume_rays`.
+    rays: u32 = volume_rays,
+
+    pub fn count(self: VolumeGrid) usize {
+        return @as(usize, self.counts[0]) * self.counts[1] * self.counts[2];
+    }
+
+    /// Where probe `i` is: `x` fastest, then `y`, then `z`.
+    pub fn at(self: VolumeGrid, i: usize) [3]f32 {
+        const x = i % self.counts[0];
+        const y = (i / self.counts[0]) % self.counts[1];
+        const z = i / (@as(usize, self.counts[0]) * self.counts[1]);
+        return .{
+            self.origin[0] + @as(f32, @floatFromInt(x)) * self.spacing,
+            self.origin[1] + @as(f32, @floatFromInt(y)) * self.spacing,
+            self.origin[2] + @as(f32, @floatFromInt(z)) * self.spacing,
+        };
+    }
+};
+
+/// What one of a probe's rays met.
+pub const VolumeHit = struct {
+    /// How far along it, in units; below nought where it met nothing - the sky.
+    distance: f32 = -1,
+    /// The way the surface met faces, toward the probe.
+    normal: [3]f32 = .{ 0, 1, 0 },
+    /// What it keeps of the light, and gives off.
+    albedo: [3]f32 = .{ 0, 0, 0 },
+    emission: [3]f32 = .{ 0, 0, 0 },
+    /// Which of the first `volume_lights` lights it sees: bit `k` light `k`.
+    lights: u32 = 0,
+};
+
+/// A volume baked: its light at each probe - as `Probes.samples` - whether
+/// each is in the open, what each of its rays met, and how far each way
+/// it sees: the mean of the distance and of its square, a texel each of an
+/// unfolded octahedron.
+pub const Volume = struct {
+    grid: VolumeGrid,
+    light: [][12]f32 = &.{},
+    valid: []bool = &.{},
+    hits: []VolumeHit = &.{},
+    depth: [][volume_depth_side * volume_depth_side][2]f32 = &.{},
+
+    pub fn deinit(self: *Volume, gpa: Allocator) void {
+        gpa.free(self.light);
+        gpa.free(self.valid);
+        gpa.free(self.hits);
+        gpa.free(self.depth);
+        self.* = undefined;
+    }
+};
+
+/// Ray `k` of `count` of every probe's: Fibonacci's spiral over the
+/// sphere, so they are spread evenly.
+pub fn volumeWay(k: usize, count: u32) [3]f32 {
+    const golden = 2.399963229728653;
+    const z = 1 - (2 * @as(f32, @floatFromInt(k)) + 1) / @as(f32, @floatFromInt(count));
+    const r = @sqrt(@max(1 - z * z, 0));
+    const phi = golden * @as(f32, @floatFromInt(k));
+    return .{ r * @cos(phi), r * @sin(phi), z };
+}
+
+/// The way of texel (`x`, `y`) of a probe's unfolded octahedron of `side`.
+pub fn octahedralWay(x: usize, y: usize, side: usize) [3]f32 {
+    const s: f32 = @floatFromInt(side);
+    var e: [2]f32 = .{ (@as(f32, @floatFromInt(x)) + 0.5) / s * 2 - 1, (@as(f32, @floatFromInt(y)) + 0.5) / s * 2 - 1 };
+    var v: Vec3 = .{ e[0], e[1], 1 - @abs(e[0]) - @abs(e[1]) };
+    if (v[2] < 0) {
+        const fx: f32 = if (e[0] >= 0) 1 else -1;
+        const fy: f32 = if (e[1] >= 0) 1 else -1;
+        v = .{ (1 - @abs(e[1])) * fx, (1 - @abs(e[0])) * fy, v[2] };
+    }
+    _ = &e;
+    return normalize(v);
+}
+
+/// Bake a probe volume over `grid` in `scene`: on this thread and as many
+/// more as `settings` says, following `control`.
+pub fn bakeVolume(gpa: Allocator, scene: Scene, settings: Settings, grid: VolumeGrid, control: *Control) (Allocator.Error || error{Cancelled})!Volume {
+    var world = try World.init(gpa, scene, settings);
+    defer world.deinit(gpa);
+    return bakeVolumeIn(gpa, &world, settings, grid, scene.volume_lights, control);
+}
+
+fn bakeVolumeIn(gpa: Allocator, world: *const World, settings: Settings, grid: VolumeGrid, lights: []const Light, control: *Control) (Allocator.Error || error{Cancelled})!Volume {
+    const total = grid.count();
+    var volume: Volume = .{ .grid = grid };
+    volume.grid.rays = std.math.clamp(grid.rays, 1, most_volume_rays);
+    errdefer volume.deinit(gpa);
+    volume.light = try gpa.alloc([12]f32, total);
+    volume.valid = try gpa.alloc(bool, total);
+    volume.hits = try gpa.alloc(VolumeHit, total * volume.grid.rays);
+    volume.depth = try gpa.alloc([volume_depth_side * volume_depth_side][2]f32, total);
+    // As a probe of the lightmap's - its light - then what its rays met.
+    var probes: Probes = .{ .origin = grid.origin, .spacing = grid.spacing, .counts = grid.counts, .samples = volume.light, .valid = volume.valid };
+    control.begin(.probes, total);
+    var job: ProbeJob = .{ .world = world, .probes = &probes };
+    parallel(ProbeJob, &job, total, settings.threads, control);
+    if (control.cancelled.load(.acquire)) return error.Cancelled;
+    var rays: VolumeJob = .{ .world = world, .volume = &volume, .lights = lights };
+    parallel(VolumeJob, &rays, total, settings.threads, control);
+    if (control.cancelled.load(.acquire)) return error.Cancelled;
+    return volume;
+}
+
+const VolumeJob = struct {
+    world: *const World,
+    volume: *Volume,
+    lights: []const Light,
+
+    fn one(self: *VolumeJob, i: usize) void {
+        const world = self.world;
+        const grid = self.volume.grid;
+        const at = vec(grid.at(i));
+        const lights = self.lights;
+        // As far as a probe's distances are kept: past it, the same.
+        const reach = grid.spacing * 1.5;
+        var distances: [most_volume_rays]f32 = undefined;
+        for (0..grid.rays) |k| {
+            const way = vec(volumeWay(k, grid.rays));
+            const out = &self.volume.hits[i * grid.rays + k];
+            out.* = .{};
+            const hit = world.tree.nearest(at, way, std.math.floatMax(f32), world.holes()) orelse {
+                distances[k] = reach;
+                continue;
+            };
+            const t = world.scene.triangles[hit.triangle];
+            const m = world.scene.materials[t.material];
+            var face = world.faces[hit.triangle];
+            var normal = normalize(mix3(t.normals, hit.u, hit.v));
+            if (hit.back and m.two_sided) {
+                face = -face;
+                normal = -normal;
+            }
+            if (dot(normal, face) <= 0) normal = face;
+            // A back that is the inside of something: dark, near.
+            distances[k] = @min(hit.t, reach);
+            out.distance = hit.t;
+            out.normal = normal;
+            if (hit.back and !m.two_sided) continue;
+            const surface = world.surfaceAt(hit);
+            out.albedo = surface.albedo;
+            out.emission = surface.emission;
+            const p = at + way * splat(hit.t) + face * splat(world.lift);
+            for (lights[0..@min(lights.len, volume_lights)], 0..) |light, l| {
+                if (world.sees(light, p)) out.lights |= @as(u32, 1) << @intCast(l);
+            }
+        }
+        // How far it sees each way: each texel's rays weighted by how near
+        // their way is to its - sharply, as DDGI does.
+        for (0..volume_depth_side) |y| for (0..volume_depth_side) |x| {
+            const texel = vec(octahedralWay(x, y, volume_depth_side));
+            var mean: f32 = 0;
+            var square: f32 = 0;
+            var weight: f32 = 0;
+            for (0..grid.rays) |k| {
+                const w = std.math.pow(f32, @max(dot(texel, vec(volumeWay(k, grid.rays))), 0), 20);
+                if (w <= 0) continue;
+                mean += distances[k] * w;
+                square += distances[k] * distances[k] * w;
+                weight += w;
+            }
+            if (weight <= 0) {
+                mean = reach;
+                square = reach * reach;
+                weight = 1;
+            }
+            self.volume.depth[i][y * volume_depth_side + x] = .{ mean / weight, square / weight };
+        };
+    }
+};
+
 fn bakeProbes(gpa: Allocator, world: *const World, settings: Settings, control: *Control) Allocator.Error!Probes {
     if (world.scene.triangles.len == 0) return .{};
     const extent: [3]f32 = world.hi - world.lo;
@@ -1380,4 +1609,70 @@ test "probes round a probe inside something leave it out" {
 
 test {
     _ = bvh;
+}
+
+test "a volume's probe over a floor: the rays down meet it as far off as they lean, its colour and which lights see it; up, the sky" {
+    var triangles: std.ArrayList(Triangle) = .empty;
+    defer triangles.deinit(testing.allocator);
+    try quad(&triangles, .{ .{ -50, 0, 50 }, .{ 50, 0, 50 }, .{ 50, 0, -50 }, .{ -50, 0, -50 } }, .{ 0, 1, 0 }, 0, 0);
+    // A sun overhead, and a lamp under the floor that sees none of it.
+    const lights = [_]Light{
+        .{ .kind = .sun, .direction = .{ 0, 1, 0 }, .color = .{ 0, 0, 0 }, .direct = false },
+        .{ .kind = .point, .position = .{ 0, -1, 0 }, .range = 10, .color = .{ 1, 1, 1 }, .direct = false },
+    };
+    const scene: Scene = .{
+        .triangles = triangles.items,
+        .instances = &.{.{ .lit = false, .least_texels = 8 }},
+        .materials = &.{.{ .albedo = .{ 0.5, 0.25, 0.125 } }},
+        .images = &.{},
+        .lights = &.{},
+        .volume_lights = &lights,
+    };
+    var control: Control = .{};
+    var volume = try bakeVolume(testing.allocator, scene, .{ .rays = 16, .sky = .{ 0.2, 0.3, 0.4 } }, .{ .origin = .{ 0, 1, 0 }, .spacing = 1, .counts = .{ 1, 1, 1 } }, &control);
+    defer volume.deinit(testing.allocator);
+    try testing.expect(volume.valid[0]);
+    var down: usize = 0;
+    for (0..volume.grid.rays) |k| {
+        const way = volumeWay(k, volume.grid.rays);
+        const hit = volume.hits[k];
+        if (way[1] < -0.05) {
+            down += 1;
+            try testing.expectApproxEqAbs(1 / -way[1], hit.distance, 0.001);
+            try testing.expectApproxEqAbs(@as(f32, 0.25), hit.albedo[1], 0.001);
+            // The dark sun is seen, the lamp under the floor is not.
+            try testing.expectEqual(@as(u32, 0b01), hit.lights);
+        } else if (way[1] > 0.05) try testing.expect(hit.distance < 0);
+    }
+    try testing.expect(down > 20);
+    // Its distances: straight down, the floor a unit off; up, as far as kept.
+    const below = volume.depth[0][volumeDepthTexel(.{ 0, -1, 0 })];
+    try testing.expectApproxEqAbs(@as(f32, 1), below[0], 0.15);
+    const above = volume.depth[0][volumeDepthTexel(.{ 0, 1, 0 })];
+    try testing.expectApproxEqAbs(@as(f32, 1.5), above[0], 0.01);
+
+    // Finer: twice the rays, half again as many down, the floor as far.
+    var fine = try bakeVolume(testing.allocator, scene, .{ .rays = 16, .sky = .{ 0.2, 0.3, 0.4 } }, .{ .origin = .{ 0, 1, 0 }, .spacing = 1, .counts = .{ 1, 1, 1 }, .rays = 128 }, &control);
+    defer fine.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 128), fine.hits.len);
+    var fine_down: usize = 0;
+    for (0..128) |k| {
+        if (volumeWay(k, 128)[1] < -0.05) fine_down += 1;
+    }
+    try testing.expect(fine_down > down * 3 / 2);
+    try testing.expectApproxEqAbs(@as(f32, 1), fine.depth[0][volumeDepthTexel(.{ 0, -1, 0 })][0], 0.15);
+}
+
+/// The texel of a probe's unfolded octahedron whose way is nearest `way`.
+fn volumeDepthTexel(way: [3]f32) usize {
+    var best: usize = 0;
+    var most: f32 = -2;
+    for (0..volume_depth_side) |y| for (0..volume_depth_side) |x| {
+        const d = dot(vec(octahedralWay(x, y, volume_depth_side)), vec(way));
+        if (d > most) {
+            most = d;
+            best = y * volume_depth_side + x;
+        }
+    };
+    return best;
 }

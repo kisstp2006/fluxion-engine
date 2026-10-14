@@ -634,6 +634,7 @@ pub const engine_components = .{
     components3d.Environment,
     components3d.LightmapGI,
     components3d.ReflectionProbe3D,
+    components3d.ProbeVolume3D,
     components3d.FogVolume,
     components3d.Decal,
     components3d.World3D,
@@ -4028,6 +4029,7 @@ pub const Quality = struct {
     screen_space_aa: ?Project.Rendering.ScreenSpaceAa = null,
     shadow_atlas_size: ?Project.Rendering.ShadowAtlasSize = null,
     shadow_filter: ?Project.Rendering.ShadowFilter = null,
+    reflection_probe_size: ?Project.Rendering.ReflectionProbeSize = null,
     lod_threshold: ?f32 = null,
     scale_3d: ?f32 = null,
 };
@@ -4040,6 +4042,7 @@ pub fn renderingNow(self: *const App) Project.Rendering {
     if (self.quality.screen_space_aa) |mode| out.screen_space_aa = mode;
     if (self.quality.shadow_atlas_size) |size| out.shadow_atlas_size = size;
     if (self.quality.shadow_filter) |filter| out.shadow_filter = filter;
+    if (self.quality.reflection_probe_size) |size| out.reflection_probe_size = size;
     if (self.quality.lod_threshold) |threshold| out.lod_threshold = threshold;
     if (self.quality.scale_3d) |scale| out.scale_3d = scale;
     return out;
@@ -4090,6 +4093,19 @@ pub fn setShadowFilter(self: *App, filter: Project.Rendering.ShadowFilter) void 
 /// How a shadow's edge is smoothed: the game's way, or the project's.
 pub fn shadowFilter(self: *const App) Project.Rendering.ShadowFilter {
     return self.renderingNow().shadow_filter;
+}
+
+/// How many texels across a reflection probe's sharpest picture is, from
+/// the next frame, in place of the project's `reflection_probe_size`: a
+/// settings menu's reflection quality. Every probe is captured again at
+/// the new size.
+pub fn setReflectionProbeSize(self: *App, size: Project.Rendering.ReflectionProbeSize) void {
+    self.quality.reflection_probe_size = size;
+}
+
+/// A reflection probe's sharpest picture's side: the game's, or the project's.
+pub fn reflectionProbeSize(self: *const App) Project.Rendering.ReflectionProbeSize {
+    return self.renderingNow().reflection_probe_size;
 }
 
 /// How soon a model far off is drawn with fewer triangles, from the next
@@ -6588,6 +6604,8 @@ pub const reflect_methods = .{
     .shadowAtlasSize = .{},
     .setShadowFilter = .{attr.Params{ .names = &.{"filter"} }},
     .shadowFilter = .{},
+    .setReflectionProbeSize = .{attr.Params{ .names = &.{"size"} }},
+    .reflectionProbeSize = .{},
     .setLodThreshold = .{attr.Params{ .names = &.{"threshold"} }},
     .lodThreshold = .{},
     .setScale3d = .{attr.Params{ .names = &.{"scale"} }},

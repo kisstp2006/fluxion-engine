@@ -217,3 +217,57 @@ test "a sun whose shadow is baked: the still walls take it from the lightmap, wh
     try testing.expectEqual(@as(f32, 0), app.renderer3d.probe_data.energy[2]);
     try testing.expectEqual(every, app.renderer3d.shadow_casters);
 }
+
+test "a probe volume baked with the room: its probes' light and their rays in the lightmap, the lamps it sees by their UUIDs, and read by the frame" {
+    const lightmaps = @import("lightmaps.zig");
+    const ProbeVolume3D = components3d.ProbeVolume3D;
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const app = try App.create(testing.allocator, .{ .headless = true, .io = testing.io, .root = folder.root(), .width = 64, .height = 64 });
+    defer app.destroy();
+
+    try room(app);
+    const lamp = try app.world.spawnWith(.{ Transform3D.at(0, 2, 0), PointLight3D{ .range = 10, .energy = 2, .bake = .indirect } });
+    const lamp_uuid = try app.ensureUuid(lamp);
+    const volume = try app.world.spawnWith(.{ Transform3D.at(0, 0, 0), ProbeVolume3D{ .extents = .init(2.5, 2.5, 2.5), .spacing = 1.5, .quality = .low } });
+    const volume_uuid = try app.ensureUuid(volume);
+    var eye: Transform3D = .at(0, 0, 2.5);
+    eye.lookAt(.init(0, -1, 0), .unit_y);
+    _ = try app.world.spawnWith(.{ eye, Camera3D{} });
+    const gi = try app.world.spawnWith(.{LightmapGI{ .texels_per_unit = 2, .quality = .low, .bounces = 2, .probe_spacing = 2 }});
+
+    const bake = try app.bakeLightmap(gi, "res://room.lightmap");
+    const baked = try bake.finish(app);
+    const lightmap = app.lightmapOf(baked).?;
+    try testing.expectEqual(@as(usize, 1), lightmap.volumes.len);
+    try testing.expectEqualSlices(@TypeOf(lamp_uuid), &.{lamp_uuid}, lightmap.volume_lights);
+    const held = lightmaps.Volume.find(lightmap.volumes, volume_uuid).?;
+    try testing.expectEqual([3]u32{ 3, 3, 3 }, held.baked.grid.counts);
+    // Its quality's rays, each probe.
+    try testing.expectEqual(@as(u32, 32), held.baked.grid.rays);
+    try testing.expectEqual(@as(usize, 27 * 32), held.baked.hits.len);
+    // Inside the room every probe is in the open, lit by the lamp's bounce,
+    // and every ray meets a wall that sees the lamp - but those under it.
+    var seeing: usize = 0;
+    for (held.baked.valid, held.baked.light) |valid, light| {
+        try testing.expect(valid);
+        try testing.expect(light[0] > 0);
+    }
+    for (held.baked.hits) |hit| {
+        // No ray leaves the closed room: none longer than its diagonal.
+        try testing.expect(hit.distance > 0 and hit.distance < 9);
+        if (hit.lights == 1) seeing += 1;
+    }
+    try testing.expect(seeing > held.baked.hits.len / 2);
+
+    // Read by the frame - baked, and then lit again every frame.
+    _ = try app.step();
+    const volumes = &app.renderer3d.volumes.?;
+    try testing.expectEqual(@as(f32, 1), volumes.shown.counts[3]);
+    try testing.expectEqual(@as(f32, 0), volumes.shown.knobs[1]);
+    app.world.get(volume, ProbeVolume3D).?.mode = .realtime;
+    _ = try app.step();
+    try testing.expectEqual(@as(f32, 1), volumes.shown.knobs[1]);
+    try testing.expect(!volumes.refused);
+}

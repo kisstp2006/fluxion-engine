@@ -41,6 +41,7 @@ const materials = @import("materials.zig");
 const csg_shapes = @import("csg_shapes.zig");
 const mesh = @import("mesh.zig");
 const renderer3d = @import("renderer3d.zig");
+const probe_volumes = @import("probe_volumes.zig");
 const Transform3D = @import("../scene/transform3d.zig").Transform3D;
 
 const Uuid = id.Uuid;
@@ -64,6 +65,11 @@ pub const LightmapBake = struct {
     lights: []lightmapper.Light,
     /// Each instance's entity's UUID: what finds its mesh in the lightmap.
     uuids: []Uuid,
+    /// The probe volumes and the lights they see, and their entities' UUIDs.
+    volumes: []lightmapper.VolumeGrid,
+    volume_uuids: []Uuid,
+    volume_lights: []lightmapper.Light,
+    volume_light_uuids: []Uuid,
     gi: ecs.Entity,
     path: []u8,
     /// What was left out of the lightmap, or lit otherwise, and why: a line
@@ -91,7 +97,7 @@ pub const LightmapBake = struct {
         defer self.destroy();
         var result = try self.job.finish();
         defer result.deinit(self.gpa);
-        const handle = try keep(app, self.path, try lightmaps.fromBaked(app.gpa, result, self.uuids));
+        const handle = try keep(app, self.path, try lightmaps.fromBaked(app.gpa, result, self.uuids, self.volume_uuids, self.volume_light_uuids));
         if (app.world.get(self.gi, LightmapGI)) |gi| gi.data = handle;
         return handle;
     }
@@ -115,6 +121,10 @@ pub const LightmapBake = struct {
         gpa.free(self.images);
         gpa.free(self.lights);
         gpa.free(self.uuids);
+        gpa.free(self.volumes);
+        gpa.free(self.volume_uuids);
+        gpa.free(self.volume_lights);
+        gpa.free(self.volume_light_uuids);
         gpa.free(self.path);
         for (self.notes.items) |note| gpa.free(note);
         self.notes.deinit(gpa);
@@ -161,6 +171,7 @@ pub fn start(app: *App, gi: ecs.Entity, path: []const u8) !*LightmapBake {
     defer gathering.deinit();
     try gathering.gatherMeshes();
     try gathering.gatherLights();
+    try gathering.gatherVolumes();
 
     const sky = skyOf(app);
     const settings: lightmapper.Settings = .{
@@ -188,6 +199,14 @@ pub fn start(app: *App, gi: ecs.Entity, path: []const u8) !*LightmapBake {
     errdefer gpa.free(lights);
     const uuids = try gathering.uuids.toOwnedSlice(gpa);
     errdefer gpa.free(uuids);
+    const volumes = try gathering.volumes.toOwnedSlice(gpa);
+    errdefer gpa.free(volumes);
+    const volume_uuids = try gathering.volume_uuids.toOwnedSlice(gpa);
+    errdefer gpa.free(volume_uuids);
+    const volume_lights = try gathering.volume_lights.toOwnedSlice(gpa);
+    errdefer gpa.free(volume_lights);
+    const volume_light_uuids = try gathering.volume_light_uuids.toOwnedSlice(gpa);
+    errdefer gpa.free(volume_light_uuids);
     // The pictures last: their pixels are let go of with them from here.
     const images = try gathering.images.toOwnedSlice(gpa);
     errdefer {
@@ -200,6 +219,8 @@ pub fn start(app: *App, gi: ecs.Entity, path: []const u8) !*LightmapBake {
         .materials = baked_materials,
         .images = images,
         .lights = lights,
+        .volumes = volumes,
+        .volume_lights = volume_lights,
     }, settings);
     self.* = .{
         .gpa = gpa,
@@ -210,6 +231,10 @@ pub fn start(app: *App, gi: ecs.Entity, path: []const u8) !*LightmapBake {
         .images = images,
         .lights = lights,
         .uuids = uuids,
+        .volumes = volumes,
+        .volume_uuids = volume_uuids,
+        .volume_lights = volume_lights,
+        .volume_light_uuids = volume_light_uuids,
         .gi = gi,
         .path = owned_path,
         .notes = gathering.notes,
@@ -248,6 +273,12 @@ const Gathering = struct {
     lights: std.ArrayList(lightmapper.Light) = .empty,
     uuids: std.ArrayList(Uuid) = .empty,
     notes: std.ArrayList([]u8) = .empty,
+    /// The probe volumes and their entities' UUIDs; the lights they see -
+    /// every one, baked or not, lit now or not - and theirs.
+    volumes: std.ArrayList(lightmapper.VolumeGrid) = .empty,
+    volume_uuids: std.ArrayList(Uuid) = .empty,
+    volume_lights: std.ArrayList(lightmapper.Light) = .empty,
+    volume_light_uuids: std.ArrayList(Uuid) = .empty,
     /// Each material and picture by its handle, once: what a triangle
     /// names, or null for one left out (see-through).
     material_found: std.AutoHashMapUnmanaged(materials.MaterialHandle, ?u32) = .empty,
@@ -255,6 +286,10 @@ const Gathering = struct {
 
     fn deinit(self: *Gathering) void {
         const gpa = self.gpa;
+        self.volumes.deinit(gpa);
+        self.volume_uuids.deinit(gpa);
+        self.volume_lights.deinit(gpa);
+        self.volume_light_uuids.deinit(gpa);
         self.triangles.deinit(gpa);
         self.instances.deinit(gpa);
         self.materials.deinit(gpa);
@@ -383,10 +418,9 @@ const Gathering = struct {
             var it = try ecs.Query(.{ Transform3D, components3d.DirectionalLight3D }).over(&app.world);
             while (it.next()) |chunk| {
                 for (chunk.slice(components3d.DirectionalLight3D), chunk.entities) |light, entity| {
-                    if (light.bake == .none) continue;
                     const placed = placedLight(app, entity) orelse continue;
                     const toward = placed.back().tryNorm() orelse continue;
-                    try self.addLight(.{
+                    try self.addLight(entity, light.bake != .none, .{
                         .kind = .sun,
                         .direction = toward.array(),
                         .color = colorOf(light.color, light.energy),
@@ -400,9 +434,8 @@ const Gathering = struct {
             var it = try ecs.Query(.{ Transform3D, components3d.PointLight3D }).over(&app.world);
             while (it.next()) |chunk| {
                 for (chunk.slice(components3d.PointLight3D), chunk.entities) |light, entity| {
-                    if (light.bake == .none) continue;
                     const placed = placedLight(app, entity) orelse continue;
-                    try self.addLight(.{
+                    try self.addLight(entity, light.bake != .none, .{
                         .kind = .point,
                         .position = placed.position.array(),
                         .direction = (placed.forward().tryNorm() orelse math.Vec3.init(0, 0, -1)).array(),
@@ -422,11 +455,10 @@ const Gathering = struct {
             var it = try ecs.Query(.{ Transform3D, components3d.SpotLight3D }).over(&app.world);
             while (it.next()) |chunk| {
                 for (chunk.slice(components3d.SpotLight3D), chunk.entities) |light, entity| {
-                    if (light.bake == .none) continue;
                     const placed = placedLight(app, entity) orelse continue;
                     const aim = placed.forward().tryNorm() orelse continue;
                     const angle = std.math.clamp(light.angle, 0, std.math.degreesToRadians(89.9));
-                    try self.addLight(.{
+                    try self.addLight(entity, light.bake != .none, .{
                         .kind = .spot,
                         .position = placed.position.array(),
                         .direction = aim.array(),
@@ -447,9 +479,36 @@ const Gathering = struct {
         }
     }
 
-    fn addLight(self: *Gathering, light: lightmapper.Light) Allocator.Error!void {
-        if (light.color[0] + light.color[1] + light.color[2] <= 0) return;
+    /// `light` of `entity`: in the lightmap's lights where it is `baked`
+    /// and gives light now; among the probe volumes' however it is, while
+    /// they have room, and where its entity has a UUID to be found by.
+    fn addLight(self: *Gathering, entity: ecs.Entity, baked: bool, light: lightmapper.Light) Allocator.Error!void {
+        if (self.volume_lights.items.len < lightmapper.volume_lights) if (self.app.uuidOf(entity)) |uuid| {
+            try self.volume_lights.append(self.gpa, light);
+            try self.volume_light_uuids.append(self.gpa, uuid);
+        };
+        if (!baked or light.color[0] + light.color[1] + light.color[2] <= 0) return;
         try self.lights.append(self.gpa, light);
+    }
+
+    /// Every probe volume of the world whose entity has a UUID: its grid.
+    fn gatherVolumes(self: *Gathering) !void {
+        const app = self.app;
+        var it = try ecs.Query(.{ Transform3D, components3d.ProbeVolume3D }).over(&app.world);
+        while (it.next()) |chunk| {
+            for (chunk.slice(components3d.ProbeVolume3D), chunk.entities) |volume, entity| {
+                const uuid = app.uuidOf(entity) orelse {
+                    try self.note("a probe volume made in code has no UUID, and is not baked", .{});
+                    continue;
+                };
+                const placed = app.drawnTransform3D(entity) orelse continue;
+                const half = volume.extents.mul(placed.scale.abs());
+                var grid = probe_volumes.gridOf(placed.position.array(), half.array(), volume.spacing);
+                grid.rays = volume.quality.rays();
+                try self.volumes.append(self.gpa, grid);
+                try self.volume_uuids.append(self.gpa, uuid);
+            }
+        }
     }
 };
 

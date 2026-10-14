@@ -77,6 +77,7 @@ const lightmaps = @import("lightmaps.zig");
 const mesh = @import("mesh.zig");
 const post3d = @import("post3d.zig");
 const reflection_probes = @import("reflection_probes.zig");
+const probe_volumes = @import("probe_volumes.zig");
 const screenFlip = @import("material.zig").screenFlip;
 const shader3d = @import("shader3d.zig");
 const shaders = @import("shaders.zig");
@@ -498,6 +499,8 @@ pub const Renderer3D = struct {
     post: ?post3d.Post3D = null,
     /// What smooth surfaces reflect: see `render/reflection_probes.zig`.
     reflections: ?reflection_probes.Reflections = null,
+    /// The light from everywhere of probe volumes: see `render/probe_volumes.zig`.
+    volumes: ?probe_volumes.Volumes = null,
     /// The light of the last draw with `Lighting.capture`, until the next
     /// draw of its size.
     captured: ?rhi.Texture = null,
@@ -758,6 +761,7 @@ pub const Renderer3D = struct {
         errdefer self.sky_draw.?.deinit(gpa, device);
         self.billboards = try .init(gpa, device);
         self.reflections = try .init(gpa, device);
+        self.volumes = try .init(gpa, device);
         return self;
     }
 
@@ -818,6 +822,7 @@ pub const Renderer3D = struct {
         if (self.fog_backdrop) |*backdrop| backdrop.deinit(gpa, device);
         if (self.sky_draw) |*held| held.deinit(gpa, device);
         if (self.reflections) |*held| held.deinit();
+        if (self.volumes) |*held| held.deinit();
         device.destroySampler(self.lightmap_sampler);
         if (self.atlas) |atlas| device.destroyTexture(atlas);
         if (self.shadow_cache) |*cache| cache.deinit(gpa);
@@ -964,6 +969,7 @@ pub const Renderer3D = struct {
             self.plan.block = .none();
         }
         if (self.reflections) |*held| try held.show(app, view.position, frustum, self.baked);
+        if (self.volumes) |*held| try held.show(app, view.position, self.baked, self.frame_data.ambient[0..3].*);
         try self.gather(app, drawn_view, frustum, self.plan.views.items.len > 0, rendering.lod_threshold);
         try self.gatherShadowItems(gpa);
         try sortStable(Item, gpa, &self.items, &self.sorted_items, &self.sort_order, Item.lessThan);
@@ -1239,6 +1245,11 @@ pub const Renderer3D = struct {
         if (self.reflections) |*held| {
             try bind.uniform(reflection_probes.slot, held.block);
             try bind.texture(reflection_probes.atlas_slot, held.atlasOr(self.white), held.sampler);
+        }
+        if (self.volumes) |*held| {
+            try bind.uniform(probe_volumes.slot, held.block);
+            try bind.texture(probe_volumes.light_slot, held.light orelse self.white, held.nearest);
+            try bind.texture(probe_volumes.depth_slot, held.depth orelse self.white, held.nearest);
         }
     }
 

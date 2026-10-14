@@ -112,7 +112,7 @@ until they are registered for scenes.
 | Input | Keys and pointer as levels and edges, named actions a player can rebind, controllers, touch and gestures |
 | The window | Its modes and screens, more than one window for tools, a game made at one size and stretched, the clipboard, the system's file dialogs |
 | 2D | Sprites in one instanced draw per texture, text from one glyph atlas, cameras, animated sprites, particles, lights and shadows, tile maps, views drawn into textures |
-| 3D | Meshes and glTF models with skeletons, materials and a surface's own shader, sun, point and spot lights with shadows, baked lightmaps and probes, constructive solids, levels of detail, meshes streamed by their distance, fog, particles |
+| 3D | Meshes and glTF models with skeletons, materials and a surface's own shader, sun, point and spot lights with shadows, baked lightmaps and probes, probe volumes for the light from everywhere - baked, or lit again every frame - reflection probes, constructive solids, levels of detail, meshes streamed by their distance, fog, particles |
 | The interface | An immediate layout in `app.ui`, and controls as entities with themes, focus and touch buttons |
 | Physics | Rigid bodies, colliders, characters, areas, rays and picking, in 2D and in 3D; joints and ragdolls in 3D |
 | Navigation | Navigation meshes baked from a level, agents, links and obstacles |
@@ -283,6 +283,7 @@ one library, and a compiler message reading
 | `example-creatures` | The 2D layer: a sprite sheet, animation, things attached to other things, and a camera that follows |
 | `example-crates` | Physics: crates, a ramp, a ball on a rod, a sensor that counts what falls into it, and a ray |
 | `example-shapes` | The 3D layer: shapes made from numbers, the sun, a camera going round them, and a click that picks one |
+| `example-light` | The light from everywhere: a room baked into a lightmap at startup, a probe volume - its light as baked, or lit again every frame as the lamp changes colour - and a reflection probe in a chrome ball |
 
 ```bash
 zig build example-pong                      # Direct3D 11 on Windows, OpenGL elsewhere

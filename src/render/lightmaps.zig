@@ -46,6 +46,18 @@ pub const LightmapHandle = file_table.Handle("LightmapHandle");
 
 pub const Probes = lightmapper.Probes;
 
+/// A probe volume baked: see `render/probe_volumes.zig`.
+pub const Volume = struct {
+    uuid: Uuid,
+    baked: lightmapper.Volume,
+
+    /// The volume of the entity with `uuid`, in `volumes`.
+    pub fn find(volumes: []const Volume, uuid: Uuid) ?*const Volume {
+        for (volumes) |*volume| if (volume.uuid.eql(uuid)) return volume;
+        return null;
+    }
+};
+
 /// A mesh's place in a lightmap's picture: its lightmap UVs times `x` and
 /// `y`, moved by `z` and `w`.
 pub const Place = struct {
@@ -67,6 +79,10 @@ pub const Lightmap = struct {
     sun: []u8 = &.{},
     places: []Place,
     probes: Probes = .{},
+    /// The probe volumes baked with it, each under its entity's UUID, and
+    /// the UUIDs of the lights they see, in their bits' order.
+    volumes: []Volume = &.{},
+    volume_lights: []Uuid = &.{},
     /// Each place's mesh by its UUID.
     by_uuid: std.AutoHashMapUnmanaged(Uuid, u32) = .empty,
 
@@ -75,6 +91,9 @@ pub const Lightmap = struct {
         gpa.free(self.sun);
         gpa.free(self.places);
         self.probes.deinit(gpa);
+        for (self.volumes) |*volume| volume.baked.deinit(gpa);
+        gpa.free(self.volumes);
+        gpa.free(self.volume_lights);
         self.by_uuid.deinit(gpa);
         self.* = undefined;
     }
@@ -117,13 +136,21 @@ pub const magic_with_sun = "FXLMAP02";
 /// nought is none.
 pub const magic_with_probe_sun = "FXLMAP03";
 
+/// The same with, after the probes' sun, the probe volumes: how many lights
+/// they see and each one's UUID; how many volumes; and each - its UUID,
+/// where its first probe is, how far apart they are and how many each way,
+/// then compressed: its probes' light and whether each is in the open, its
+/// rays' ends, and its distances (`writeVolume`).
+pub const magic_with_volumes = "FXLMAP04";
+
 /// A lightmap as its file's bytes, the caller's.
 pub fn write(gpa: Allocator, lightmap: Lightmap) Allocator.Error![]u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     const w = &out.writer;
-    const probe_sun = lightmap.probes.sun.len > 0;
-    writeAll(w, if (probe_sun) magic_with_probe_sun else if (lightmap.sun.len > 0) magic_with_sun else magic) catch return error.OutOfMemory;
+    const with_volumes = lightmap.volumes.len > 0;
+    const probe_sun = lightmap.probes.sun.len > 0 or with_volumes;
+    writeAll(w, if (with_volumes) magic_with_volumes else if (probe_sun) magic_with_probe_sun else if (lightmap.sun.len > 0) magic_with_sun else magic) catch return error.OutOfMemory;
     const probes = lightmap.probes;
     for ([_]u32{ lightmap.width, lightmap.height, @intCast(lightmap.places.len), probes.counts[0], probes.counts[1], probes.counts[2] }) |n| try int(w, n);
     for (probes.origin ++ [1]f32{probes.spacing}) |x| try int(w, @bitCast(x));
@@ -157,10 +184,99 @@ pub fn write(gpa: Allocator, lightmap: Lightmap) Allocator.Error![]u8 {
         try writeCompressed(gpa, w, lightmap.sun);
     }
     if (probe_sun) {
-        std.debug.assert(lightmap.probes.sun.len == lightmap.probes.valid.len);
+        std.debug.assert(lightmap.probes.sun.len == 0 or lightmap.probes.sun.len == lightmap.probes.valid.len);
         try writeCompressed(gpa, w, lightmap.probes.sun);
     }
+    if (with_volumes) {
+        try int(w, @intCast(lightmap.volume_lights.len));
+        for (lightmap.volume_lights) |uuid| try writeAll(w, &uuid.bytes);
+        try int(w, @intCast(lightmap.volumes.len));
+        for (lightmap.volumes) |volume| try writeVolume(gpa, w, volume);
+    }
     return out.toOwnedSlice();
+}
+
+/// A probe volume: its UUID, grid and how many rays a probe sent, then its
+/// light, its rays' ends and its distances, each compressed.
+fn writeVolume(gpa: Allocator, w: *std.Io.Writer, volume: Volume) Allocator.Error!void {
+    const grid = volume.baked.grid;
+    try writeAll(w, &volume.uuid.bytes);
+    for (grid.origin ++ [1]f32{grid.spacing}) |x| try int(w, @bitCast(x));
+    for (grid.counts) |n| try int(w, n);
+    try int(w, grid.rays);
+    const count = grid.count();
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(gpa);
+    try bytes.ensureTotalCapacity(gpa, count * (12 * 4 + 1));
+    for (volume.baked.light) |sample| for (sample) |x| bytes.appendSliceAssumeCapacity(&std.mem.toBytes(x));
+    for (volume.baked.valid) |v| bytes.appendAssumeCapacity(@intFromBool(v));
+    try writeCompressed(gpa, w, bytes.items);
+    bytes.clearRetainingCapacity();
+    try bytes.ensureTotalCapacity(gpa, volume.baked.hits.len * hit_bytes);
+    for (volume.baked.hits) |hit| {
+        const numbers = [_]f32{ hit.distance, hit.normal[0], hit.normal[1], hit.normal[2], hit.albedo[0], hit.albedo[1], hit.albedo[2], hit.emission[0], hit.emission[1], hit.emission[2] };
+        for (numbers) |x| bytes.appendSliceAssumeCapacity(&std.mem.toBytes(x));
+        bytes.appendSliceAssumeCapacity(&std.mem.toBytes(hit.lights));
+    }
+    try writeCompressed(gpa, w, bytes.items);
+    try writeCompressed(gpa, w, std.mem.sliceAsBytes(volume.baked.depth));
+}
+
+/// A ray's end in the file: ten floats and the bits of the lights it sees.
+const hit_bytes = 11 * 4;
+
+fn readVolume(gpa: Allocator, bytes: []const u8, at: *usize) (Allocator.Error || error{BadLightmap})!Volume {
+    if (at.* + 16 > bytes.len) return error.BadLightmap;
+    const uuid: Uuid = .fromBytes(bytes[at.*..][0..16].*);
+    at.* += 16;
+    const head = try takeInts(bytes, at, 8);
+    const grid: lightmapper.VolumeGrid = .{
+        .origin = .{ @bitCast(head[0]), @bitCast(head[1]), @bitCast(head[2]) },
+        .spacing = @bitCast(head[3]),
+        .counts = .{ head[4], head[5], head[6] },
+        .rays = head[7],
+    };
+    if (grid.count() == 0 or grid.count() > 1 << 20) return error.BadLightmap;
+    if (grid.rays == 0 or grid.rays > lightmapper.most_volume_rays) return error.BadLightmap;
+    const count = grid.count();
+    var baked: lightmapper.Volume = .{ .grid = grid };
+    errdefer baked.deinit(gpa);
+    baked.light = try gpa.alloc([12]f32, count);
+    baked.valid = try gpa.alloc(bool, count);
+    baked.hits = try gpa.alloc(lightmapper.VolumeHit, count * grid.rays);
+    baked.depth = try gpa.alloc([lightmapper.volume_depth_side * lightmapper.volume_depth_side][2]f32, count);
+    {
+        const light = try readCompressed(gpa, bytes, at, count * (12 * 4 + 1));
+        defer gpa.free(light);
+        if (light.len == 0) return error.BadLightmap;
+        for (baked.light, 0..) |*sample, i| {
+            for (sample, 0..) |*x, k| x.* = @bitCast(std.mem.readInt(u32, light[(i * 12 + k) * 4 ..][0..4], .little));
+        }
+        for (baked.valid, light[count * 48 ..]) |*v, b| v.* = b != 0;
+    }
+    {
+        const hits = try readCompressed(gpa, bytes, at, baked.hits.len * hit_bytes);
+        defer gpa.free(hits);
+        if (hits.len == 0) return error.BadLightmap;
+        for (baked.hits, 0..) |*hit, i| {
+            var numbers: [10]f32 = undefined;
+            for (&numbers, 0..) |*x, k| x.* = @bitCast(std.mem.readInt(u32, hits[i * hit_bytes + k * 4 ..][0..4], .little));
+            hit.* = .{
+                .distance = numbers[0],
+                .normal = numbers[1..4].*,
+                .albedo = numbers[4..7].*,
+                .emission = numbers[7..10].*,
+                .lights = std.mem.readInt(u32, hits[i * hit_bytes + 40 ..][0..4], .little),
+            };
+        }
+    }
+    {
+        const depth = try readCompressed(gpa, bytes, at, std.mem.sliceAsBytes(baked.depth).len);
+        defer gpa.free(depth);
+        if (depth.len == 0) return error.BadLightmap;
+        @memcpy(std.mem.sliceAsBytes(baked.depth), depth);
+    }
+    return .{ .uuid = uuid, .baked = baked };
 }
 
 /// `bytes` zlib-compressed after their compressed length; none, a length
@@ -213,7 +329,8 @@ fn int(w: *std.Io.Writer, n: u32) error{OutOfMemory}!void {
 /// `error.BadLightmap` for one that is not one, or is cut short.
 pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadLightmap})!Lightmap {
     if (bytes.len < magic.len) return error.BadLightmap;
-    const with_probe_sun = std.mem.eql(u8, bytes[0..magic.len], magic_with_probe_sun);
+    const with_volumes = std.mem.eql(u8, bytes[0..magic.len], magic_with_volumes);
+    const with_probe_sun = with_volumes or std.mem.eql(u8, bytes[0..magic.len], magic_with_probe_sun);
     const with_sun = with_probe_sun or std.mem.eql(u8, bytes[0..magic.len], magic_with_sun);
     if (!with_sun and !std.mem.eql(u8, bytes[0..magic.len], magic)) return error.BadLightmap;
     var at: usize = magic.len;
@@ -280,9 +397,28 @@ pub fn read(gpa: Allocator, bytes: []const u8) (Allocator.Error || error{BadLigh
         if (with_probe_sun) {
             probes.sun = try readCompressed(gpa, bytes, &at, probes.valid.len);
         }
-        if (at != bytes.len) return error.BadLightmap;
     }
-    var out: Lightmap = .{ .width = width, .height = height, .pixels = pixels, .sun = sun, .places = places, .probes = probes };
+    var volume_lights: []Uuid = &.{};
+    errdefer gpa.free(volume_lights);
+    var volumes: std.ArrayList(Volume) = .empty;
+    errdefer {
+        for (volumes.items) |*volume| volume.baked.deinit(gpa);
+        volumes.deinit(gpa);
+    }
+    if (with_volumes) {
+        const lights = (try takeInts(bytes, &at, 1))[0];
+        if (lights > lightmapper.volume_lights or at + lights * 16 > bytes.len) return error.BadLightmap;
+        volume_lights = try gpa.alloc(Uuid, lights);
+        for (volume_lights) |*uuid| {
+            uuid.* = .fromBytes(bytes[at..][0..16].*);
+            at += 16;
+        }
+        const count = (try takeInts(bytes, &at, 1))[0];
+        if (count > 256) return error.BadLightmap;
+        for (0..count) |_| try volumes.append(gpa, try readVolume(gpa, bytes, &at));
+    }
+    if (with_sun and at != bytes.len) return error.BadLightmap;
+    var out: Lightmap = .{ .width = width, .height = height, .pixels = pixels, .sun = sun, .places = places, .probes = probes, .volume_lights = volume_lights, .volumes = try volumes.toOwnedSlice(gpa) };
     errdefer out.by_uuid.deinit(gpa);
     try out.index(gpa);
     return out;
@@ -300,7 +436,7 @@ fn takeInts(bytes: []const u8, at: *usize, comptime n: usize) error{BadLightmap}
 
 /// What was baked, as a lightmap of half floats, each instance's place
 /// under the UUID given for it; instances not in the picture are left out.
-pub fn fromBaked(gpa: Allocator, baked: lightmapper.Result, uuids: []const Uuid) Allocator.Error!Lightmap {
+pub fn fromBaked(gpa: Allocator, baked: lightmapper.Result, uuids: []const Uuid, volume_uuids: []const Uuid, volume_light_uuids: []const Uuid) Allocator.Error!Lightmap {
     const pixels = try gpa.alloc(u32, baked.pixels.len);
     errdefer gpa.free(pixels);
     for (baked.pixels, pixels) |p, *texel| texel.* = pack(p);
@@ -321,7 +457,25 @@ pub fn fromBaked(gpa: Allocator, baked: lightmapper.Result, uuids: []const Uuid)
     errdefer gpa.free(probes.samples);
     probes.valid = try gpa.dupe(bool, baked.probes.valid);
     errdefer gpa.free(probes.valid);
-    var out: Lightmap = .{ .width = baked.width, .height = baked.height, .pixels = pixels, .places = places, .probes = probes };
+    const volume_lights = try gpa.dupe(Uuid, volume_light_uuids[0..@min(volume_light_uuids.len, lightmapper.volume_lights)]);
+    errdefer gpa.free(volume_lights);
+    const volumes = try gpa.alloc(Volume, baked.volumes.len);
+    var copied: usize = 0;
+    errdefer {
+        for (volumes[0..copied]) |*volume| volume.baked.deinit(gpa);
+        gpa.free(volumes);
+    }
+    for (baked.volumes, volume_uuids) |from, uuid| {
+        var into: lightmapper.Volume = .{ .grid = from.grid };
+        errdefer into.deinit(gpa);
+        into.light = try gpa.dupe([12]f32, from.light);
+        into.valid = try gpa.dupe(bool, from.valid);
+        into.hits = try gpa.dupe(lightmapper.VolumeHit, from.hits);
+        into.depth = try gpa.dupe([lightmapper.volume_depth_side * lightmapper.volume_depth_side][2]f32, from.depth);
+        volumes[copied] = .{ .uuid = uuid, .baked = into };
+        copied += 1;
+    }
+    var out: Lightmap = .{ .width = baked.width, .height = baked.height, .pixels = pixels, .places = places, .probes = probes, .volumes = volumes, .volume_lights = volume_lights };
     errdefer out.by_uuid.deinit(gpa);
     try out.index(gpa);
     return out;
@@ -593,7 +747,7 @@ test "a lightmap's file reads back as it was written, near enough, and one cut s
         .probes = .{ .origin = .{ 1, 2, 3 }, .spacing = 2, .counts = .{ 2, 1, 1 }, .samples = &samples, .valid = &valid },
     };
     const uuids = [_]Uuid{ .fromBytes(@splat(1)), .fromBytes(@splat(2)), .fromBytes(@splat(3)) };
-    var lightmap = try fromBaked(gpa, baked, &uuids);
+    var lightmap = try fromBaked(gpa, baked, &uuids, &.{}, &.{});
     defer lightmap.deinit(gpa);
     // The one not in the picture left out.
     try testing.expectEqual(@as(usize, 2), lightmap.places.len);
@@ -661,3 +815,54 @@ test "a lightmap's file reads back as it was written, near enough, and one cut s
     try testing.expectEqual(@as(usize, 0), only.sun.len);
     try testing.expectEqualSlices(u8, &.{ 255, 0 }, only.probes.sun);
 }
+
+test "a lightmap's probe volumes read back as they were written, under their UUIDs" {
+    const gpa = testing.allocator;
+    var baked_pixels = [_][3]f32{.{ 1, 1, 1 }};
+    var baked_places = [_][4]f32{.{ 1, 1, 0, 0 }};
+    var samples = [_][12]f32{@splat(0.5)};
+    var valid = [_]bool{true};
+    var light = [_][12]f32{ @splat(0.25), @splat(0.75) };
+    var volume_valid = [_]bool{ true, false };
+    var hits: [2 * 32]lightmapper.VolumeHit = @splat(.{});
+    hits[3] = .{ .distance = 2.5, .normal = .{ 0, 1, 0 }, .albedo = .{ 0.5, 0.25, 0.125 }, .emission = .{ 1, 0, 0 }, .lights = 0b101 };
+    var depth: [2][lightmapper.volume_depth_side * lightmapper.volume_depth_side][2]f32 = @splat(@splat(.{ 1.5, 2.25 }));
+    depth[1][7] = .{ 0.5, 0.3 };
+    var volumes = [_]lightmapper.Volume{.{
+        .grid = .{ .origin = .{ 1, 2, 3 }, .spacing = 1.5, .counts = .{ 2, 1, 1 }, .rays = 32 },
+        .light = &light,
+        .valid = &volume_valid,
+        .hits = &hits,
+        .depth = &depth,
+    }};
+    const baked: lightmapper.Result = .{
+        .width = 1,
+        .height = 1,
+        .pixels = &baked_pixels,
+        .places = &baked_places,
+        .probes = .{ .origin = .{ 0, 0, 0 }, .spacing = 1, .counts = .{ 1, 1, 1 }, .samples = &samples, .valid = &valid },
+        .volumes = &volumes,
+    };
+    const uuids = [_]Uuid{.fromBytes(@splat(1))};
+    const volume_uuids = [_]Uuid{.fromBytes(@splat(9))};
+    const light_uuids = [_]Uuid{ .fromBytes(@splat(5)), .fromBytes(@splat(6)) };
+    var lightmap = try fromBaked(gpa, baked, &uuids, &volume_uuids, &light_uuids);
+    defer lightmap.deinit(gpa);
+    const bytes = try write(gpa, lightmap);
+    defer gpa.free(bytes);
+    try testing.expectEqualStrings(magic_with_volumes, bytes[0..magic_with_volumes.len]);
+    var back = try read(gpa, bytes);
+    defer back.deinit(gpa);
+    try testing.expectEqualSlices(Uuid, &light_uuids, back.volume_lights);
+    const volume = Volume.find(back.volumes, volume_uuids[0]).?;
+    try testing.expectEqual(@as(f32, 1.5), volume.baked.grid.spacing);
+    try testing.expectEqual(@as(u32, 32), volume.baked.grid.rays);
+    try testing.expectEqual(hits.len, volume.baked.hits.len);
+    try testing.expectEqualSlices([12]f32, &light, volume.baked.light);
+    try testing.expectEqualSlices(bool, &volume_valid, volume.baked.valid);
+    try testing.expectEqual(hits[3], volume.baked.hits[3]);
+    try testing.expectEqual(depth[1][7], volume.baked.depth[1][7]);
+    try testing.expect(Volume.find(back.volumes, uuids[0]) == null);
+    try testing.expectError(error.BadLightmap, read(gpa, bytes[0 .. bytes.len - 1]));
+}
+

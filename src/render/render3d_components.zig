@@ -624,6 +624,71 @@ pub const LightmapGI = extern struct {
     };
 };
 
+/// The light from everywhere at every pixel inside a box of the world,
+/// beside a `Transform3D`: a grid of probes over the box, each holding how
+/// lit a surface facing any way is there, eight read round each pixel -
+/// only those that see it, so a room takes none of the street's light
+/// through its wall. Baked with the world's `LightmapGI`; `realtime` it is
+/// lit again every frame from what its probes' rays met at the bake, as
+/// the lights are now - a lamp put out, a sun dimmed - bouncing frame
+/// after frame. Its box is along the world's axes. See
+/// `render/probe_volumes.zig`.
+pub const ProbeVolume3D = extern struct {
+    /// Half its box's size along the world's axes, in metres, before its
+    /// transform's scale.
+    extents: math.Vec3 = .init(8, 3, 8),
+    /// How far apart its probes are, in metres.
+    spacing: f32 = 1.5,
+    /// How many rays each probe sends at the bake: more see smaller things
+    /// and leak less, for a longer bake, a larger lightmap file and, realtime,
+    /// a dearer relight each frame. Baked again to change.
+    quality: Quality = .medium,
+    /// Its light as baked, or lit again as the game goes.
+    mode: Mode = .baked,
+    /// What its light is multiplied by.
+    intensity: f32 = 1,
+    /// Realtime: how much of the last frame's light each frame keeps - more
+    /// is smoother, and slower to follow a light switched.
+    hysteresis: f32 = 0.85,
+    /// Realtime: whether light bounces on from what it lit, frame after frame.
+    bounce: bool = true,
+
+    pub const Quality = enum(u8) {
+        low,
+        medium,
+        high,
+
+        /// How many rays a probe sends.
+        pub fn rays(self: Quality) u32 {
+            return switch (self) {
+                .low => 32,
+                .medium => 64,
+                .high => 128,
+            };
+        }
+    };
+
+    pub const Mode = enum(u8) {
+        /// Its light as the bake found it: what moves and what has no
+        /// lightmap UVs read it; the lightmap is read where there is one.
+        baked,
+        /// Lit again every frame, as the lights are now: everything inside
+        /// reads it, the still meshes too, over the lightmap.
+        realtime,
+    };
+
+    pub const reflect_name = "ProbeVolume3D";
+    pub const reflect_fields = .{
+        .extents = .{ attr.Unit{ .text = "m" }, attr.Doc{ .text = "Half its box's size along the world's axes" } },
+        .spacing = .{ attr.Unit{ .text = "m" }, attr.Range{ .min = 0.25, .max = 16 }, attr.Doc{ .text = "How far apart its probes are" } },
+        .quality = .{attr.Doc{ .text = "How many rays each probe sends at the bake - 32, 64 or 128: more see smaller things and leak less, for a longer bake and a dearer realtime relight. Baked again to change" }},
+        .mode = .{attr.Doc{ .text = "Its light as baked, or lit again every frame as the lights are now" }},
+        .intensity = .{ attr.Range{ .min = 0, .max = 16 }, attr.Doc{ .text = "What its light is multiplied by" } },
+        .hysteresis = .{ attr.Group{ .name = "Realtime" }, attr.Range{ .min = 0, .max = 0.99 }, attr.Doc{ .text = "How much of the last frame's light each frame keeps: smoother, slower" } },
+        .bounce = .{attr.Doc{ .text = "Whether light bounces on from what it lit, frame after frame" }},
+    };
+};
+
 /// What smooth surfaces reflect, in a box of the world beside a
 /// `Transform3D`: the world seen all round from its middle, laid onto every
 /// surface inside - a room's walls in its polished floor, the street in a

@@ -144,6 +144,11 @@ pub fn build(b: *std.Build) void {
             .step = "example-shapes",
             .about = "The 3D layer: shapes made from numbers, a camera going round them, the sun",
         },
+        .{
+            .name = "light",
+            .step = "example-light",
+            .about = "The light from everywhere: a room baked, a probe volume - baked or realtime - and a reflection probe",
+        },
     };
 
     const example_step = b.step("examples", "Build every example");

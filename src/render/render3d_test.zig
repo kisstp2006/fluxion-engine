@@ -947,6 +947,15 @@ test "a reflection probe is given a place as it comes, read once it is captured,
     try testing.expect(reflections.slots.items[0].ready);
     try reflections.show(app, .zero, everywhere, null);
     try testing.expectEqual(@as(f32, 1), reflections.shown.info[0]);
+    try testing.expectEqual(@as(f32, 128), reflections.shown.probes[3][3]);
+    // A settings menu's sharper reflections: captured again, at the new size.
+    app.setReflectionProbeSize(.x256);
+    try testing.expectEqual(@import("../project/Project.zig").Rendering.ReflectionProbeSize.x256, app.reflectionProbeSize());
+    try reflections.capture(app);
+    try testing.expectEqual(@as(u32, 256), reflections.side);
+    try testing.expect(reflections.slots.items[0].ready);
+    try reflections.show(app, .zero, everywhere, null);
+    try testing.expectEqual(@as(f32, 256), reflections.shown.probes[3][3]);
     app.world.despawn(probe);
     try reflections.capture(app);
     try testing.expectEqual(@as(usize, 0), reflections.slots.items.len);

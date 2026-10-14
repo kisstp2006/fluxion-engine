@@ -236,6 +236,10 @@ pub const Rendering = struct {
     /// How a shadow's edge is smoothed: hard reads the shadow once, soft
     /// more times for a smoother edge.
     shadow_filter: ShadowFilter = .soft_medium,
+    /// How many texels across a reflection probe's sharpest picture is, and
+    /// each face it is captured from: sharper mirrors for more memory and a
+    /// dearer capture. See `render/reflection_probes.zig`.
+    reflection_probe_size: ReflectionProbeSize = .x128,
     /// How many pixels a dense mesh's coarser level may differ from the
     /// whole on screen before the finer one is drawn: more draws coarser
     /// levels nearer. Nought draws every mesh whole. See `render/lods.zig`.
@@ -260,6 +264,7 @@ pub const Rendering = struct {
         screen_space_aa: ScreenSpaceAa = .disabled,
         shadow_atlas_size: ShadowAtlasSize = .x2048,
         shadow_filter: ShadowFilter = .soft_low,
+        reflection_probe_size: ReflectionProbeSize = .x64,
         lod_threshold: f32 = 2,
         scale_3d: f32 = 1,
 
@@ -269,6 +274,7 @@ pub const Rendering = struct {
             .screen_space_aa = .{ attr.Label{ .text = "Screen space AA" }, attr.Doc{ .text = "The edge smoother over the 3D picture on a phone or in a browser." } },
             .shadow_atlas_size = .{attr.Doc{ .text = "The shadows' picture's side on a phone or in a browser." }},
             .shadow_filter = .{attr.Doc{ .text = "How a shadow's edge is smoothed on a phone or in a browser." }},
+            .reflection_probe_size = .{attr.Doc{ .text = "A reflection probe's sharpest picture's side on a phone or in a browser." }},
             .lod_threshold = .{ attr.Label{ .text = "LOD threshold" }, attr.Range{ .min = 0, .max = 64 }, attr.Doc{ .text = "Pixels a dense mesh's coarser level may differ by on a phone or in a browser." } },
             .scale_3d = .{ attr.Label{ .text = "Scale 3D" }, attr.Range{ .min = 0.25, .max = 2 }, attr.Doc{ .text = "How large the 3D world is drawn on a phone or in a browser, against the picture." } },
         };
@@ -290,6 +296,7 @@ pub const Rendering = struct {
         out.screen_space_aa = self.mobile.screen_space_aa;
         out.shadow_atlas_size = self.mobile.shadow_atlas_size;
         out.shadow_filter = self.mobile.shadow_filter;
+        out.reflection_probe_size = self.mobile.reflection_probe_size;
         out.lod_threshold = self.mobile.lod_threshold;
         out.scale_3d = self.mobile.scale_3d;
         return out;
@@ -315,6 +322,21 @@ pub const Rendering = struct {
     };
 
     pub const ShadowFilter = enum { hard, soft_low, soft_medium, soft_high };
+
+    pub const ReflectionProbeSize = enum {
+        x64,
+        x128,
+        x256,
+
+        /// Texels a side.
+        pub fn pixels(self: ReflectionProbeSize) u32 {
+            return switch (self) {
+                .x64 => 64,
+                .x128 => 128,
+                .x256 => 256,
+            };
+        }
+    };
 
     pub const Msaa = enum {
         disabled,
@@ -419,6 +441,7 @@ pub const Rendering = struct {
         .screen_space_aa = .{ attr.Label{ .text = "Screen space AA" }, attr.Doc{ .text = "An edge smoother run over the finished 3D picture: cheaper than more samples, and softer." } },
         .shadow_atlas_size = .{attr.Doc{ .text = "How large the one picture every 3D shadow is drawn into is, a side: larger is sharper, and more memory." }},
         .shadow_filter = .{attr.Doc{ .text = "How a 3D shadow's edge is smoothed: hard reads the shadow once, soft more times for a smoother edge." }},
+        .reflection_probe_size = .{attr.Doc{ .text = "How many texels across a reflection probe's sharpest picture is, and each face it is captured from: sharper mirrors for more memory and a dearer capture. Every probe is captured again when it changes." }},
         .lod_threshold = .{ attr.Label{ .text = "LOD threshold" }, attr.Range{ .min = 0, .max = 64 }, attr.Doc{ .text = "How many pixels a dense mesh's coarser level may differ from the whole before the finer one is drawn; nought draws every mesh whole." } },
         .scale_3d = .{ attr.Label{ .text = "Scale 3D" }, attr.Range{ .min = 0.25, .max = 2 }, attr.Doc{ .text = "How large the 3D world is drawn against the picture: smaller is faster and softer, larger sharper and slower." } },
         .depth_prepass = .{ attr.Advanced{}, attr.Doc{ .text = "Draw the solid surfaces' depth before their light: each pixel lit once, by what is in front, for their corners worked out twice. Faster where many surfaces stand behind each other and the light is dear." } },

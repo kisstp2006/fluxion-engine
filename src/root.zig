@@ -264,6 +264,7 @@ pub const SpotLight3D = components.SpotLight3D;
 pub const Environment = components.Environment;
 pub const FogVolume = components.FogVolume;
 pub const ReflectionProbe3D = components.ReflectionProbe3D;
+pub const ProbeVolume3D = components.ProbeVolume3D;
 pub const Decal = components.Decal;
 pub const World3D = components.World3D;
 pub const SkyBox3D = components.SkyBox3D;
@@ -648,6 +649,7 @@ test {
     _ = @import("render/lightmap_uv.zig");
     _ = @import("render/lightmaps.zig");
     _ = @import("render/reflection_probes.zig");
+    _ = @import("render/probe_volumes.zig");
     _ = @import("render/skeleton.zig");
     _ = @import("render/lightmap_test.zig");
     _ = @import("render/view3d.zig");
