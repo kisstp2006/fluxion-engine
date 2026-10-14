@@ -149,6 +149,55 @@ test "the project's 3D scale draws the 3D world smaller than the picture it goes
     try testing.expect(app.renderer3d.last_depth == null);
 }
 
+test "a game changes the 3D world's scale, smoothing and shadows while it runs, over what the project says, from the next frame" {
+    const Project = @import("../project/Project.zig");
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    var sun: Transform3D = .at(0, 10, 0);
+    sun.lookAt(.init(1, 0, 0.5), .unit_y);
+    _ = try app.world.spawnWith(.{ sun, DirectionalLight3D{ .shadow = true, .shadow_cascades = .two } });
+    _ = try app.step();
+    // The project's own - here a project with no file, so the defaults.
+    const project: Project.Rendering = .{};
+    try testing.expectEqual(project.msaa_3d, app.msaa3d());
+    try testing.expectEqual(project.shadow_filter, app.shadowFilter());
+    try testing.expectEqual(project.lod_threshold, app.lodThreshold());
+    try testing.expectEqual(@as(f32, 1), app.scale3d());
+    const limit = app.device.caps().limits.max_texture_2d;
+    try testing.expectEqual(@min(project.shadow_atlas_size.pixels(), limit), app.renderer3d.atlas_size);
+    try testing.expectEqual(@as(u32, 64), app.renderer3d.post.?.targets.items[0].width);
+
+    app.setScale3d(0.5);
+    app.setMsaa3d(.x4);
+    app.setScreenSpaceAa(.fxaa);
+    app.setShadowAtlasSize(.x1024);
+    app.setShadowFilter(.hard);
+    app.setLodThreshold(4);
+    _ = try app.step();
+    try testing.expectEqual(Project.Rendering.Msaa.x4, app.msaa3d());
+    try testing.expectEqual(Project.Rendering.ScreenSpaceAa.fxaa, app.screenSpaceAa());
+    try testing.expectEqual(Project.Rendering.ShadowAtlasSize.x1024, app.shadowAtlasSize());
+    try testing.expectEqual(Project.Rendering.ShadowFilter.hard, app.shadowFilter());
+    try testing.expectEqual(@as(f32, 4), app.lodThreshold());
+    // The frame after is drawn with them: as many samples as the device
+    // has of the four, the shadows' picture made again at its new side, and
+    // a picture half as wide among those drawn into.
+    try testing.expectEqual(app.renderer3d.post.?.samplesFor(4), app.renderer3d.samples);
+    try testing.expectEqual(@min(@as(u32, 1024), limit), app.renderer3d.atlas_size);
+    var half = false;
+    for (app.renderer3d.post.?.targets.items) |target| half = half or target.width == 32;
+    try testing.expect(half);
+    // A scale out of reach is brought back into it, and nothing of the
+    // project's is changed: its file would say what it said.
+    app.setScale3d(9);
+    try testing.expectEqual(@as(f32, 2), app.scale3d());
+    app.setLodThreshold(-1);
+    try testing.expectEqual(@as(f32, 0), app.lodThreshold());
+    try testing.expect(app.project.settings == null);
+}
+
 test "with the depth drawn first, every solid surface's depth is drawn before its light, and a see-through one's is not" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

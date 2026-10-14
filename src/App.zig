@@ -460,6 +460,9 @@ game_area: stretching.GameArea = .window(1, 1),
 /// How frames are shown against the refresh, as last asked: kept for a
 /// headless app too, which has no display to wait for.
 vsync_mode_now: VsyncMode = .enabled,
+/// What the game changed of how the 3D world is drawn, over the project's
+/// own rendering settings: see `setMsaa3d` and those beside it.
+quality: Quality = .{},
 /// Lines, shapes and text drawn over everything, for one frame unless its
 /// style says for how many seconds. Inside `.fixed` they last until the next
 /// step instead, so a step's shapes are there in the frames between steps.
@@ -4002,6 +4005,114 @@ pub fn vsyncMode(self: *const App) VsyncMode {
     return self.vsync_mode_now;
 }
 
+// -------------------------------------------------------------------------
+// How the 3D world is drawn, changed while the game runs
+// -------------------------------------------------------------------------
+//
+// The project file says how the 3D world is smoothed, how fine its shadows
+// are, how far off a model is drawn whole and at what scale: one answer for
+// every player. A settings menu gives each player their own - a slower
+// computer fewer samples and a smaller picture - with the calls here, each
+// from the next frame, and keeps them itself: nothing here is written to
+// the project.
+
+/// What a game changed of the project's rendering settings while it runs:
+/// each the project's own until it is set.
+pub const Quality = struct {
+    msaa_3d: ?Project.Rendering.Msaa = null,
+    screen_space_aa: ?Project.Rendering.ScreenSpaceAa = null,
+    shadow_atlas_size: ?Project.Rendering.ShadowAtlasSize = null,
+    shadow_filter: ?Project.Rendering.ShadowFilter = null,
+    lod_threshold: ?f32 = null,
+    scale_3d: ?f32 = null,
+};
+
+/// The rendering settings the 3D world is drawn with now: the project's,
+/// as they are where the game runs, with what the game changed since.
+pub fn renderingNow(self: *const App) Project.Rendering {
+    var out = (if (self.project.settings) |held| held.rendering else Project.Rendering{}).here();
+    if (self.quality.msaa_3d) |samples| out.msaa_3d = samples;
+    if (self.quality.screen_space_aa) |mode| out.screen_space_aa = mode;
+    if (self.quality.shadow_atlas_size) |size| out.shadow_atlas_size = size;
+    if (self.quality.shadow_filter) |filter| out.shadow_filter = filter;
+    if (self.quality.lod_threshold) |threshold| out.lod_threshold = threshold;
+    if (self.quality.scale_3d) |scale| out.scale_3d = scale;
+    return out;
+}
+
+/// How many samples a pixel the 3D world's edges are smoothed with, from
+/// the next frame, in place of the project's `msaa_3d`: what a settings
+/// menu's anti-aliasing changes. A device with fewer draws with what it has.
+pub fn setMsaa3d(self: *App, samples: Project.Rendering.Msaa) void {
+    self.quality.msaa_3d = samples;
+}
+
+/// The samples a pixel asked of the 3D world: the game's, or the project's.
+pub fn msaa3d(self: *const App) Project.Rendering.Msaa {
+    return self.renderingNow().msaa_3d;
+}
+
+/// The edge smoother over the finished 3D picture, from the next frame, in
+/// place of the project's `screen_space_aa`.
+pub fn setScreenSpaceAa(self: *App, mode: Project.Rendering.ScreenSpaceAa) void {
+    self.quality.screen_space_aa = mode;
+}
+
+/// The edge smoother over the 3D picture: the game's, or the project's.
+pub fn screenSpaceAa(self: *const App) Project.Rendering.ScreenSpaceAa {
+    return self.renderingNow().screen_space_aa;
+}
+
+/// The side of the picture every shadow is drawn into, from the next frame,
+/// in place of the project's `shadow_atlas_size`: a smaller one is coarser
+/// shadows, drawn sooner. The picture is made again at the new size.
+pub fn setShadowAtlasSize(self: *App, size: Project.Rendering.ShadowAtlasSize) void {
+    self.quality.shadow_atlas_size = size;
+}
+
+/// The side of the shadows' picture: the game's, or the project's.
+pub fn shadowAtlasSize(self: *const App) Project.Rendering.ShadowAtlasSize {
+    return self.renderingNow().shadow_atlas_size;
+}
+
+/// How a shadow's edge is smoothed, from the next frame, in place of the
+/// project's `shadow_filter`: `hard` reads the shadows once a pixel, the
+/// soft ones more often.
+pub fn setShadowFilter(self: *App, filter: Project.Rendering.ShadowFilter) void {
+    self.quality.shadow_filter = filter;
+}
+
+/// How a shadow's edge is smoothed: the game's way, or the project's.
+pub fn shadowFilter(self: *const App) Project.Rendering.ShadowFilter {
+    return self.renderingNow().shadow_filter;
+}
+
+/// How soon a model far off is drawn with fewer triangles, from the next
+/// frame, in place of the project's `lod_threshold`: the pixels a coarser
+/// level may be out by. Nought draws every model whole.
+pub fn setLodThreshold(self: *App, threshold: f32) void {
+    self.quality.lod_threshold = @max(0, threshold);
+}
+
+/// The pixels a coarser level of a model may be out by: the game's, or the
+/// project's.
+pub fn lodThreshold(self: *const App) f32 {
+    return self.renderingNow().lod_threshold;
+}
+
+/// The scale the 3D world is drawn at before it is stretched to the
+/// picture, from the next frame, in place of the project's `scale_3d`: 0.5
+/// draws a quarter of the pixels. Kept between 0.25 and 2. The interface is
+/// drawn at the picture's own size whatever this is.
+pub fn setScale3d(self: *App, scale: f32) void {
+    self.quality.scale_3d = std.math.clamp(scale, 0.25, 2);
+}
+
+/// The scale the 3D world is drawn at: the game's, or the project's.
+pub fn scale3d(self: *const App) f32 {
+    return self.renderingNow().scale_3d;
+}
+
 /// How the game, made at the project's size, is shown in a window of
 /// another: see `render/stretch.zig`. From the next frame.
 pub fn setStretchMode(self: *App, mode: stretching.Mode) void {
@@ -6456,6 +6567,18 @@ pub const reflect_methods = .{
     // The frame
     .setVsyncMode = .{ attr.Params{ .names = &.{"mode"} }, flux.GivesErrors{} },
     .vsyncMode = .{},
+    .setMsaa3d = .{attr.Params{ .names = &.{"samples"} }},
+    .msaa3d = .{},
+    .setScreenSpaceAa = .{attr.Params{ .names = &.{"mode"} }},
+    .screenSpaceAa = .{},
+    .setShadowAtlasSize = .{attr.Params{ .names = &.{"size"} }},
+    .shadowAtlasSize = .{},
+    .setShadowFilter = .{attr.Params{ .names = &.{"filter"} }},
+    .shadowFilter = .{},
+    .setLodThreshold = .{attr.Params{ .names = &.{"threshold"} }},
+    .lodThreshold = .{},
+    .setScale3d = .{attr.Params{ .names = &.{"scale"} }},
+    .scale3d = .{},
     .setStretchMode = .{attr.Params{ .names = &.{"mode"} }},
     .stretchMode = .{},
     .setStretchAspect = .{attr.Params{ .names = &.{"aspect"} }},

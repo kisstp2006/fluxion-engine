@@ -893,7 +893,7 @@ pub const Renderer3D = struct {
         };
 
         const frustum: math.Frustum = .fromViewProjection(view_projection, clip);
-        const rendering: Project.Rendering = (if (app.project.settings) |held| held.rendering else Project.Rendering{}).here();
+        const rendering: Project.Rendering = app.renderingNow();
         // At the project's scale, for the game's own picture: what is drawn,
         // and what the frame's numbers say of it.
         const scale = if (lighting.antialias) std.math.clamp(rendering.scale_3d, 0.25, 2) else 1;
