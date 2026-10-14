@@ -969,6 +969,14 @@ pub const Post3D = struct {
         return &self.targets.items[self.targets.items.len - 1];
     }
 
+    /// Every target let go of, each made again by the next draw that asks
+    /// for it - what a window resized does to them, in place: see
+    /// `Renderer3D.remakeTargets`.
+    pub fn forgetTargets(self: *Post3D) void {
+        for (self.targets.items) |*held| held.deinit(self.device);
+        self.targets.clearRetainingCapacity();
+    }
+
     /// The most samples a pixel the device draws the light and the depth
     /// with, up to `wanted`.
     pub fn samplesFor(self: *const Post3D, wanted: u32) u32 {

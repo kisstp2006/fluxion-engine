@@ -841,6 +841,13 @@ pub const SkyDraw = struct {
         return .{ .noise = noise, .repeating = repeating, .clamped = clamped, .block = block, .corners = corners };
     }
 
+    /// The sky's picture let go of, made again by the next frame that draws it.
+    pub fn forgetPicture(self: *SkyDraw, device: *rhi.Device) void {
+        if (self.picture) |p| device.destroyTexture(p);
+        self.picture = null;
+        self.picture_size = .{ 0, 0 };
+    }
+
     pub fn deinit(self: *SkyDraw, gpa: Allocator, device: *rhi.Device) void {
         if (self.picture_pipeline) |p| device.destroyPipeline(p);
         var it = self.over_pipelines.valueIterator();

@@ -40,6 +40,7 @@ const Uuid = @import("fluxion_id").Uuid;
 const display = @import("app/display.zig");
 const frame_steps = @import("app/frame_steps.zig");
 const frame_stats_table = @import("app/frame_stats.zig");
+const MemoryWatch = @import("app/memory_watch.zig").MemoryWatch;
 
 // core
 const Commands = @import("core/commands.zig");
@@ -414,6 +415,9 @@ particles3d: particles_3d.Emitters = .{},
 /// What each frame cost, while `Options.stats` asks: see
 /// `app/frame_stats.zig`.
 frame_stats: frame_stats_table.FrameStats = .{},
+/// The card's memory, watched for what the driver moves out of it: see
+/// `app/memory_watch.zig`.
+memory_watch: MemoryWatch = .{},
 /// The mesh each `CSGShape3D` at the top comes to: see
 /// `render/csg_shapes.zig` and `meshDrawnBy`.
 csg: csg_shapes.Shapes = .{},

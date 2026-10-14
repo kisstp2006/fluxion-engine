@@ -840,6 +840,25 @@ pub const Renderer3D = struct {
         self.* = undefined;
     }
 
+    /// Every picture a frame draws into let go of, each made again by the
+    /// next draw: the light and depth and the passes after, the sky's
+    /// picture and the shadow atlas. What a window resized does to them, for
+    /// a driver that moved them out of a full card into the machine's
+    /// memory (`app/memory_watch.zig`), where every frame drew into them
+    /// across the bus.
+    pub fn remakeTargets(self: *Renderer3D, gpa: Allocator) void {
+        self.last_depth = null;
+        if (self.post) |*held| held.forgetTargets();
+        if (self.sky_draw) |*drawer| drawer.forgetPicture(self.device);
+        if (self.atlas) |atlas| {
+            self.device.destroyTexture(atlas);
+            self.atlas = null;
+            self.atlas_size = 0;
+            if (self.shadow_cache) |*cache| cache.deinit(gpa);
+            self.shadow_cache = null;
+        }
+    }
+
     /// One more frame: targets no draw has used for a few are let go - a
     /// window dragged bigger leaves every size it passed through.
     pub fn tick(self: *Renderer3D, gpa: Allocator) void {

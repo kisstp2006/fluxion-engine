@@ -471,5 +471,12 @@ fn draw(app: *App) anyerror!void {
     const tidying = app.frame_stats.start(app.io);
     app.meshes.tick(app.gpa, &app.device);
     app.renderer3d.tick(app.gpa);
+    // What the driver moved out of a full card, made again once it has room:
+    // see `memory_watch.zig`.
+    if (app.memory_watch.due(app.time.unscaled_delta)) if (app.memory_watch.saw(app.device.memory())) {
+        log.info("the driver moved some of what the game drew into out of the card's memory: its render targets are made again, back in it", .{});
+        app.renderer3d.remakeTargets(app.gpa);
+        app.screen_texture.forgetPictures();
+    };
     app.frame_stats.tidy_ns += FrameStats.took(app.io, tidying);
 }

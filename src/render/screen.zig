@@ -154,6 +154,15 @@ pub const Screen = struct {
         try self.device.submit();
     }
 
+    /// The frame's picture and its copy let go of, to be made again by the
+    /// next frame that draws into them.
+    pub fn forgetPictures(self: *Screen) void {
+        for ([_]*?FrameTexture{ &self.frame, &self.copy }) |slot| {
+            if (slot.*) |held| self.device.destroyTexture(held.texture);
+            slot.* = null;
+        }
+    }
+
     fn pictureOf(self: *Screen, slot: *?FrameTexture, width: u32, height: u32, clear: [4]f32, label: []const u8) !FrameTexture {
         if (slot.*) |held| {
             if (held.width == width and held.height == height) return held;
