@@ -40,6 +40,15 @@
 //! this machine - and every server that answers is listed with its name,
 //! what it says of itself, its players and how long it took to answer.
 //!
+//! **Across the internet.** A server behind a NAT is reached through a
+//! rendezvous server - `network.rendezvous` in the project, or
+//! `setRendezvous` - which runs fluxion-session's `fluxion-rendezvous`. A
+//! `public` server says it is there, every while, and is given an id; a
+//! player finds it (`searchOnline`) and joins it by that id (`joinOnline`):
+//! introduced to it, the two open their NATs to each other and the session
+//! goes directly; where that does not open in `direct_ns`, it goes through
+//! the rendezvous - sealed end to end, as ever.
+//!
 //! **Which game.** A server and a player meet only if their game and its
 //! `network.session_version` are the same: the project's name and that
 //! number are what fluxion-session calls the protocol.
@@ -65,6 +74,19 @@ pub const first_player: u32 = 2;
 /// background for long - before what comes is let go.
 pub const most_events = 65536;
 pub const most_event_bytes = 32 * 1024 * 1024;
+
+/// How far a player joining through the rendezvous has got.
+pub const OnlinePhase = enum {
+    none,
+    /// Waiting for the rendezvous's address: a name being looked up.
+    waiting,
+    /// Asking to be introduced to the server.
+    asking,
+    /// Joining it at the address the rendezvous gave.
+    direct,
+    /// Joining it through the rendezvous.
+    relayed,
+};
 
 /// What this end of a session is.
 pub const Role = enum {
@@ -104,9 +126,13 @@ pub const Event = struct {
     };
 };
 
-/// A server a LAN search found.
+/// A server a search found: on the LAN, at its address; or by the
+/// rendezvous, by its `id`.
 pub const Found = struct {
     address: Address,
+    /// The rendezvous's id for it, to `joinOnline`; nought for one on the
+    /// LAN.
+    id: u64 = 0,
     name: []const u8,
     info: []const u8,
     players: u16,
@@ -129,7 +155,16 @@ pub const HostOptions = struct {
     /// Pass on what a player sends another player. Off, a player reaches
     /// the server alone, and the others are not told of each other.
     relay: bool = true,
+    /// Listed by the rendezvous, for players across the internet to find
+    /// and join: see `setRendezvous`.
+    public: bool = false,
 };
+
+/// How long a player joining through the rendezvous waits for the server
+/// directly, before it goes through the rendezvous instead.
+pub const direct_ns: u64 = 2500 * std.time.ns_per_ms;
+/// How long it waits to be introduced at all.
+pub const introduce_ns: u64 = 10 * std.time.ns_per_s;
 
 /// The first byte of every message: what it is. A game's own are `game`;
 /// the rest are the session's, and never reach the game as they are.
@@ -245,9 +280,44 @@ pub const Session = struct {
     /// taken: the next frame's lets it go.
     heard: bool = false,
 
+    // Across the internet.
+    /// The rendezvous: as given, and once found, its address; a name being
+    /// looked up.
+    rendezvous_text: std.ArrayList(u8) = .empty,
+    rendezvous: ?Address = null,
+    rendezvous_lookup: ?*Lookup = null,
+    /// The socket's way through NATs: a public server's, or a player's
+    /// joining through the rendezvous. `Server` and `Client` are given its
+    /// transport.
+    nat: ?fs.Nat = null,
+    /// A public server's listing: its name and what more it says.
+    listing_name: std.ArrayList(u8) = .empty,
+    listing_info: std.ArrayList(u8) = .empty,
+    listed: bool = false,
+    /// A player's join through the rendezvous: the server's id, how far it
+    /// has got, and since when.
+    online_id: u64 = 0,
+    online_phase: OnlinePhase = .none,
+    online_since: u64 = 0,
+    /// Never directly: through the rendezvous at once - to try it.
+    force_relay: bool = false,
+    /// The search of the rendezvous: its own socket and way, and whether it
+    /// waits for the rendezvous's address to ask.
+    online_socket: ?fs.transport.Udp = null,
+    online_nat: ?fs.Nat = null,
+    online_wanted: bool = false,
+
     pub fn deinit(self: *Session, app: *App) void {
         leave(app);
         stopSearch(app);
+        stopOnlineSearch(app);
+        if (self.rendezvous_lookup) |lookup| {
+            if (!builtin.single_threaded) if (lookup.thread) |thread| thread.join();
+            app.gpa.destroy(lookup);
+        }
+        self.rendezvous_text.deinit(app.gpa);
+        self.listing_name.deinit(app.gpa);
+        self.listing_info.deinit(app.gpa);
         self.clearEvents(app.gpa);
         self.events.deinit(app.gpa);
         self.hello.deinit(app.gpa);
@@ -349,7 +419,18 @@ pub fn host(app: *App, options: HostOptions) Error!void {
     const peers = try app.gpa.alloc(u32, most);
     errdefer app.gpa.free(peers);
     @memset(peers, 0);
-    s.server = fs.Server.init(app.gpa, io, s.socket.?.transport(), .{
+    // A public server's datagrams pass its way through NATs first.
+    if (options.public) try ensureRendezvous(app);
+    const out = if (options.public) blk: {
+        s.nat = fs.Nat.init(app.gpa, s.socket.?.transport(), unknownAddress(), protocolOf(app), .{}, seedOf(io));
+        s.listing_name.clearRetainingCapacity();
+        try s.listing_name.appendSlice(app.gpa, options.name);
+        s.listing_info.clearRetainingCapacity();
+        try s.listing_info.appendSlice(app.gpa, options.info);
+        s.listed = false;
+        break :blk s.nat.?.transport();
+    } else s.socket.?.transport();
+    s.server = fs.Server.init(app.gpa, io, out, .{
         .protocol = protocolOf(app),
         .max_clients = most,
         .discovery = if (options.discoverable) .{ .name = options.name, .info = options.info } else null,
@@ -359,7 +440,209 @@ pub fn host(app: *App, options: HostOptions) Error!void {
     s.next_peer = first_player;
     s.relay = options.relay;
     s.role = .server;
-    log.info("a server on UDP port {d}, for {d} players", .{ s.socket.?.port(), most });
+    log.info("a server on UDP port {d}, for {d} players{s}", .{ s.socket.?.port(), most, if (options.public) ", listed by the rendezvous" else "" });
+    if (options.public and s.rendezvous_text.items.len == 0) log.warn("a public server with no rendezvous: setRendezvous, or the project's network.rendezvous", .{});
+}
+
+/// An address that is no one's: what a NAT's rendezvous is until found.
+fn unknownAddress() Address {
+    return .{ .ip4 = .unspecified(0) };
+}
+
+fn seedOf(io: std.Io) u64 {
+    var seed: u64 = undefined;
+    io.random(std.mem.asBytes(&seed));
+    return seed;
+}
+
+/// The rendezvous server from now on: `host:port` - a number or a name -
+/// or "" for none. A name is looked up on a thread of its own.
+pub fn setRendezvous(app: *App, text: []const u8) Error!void {
+    const s = &app.session;
+    const trimmed = std.mem.trim(u8, text, " \t");
+    if (std.mem.eql(u8, trimmed, s.rendezvous_text.items)) return;
+    s.rendezvous_text.clearRetainingCapacity();
+    try s.rendezvous_text.appendSlice(app.gpa, trimmed);
+    s.rendezvous = null;
+    s.listed = false;
+    if (trimmed.len == 0) return;
+    const io = app.io orelse return error.NoIo;
+    // `host:port`: the port after the last colon, where it is one.
+    var name = trimmed;
+    var port: u16 = 27000;
+    if (std.mem.lastIndexOfScalar(u8, trimmed, ':')) |colon| {
+        if (std.fmt.parseInt(u16, trimmed[colon + 1 ..], 10)) |given| {
+            port = given;
+            name = trimmed[0..colon];
+        } else |_| {}
+    }
+    if (std.mem.eql(u8, name, "localhost")) {
+        s.rendezvous = .{ .ip4 = .loopback(port) };
+        return;
+    }
+    if (Address.parse(name, port)) |literal| {
+        s.rendezvous = literal;
+        return;
+    } else |_| {}
+    _ = std.Io.net.HostName.init(name) catch return error.BadAddress;
+    if (s.rendezvous_lookup != null) return;
+    const lookup = try app.gpa.create(Lookup);
+    errdefer app.gpa.destroy(lookup);
+    lookup.* = .{ .port = port, .name_len = name.len };
+    @memcpy(lookup.name[0..name.len], name);
+    if (builtin.single_threaded) lookup.run(io) else {
+        lookup.thread = std.Thread.spawn(.{}, Lookup.run, .{ lookup, io }) catch return error.OutOfMemory;
+    }
+    s.rendezvous_lookup = lookup;
+}
+
+/// The project's rendezvous - `network.rendezvous` - where none was given.
+fn ensureRendezvous(app: *App) Error!void {
+    if (app.session.rendezvous_text.items.len > 0) return;
+    const given = networkOf(app).rendezvous;
+    if (given.len > 0) try setRendezvous(app, given);
+}
+
+/// The rendezvous as given: "" for none.
+pub fn rendezvousText(app: *const App) []const u8 {
+    return app.session.rendezvous_text.items;
+}
+
+/// Joined to the server the rendezvous knows as `id`, saying `hello`:
+/// introduced to it, then directly - or, where that does not open in
+/// `direct_ns`, through the rendezvous. A session there was is left first.
+pub fn joinOnline(app: *App, id: u64, hello: []const u8) Error!void {
+    const io = app.io orelse return error.NoIo;
+    if (hello.len > 256) return error.TooLarge;
+    try ensureRendezvous(app);
+    if (app.session.rendezvous_text.items.len == 0) return error.BadAddress;
+    leave(app);
+    const s = &app.session;
+    s.hello.clearRetainingCapacity();
+    try s.hello.appendSlice(app.gpa, hello);
+    s.socket = try openSocket(io, 0, false);
+    s.nat = fs.Nat.init(app.gpa, s.socket.?.transport(), unknownAddress(), protocolOf(app), .{}, seedOf(io));
+    s.client = .init(app.gpa, s.nat.?.transport(), .{ .protocol = protocolOf(app) });
+    s.role = .joining;
+    s.online_id = id;
+    s.online_phase = .waiting;
+    s.online_since = nowOf(io);
+}
+
+/// The rendezvous asked for this game's servers: they are in `found` too,
+/// each with its id.
+pub fn searchOnline(app: *App) Error!void {
+    const io = app.io orelse return error.NoIo;
+    const s = &app.session;
+    try ensureRendezvous(app);
+    if (s.rendezvous_text.items.len == 0) return error.BadAddress;
+    if (s.online_socket == null) {
+        s.online_socket = try openSocket(io, 0, false);
+        s.online_nat = fs.Nat.init(app.gpa, s.online_socket.?.transport(), unknownAddress(), protocolOf(app), .{}, seedOf(io));
+    }
+    s.online_wanted = true;
+}
+
+/// The rendezvous's search let go of.
+pub fn stopOnlineSearch(app: *App) void {
+    const s = &app.session;
+    if (s.online_nat) |*nat| nat.deinit();
+    s.online_nat = null;
+    if (s.online_socket) |*socket| socket.close();
+    s.online_socket = null;
+    s.online_wanted = false;
+}
+
+/// A public server's id at the rendezvous, and the address the world sees
+/// it at: null until the rendezvous answers.
+pub fn publicListing(app: *const App) ?struct { u64, Address } {
+    const nat = if (app.session.nat) |*held| held else return null;
+    return .{ nat.id orelse return null, nat.public orelse return null };
+}
+
+/// Whether `peer` is reached through the rendezvous: a server's player, or
+/// a player's server.
+pub fn isRelayed(app: *const App, peer: u32) bool {
+    const at = addressOf(app, peer) orelse return false;
+    return fs.Nat.isRelayed(at);
+}
+
+/// The rendezvous's address found, the NATs' ways told it; a public
+/// server listed and kept so; a player's join through it moved on.
+fn pumpNat(app: *App, now: u64) void {
+    const s = &app.session;
+    if (s.rendezvous_lookup) |lookup| if (lookup.done.load(.acquire)) {
+        if (!builtin.single_threaded) if (lookup.thread) |thread| thread.join();
+        if (lookup.found) |found| s.rendezvous = found else log.warn("no address found for the rendezvous \"{s}\"", .{lookup.name[0..lookup.name_len]});
+        app.gpa.destroy(lookup);
+        s.rendezvous_lookup = null;
+    };
+    const rendezvous = s.rendezvous orelse return;
+    if (s.nat) |*nat| {
+        nat.rendezvous = rendezvous;
+        if (s.server) |*server| {
+            nat.register(now, s.listing_name.items, s.listing_info.items, server.clients(), @intCast(s.peers.len));
+            if (!s.listed and nat.id != null) {
+                s.listed = true;
+                var buffer: [64]u8 = undefined;
+                log.info("listed by the rendezvous as {x}, seen at {s}:{d}", .{ nat.id.?, hostText(nat.public.?, &buffer), nat.public.?.getPort() });
+            }
+        }
+        nat.update(now);
+    }
+    if (s.client != null and s.nat != null) joinOnlineStep(app, now);
+    if (s.online_nat) |*nat| {
+        nat.rendezvous = rendezvous;
+        if (s.online_wanted) {
+            s.online_wanted = false;
+            nat.search();
+        }
+        nat.update(now);
+        // Nothing else reads its socket: what came, taken here.
+        var buffer: [fs.transport.max_datagram + 1]u8 = undefined;
+        while (nat.transport().receive(&buffer)) |_| {}
+    }
+}
+
+fn joinOnlineStep(app: *App, now: u64) void {
+    const s = &app.session;
+    const nat = &s.nat.?;
+    const client = &s.client.?;
+    switch (s.online_phase) {
+        .none => {},
+        .waiting => {
+            nat.introduce(now, s.online_id);
+            s.online_phase = .asking;
+            s.online_since = now;
+        },
+        .asking => {
+            if (nat.gone or now -| s.online_since > introduce_ns) return failOnline(app, .refused);
+            if (s.force_relay) {
+                goRelayed(app, now);
+            } else if (nat.direct) |address| {
+                client.connect(app.io.?, now, address, s.hello.items) catch return failOnline(app, .refused);
+                s.online_phase = .direct;
+                s.online_since = now;
+            }
+        },
+        .direct => if (s.role == .joining and now -| s.online_since > direct_ns) goRelayed(app, now),
+        .relayed => {},
+    }
+}
+
+fn goRelayed(app: *App, now: u64) void {
+    const s = &app.session;
+    log.info("joining through the rendezvous", .{});
+    s.client.?.connect(app.io.?, now, fs.Nat.relayed(s.online_id), s.hello.items) catch return failOnline(app, .refused);
+    s.online_phase = .relayed;
+    s.online_since = now;
+}
+
+fn failOnline(app: *App, reason: Reason) void {
+    const s = &app.session;
+    leave(app);
+    s.last_reason = reason;
+    s.happen(app.gpa, .{ .kind = .left, .peer = server_peer, .reason = reason });
 }
 
 /// Joined to the server at `address` - a number, `192.168.1.20` or
@@ -427,6 +710,10 @@ pub fn leave(app: *App) void {
         client.deinit();
         s.client = null;
     }
+    if (s.nat) |*nat| nat.deinit();
+    s.nat = null;
+    s.online_phase = .none;
+    s.listed = false;
     if (s.socket) |*socket| socket.close();
     s.socket = null;
     @memset(s.peers, 0);
@@ -485,6 +772,7 @@ fn pump(app: *App) void {
             s.happen(app.gpa, .{ .kind = .left, .peer = server_peer, .reason = .refused });
         }
     };
+    pumpNat(app, now);
     if (s.server != null) serverNews(app, now);
     if (s.client != null) clientNews(app, now);
     if (s.browser) |*browser| browser.update(now);
@@ -771,14 +1059,23 @@ pub fn stopSearch(app: *App) void {
 
 /// The servers found since the last `search`, good until the next frame.
 pub fn foundInto(app: *const App, into: *std.ArrayList(Found), gpa: std.mem.Allocator) error{OutOfMemory}!void {
-    const browser = if (app.session.browser) |*held| held else return;
-    for (browser.found.items) |*found| try into.append(gpa, .{
+    if (app.session.browser) |*browser| for (browser.found.items) |*found| try into.append(gpa, .{
         .address = found.address,
         .name = found.name(),
         .info = found.info(),
         .players = found.players,
         .most = found.most,
         .ping_ns = found.ping_ns,
+    });
+    const nat = if (app.session.online_nat) |*held| held else return;
+    for (nat.found()) |*found| try into.append(gpa, .{
+        .address = unknownAddress(),
+        .id = found.id,
+        .name = found.nameText(),
+        .info = found.infoText(),
+        .players = found.players,
+        .most = found.most,
+        .ping_ns = 0,
     });
 }
 

@@ -683,6 +683,9 @@ pub const Network = struct {
     session_port: u16 = 27015,
     /// The most players a server takes when the game does not say.
     session_max_players: u16 = 16,
+    /// The rendezvous server - `host:port` - that public servers are listed
+    /// by and players reach them through across the internet; "" for none.
+    rendezvous: []const u8 = "",
 
     pub const reflect_attributes = .{attr.Label{ .text = "Network" }};
     pub const reflect_fields = .{
@@ -691,6 +694,7 @@ pub const Network = struct {
         .session_version = .{ attr.Doc{ .text = "The version of what the game's players say to each other: a player of one version never joins a server of another, nor finds it on the LAN. Raise it when what is sent changes." }, attr.Range{ .min = 1, .max = 1000000, .step = 1 } },
         .session_port = .{ attr.Doc{ .text = "The UDP port a server listens on, and a LAN search asks, when the game does not say." }, attr.Range{ .min = 1, .max = 65535, .step = 1 } },
         .session_max_players = .{ attr.Doc{ .text = "The most players a server takes when the game does not say: the host not counted." }, attr.Range{ .min = 1, .max = 1024, .step = 1 } },
+        .rendezvous = .{attr.Doc{ .text = "The rendezvous server - host:port, a number or a name - that public servers are listed by and players reach them through across the internet, NATs and all: one running fluxion-session's fluxion-rendezvous. Empty for none: LAN play and addresses alone." }},
     };
 };
 

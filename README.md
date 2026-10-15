@@ -118,7 +118,7 @@ until they are registered for scenes.
 | Navigation | Navigation meshes baked from a level, agents, links and obstacles |
 | Sound | Players, buses, and sound heard from where it is in 2D and 3D |
 | Scenes | A world written as JSON or CBOR and read back, entities by UUID, scenes instanced in scenes, any file read in the background |
-| Networking | Web requests that never stop the frame; networked play over UDP - a server players join, sealed end to end, messages on unreliable, sequenced and reliable channels, players passed each other's messages, the LAN's servers found - from Zig and from scripts (`net`) |
+| Networking | Web requests that never stop the frame; networked play over UDP - a server players join, sealed end to end, messages on unreliable, sequenced and reliable channels, players passed each other's messages, the LAN's servers found, and across the internet through NATs: public servers listed by a rendezvous server, found and joined by id, directly where the NATs open to each other and through the rendezvous where they do not - from Zig and from scripts (`net`) |
 | The project | `res://`, `user://` and `uid://` paths, `project.fluxion` and its settings, plugins, config files and saves |
 | Scripts | [Flux](https://github.com/kisstp2006/fluxion-script) scripts on entities, read again as they are saved |
 | Reflection | Every component described - fields, defaults, ranges, units - and read, written and called by name |

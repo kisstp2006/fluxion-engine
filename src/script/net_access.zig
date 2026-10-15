@@ -83,7 +83,7 @@ pub const NetAccess = struct {
     pub const reflect_name = "Net";
     pub const reflect_opaque = true;
     pub const reflect_methods = .{
-        .host = .{ attr.Params{ .names = &.{ "port", "max_players", "name", "info" } }, attr.defaults(.{ @as(i64, 0), @as(i64, 0), "", "" }), flux.GivesErrors{} },
+        .host = .{ attr.Params{ .names = &.{ "port", "max_players", "name", "info", "public" } }, attr.defaults(.{ @as(i64, 0), @as(i64, 0), "", "", false }), flux.GivesErrors{} },
         .join = .{ attr.Params{ .names = &.{ "address", "port", "hello" } }, attr.defaults(.{ @as(i64, 0), "" }), flux.GivesErrors{} },
         .leave = .{},
         .send = .{ attr.Params{ .names = &.{ "vm", "peer", "value", "channel" } }, attr.defaults(.{NetChannel.reliable}) },
@@ -101,6 +101,14 @@ pub const NetAccess = struct {
         .search = .{ attr.Params{ .names = &.{"port"} }, attr.defaults(.{@as(i64, 0)}), flux.GivesErrors{} },
         .servers = .{attr.Params{ .names = &.{"vm"} }},
         .stopSearch = .{},
+        .setRendezvous = .{ attr.Params{ .names = &.{"address"} }, flux.GivesErrors{} },
+        .rendezvous = .{attr.Params{ .names = &.{"vm"} }},
+        .searchOnline = .{flux.GivesErrors{}},
+        .joinOnline = .{ attr.Params{ .names = &.{ "id", "hello" } }, attr.defaults(.{""}), flux.GivesErrors{} },
+        .publicId = .{attr.Params{ .names = &.{"vm"} }},
+        .publicAddress = .{attr.Params{ .names = &.{"vm"} }},
+        .isRelayed = .{attr.Params{ .names = &.{"peer"} }},
+        .setForceRelay = .{attr.Params{ .names = &.{"on"} }},
     };
 
     /// Be a server of this game, players joining it from now on: on `port`
@@ -108,12 +116,15 @@ pub const NetAccess = struct {
     /// and `session_max_players` - answering LAN searches with `name` and
     /// `info`: the map, the mode. A session there was is left first. Fails
     /// with `CannotListen` where another program has the port.
-    pub fn host(self: *NetAccess, on_port: i64, max_players: i64, name: []const u8, info: []const u8) anyerror!void {
+    /// With `public`, listed by the rendezvous too (`setRendezvous`), for
+    /// players across the internet to find and join through NATs.
+    pub fn host(self: *NetAccess, on_port: i64, max_players: i64, name: []const u8, info: []const u8, public: bool) anyerror!void {
         return self.app.hostSession(.{
             .port = portOf(on_port),
             .max_players = if (max_players > 0) @intCast(@min(max_players, std.math.maxInt(u16))) else null,
             .name = name,
             .info = info,
+            .public = public,
         });
     }
 
@@ -242,8 +253,10 @@ pub const NetAccess = struct {
         return self.app.searchSessions(portOf(on_port));
     }
 
-    /// The servers found since the last `search`: each a map of `address`,
-    /// `port`, `name`, `info`, `players`, `max_players` and `ping`.
+    /// The servers found since the last `search` and `searchOnline`: each a
+    /// map of `address`, `port`, `name`, `info`, `players`, `max_players`,
+    /// `ping` and `id` - the rendezvous's, to `joinOnline` it by; "" for one
+    /// on the LAN.
     pub fn servers(self: *NetAccess, vm: *flux.Vm) flux.Vm.Error!flux.Value {
         var found: std.ArrayList(sessions.Found) = .empty;
         defer found.deinit(vm.gpa);
@@ -254,7 +267,7 @@ pub const NetAccess = struct {
         for (found.items) |one| {
             const made = blk: {
                 var host_buffer: [64]u8 = undefined;
-                const keys = [_][]const u8{ "address", "port", "name", "info", "players", "max_players", "ping" };
+                const keys = [_][]const u8{ "address", "port", "name", "info", "players", "max_players", "ping", "id" };
                 var values: [keys.len]flux.Value = undefined;
                 var key_values: [keys.len]flux.Value = undefined;
                 // Each rooted until the map has it: making the next can
@@ -274,6 +287,11 @@ pub const NetAccess = struct {
                 values[4] = .int(one.players);
                 values[5] = .int(one.most);
                 values[6] = .float(@as(f64, @floatFromInt(one.ping_ns)) / std.time.ns_per_s);
+                // A rendezvous's, by its id; "" for one on the LAN.
+                var id_buffer: [16]u8 = undefined;
+                values[7] = try vm.string(if (one.id == 0) "" else std.fmt.bufPrint(&id_buffer, "{x}", .{one.id}) catch "");
+                try vm.pushRoot(values[7]);
+                rooted += 1;
                 for (keys, &key_values) |key, *into| {
                     into.* = try vm.string(key);
                     try vm.pushRoot(into.*);
@@ -290,9 +308,67 @@ pub const NetAccess = struct {
         return vm.newList(.any, items.items);
     }
 
-    /// The LAN search let go of.
+    /// The LAN search let go of, and the rendezvous's.
     pub fn stopSearch(self: *NetAccess) void {
         self.app.stopSessionSearch();
+        self.app.stopSessionSearchOnline();
+    }
+
+    /// The rendezvous server from now on - `host:port`, a number or a name -
+    /// that public servers are listed by and players reach them through
+    /// across the internet; "" for none, or the project's.
+    pub fn setRendezvous(self: *NetAccess, to: []const u8) anyerror!void {
+        return self.app.setSessionRendezvous(to);
+    }
+
+    /// The rendezvous as given; "" for none.
+    pub fn rendezvous(self: *NetAccess, vm: *flux.Vm) flux.Vm.Error!flux.Value {
+        return vm.string(self.app.sessionRendezvous());
+    }
+
+    /// Ask the rendezvous for this game's servers across the internet:
+    /// `servers()` lists them too, each with its `id`. Fails with
+    /// `BadAddress` where there is no rendezvous.
+    pub fn searchOnline(self: *NetAccess) anyerror!void {
+        return self.app.searchSessionsOnline();
+    }
+
+    /// Join the server the rendezvous lists as `id` - as `servers()` gives
+    /// it - saying `hello`: directly where the NATs open to each other,
+    /// through the rendezvous where they do not. `joined` once in, `left`
+    /// if not.
+    pub fn joinOnline(self: *NetAccess, listed: []const u8, hello: []const u8) anyerror!void {
+        const number = std.fmt.parseInt(u64, std.mem.trim(u8, listed, " \t"), 16) catch return error.BadAddress;
+        return self.app.joinSessionOnline(number, hello);
+    }
+
+    /// A public server's id at the rendezvous, to join it by; "" until the
+    /// rendezvous has answered.
+    pub fn publicId(self: *NetAccess, vm: *flux.Vm) flux.Vm.Error!flux.Value {
+        const listing = self.app.sessionListing() orelse return vm.string("");
+        var buffer: [16]u8 = undefined;
+        return vm.string(std.fmt.bufPrint(&buffer, "{x}", .{listing[0]}) catch "");
+    }
+
+    /// The address the world sees a public server at, `203.0.113.7:27015`;
+    /// "" until the rendezvous has answered.
+    pub fn publicAddress(self: *NetAccess, vm: *flux.Vm) flux.Vm.Error!flux.Value {
+        const listing = self.app.sessionListing() orelse return vm.string("");
+        var buffer: [80]u8 = undefined;
+        var host_buffer: [64]u8 = undefined;
+        return vm.string(std.fmt.bufPrint(&buffer, "{s}:{d}", .{ sessions.hostText(listing[1], &host_buffer), listing[1].getPort() }) catch "");
+    }
+
+    /// Whether `peer` is reached through the rendezvous, not directly.
+    pub fn isRelayed(self: *NetAccess, peer: i64) bool {
+        if (peer <= 0 or peer > std.math.maxInt(u32)) return false;
+        return self.app.sessionRelayed(@intCast(peer));
+    }
+
+    /// Joining through the rendezvous, go through it at once - never
+    /// directly: to try a NAT that opens to nothing.
+    pub fn setForceRelay(self: *NetAccess, on: bool) void {
+        self.app.setSessionForceRelay(on);
     }
 
     /// The signals of `net`'s a script reaches as members.

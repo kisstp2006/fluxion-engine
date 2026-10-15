@@ -233,6 +233,98 @@ test "a LAN search finds the server on this machine, with its name, what it says
 }
 
 // -------------------------------------------------------------------------
+// Across the internet
+// -------------------------------------------------------------------------
+
+const fs = @import("fluxion_session");
+
+/// A frame of each and of the rendezvous, until `done` holds.
+fn meet(apps: []const *App, rendezvous: *fs.Rendezvous, heard: []Heard, context: anytype, comptime done: fn (@TypeOf(context)) bool) !void {
+    var frames: usize = 0;
+    while (frames < 1500) : (frames += 1) {
+        const now: u64 = @intCast(std.Io.Clock.awake.now(testing.io).nanoseconds);
+        rendezvous.update(now);
+        for (apps, heard) |app, *kept| {
+            _ = try app.step();
+            try kept.take(app);
+        }
+        if (done(context)) return;
+        try testing.io.sleep(.fromMilliseconds(4), .awake);
+    }
+    return error.TestTimedOut;
+}
+
+test "across NATs: a public server listed by the rendezvous, found and joined by its id - directly, and through the rendezvous" {
+    var socket = try fs.transport.Udp.open(testing.io, .{ .ip4 = .unspecified(0) }, .{});
+    defer socket.close();
+    var rendezvous: fs.Rendezvous = .init(testing.allocator, socket.transport(), .{}, 9);
+    defer rendezvous.deinit();
+    var at_buffer: [32]u8 = undefined;
+    const at = try std.fmt.bufPrint(&at_buffer, "127.0.0.1:{d}", .{socket.port()});
+    for ([_]bool{ false, true }) |through| {
+        const server = try headless();
+        defer server.destroy();
+        const player = try headless();
+        defer player.destroy();
+        var heard: [2]Heard = @splat(.{});
+        defer for (&heard) |*h| h.deinit();
+        const apps = [_]*App{ server, player };
+        try server.setSessionRendezvous(at);
+        try player.setSessionRendezvous(at);
+        try server.hostSession(.{ .port = 0, .max_players = 4, .name = "Across", .info = "de_dust2", .public = true });
+        try meet(&apps, &rendezvous, &heard, server, struct {
+            fn done(a: *App) bool {
+                return a.sessionListing() != null;
+            }
+        }.done);
+        const listing = server.sessionListing().?;
+        try player.searchSessionsOnline();
+        const Wanted = struct { app: *App, id: u64 };
+        try meet(&apps, &rendezvous, &heard, Wanted{ .app = player, .id = listing[0] }, struct {
+            fn done(w: Wanted) bool {
+                for (w.app.session.online_nat.?.found()) |one| {
+                    if (one.id == w.id) return true;
+                }
+                return false;
+            }
+        }.done);
+        var found: std.ArrayList(App.SessionFound) = .empty;
+        defer found.deinit(testing.allocator);
+        try player.foundSessions(testing.allocator, &found);
+        // The one hosted now: the one before is still listed a while.
+        const listed = for (found.items) |one| {
+            if (one.id == listing[0]) break one;
+        } else return error.TestUnexpectedResult;
+        try testing.expectEqualStrings("Across", listed.name);
+        try testing.expectEqualStrings("de_dust2", listed.info);
+        player.setSessionForceRelay(through);
+        try player.joinSessionOnline(listed.id, "far player");
+        try meet(&apps, &rendezvous, &heard, player, struct {
+            fn done(a: *App) bool {
+                return a.sessionRole() == .client;
+            }
+        }.done);
+        // Through the rendezvous only where it had to be.
+        try testing.expectEqual(through, player.sessionRelayed(1));
+        try testing.expectEqual(through, server.sessionRelayed(2));
+        try testing.expect(heard[0].find(.peer_joined, 2, "far player") != null);
+        try player.sessionSend(1, .reliable, "hello across");
+        try meet(&apps, &rendezvous, &heard, &heard, struct {
+            fn done(h: *[2]Heard) bool {
+                return h[0].find(.message, 2, "hello across") != null;
+            }
+        }.done);
+        try server.sessionSend(2, .reliable, "and back");
+        try meet(&apps, &rendezvous, &heard, &heard, struct {
+            fn done(h: *[2]Heard) bool {
+                return h[1].find(.message, 1, "and back") != null;
+            }
+        }.done);
+        if (through) try testing.expect(rendezvous.relayed > 4);
+    }
+}
+
+// -------------------------------------------------------------------------
 // From scripts
 // -------------------------------------------------------------------------
 

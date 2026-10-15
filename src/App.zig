@@ -5833,6 +5833,54 @@ pub fn stopSessionSearch(self: *App) void {
     sessions.stopSearch(self);
 }
 
+/// The rendezvous server from now on - `host:port`, a number or a name - for
+/// public servers to be listed by and players to reach them through across
+/// the internet; "" for none. Where none is given, the project's
+/// `network.rendezvous`. See `net/session.zig`.
+pub fn setSessionRendezvous(self: *App, text: []const u8) sessions.Error!void {
+    return sessions.setRendezvous(self, text);
+}
+
+/// The rendezvous as given: "" for none.
+pub fn sessionRendezvous(self: *const App) []const u8 {
+    return sessions.rendezvousText(self);
+}
+
+/// The rendezvous asked for this game's servers: `foundSessions` lists them
+/// too, each with its `id`.
+pub fn searchSessionsOnline(self: *App) sessions.Error!void {
+    return sessions.searchOnline(self);
+}
+
+/// The rendezvous's search let go of.
+pub fn stopSessionSearchOnline(self: *App) void {
+    sessions.stopOnlineSearch(self);
+}
+
+/// Joined to the server the rendezvous knows as `id`, saying `hello`:
+/// directly where the two NATs open to each other, through the rendezvous
+/// where they do not.
+pub fn joinSessionOnline(self: *App, id: u64, hello: []const u8) sessions.Error!void {
+    return sessions.joinOnline(self, id, hello);
+}
+
+/// A public server's id at the rendezvous and the address the world sees it
+/// at; null until the rendezvous has answered.
+pub fn sessionListing(self: *const App) ?struct { u64, SessionAddress } {
+    return sessions.publicListing(self);
+}
+
+/// Whether `peer` is reached through the rendezvous rather than directly.
+pub fn sessionRelayed(self: *const App, peer: u32) bool {
+    return sessions.isRelayed(self, peer);
+}
+
+/// A player joining through the rendezvous goes through it at once, never
+/// directly: to try what a NAT that opens to nothing does.
+pub fn setSessionForceRelay(self: *App, on: bool) void {
+    self.session.force_relay = on;
+}
+
 // -------------------------------------------------------------------------
 // A game's files
 // -------------------------------------------------------------------------

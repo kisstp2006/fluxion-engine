@@ -130,8 +130,8 @@
         // Networked play: a script's `net` global - a server players join
         // over UDP, sealed, and the servers of a LAN found.
         .fluxion_session = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-session#159bb5536df103d7b58de15049ca455e1b818f2b",
-            .hash = "fluxion_session-0.1.0-jOHNl2KuAQApxlvDMcVqSVmEZCfVE9Xkk6kroNPeWuo9",
+            .url = "git+https://github.com/kisstp2006/fluxion-session#4ecea3c24afb9b35d88b04338d1d912f0dbb78b3",
+            .hash = "fluxion_session-0.1.0-jOHNlytpAgCUFQ7m07N7V-SCbulmv0mUTxGBSsRBhgOM",
         },
 
         // Generational handles: what the asset tables hand out, and what a
