@@ -291,13 +291,38 @@ pub const Script = extern struct {
     /// When off, no instance is made, and an existing one is let go of, with
     /// `exit`.
     enabled: bool = true,
+    /// Which builds of the game run it: every one, a dedicated server's
+    /// alone, or the players' alone. Where it is not run, it is as if it
+    /// were off. See `App.isServerBuild`.
+    runs_on: RunsOn = .everywhere,
+
+    pub const RunsOn = enum(u8) {
+        everywhere,
+        /// A dedicated server's build alone: what the server does that the
+        /// players' game need not - or must not - have.
+        server_build,
+        /// The players' builds alone - a listen server's too: what a
+        /// dedicated server, with no one at it, has no use for.
+        client_build,
+    };
 
     pub const reflect_name = "Script";
     pub const reflect_fields = .{
         .source = .{attr.Doc{ .text = "The .flux file" }},
         .struct_name = .{attr.Doc{ .text = "Which struct of the file; empty for the one named after the file" }},
         .enabled = .{attr.Doc{ .text = "Off, the script is let go of, with exit" }},
+        .runs_on = .{attr.Doc{ .text = "Which builds run it: every one, a dedicated server's alone, or the players' alone" }},
     };
+
+    /// Whether it runs in this build: on, and meant for it.
+    pub fn runsIn(self: *const Script, server_build: bool) bool {
+        if (!self.enabled) return false;
+        return switch (self.runs_on) {
+            .everywhere => true,
+            .server_build => server_build,
+            .client_build => !server_build,
+        };
+    }
 
     /// The struct named after the file.
     pub fn of(source: ScriptHandle) Script {
@@ -1199,7 +1224,7 @@ pub const Scripts = struct {
         };
         while (query.next()) |chunk| {
             for (chunk.entities, chunk.slice(Script)) |entity, script| {
-                if (!script.enabled or script.source.isNone() or self.instances.contains(entity)) continue;
+                if (!script.runsIn(app.server_build) or script.source.isNone() or self.instances.contains(entity)) continue;
                 if (self.refused.get(entity)) |asked| if (std.meta.eql(asked, script)) continue;
                 try self.scratch.append(app.gpa, entity);
             }
@@ -1207,7 +1232,7 @@ pub const Scripts = struct {
         for (self.scratch.items) |entity| {
             // Looked at again: making the ones before may have changed it.
             const script = (app.world.getConst(entity, Script) orelse continue).*;
-            if (!script.enabled or script.source.isNone() or self.instances.contains(entity)) continue;
+            if (!script.runsIn(app.server_build) or script.source.isNone() or self.instances.contains(entity)) continue;
             try self.make(entity, script);
         }
     }
@@ -1226,7 +1251,7 @@ pub const Scripts = struct {
 
     fn wanted(self: *Scripts, entity: Entity, inst: *const Instance) bool {
         const script = self.app.world.getConst(entity, Script) orelse return false;
-        return script.enabled and script.source.eql(inst.file) and std.mem.eql(u8, &script.struct_name, &inst.struct_name);
+        return script.runsIn(self.app.server_build) and script.source.eql(inst.file) and std.mem.eql(u8, &script.struct_name, &inst.struct_name);
     }
 
     fn make(self: *Scripts, entity: Entity, script: Script) Allocator.Error!void {

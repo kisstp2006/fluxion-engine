@@ -616,6 +616,7 @@ test {
     _ = @import("animation/tween_test.zig");
     _ = @import("app_test.zig");
     _ = @import("app/frame_stats.zig");
+    _ = @import("app/terminal.zig");
     _ = @import("app/memory_watch.zig");
     _ = @import("app/version.zig");
     _ = @import("assets/images_test.zig");

@@ -79,6 +79,9 @@ pub const order = [_]Step{
     .{ .pass = freshFrame },
     .{ .pass = feedInterface },
     .{ .pass = commands },
+    // A dedicated server's terminal: the lines typed since the last frame,
+    // the game's to read this one.
+    .{ .pass = terminalLines },
     .{ .pass = States.changeAsked },
     .{ .pass = bodiesBeforeTheSteps },
 
@@ -146,7 +149,7 @@ pub const order = [_]Step{
 /// What each of `order`'s steps is called, in its order: what a frame's
 /// stats name the step it spent longest in by.
 pub const order_names = [_][]const u8{
-    "tick", "fingers", "freshFrame", "feedInterface", "commands", "States.changeAsked",
+    "tick", "fingers", "freshFrame", "feedInterface", "commands", "terminalLines", "States.changeAsked",
     "bodiesBeforeTheSteps", "scriptsHearInput", "stage input", "engineKeys", "pointerSpeed", "picking",
     "fixed steps", "freshInherited", "gameClocks", "frameTimers", "tween.update", "animation.update",
     "ragdolls3d.update", "skeleton.update", "sprite_frames.update", "scriptsUpdate", "stage update",
@@ -278,6 +281,10 @@ fn feedInterface(app: *App) anyerror!void {
 /// before the first system of this one.
 fn commands(app: *App) anyerror!void {
     try app.commands.apply();
+}
+
+fn terminalLines(app: *App) anyerror!void {
+    app.terminal_lines = app.terminal.take();
 }
 
 /// Bodies are synced before each fixed step. A frame with no time - and the

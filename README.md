@@ -301,6 +301,7 @@ The screenshots on this page are what each example's `--capture` wrote.
 ```bash
 zig build                              # the runtime and every example, into zig-out/bin
 zig build runtime-only                 # the runtime alone
+zig build server-only                  # the dedicated server's build of it alone
 zig build test                         # every test
 zig build test-core -Dtest-filter=tile # the engine's own, and only those named so
 zig build docs                         # the API's documentation, into zig-out/docs
@@ -322,6 +323,16 @@ const app = try App.create(gpa, flags.apply(.{ .title = "game", .io = io }));
 
 `--capture shot.png` keeps the last frame, the same picture on every
 machine, and `--stats report.json` what each frame cost.
+
+**A dedicated server is the runtime built as `fluxion-server`.** It has no
+window and no sound, holds its frames to 128 a second, and its console is
+the terminal it was started in: each line typed there is the game's for a
+frame (`app.terminalLines()`), and `app.printTerminal(text)` writes back.
+A game asks `app.isServerBuild()` for what only a dedicated server does, or
+never does, and a `Script` can be set to run on the server's build alone or
+on the players' builds alone (`runs_on`), as if turned off in the other.
+The editor exports one from a Windows or Linux preset with **Dedicated
+server** ticked.
 
 ### Where the code is
 

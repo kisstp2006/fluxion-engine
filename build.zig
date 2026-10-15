@@ -58,17 +58,23 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(simplify_tests).step);
 
     const ndk = b.option([]const u8, "android-ndk", "The Android NDK, for a build for Android (default: ANDROID_NDK_HOME, then the newest in the Android SDK's ndk folder)");
-    const program = runtime(b, e, target, optimize, ndk);
+    const program = runtime(b, e, target, optimize, ndk, false);
     const android = target.result.abi.isAndroid();
     const web = target.result.cpu.arch.isWasm();
     b.installArtifact(program);
     b.step("runtime-only", "Build and install only the game runtime").dependOn(&b.addInstallArtifact(program, .{}).step);
     test_step.dependOn(&program.step);
+    // A dedicated server's build of it, for a desktop: see runtime/main.zig.
+    if (!android and !web) {
+        const server = runtime(b, e, target, optimize, null, true);
+        b.installArtifact(server);
+        b.step("server-only", "Build and install only the dedicated server").dependOn(&b.addInstallArtifact(server, .{}).step);
+    }
     // And for a browser, whatever the target: a change that breaks the page's
     // build is found where the change is made.
     if (!web) {
         const browser = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
-        test_step.dependOn(&runtime(b, engine(b, browser, .ReleaseSmall, false), browser, .ReleaseSmall, null).step);
+        test_step.dependOn(&runtime(b, engine(b, browser, .ReleaseSmall, false), browser, .ReleaseSmall, null, false).step);
     }
 
     // What a page needs around the runtime's module, a folder the export
@@ -389,8 +395,11 @@ const Engine = struct {
 /// Android it is the library the platform's activity loads, the APK's
 /// libmain.so; in a browser, the page's module. A release build on Windows
 /// opens a window and no console; the export can still turn a game's into
-/// one with a console.
-fn runtime(b: *std.Build, e: Engine, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ndk: ?[]const u8) *std.Build.Step.Compile {
+/// one with a console. With `server`, `fluxion-server`: a dedicated server's
+/// build - no window, no sound, its console the terminal - always with one.
+fn runtime(b: *std.Build, e: Engine, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, ndk: ?[]const u8, server: bool) *std.Build.Step.Compile {
+    const built = b.addOptions();
+    built.addOption(bool, "server", server);
     const runtime_mod = b.createModule(.{
         .root_source_file = b.path("runtime/main.zig"),
         .target = target,
@@ -400,15 +409,20 @@ fn runtime(b: *std.Build, e: Engine, target: std.Build.ResolvedTarget, optimize:
         // is the one to find a fault with.
         // `-Dstrip=false` keeps it, for a profiler to name what is slow.
         .strip = stripOption(b) orelse (optimize == .ReleaseFast or optimize == .ReleaseSmall),
-        .imports = &.{.{ .name = "fluxion_engine", .module = e.mod }},
+        .imports = &.{
+            .{ .name = "fluxion_engine", .module = e.mod },
+            .{ .name = "runtime_options", .module = built.createModule() },
+        },
     });
     const android = target.result.abi.isAndroid();
-    const program = if (android)
+    const program = if (server)
+        b.addExecutable(.{ .name = "fluxion-server", .root_module = runtime_mod })
+    else if (android)
         b.addLibrary(.{ .name = "main", .linkage = .dynamic, .root_module = runtime_mod })
     else
         b.addExecutable(.{ .name = "fluxion-runtime", .root_module = runtime_mod });
     if (android) useAndroidNdk(b, program, ndk);
-    if (target.result.os.tag == .windows and optimize != .Debug) program.subsystem = .windows;
+    if (target.result.os.tag == .windows and optimize != .Debug and !server) program.subsystem = .windows;
     if (target.result.cpu.arch.isWasm()) {
         // A page's module, for wasm32-wasi: no `main` - the page calls
         // `init`, `frame` and `deinit` - its exports kept, and a reactor,

@@ -17,6 +17,18 @@
 //! game --frames 300 --capture shot.png
 //! ```
 //!
+//! Built as `fluxion-server` it is a dedicated server's build: no window and
+//! no sound, frames held to 128 a second, the game told so
+//! (`app.isServerBuild`) - its scripts for the server's build alone run,
+//! its players' alone do not - and its console the terminal it was started
+//! in: each line typed there is the game's (`app.terminalLines`), and what
+//! the game says to it is written there (`app.printTerminal`). Its log goes
+//! to standard error as the game's does.
+//!
+//! ```bash
+//! game-server --pack Game.fxpack +map de_dust2
+//! ```
+//!
 //! In a browser it is a WebAssembly module the page drives: `init` once,
 //! `frame` once an animation frame until it answers false, then `deinit`.
 //! Its command line and the page's address come in as WASI's arguments and
@@ -35,6 +47,8 @@ const App = fx.App;
 const shipped = fx.shipped;
 
 const log = std.log.scoped(.game);
+/// Whether this is `fluxion-server`: see the build.
+const server = @import("runtime_options").server;
 const android = builtin.abi.isAndroid();
 const web = builtin.cpu.arch.isWasm();
 
@@ -170,6 +184,13 @@ fn start(gpa: std.mem.Allocator, io: std.Io, flags: Flags, arguments: []const []
     options.open_project = true;
     options.arguments = arguments;
     options.page = address;
+    if (server) {
+        options.headless = true;
+        options.server = true;
+        // A server's frames come as fast as its players need them, no
+        // faster: not a core spent spinning.
+        if (options.max_fps == null) options.max_fps = 128;
+    }
     const app = App.create(gpa, options) catch |err| {
         log.err("the game did not start: {t}", .{err});
         return err;
@@ -186,6 +207,10 @@ fn start(gpa: std.mem.Allocator, io: std.Io, flags: Flags, arguments: []const []
     app.useControlNodes() catch |err| return failed(app, err);
 
     app.startup() catch |err| return failed(app, err);
+    if (server) {
+        app.startTerminal() catch |err| log.warn("the terminal is not read: {t}", .{err});
+        log.info("a dedicated server: type the console's commands here", .{});
+    }
     return app;
 }
 

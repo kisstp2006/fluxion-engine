@@ -167,6 +167,7 @@ const Exports = @import("script/script_exports.zig").Exports;
 // The web and networked play: `net/`.
 const web_requests = @import("net/web.zig");
 const sessions = @import("net/session.zig");
+const terminals = @import("app/terminal.zig");
 
 // assets
 const Assets = @import("assets/assets.zig");
@@ -559,6 +560,12 @@ web: web_requests.Web = .{},
 /// Networked play: the server the game is, or the one it joined, and the
 /// servers of the LAN it found. See `hostSession`.
 session: sessions.Session = .{},
+/// A dedicated server's terminal, once `startTerminal` reads it, and the
+/// lines typed into it since the last frame. See `app/terminal.zig`.
+terminal: terminals.Terminal = .{},
+terminal_lines: []const []const u8 = &.{},
+/// Whether this is a dedicated server's build. See `Options.server`.
+server_build: bool = false,
 
 // A game's files: `files/`.
 /// How hard `writeSecret`'s password is made to guess. See `sealed.Cost`.
@@ -835,6 +842,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .frames_left = options.frames,
         .frame_stats = .{ .path = options.stats },
         .arguments = options.arguments,
+        .server_build = options.server,
         .page = options.page,
         .started = false,
     };
@@ -1004,6 +1012,7 @@ pub fn destroy(self: *App) void {
     // A server tells its players it is closing, a player its server it is
     // going.
     self.session.deinit(self);
+    self.terminal.deinit();
     self.web.deinit(self);
     self.frame_stats.deinit(gpa);
     self.input.deinit(gpa);
@@ -5603,6 +5612,35 @@ pub fn openAutoloads(self: *App) !void {
     return project_start.openAutoloads(self);
 }
 
+/// Whether this is a dedicated server's build - `fluxion-server`, no window,
+/// its console the terminal it was started in - rather than a game a player
+/// plays: for what a server alone does, or does not. A listen server - a
+/// game that hosts - is a client's build that is a server.
+pub fn isServerBuild(self: *const App) bool {
+    return self.server_build;
+}
+
+/// The terminal the program was started in read from now on, a line at a
+/// time: `terminalLines`. What `fluxion-server` does; a game's own program
+/// reads nothing it was not meant to.
+pub fn startTerminal(self: *App) !void {
+    try self.terminal.start(self.gpa, self.io orelse return);
+}
+
+/// The lines typed into the terminal since the last frame, the oldest
+/// first - each the same for every script that asks this frame. None where
+/// the terminal is not read (`startTerminal`).
+pub fn terminalLines(self: *const App) []const []const u8 {
+    return self.terminal_lines;
+}
+
+/// `text` written to the terminal the program was started in, a line of
+/// its own: a dedicated server's console, as a log's line is but without
+/// its prefix.
+pub fn printTerminal(self: *App, text: []const u8) void {
+    terminals.print(self.io orelse return, text);
+}
+
 /// What the project file's `application.version` says: "1.2.0", for a menu
 /// to show. Empty with none.
 pub fn gameVersion(self: *const App) []const u8 {
@@ -6783,6 +6821,9 @@ pub const reflect_methods = .{
     .gameVersion = .{},
     // What the game was started with
     .commandArgument = .{attr.Params{ .names = &.{"name"} }},
+    .isServerBuild = .{},
+    .terminalLines = .{},
+    .printTerminal = .{attr.Params{ .names = &.{"text"} }},
     .pageParameter = .{attr.Params{ .names = &.{"name"} }},
     // A game's files
     .openUrl = .{ attr.Params{ .names = &.{"url"} }, flux.GivesErrors{} },

@@ -228,6 +228,12 @@ pub const Options = struct {
     /// texture.
     headless: bool = false,
 
+    /// A dedicated server's build - `fluxion-server` - which the game can ask
+    /// about (`App.isServerBuild`): a `Script` meant for the clients' builds
+    /// alone is not run, and one for the server's build alone is. Whether
+    /// there is a window is `headless`'s.
+    server: bool = false,
+
     /// The window's close button - and Alt+F4 - only ask: `close_pressed`
     /// says so, and the program ends the run with `quit` if it agrees. For a
     /// program with unsaved work to ask about; a game closes at once.
