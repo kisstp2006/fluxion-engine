@@ -608,6 +608,8 @@ test "a skin is a skeleton on the entity its bones hang from, and what hangs fro
     try testing.expect(app.find("Lower") == null);
     const body = app.find("Body").?;
     try testing.expect(app.world.get(body, MeshInstance3D).?.skeleton.eql(armature));
+    // It moves: no lightmap holds it.
+    try testing.expect(app.world.get(body, MeshInstance3D).?.gi_mode == .dynamic);
     const square = app.meshOf(app.world.get(body, MeshInstance3D).?.mesh).?;
     try testing.expectEqual(@as(usize, 6), square.skin.len);
     try testing.expectEqual(@as(usize, 2), square.bone_bounds.len);

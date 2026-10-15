@@ -19,7 +19,9 @@
 //! **A skin** is a `Skeleton` - its bones are not entities - on the entity
 //! of the node its top bones hang from (the model's root where they hang
 //! from none), as a `Skeleton3D`; the node whose mesh it bends gets a
-//! `MeshInstance3D` whose `skeleton` names that entity. What hangs from a
+//! `MeshInstance3D` whose `skeleton` names that entity - and whose `gi_mode`
+//! is dynamic: it moves, so the probes light it and no lightmap is baked
+//! with it in the pose it had. What hangs from a
 //! bone in the file is put under an entity named after the bone, with a
 //! `BoneAttachment3D`, under the skeleton's entity.
 //!
@@ -1064,6 +1066,9 @@ const ModelScene = struct {
             if (held.skin) |skin| if (model.skins[skin].joints.len > 0) {
                 const skeleton = self.skeletonEntity(skin, scene.parents);
                 try w.field("skeleton", @as([]const u8, &skeleton));
+                // A mesh its bones bend moves: lit by the probes, never
+                // baked into a lightmap in the pose it was in at the bake.
+                try w.field("gi_mode", @as([]const u8, "dynamic"));
             };
             try w.endObject();
         }
