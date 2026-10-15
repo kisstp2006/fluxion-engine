@@ -868,6 +868,9 @@ pub const Renderer3D = struct {
     /// across the bus.
     pub fn remakeTargets(self: *Renderer3D, gpa: Allocator) void {
         self.last_depth = null;
+        // The occlusion picture is one of the targets: the next frame's
+        // shadows, drawn before it is made again, would bind it gone.
+        self.screen_ao = null;
         if (self.post) |*held| held.forgetTargets();
         if (self.sky_draw) |*drawer| drawer.forgetPicture(self.device);
         if (self.atlas) |atlas| {

@@ -962,3 +962,20 @@ test "a reflection probe is given a place as it comes, read once it is captured,
     try reflections.show(app, .zero, everywhere, null);
     try testing.expectEqual(@as(f32, 0), reflections.shown.info[0]);
 }
+
+test "the targets made again - as a full card has them made - leave the next draw's shadows nothing gone to read" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try looking(app);
+    _ = try boxAt(app, 0, 0, 0);
+    _ = try app.world.spawnWith(.{ Transform3D.at(1, 2, 2), PointLight3D{ .shadow = true, .range = 10 } });
+    _ = try app.world.spawnWith(.{Environment{ .ssao = true }});
+    _ = try app.step();
+    try testing.expect(app.renderer3d.screen_ao != null);
+    // The occlusion picture went with the targets: the shadows drawn first
+    // in the next frame bind the frame's pictures, and must not bind it.
+    app.renderer3d.remakeTargets(app.gpa);
+    _ = try app.step();
+    _ = try app.step();
+    try testing.expect(app.renderer3d.screen_ao != null);
+}
