@@ -127,6 +127,12 @@
             .url = "git+https://github.com/kisstp2006/fluxion-net#a42b639c0a00cc6fc16402ce297b724466b4d8e3",
             .hash = "fluxion_net-0.1.0-VdxHa6O7AADxza51vBhNs0OAdetvmZolsJH1yDxvtZWK",
         },
+        // Networked play: a script's `net` global - a server players join
+        // over UDP, sealed, and the servers of a LAN found.
+        .fluxion_session = .{
+            .url = "git+https://github.com/kisstp2006/fluxion-session#159bb5536df103d7b58de15049ca455e1b818f2b",
+            .hash = "fluxion_session-0.1.0-jOHNl2KuAQApxlvDMcVqSVmEZCfVE9Xkk6kroNPeWuo9",
+        },
 
         // Generational handles: what the asset tables hand out, and what a
         // component holds instead of a pointer. The commit every package

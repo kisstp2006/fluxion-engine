@@ -40,6 +40,7 @@ const touch_button = @import("../ui/touch_button.zig");
 const tree = @import("../scene/tree.zig");
 const tween = @import("../animation/tween.zig");
 const web = @import("../net/web.zig");
+const session = @import("../net/session.zig");
 
 const FrameStats = @import("frame_stats.zig").FrameStats;
 
@@ -63,6 +64,9 @@ pub const news = [_]Step{
     // The web's answers, whoever asked: nothing on its way is lost while
     // the program is away.
     .{ .pass = web.collect },
+    // What the session's peers sent: a server whose window is behind
+    // another keeps its players.
+    .{ .pass = session.collect },
     .{ .pass = touch_button.update },
     .{ .pass = actions },
     .{ .pass = fitGameArea },
@@ -121,6 +125,8 @@ pub const order = [_]Step{
     .{ .pass = sound },
     .{ .pass = emitters },
     .{ .pass = scriptsEndOfFrame },
+    // The frame's network news let go of, and what it sent gone out.
+    .{ .pass = session.endOfFrame },
     .{ .pass = forgetTheDead },
 
     // Every animated sprite's frame in its Sprite, and every smoothed
@@ -146,7 +152,7 @@ pub const order_names = [_][]const u8{
     "ragdolls3d.update", "skeleton.update", "sprite_frames.update", "scriptsUpdate", "stage update",
     "stage late", "deferredSignals", "current_scene.openAsked", "backgroundLoads",
     "streaming.update", "tree.despawnOrphans", "tile_chunks.despawnOrphans", "sound",
-    "emitters", "scriptsEndOfFrame", "forgetTheDead", "sprite_frames.show", "cameras.follow", "debugViews",
+    "emitters", "scriptsEndOfFrame", "session.endOfFrame", "forgetTheDead", "sprite_frames.show", "cameras.follow", "debugViews",
     "freshInherited", "layOut", "skeleton.update", "skeleton.drawBones", "textureMips", "draw",
 };
 

@@ -164,8 +164,9 @@ const script = @import("script/script.zig");
 const flux = script.flux;
 const Exports = @import("script/script_exports.zig").Exports;
 
-// The web: `net/`.
+// The web and networked play: `net/`.
 const web_requests = @import("net/web.zig");
+const sessions = @import("net/session.zig");
 
 // assets
 const Assets = @import("assets/assets.zig");
@@ -555,6 +556,9 @@ open_project: bool = false,
 /// The game's web requests and their answers, once it asks. See
 /// `webSend`.
 web: web_requests.Web = .{},
+/// Networked play: the server the game is, or the one it joined, and the
+/// servers of the LAN it found. See `hostSession`.
+session: sessions.Session = .{},
 
 // A game's files: `files/`.
 /// How hard `writeSecret`'s password is made to guess. See `sealed.Cost`.
@@ -997,6 +1001,9 @@ pub fn destroy(self: *App) void {
     if (self.scripts) |scripts| scripts.calls.destroy(scripts);
     // What the game asked last - a session closed as it quit - is given a
     // moment to go.
+    // A server tells its players it is closing, a player its server it is
+    // going.
+    self.session.deinit(self);
     self.web.deinit(self);
     self.frame_stats.deinit(gpa);
     self.input.deinit(gpa);
@@ -5664,6 +5671,128 @@ pub fn webProgress(self: *App, id: WebRequestId) ?web_requests.Progress {
 /// Stop a request: its answer says `error.Cancelled`.
 pub fn cancelWebRequest(self: *App, id: WebRequestId) void {
     web_requests.cancel(self, id);
+}
+
+// -------------------------------------------------------------------------
+// Networked play
+// -------------------------------------------------------------------------
+//
+// See `net/session.zig`: a server players join over UDP, or a player joined
+// to one, its news taken every frame. A script reaches it as `net`.
+
+pub const SessionRole = sessions.Role;
+pub const SessionEvent = sessions.Event;
+pub const SessionChannel = sessions.Channel;
+pub const SessionReason = sessions.Reason;
+pub const SessionHostOptions = sessions.HostOptions;
+pub const SessionFound = sessions.Found;
+pub const SessionAddress = sessions.Address;
+pub const SessionStats = @import("fluxion_session").Connection.Stats;
+
+/// A server of this game, players joining it from now on: on
+/// `options.port`, for `options.max_players` - or the project's
+/// `network.session_port` and `session_max_players` - answering LAN
+/// searches with `options.name` and `info`. A session there was is left
+/// first. Its own number is 1.
+pub fn hostSession(self: *App, options: SessionHostOptions) sessions.Error!void {
+    return sessions.host(self, options);
+}
+
+/// Join the server at `address` - `192.168.1.20`, `::1`, `localhost` or
+/// a name, looked up first - on `port` or the project's, saying `hello`:
+/// a name, a password, a token, 256 bytes at most. A session there was is
+/// left first. `sessionEvents` says `joined` once in, `left` if not.
+pub fn joinSession(self: *App, address: []const u8, port: ?u16, hello: []const u8) sessions.Error!void {
+    return sessions.join(self, address, port, hello);
+}
+
+/// Off the session: a server tells its players it is closing, a player its
+/// server it is going. Playing alone from now on.
+pub fn leaveSession(self: *App) void {
+    sessions.leave(self);
+}
+
+/// What this end of a session is: alone, a server, joining one, or joined.
+pub fn sessionRole(self: *const App) SessionRole {
+    return self.session.role;
+}
+
+/// This end's peer number: 1 for a server, and for a game alone; a
+/// player's own once joined; nought while joining.
+pub fn sessionPeer(self: *const App) u32 {
+    return sessions.ownPeer(self);
+}
+
+/// The UDP port this end is on: the one a server's players join, which a
+/// server asked to host on port 0 was given. Nought off a session.
+pub fn sessionPort(self: *const App) u16 {
+    return sessions.boundPort(self);
+}
+
+/// What came since the last frame, and this frame's: players joining,
+/// leaving, their messages. Good until the end of the frame.
+pub fn sessionEvents(self: *const App) []const SessionEvent {
+    return self.session.events.items;
+}
+
+/// `data` to `peer` on `channel`, at the end of the frame: a server's to a
+/// player, a player's to the server (1) or, by way of it, another player.
+pub fn sessionSend(self: *App, peer: u32, channel: SessionChannel, data: []const u8) sessions.SendError!void {
+    return sessions.send(self, peer, channel, data);
+}
+
+/// `data` to every other peer, at the end of the frame.
+pub fn sessionSendAll(self: *App, channel: SessionChannel, data: []const u8) sessions.SendError!void {
+    return sessions.sendAll(self, channel, data);
+}
+
+/// A server's player sent away, told it was kicked.
+pub fn kickSessionPeer(self: *App, peer: u32) void {
+    sessions.kick(self, peer);
+}
+
+/// The other peers, into `into`: a server's players; a player's server and
+/// the other players.
+pub fn sessionPeers(self: *const App, gpa: std.mem.Allocator, into: *std.ArrayList(u32)) error{OutOfMemory}!void {
+    return sessions.peersInto(self, into, gpa);
+}
+
+/// The round trip to `peer`, in seconds; null for no such peer.
+pub fn sessionRoundTrip(self: *App, peer: u32) ?f64 {
+    return sessions.roundTrip(self, peer);
+}
+
+/// What went each way to `peer` and what was lost; null for no such peer.
+pub fn sessionStats(self: *App, peer: u32) ?SessionStats {
+    return sessions.statsOf(self, peer);
+}
+
+/// Where `peer` is.
+pub fn sessionAddress(self: *const App, peer: u32) ?SessionAddress {
+    return sessions.addressOf(self, peer);
+}
+
+/// What a server answers LAN searches with from now on: the map changed.
+pub fn describeSession(self: *App, name: []const u8, info: []const u8) void {
+    sessions.describe(self, name, info);
+}
+
+/// Ask the LAN for this game's servers - on `port`, or the project's - by
+/// its broadcast address and this machine. `foundSessions` lists what
+/// answers. What was found before is forgotten.
+pub fn searchSessions(self: *App, port: ?u16) sessions.Error!void {
+    return sessions.search(self, port);
+}
+
+/// The servers found since the last `searchSessions`, into `into`: their
+/// names and info are good until the next frame.
+pub fn foundSessions(self: *const App, gpa: std.mem.Allocator, into: *std.ArrayList(SessionFound)) error{OutOfMemory}!void {
+    return sessions.foundInto(self, into, gpa);
+}
+
+/// The LAN search let go of: its socket closed.
+pub fn stopSessionSearch(self: *App) void {
+    sessions.stopSearch(self);
 }
 
 // -------------------------------------------------------------------------

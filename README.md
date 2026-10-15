@@ -118,6 +118,7 @@ until they are registered for scenes.
 | Navigation | Navigation meshes baked from a level, agents, links and obstacles |
 | Sound | Players, buses, and sound heard from where it is in 2D and 3D |
 | Scenes | A world written as JSON or CBOR and read back, entities by UUID, scenes instanced in scenes, any file read in the background |
+| Networking | Web requests that never stop the frame; networked play over UDP - a server players join, sealed end to end, messages on unreliable, sequenced and reliable channels, players passed each other's messages, the LAN's servers found - from Zig and from scripts (`net`) |
 | The project | `res://`, `user://` and `uid://` paths, `project.fluxion` and its settings, plugins, config files and saves |
 | Scripts | [Flux](https://github.com/kisstp2006/fluxion-script) scripts on entities, read again as they are saved |
 | Reflection | Every component described - fields, defaults, ranges, units - and read, written and called by name |
@@ -251,6 +252,8 @@ The libraries under it come with it, each pinned to a pushed commit, so
 [Script](https://github.com/kisstp2006/fluxion-script) ·
 [Audio](https://github.com/kisstp2006/fluxion-audio) ·
 [VFS](https://github.com/kisstp2006/fluxion-vfs) ·
+[Net](https://github.com/kisstp2006/fluxion-net) ·
+[Session](https://github.com/kisstp2006/fluxion-session) ·
 [Math](https://github.com/kisstp2006/fluxion-math) ·
 [Id](https://github.com/kisstp2006/fluxion-id)
 
@@ -337,7 +340,7 @@ The rest is in folders by what it is about:
 | `bake/`, `csg/`, `simplify/` | The lightmapper, solids cut from each other, and levels of detail made |
 | `ui/`, `input/`, `audio/`, `animation/`, `tiles/`, `time/`, `math/` | What their names say |
 | `script/`, `reflect/` | What a script sees of the engine, and how components are described |
-| `project/`, `files/`, `net/`, `platform/` | The project and its plugins, a game's own files, web requests, the window |
+| `project/`, `files/`, `net/`, `platform/` | The project and its plugins, a game's own files, web requests and networked play, the window |
 
 Tests sit beside what they test, as `*_test.zig`. `runtime/` is the program
 a shipped game runs, and `tools/` what the build runs.

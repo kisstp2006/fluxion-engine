@@ -186,6 +186,8 @@ pub const ImageRef = @import("image_access.zig").ImageRef;
 pub const TimeAccess = @import("time_access.zig").TimeAccess;
 pub const ClockRef = @import("time_access.zig").ClockRef;
 pub const WebAccess = @import("web_access.zig").WebAccess;
+pub const NetAccess = @import("net_access.zig").NetAccess;
+const net_access = @import("net_access.zig");
 pub const WebResponse = @import("web_access.zig").WebResponse;
 const web_access = @import("web_access.zig");
 pub const FramesRef = @import("asset_refs.zig").FramesRef;
@@ -540,6 +542,10 @@ pub const Scripts = struct {
     web_access: WebAccess,
     /// The web requests scripts made, each with the task its answer ends.
     web_waiting: std.ArrayList(web_access.Waiting) = .empty,
+    /// What scripts reach as `net`.
+    net_access: NetAccess,
+    /// `net`'s signals, once a script has reached for them; `.null` before.
+    net_signals: [NetAccess.signal_names.len]flux.Value = @splat(.null),
     /// `app.focus_changed` and `app.quitting`, once a script has reached
     /// for them; `.null` before.
     app_signals: [2]flux.Value = @splat(.null),
@@ -648,6 +654,7 @@ pub const Scripts = struct {
             .time_access = .{ .app = app },
             .images_access = .{ .app = app },
             .web_access = .{ .app = app },
+            .net_access = .{ .app = app },
         };
         const vm = try flux.Vm.create(app.gpa, .{
             .out = options.out orelse &self.printed.writer,
@@ -665,6 +672,7 @@ pub const Scripts = struct {
             .time = try vm.handle(&self.time_access),
             .images = try vm.handle(&self.images_access),
             .web = try vm.handle(&self.web_access),
+            .net = try vm.handle(&self.net_access),
         }, if (options.entities) .world else .host);
         self.frame = try vm.newSignal("frame", 0);
         try vm.hold(self.frame);
@@ -1089,6 +1097,7 @@ pub const Scripts = struct {
                 self.answerDialogs();
                 self.hearDrops();
                 self.answerWeb();
+                self.hearNet();
                 self.tellFocus();
             },
             .fixed => |dt| if (world) {
@@ -2123,6 +2132,64 @@ pub const Scripts = struct {
         defer self.was_in_front = now;
         const before = self.was_in_front orelse return;
         if (before != now) self.sayAppSignal(.focus_changed, &.{.boolean(now)});
+    }
+
+    /// The signal of `net`'s, made the first time a script reaches for it.
+    pub fn netSignal(self: *Scripts, which: NetAccess.Signal) flux.Vm.Error!flux.Value {
+        const held = &self.net_signals[@intFromEnum(which)];
+        if (held.tag != .signal) {
+            const made = try self.vm.newSignal(@tagName(which), @intCast(NetAccess.signal_args[@intFromEnum(which)].fields().len));
+            try self.vm.hold(made);
+            held.* = made;
+        }
+        return held.*;
+    }
+
+    /// The session's news since the last frame, each said on its signal of
+    /// `net`'s: players joining and leaving, their messages. It is let go
+    /// of at the end of the frame, after the scripts have heard it once.
+    fn hearNet(self: *Scripts) void {
+        const vm = self.vm;
+        for (self.app.sessionEvents()) |event| {
+            const which: NetAccess.Signal = switch (event.kind) {
+                .peer_joined => .peer_joined,
+                .peer_left => .peer_left,
+                .message => .message,
+                .joined => .joined,
+                .left => .left,
+            };
+            const signal = self.net_signals[@intFromEnum(which)];
+            if (signal.tag != .signal) continue;
+            vm.setBudget(self.options.budget);
+            self.sayNet(signal, event) catch |err| switch (err) {
+                error.OutOfMemory => self.outOfMemory(null),
+                error.Panic => self.sayPanic(null, "a script told the network's news"),
+            };
+        }
+    }
+
+    fn sayNet(self: *Scripts, signal: flux.Value, event: App.SessionEvent) flux.Vm.Error!void {
+        const vm = self.vm;
+        const peer: flux.Value = .int(event.peer);
+        const second: flux.Value = switch (event.kind) {
+            .peer_joined => try vm.string(event.data),
+            .peer_left, .left => try vm.string(@tagName(event.reason)),
+            .message => net_access.unpack(vm, event.data) catch |err| switch (err) {
+                error.Malformed => {
+                    log.warn("a message from peer {d} is no value: let go of", .{event.peer});
+                    return;
+                },
+                else => |e| return e,
+            },
+            .joined => .null,
+        };
+        try vm.pushRoot(second);
+        defer vm.popRoot();
+        switch (event.kind) {
+            .joined => try vm.emitSignalValue(signal, &.{peer}),
+            .left => try vm.emitSignalValue(signal, &.{second}),
+            else => try vm.emitSignalValue(signal, &.{ peer, second }),
+        }
     }
 
     /// The web's answers to the scripts' requests, each ending the task

@@ -217,6 +217,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     }
     const vfs = b.dependency("fluxion_vfs", .{ .target = target, .optimize = optimize });
     const net = b.dependency("fluxion_net", .{ .target = target, .optimize = optimize });
+    const session = b.dependency("fluxion_session", .{ .target = target, .optimize = optimize });
 
     // The two renderers below are built from their packages' source with this
     // package's rhi, font and shader, so that a `Device` stays one type:
@@ -312,6 +313,7 @@ fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
             .{ .name = "fluxion_audio", .module = audio.module("fluxion_audio") },
             .{ .name = "fluxion_vfs", .module = vfs.module("fluxion_vfs") },
             .{ .name = "fluxion_net", .module = net.module("fluxion_net") },
+            .{ .name = "fluxion_session", .module = session.module("fluxion_session") },
             .{ .name = "fluxion_lightmapper", .module = lightmapper },
             .{ .name = "fluxion_navmesh", .module = navmesh },
             .{ .name = "fluxion_csg", .module = csg },

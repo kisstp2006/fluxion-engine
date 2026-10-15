@@ -44,6 +44,7 @@ const Scripts = @import("script.zig").Scripts;
 const TimeAccess = @import("time_access.zig").TimeAccess;
 const WebAccess = @import("web_access.zig").WebAccess;
 const WebResponse = @import("web_access.zig").WebResponse;
+const NetAccess = @import("net_access.zig").NetAccess;
 const entityHandle = @import("script.zig").entityHandle;
 const member_docs = @import("script.zig").member_docs;
 const typeName = @import("script.zig").typeName;
@@ -148,6 +149,11 @@ fn hostMember(vm: *flux.Vm, handle: flux.Value, name: []const u8) flux.Vm.Error!
         return null;
     };
     if (now.asConst(WebResponse)) |response| return response.member(vm, name);
+    // `net.peer_joined`, `net.message` and the rest.
+    if (now.as(NetAccess) != null) {
+        const which = std.meta.stringToEnum(NetAccess.Signal, name) orelse return null;
+        return try self.netSignal(which);
+    }
     // `app.focus_changed`, `app.quitting`.
     if (now.as(App) != null) {
         const which = std.meta.stringToEnum(Scripts.AppSignal, name) orelse return null;
@@ -424,9 +430,9 @@ fn notAnEntity(vm: *flux.Vm, value: flux.Value) flux.Vm.Error {
     };
 }
 
-/// The values behind `app`, `files`, `time`, `images` and `web` where the
-/// scripts run.
-pub const Given = struct { app: flux.Value, files: flux.Value, time: flux.Value, images: flux.Value, web: flux.Value };
+/// The values behind `app`, `files`, `time`, `images`, `web` and `net`
+/// where the scripts run.
+pub const Given = struct { app: flux.Value, files: flux.Value, time: flux.Value, images: flux.Value, web: flux.Value, net: flux.Value };
 
 /// Whose scripts a VM compiles: the world's, on its entities, which the
 /// engine calls the methods of - `ready`, `update`, `draw` - or a host's own
@@ -454,12 +460,14 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given, whose: Whose) Allocator.E
         try vm.defineGlobal("time", g.time, time_doc);
         try vm.defineGlobal("images", g.images, images_doc);
         try vm.defineGlobal("web", g.web, web_doc);
+        try vm.defineGlobal("net", g.net, net_doc);
     } else {
         try vm.declareGlobal("app", reflect.typeOf(App), app_doc);
         try vm.declareGlobal("files", reflect.typeOf(FileAccess), files_doc);
         try vm.declareGlobal("time", reflect.typeOf(TimeAccess), time_doc);
         try vm.declareGlobal("images", reflect.typeOf(ImagesAccess), images_doc);
         try vm.declareGlobal("web", reflect.typeOf(WebAccess), web_doc);
+        try vm.declareGlobal("net", reflect.typeOf(NetAccess), net_doc);
     }
     try vm.extend(reflect.typeOf(EntityRef), reflect.typeOf(App), if (given) |g| g.app else .null);
     for (named_types) |t| try vm.declareType(t);
@@ -476,6 +484,7 @@ pub fn install(vm: *flux.Vm, app: *App, given: ?Given, whose: Whose) Allocator.E
     try vm.declareMember(.{ .of = reflect.typeOf(Transform2D), .name = "scale", .type = .vec2, .writable = true, .doc = "`scale_x` and `scale_y` as one vector." });
     try vm.declareMember(.{ .of = reflect.typeOf(Transform3D), .name = "rotation_degrees", .type = .vec3, .writable = true, .doc = "The turn as pitch, yaw and roll in degrees: `t.rotation_degrees.y += 90.0`. `rotation` is the same turn as a `quat`." });
     for (ClockRef.signal_names, ClockRef.signal_args, ClockRef.signal_docs) |name, args, doc| try vm.declareMember(.{ .of = reflect.typeOf(ClockRef), .name = name, .type = .signal, .args = args, .doc = doc });
+    for (NetAccess.signal_names, NetAccess.signal_args, NetAccess.signal_docs) |name, args, doc| try vm.declareMember(.{ .of = reflect.typeOf(NetAccess), .name = name, .type = .signal, .args = args, .doc = doc });
     for (WebResponse.fields) |f| try vm.declareMember(.{ .of = reflect.typeOf(WebResponse), .name = f.name, .type = f.type, .doc = f.doc });
     try vm.declareMember(.{ .of = reflect.typeOf(App), .name = "focus_changed", .type = .signal, .args = reflect.typeOf(struct { front: bool }), .doc = "Said when the game comes to the front or goes behind another program, with whether it is in front now: `app.focus_changed.connect(fn(front: bool) { ... })`." });
     try vm.declareMember(.{ .of = reflect.typeOf(App), .name = "quitting", .type = .signal, .args = reflect.typeOf(struct {}), .doc = "Said as the game ends, before its last frame is let go: what is asked of the web then is given a moment to go - a session closed, a score sent." });
@@ -501,6 +510,7 @@ const named_types = [_]*const reflect.Type{
     reflect.typeOf(ClockRef),
     reflect.typeOf(WebAccess),
     reflect.typeOf(WebResponse),
+    reflect.typeOf(NetAccess),
     reflect.typeOf(FramesRef),
     reflect.typeOf(datetime.DateTime),
     reflect.typeOf(datetime.Duration),
@@ -527,5 +537,7 @@ const files_doc = "The game's files to read (`res://`) and the player's to read 
 const time_doc = "Dates, times and spans, written in the game's culture: `now()`, `date(year, month, day)`, `parse(text)`, `minutes(n)`, `locale()`, `setLocale(tag)`, and `clock(start, rate)` for a clock of the game's own.";
 
 const web_doc = "The web, asked without the game waiting: `get(url)`, `post(url, body)`, `postForm(url, values)`, `request(method, url, headers, body)` - each a task to `await` for its `Response`, `catch` for what went wrong - and `download(url, path)` into a file under `user://`; `progress(task)`, `received(task)`, `cancel(task)`.";
+
+const net_doc = "Networked play: `host(port, max_players, name, info)` a server, `join(address, port, hello)` one, `leave()`; `send(peer, value, channel)` and `sendAll(value, channel)` - any value, on `.reliable`, `.sequenced` or `.unreliable` - `kick(peer)`; `role()`, `id()`, `isServer()`, `isOnline()`, `peers()`, `ping(peer)`, `address(peer)`; `search(port)` the LAN and `servers()` found; signals `peer_joined`, `peer_left`, `message`, `joined`, `left`. The server is peer 1.";
 
 const images_doc = "Pictures in memory: `new(width, height, color)`, `read(path)`, `capture()` of the frame, `fromTexture(texture)`; an image's `getPixel`, `setPixel`, `fill`, `fillRect`, `region`, `blit`, `blend`, `resize`, `flipX`, `flipY`, `savePng`, `saveJpg`; `toTexture(image)` draws it.";

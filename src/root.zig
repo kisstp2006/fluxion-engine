@@ -626,6 +626,7 @@ test {
     _ = @import("files/pack_test.zig");
     _ = @import("input/input_test.zig");
     _ = @import("net/web_test.zig");
+    _ = @import("net/session_test.zig");
     _ = @import("project/plugins_test.zig");
     _ = @import("physics/areas_test.zig");
     _ = @import("physics/bodies_test.zig");

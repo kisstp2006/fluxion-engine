@@ -674,11 +674,23 @@ pub const Network = struct {
     max_requests: u8 = 4,
     /// Whether `http://` addresses are asked, not only `https://` ones.
     allow_plain_http: bool = false,
+    /// The version of what the game's players say to each other: a player
+    /// of one version never joins a server of another, nor finds it on the
+    /// LAN. Raise it when what is sent changes. See `net/session.zig`.
+    session_version: u32 = 1,
+    /// The UDP port a server listens on, and a LAN search asks, when the
+    /// game does not say.
+    session_port: u16 = 27015,
+    /// The most players a server takes when the game does not say.
+    session_max_players: u16 = 16,
 
     pub const reflect_attributes = .{attr.Label{ .text = "Network" }};
     pub const reflect_fields = .{
         .max_requests = .{ attr.Doc{ .text = "How many of the game's web requests are on their way at once; the rest wait their turn." }, attr.Range{ .min = 1, .max = 16, .step = 1 } },
         .allow_plain_http = .{attr.Doc{ .text = "Ask http:// addresses too, not only https:// ones. Off, a request over plain HTTP fails with NotSecure: what it carries - keys, scores, a player's name - anyone on the way could read and change." }},
+        .session_version = .{ attr.Doc{ .text = "The version of what the game's players say to each other: a player of one version never joins a server of another, nor finds it on the LAN. Raise it when what is sent changes." }, attr.Range{ .min = 1, .max = 1000000, .step = 1 } },
+        .session_port = .{ attr.Doc{ .text = "The UDP port a server listens on, and a LAN search asks, when the game does not say." }, attr.Range{ .min = 1, .max = 65535, .step = 1 } },
+        .session_max_players = .{ attr.Doc{ .text = "The most players a server takes when the game does not say: the host not counted." }, attr.Range{ .min = 1, .max = 1024, .step = 1 } },
     };
 };
 
