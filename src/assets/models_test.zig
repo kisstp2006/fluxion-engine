@@ -586,7 +586,7 @@ test "a skin is a skeleton on the entity its bones hang from, and what hangs fro
     defer testing.allocator.free(text);
     const upper_hat = try std.mem.replaceOwned(u8, testing.allocator, text, "{ \"name\": \"Upper\", \"translation\": [0, 1, 0] }", "{ \"name\": \"Upper\", \"translation\": [0, 1, 0], \"children\": [4] }");
     defer testing.allocator.free(upper_hat);
-    const with_hat = try std.mem.replaceOwned(u8, testing.allocator, upper_hat, "{ \"name\": \"Body\", \"mesh\": 0, \"skin\": 0 }", "{ \"name\": \"Body\", \"mesh\": 0, \"skin\": 0 }, { \"name\": \"Hat\", \"translation\": [0, 0.5, 0] }");
+    const with_hat = try std.mem.replaceOwned(u8, testing.allocator, upper_hat, "{ \"name\": \"Body\", \"mesh\": 0, \"skin\": 0 }", "{ \"name\": \"Body\", \"mesh\": 0, \"skin\": 0 }, { \"name\": \"Hat\", \"translation\": [0, 0.5, 0], \"mesh\": 0 }");
     defer testing.allocator.free(with_hat);
     try testing.expect(!std.mem.eql(u8, text, with_hat));
     try folder.put("models/skinned.gltf", with_hat);
@@ -620,6 +620,8 @@ test "a skin is a skeleton on the entity its bones hang from, and what hangs fro
     try testing.expect(app.parentOf(upper).eql(armature));
     const hat = app.find("Hat").?;
     try testing.expect(app.parentOf(hat).eql(upper));
+    // Carried by the bone, it moves too: no lightmap holds it.
+    try testing.expect(app.world.get(hat, MeshInstance3D).?.gi_mode == .dynamic);
     _ = try app.step();
     try testing.expect(app.globalPosition3D(hat).?.approxEql(.init(0, 1.5, 0)));
 

@@ -19,9 +19,10 @@
 //! **A skin** is a `Skeleton` - its bones are not entities - on the entity
 //! of the node its top bones hang from (the model's root where they hang
 //! from none), as a `Skeleton3D`; the node whose mesh it bends gets a
-//! `MeshInstance3D` whose `skeleton` names that entity - and whose `gi_mode`
-//! is dynamic: it moves, so the probes light it and no lightmap is baked
-//! with it in the pose it had. What hangs from a
+//! `MeshInstance3D` whose `skeleton` names that entity - and whose `gi_mode`,
+//! as that of every mesh a bone carries, is dynamic: it moves, so the
+//! probes light it and no lightmap is baked with it in the pose it had.
+//! What hangs from a
 //! bone in the file is put under an entity named after the bone, with a
 //! `BoneAttachment3D`, under the skeleton's entity.
 //!
@@ -1034,6 +1035,15 @@ const ModelScene = struct {
         }
     }
 
+    /// Whether a bone is above node `at`: it moves with the bone.
+    fn hangsFromBone(self: ModelScene, at: u32, parents: []const ?u32) bool {
+        var above = parents[at];
+        while (above) |held| : (above = parents[held]) {
+            if (self.skinOfBone(held) != null) return true;
+        }
+        return false;
+    }
+
     fn node(self: ModelScene, w: *json.Writer, at: u32, parent: []const u8, scene: Scene) json.Writer.Error!void {
         if (self.skinOfBone(at) != null) return self.bone(w, at, scene);
         if (scene.placed[at]) return;
@@ -1063,13 +1073,15 @@ const ModelScene = struct {
             try w.key("MeshInstance3D");
             try w.beginObject();
             try w.field("mesh", std.fmt.bufPrint(&name, "{s}#mesh/{d}", .{ self.source, m }) catch "");
+            var moves = self.hangsFromBone(at, scene.parents);
             if (held.skin) |skin| if (model.skins[skin].joints.len > 0) {
                 const skeleton = self.skeletonEntity(skin, scene.parents);
                 try w.field("skeleton", @as([]const u8, &skeleton));
-                // A mesh its bones bend moves: lit by the probes, never
-                // baked into a lightmap in the pose it was in at the bake.
-                try w.field("gi_mode", @as([]const u8, "dynamic"));
+                moves = true;
             };
+            // A mesh its bones bend, or one a bone carries, moves: lit by
+            // the probes, never baked into a lightmap in the pose it had.
+            if (moves) try w.field("gi_mode", @as([]const u8, "dynamic"));
             try w.endObject();
         }
         if (self.skinOn(at, scene.parents)) |skin| {
