@@ -188,6 +188,9 @@ const named = [_]Named{
     .{ .call = "saveSpriteFrames", .param = "path", .what = .{ .file = &.{.frames} } },
     .{ .call = "readData", .param = "path", .what = .{ .file = &.{.data} } },
     .{ .call = "bakeNavigationMesh", .param = "path", .what = .{ .file = &.{.navmesh} } },
+    .{ .call = "materialNumber", .param = "path", .what = .{ .file = &.{.material} } },
+    .{ .call = "setMaterialNumber", .param = "path", .what = .{ .file = &.{.material} } },
+    .{ .call = "setMaterialColor", .param = "path", .what = .{ .file = &.{.material} } },
 };
 
 /// Where a call's parameters are, as a script counts its arguments: `vm`,

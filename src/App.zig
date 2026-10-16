@@ -5055,6 +5055,43 @@ pub fn saveMaterial(self: *App, handle: material_table.MaterialHandle, path: []c
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes });
 }
 
+/// A number of the material at `path` - `emission_energy`, `roughness`, any
+/// of `Material3DData`'s - read first if it was not: what a script reads to
+/// light a sign or wet a floor.
+pub fn materialNumber(self: *App, path: []const u8, field: []const u8) !f32 {
+    const held = self.materials.get(try self.loadMaterial(path)) orelse return error.NoSuchMaterial;
+    inline for (std.meta.fields(components3d.Material3DData)) |f| {
+        if (f.type == f32 and std.mem.eql(u8, f.name, field)) return @field(held, f.name);
+    }
+    return error.NoSuchNumber;
+}
+
+/// Give a number of the material at `path` - `emission_energy` and the
+/// like - `value`: every mesh drawn with it shows it from the next frame.
+pub fn setMaterialNumber(self: *App, path: []const u8, field: []const u8, value: f32) !void {
+    const held = self.materials.get(try self.loadMaterial(path)) orelse return error.NoSuchMaterial;
+    inline for (std.meta.fields(components3d.Material3DData)) |f| {
+        if (f.type == f32 and std.mem.eql(u8, f.name, field)) {
+            @field(held, f.name) = value;
+            return;
+        }
+    }
+    return error.NoSuchNumber;
+}
+
+/// Give a colour of the material at `path` - `albedo_color` or `emission` -
+/// `color`, as `setMaterialNumber` does a number.
+pub fn setMaterialColor(self: *App, path: []const u8, field: []const u8, color: Color) !void {
+    const held = self.materials.get(try self.loadMaterial(path)) orelse return error.NoSuchMaterial;
+    inline for (std.meta.fields(components3d.Material3DData)) |f| {
+        if (f.type == Color and std.mem.eql(u8, f.name, field)) {
+            @field(held, f.name) = color;
+            return;
+        }
+    }
+    return error.NoSuchColor;
+}
+
 /// Read a `.lightmap` - what a `LightmapGI` baked - or find the one read
 /// from there already.
 pub fn loadLightmap(self: *App, path: []const u8) !lightmap_table.LightmapHandle {
@@ -6861,8 +6898,12 @@ pub const reflect_methods = .{
     .loadProgress = .{attr.Params{ .names = &.{"path"} }},
     .loadStatus = .{attr.Params{ .names = &.{"path"} }},
     .finishLoad = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+    // Materials
+    .materialNumber = .{attr.Params{ .names = &.{ "path", "field" } }},
+    .setMaterialNumber = .{attr.Params{ .names = &.{ "path", "field", "value" } }},
+    .setMaterialColor = .{attr.Params{ .names = &.{ "path", "field", "color" } }},
     // Each kind of file
-    .loadSpriteFrames = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+    .loadSpriteFrames =.{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
     .newSpriteFrames = .{},
     .saveSpriteFrames = .{ attr.Params{ .names = &.{ "frames", "path" } }, flux.GivesErrors{} },
     // The project

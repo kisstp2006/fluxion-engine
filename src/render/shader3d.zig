@@ -408,7 +408,10 @@ const engine_head =
     \\    vec3 h = normalize(v + l);
     \\    float n_v = max(dot(n, v), 0.0001);
     \\    float n_h = max(dot(n, h), 0.0);
-    \\    float h_v = max(dot(h, v), 0.0);
+    \\    // Held to one: a lamp at the eye makes `h` the very `v`, and a dot a
+    \\    // hair over one gives the Fresnel term below the power of a number
+    \\    // under nought - no number at all, a white speck in rings round it.
+    \\    float h_v = clamp(dot(h, v), 0.0, 1.0);
     \\    float rough = max(roughness, 0.045);
     \\    float a = rough * rough;
     \\    float a2 = a * a;

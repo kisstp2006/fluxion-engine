@@ -45,6 +45,25 @@ fn boxAt(app: *App, x: f32, y: f32, z: f32) !@import("fluxion_ecs").Entity {
     return app.world.spawnWith(.{ Transform3D.at(x, y, z), MeshInstance3D{}, PrimitiveMesh3D{} });
 }
 
+test "a script turns a material's glow down and its colour by name, as a sign is lit" {
+    const app = try headless();
+    defer app.destroy();
+    const sign = try app.addMaterial("sign.mat3d", .{ .emission = .white, .emission_energy = 2 });
+    try app.setMaterialNumber("sign.mat3d", "emission_energy", 0);
+    try testing.expectEqual(@as(f32, 0), app.materialOf(sign).?.emission_energy);
+    var path: []const u8 = "sign.mat3d";
+    var field: []const u8 = "emission_energy";
+    var value: f32 = 3.5;
+    try app.callNamed("setMaterialNumber", &.{ .of(&path), .of(&field), .of(&value) }, null);
+    var read: f32 = 0;
+    try app.callNamed("materialNumber", &.{ .of(&path), .of(&field) }, .of(&read));
+    try testing.expectEqual(@as(f32, 3.5), read);
+    try app.setMaterialColor("sign.mat3d", "emission", .{ .r = 1, .g = 0.5, .b = 0, .a = 1 });
+    try testing.expectEqual(@as(f32, 0.5), app.materialOf(sign).?.emission.g);
+    try testing.expectError(error.NoSuchNumber, app.setMaterialNumber("sign.mat3d", "albedo_color", 1));
+    try testing.expectError(error.NoSuchColor, app.setMaterialColor("sign.mat3d", "roughness", .white));
+}
+
 test "the boxes a camera sees are drawn together, and one behind it is left out" {
     const app = try headless();
     defer app.destroy();
