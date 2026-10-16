@@ -272,6 +272,32 @@ test "an area says a body came in and went out, and a ray says what is below it"
     try testing.expectApproxEqAbs(@as(f32, 0.5), hit.point.y, 0.02);
 }
 
+test "an area that stands still says a character walked in, and not that it left while it stands there" {
+    const app = try headless();
+    defer app.destroy();
+    _ = try floorOf(app);
+    // Clear of the floor: an area says a floor it touches is in it too.
+    const gate = try app.world.spawnWith(.{ Transform3D.at(0, 1.6, 0), Area3D{}, Collider3D.box(.init(1, 1, 1)) });
+    try app.signal(gate, Area3D, .body_entered).connect(.method(gate, "_body_in"), .{});
+    try app.signal(gate, Area3D, .body_exited).connect(.method(gate, "_body_out"), .{});
+    const walker = try app.world.spawnWith(.{ Transform3D.at(5, 0.9, 0), CharacterBody3D{}, Collider3D.capsule(0.3, 1.8) });
+    try frames(app, 5);
+    try testing.expectEqual(@as(usize, 0), Seen.entered);
+    // It walks in, and stops there.
+    for (0..60) |_| {
+        app.world.get(walker, CharacterBody3D).?.velocity = .init(-5, 0, 0);
+        _ = try app.moveAndSlide(walker);
+        _ = try app.step();
+        if (app.world.get(walker, Transform3D).?.position.x < 0) break;
+    }
+    app.world.get(walker, CharacterBody3D).?.velocity = .zero;
+    try frames(app, 30);
+    try testing.expectEqual(@as(usize, 1), Seen.entered);
+    try testing.expect(Seen.last.eql(walker));
+    try testing.expectEqual(@as(usize, 0), Seen.exited);
+    try testing.expect(app.hasOverlappingBodies(gate));
+}
+
 test "a script kicks a body and asks a ray" {
     const app = try headless();
     defer app.destroy();
