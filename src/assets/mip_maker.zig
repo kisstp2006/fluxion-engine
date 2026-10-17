@@ -25,11 +25,28 @@ const Allocator = std.mem.Allocator;
 const image = @import("fluxion_image");
 
 const Project = @import("../project/Project.zig");
+const gltf = @import("gltf.zig");
+const models = @import("models.zig");
 const background_load = @import("background_load.zig");
 const helpers = @import("../test_helpers.zig");
 
 /// Whether there is a thread to read on.
 pub const threaded = background_load.threaded;
+
+/// The bytes of the picture `source` names: a file, or - `model.glb#image/3`
+/// - a picture inside a model, read out of the model's file.
+pub fn readPicture(gpa: Allocator, files: Project.Files, source: []const u8, limit: usize) ![]u8 {
+    const at = std.mem.indexOf(u8, source, "#image/") orelse return files.read(gpa, source, .limited(limit));
+    const file = source[0..at];
+    const index = try std.fmt.parseInt(usize, source[at + "#image/".len ..], 10);
+    const bytes = try files.read(gpa, file, .limited(@max(limit, 1 << 30)));
+    defer gpa.free(bytes);
+    var beside: models.Beside = .{ .files = files, .folder = models.folderOf(file) };
+    var model = try gltf.parse(gpa, bytes, beside.fetch());
+    defer model.deinit();
+    if (index >= model.images.len or model.images[index].bytes.len == 0) return error.FileNotFound;
+    return gpa.dupe(u8, model.images[index].bytes);
+}
 
 pub fn MipMaker(comptime Handle: type) type {
     return struct {
@@ -49,18 +66,32 @@ pub fn MipMaker(comptime Handle: type) type {
         made: std.ArrayListUnmanaged(Made) = .empty,
         thread: ?std.Thread = null,
         stopping: bool = false,
+        /// Whether the thread is reading one now: taken from `asked`, not yet
+        /// in `made`, and still pending.
+        reading: bool = false,
 
         const Job = struct { handle: Handle, source: []u8 };
 
+        /// What a handle that says how makes of a picture, on the thread
+        /// that read it: `Handle.prepare` and its `Handle.Chain`.
+        const prepares = @typeInfo(Handle) == .@"struct" and @hasDecl(Handle, "prepare");
+        const Chain = if (prepares) ?Handle.Chain else void;
+
         /// A picture read again: its handle, and its pixels - null where its
-        /// file could not be read or is no picture any more.
+        /// file could not be read or is no picture any more - or, for a
+        /// handle that prepares one, what it made of them in their place.
         pub const Made = struct {
             handle: Handle,
             picture: ?image.Decoded,
+            chain: Chain = if (prepares) null else {},
 
             pub fn deinit(self: *Made, gpa: Allocator) void {
                 if (self.picture) |*held| held.deinit(gpa);
                 self.picture = null;
+                if (prepares) if (self.chain) |*held| {
+                    held.deinit(gpa);
+                    self.chain = null;
+                };
             }
         };
 
@@ -118,7 +149,7 @@ pub fn MipMaker(comptime Handle: type) type {
         pub fn pending(self: *Self) usize {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
-            return self.asked.items.len - self.next + self.made.items.len;
+            return self.asked.items.len - self.next + self.made.items.len + @intFromBool(self.reading);
         }
 
         fn takeJob(self: *Self) ?Job {
@@ -140,9 +171,14 @@ pub fn MipMaker(comptime Handle: type) type {
 
         fn read(self: *Self, job: Job) Made {
             defer self.gpa.free(job.source);
-            const bytes = self.files.read(self.gpa, job.source, .limited(self.limit)) catch return .{ .handle = job.handle, .picture = null };
+            const bytes = readPicture(self.gpa, self.files, job.source, self.limit) catch return .{ .handle = job.handle, .picture = null };
             defer self.gpa.free(bytes);
-            const picture = image.decode(self.gpa, bytes) catch return .{ .handle = job.handle, .picture = null };
+            var picture = image.decode(self.gpa, bytes) catch return .{ .handle = job.handle, .picture = null };
+            if (prepares) {
+                defer picture.deinit(self.gpa);
+                const chain = job.handle.prepare(self.gpa, &picture) catch return .{ .handle = job.handle, .picture = null };
+                return .{ .handle = job.handle, .picture = null, .chain = chain };
+            }
             return .{ .handle = job.handle, .picture = picture };
         }
 
@@ -158,10 +194,12 @@ pub fn MipMaker(comptime Handle: type) type {
                     return;
                 }
                 const job = self.takeLocked().?;
+                self.reading = true;
                 self.mutex.unlock(self.io);
                 var made = self.read(job);
                 self.mutex.lockUncancelable(self.io);
                 self.made.append(self.gpa, made) catch made.deinit(self.gpa);
+                self.reading = false;
                 self.mutex.unlock(self.io);
             }
         }

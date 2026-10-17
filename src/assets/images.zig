@@ -319,7 +319,7 @@ pub fn capture(app: *App, gpa: Allocator) !Image {
 /// texture made from an image and changed since.
 pub fn ofTexture(app: *App, gpa: Allocator, texture: Assets.TextureHandle) !Image {
     const held = app.assets.get(texture) orelse return error.NoSuchTexture;
-    const pixels = try app.device.readTexture(held.gpu, gpa);
+    const pixels = try app.assets.readPixels(texture, gpa);
     const out: Image = .{ .width = held.width, .height = held.height, .pixels = pixels };
     if (held.upside_down) out.flipY();
     return out;

@@ -184,6 +184,13 @@ pub const ImportSettings = struct {
     /// Whether every one of its animations goes round and round, not only
     /// one whose name ends in `loop`.
     loop_animations: bool = false,
+    /// Whether its pictures are kept on the graphics card as BC's compressed
+    /// blocks - a quarter or an eighth of the memory - as the project says,
+    /// always, or never.
+    texture_compression: TextureCompression = .project,
+    /// The longest side its pictures are kept at on the graphics card,
+    /// halved until they fit: nought for the project's.
+    texture_max_size: u32 = 0,
     /// Materials of its own drawn with a material file in their place, by
     /// name: `[{ "name": "Rust", "material": "res://materials/rust.mat3d" }]`.
     /// One that does not read is said, and its own is drawn.
@@ -194,6 +201,18 @@ pub const ImportSettings = struct {
     pub const reflect_fields = .{
         .materials = .{attr.Hidden{}},
     };
+
+    pub const TextureCompression = enum { project, compressed, uncompressed };
+
+    /// What `texture_compression` says, as a texture's own say: null for the
+    /// project's.
+    pub fn compressOf(self: ImportSettings) ?bool {
+        return switch (self.texture_compression) {
+            .project => null,
+            .compressed => true,
+            .uncompressed => false,
+        };
+    }
 
     pub const MaterialFile = struct {
         /// The material's name in the model.
@@ -430,10 +449,15 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
     const nearest = try gpa.alloc(bool, model.images.len);
     defer gpa.free(nearest);
     @memset(nearest, false);
+    // And kept as normal maps where a material's normals come from them.
+    const normal = try gpa.alloc(bool, model.images.len);
+    defer gpa.free(normal);
+    @memset(normal, false);
     for (model.materials) |material| {
         for (material.pictures()) |held| if (held) |ref| {
             nearest[ref.image] = ref.nearest;
         };
+        if (material.normal) |ref| normal[ref.image] = true;
     }
     const pictures = try gpa.alloc(TextureHandle, model.images.len);
     defer gpa.free(pictures);
@@ -447,10 +471,23 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
         var name: [512]u8 = undefined;
         const named = try std.fmt.bufPrint(&name, "{s}#image/{d}", .{ source, at });
         if (app.assets.findTexture(named)) |held| {
+            // As the model's import settings say now.
+            if (app.assets.get(held)) |texture| {
+                texture.role = if (normal[at]) .normal else .color;
+                texture.compress = prepared.settings.compressOf();
+                texture.max_size = if (prepared.settings.texture_max_size == 0) null else prepared.settings.texture_max_size;
+            }
             try app.assets.setTexturePixels(held, picture.width, picture.height, picture.pixels);
             out.* = held;
         } else {
-            out.* = try app.assets.adoptTexture(named, picture.width, picture.height, picture.pixels, .{ .filter = if (nearest[at]) .nearest else .linear, .wrap = .repeat, .mips = true });
+            out.* = try app.assets.adoptTexture(named, picture.width, picture.height, picture.pixels, .{
+                .filter = if (nearest[at]) .nearest else .linear,
+                .wrap = .repeat,
+                .mips = true,
+                .role = if (normal[at]) .normal else .color,
+                .compress = prepared.settings.compressOf(),
+                .max_size = if (prepared.settings.texture_max_size == 0) null else prepared.settings.texture_max_size,
+            });
         }
         // The RHI has copied the pixels before it returns. Background
         // preparation owns them with its allocator, not necessarily gpa.

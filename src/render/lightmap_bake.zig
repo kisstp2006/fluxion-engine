@@ -398,7 +398,7 @@ const Gathering = struct {
         found.value_ptr.* = null;
         const held = self.app.assets.get(handle) orelse return null;
         if (held.upside_down) return null;
-        const pixels = self.app.device.readTexture(held.gpu, self.gpa) catch return null;
+        const pixels = self.app.assets.readPixels(handle, self.gpa) catch return null;
         if (pixels.len != @as(usize, held.width) * held.height * 4) {
             self.gpa.free(pixels);
             return null;

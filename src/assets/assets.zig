@@ -23,12 +23,14 @@
 //! asked for.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
 const rhi = @import("fluxion_rhi");
 const image = @import("fluxion_image");
 const mip_maker_table = @import("mip_maker.zig");
+const bc = @import("bc.zig");
 const id = @import("fluxion_id");
 const typeface = @import("fluxion_font");
 const platform = @import("fluxion_platform");
@@ -73,9 +75,63 @@ pub const Texture = struct {
     /// again at its own size when the limit is raised.
     limited: bool = false,
     /// Its chain is made again from its file, the picture's own size held to
-    /// the limit: asked when the limit is raised over what it was made at.
+    /// the limit: asked when the limit or the compression changes.
     regrow: bool = false,
+    /// How it is kept on the device: four bytes a texel, or BC's blocks.
+    format: rhi.Format = .rgba8_unorm,
+    /// What it is to a surface: a normal map is kept as two channels.
+    role: Role = .color,
+    /// Its own say over compression and size, where its import settings
+    /// give one: null is the project's.
+    compress: ?bool = null,
+    max_size: ?u32 = null,
 };
+
+/// What a picture's own import settings say of it on a 3D surface: in
+/// `<picture>.import` beside it, as a model's are, and what the editor's
+/// inspector shows for it.
+pub const TextureSettings = struct {
+    /// Whether it is kept on the graphics card as BC's compressed blocks: as
+    /// the project says, always, or never.
+    compression: Compression = .project,
+    /// The longest side it is kept at on the graphics card, halved until it
+    /// fits: nought for the project's.
+    max_size: u32 = 0,
+
+    pub const Compression = enum { project, compressed, uncompressed };
+
+    /// The settings beside the picture at `source`, or none where it has
+    /// none or they do not read.
+    pub fn of(gpa: Allocator, files: Project.Files, source: []const u8) TextureSettings {
+        const path = std.mem.concat(gpa, u8, &.{ source, ".import" }) catch return .{};
+        defer gpa.free(path);
+        const bytes = files.read(gpa, path, .limited(16 * 1024)) catch return .{};
+        defer gpa.free(bytes);
+        const parsed = @import("fluxion_json").parseAs(TextureSettings, gpa, bytes, .{ .syntax = .json5 }) catch |err| {
+            log.warn("{s} does not read, and the picture is kept as the project says: {t}", .{ path, err });
+            return .{};
+        };
+        defer parsed.deinit();
+        return parsed.value;
+    }
+
+    /// As a texture's own say: null for the project's.
+    pub fn compress(self: TextureSettings) ?bool {
+        return switch (self.compression) {
+            .project => null,
+            .compressed => true,
+            .uncompressed => false,
+        };
+    }
+
+    pub fn maxSize(self: TextureSettings) ?u32 {
+        return if (self.max_size == 0) null else self.max_size;
+    }
+};
+
+/// What a picture is to the surface it is on: a normal map's `x` and `y`
+/// are kept as BC5's two channels, its `z` worked out where it is read.
+pub const Role = enum(u8) { color, normal };
 
 /// What a `Sprite` holds: eight bytes, safe in a component or a save file.
 ///
@@ -200,6 +256,11 @@ pub const LoadOptions = struct {
     /// A chain of levels below the picture, for one drawn small: a 3D
     /// surface's. See `Texture.mips`.
     mips: bool = false,
+    /// With a chain: what it is to its surface, and its own say over
+    /// compression and size - null for the project's.
+    role: Role = .color,
+    compress: ?bool = null,
+    max_size: ?u32 = null,
     /// What a loading thread read of the `.uid` file beside it: taken in
     /// rather than read again here, on the game's thread. See
     /// `Project.readUidWith`.
@@ -246,6 +307,10 @@ default_filter: rhi.Filter = .nearest,
 /// are never made smaller. The project's `rendering.texture_max_size`, and
 /// `setTextureMaxSize` as a game runs.
 texture_max_size: u32 = 0,
+/// Whether a 3D surface's picture is kept as BC's compressed blocks where
+/// the device samples them: a quarter of its memory, or an eighth for one
+/// with no alpha. The project's `rendering.texture_compression`.
+texture_compression: bool = true,
 /// How many textures have been made from images: the number in the next
 /// one's name, `image://N`. See `images.toTexture`.
 images_made: u32 = 0,
@@ -264,22 +329,35 @@ mip_maker: ?mip_maker_table.MipMaker(MipRequest) = null,
 /// The old picture stays live while its replacement is filled over frames.
 mip_upload: ?MipUpload = null,
 
-const MipRequest = struct { handle: TextureHandle, revision: u64 = 0 };
+/// A picture to read again and make into a chain, as it is wanted now: made
+/// on the mip maker's thread, `prepare`, and only uploaded on the game's.
+const MipRequest = struct {
+    handle: TextureHandle,
+    revision: u64 = 0,
+    recipe: Recipe = .{},
 
+    pub const Chain = Assets.Chain;
+
+    pub fn prepare(self: MipRequest, gpa: Allocator, picture: *const image.Decoded) !Assets.Chain {
+        return makeChain(gpa, picture.width, picture.height, picture.pixels, self.recipe);
+    }
+};
+
+/// A chain filled over frames, the old picture drawn until it is done.
 const MipUpload = struct {
     handle: TextureHandle,
     before: rhi.Texture,
     revision: u64,
     gpu: rhi.Texture,
-    picture: image.Decoded,
+    chain: Chain,
+    /// The level being written, and how many of its rows - of texels, or of
+    /// blocks - are.
+    level: u32 = 0,
     row: u32 = 0,
-    chain: bool,
-    limited: bool = false,
-    hash: std.crypto.hash.sha2.Sha256 = .init(.{}),
 
     fn deinit(self: *MipUpload, assets: *Assets) void {
         if (!self.gpu.isNone()) assets.device.destroyTexture(self.gpu);
-        self.picture.deinit(assets.gpa);
+        self.chain.deinit(assets.gpa);
     }
 };
 
@@ -392,7 +470,7 @@ fn addTexture(
     options: LoadOptions,
     source: []const u8,
 ) Error!TextureHandle {
-    const made = try self.makeTexture(width, height, rgba, options.label, options.mips);
+    const made = try self.makeTexture(width, height, rgba, options.label, .{ .mips = options.mips, .role = options.role, .compress = options.compress, .max_size = options.max_size });
     errdefer self.releaseTexture(made.gpu, null);
 
     return .fromId(try self.textures.add(self.gpa, .{
@@ -406,37 +484,179 @@ fn addTexture(
         .mips_asked = options.mips,
         .fingerprint = made.fingerprint,
         .limited = made.limited,
+        .format = made.format,
+        .role = options.role,
+        .compress = options.compress,
+        .max_size = options.max_size,
     }));
 }
 
-/// A texture of `rgba`, with a chain of levels below it if `mips` asks and
-/// the device can make one - a texel has none below it.
-/// One with a chain is held to `texture_max_size`: made at the size it
-/// fits, from the picture halved.
-fn makeTexture(self: *Assets, width: u32, height: u32, rgba: []const u8, label: []const u8, mips: bool) Error!Made {
-    const size = if (mips) limitedSize(width, height, self.texture_max_size) else [2]u32{ width, height };
-    const smaller = size[0] != width or size[1] != height;
-    const pixels = if (smaller) try halved(self.gpa, width, height, rgba, size) else rgba;
-    defer if (smaller) self.gpa.free(pixels);
-    const chain = mips and (size[0] > 1 or size[1] > 1) and self.device.caps().formatSupport(.rgba8_unorm).generate_mips;
-    var fingerprint: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(pixels, &fingerprint, .{});
-    if (self.identicalTexture(size[0], size[1], chain, fingerprint)) |gpu|
-        return .{ .gpu = gpu, .mips = chain, .fingerprint = fingerprint, .width = size[0], .height = size[1], .limited = smaller };
-    const gpu = try self.device.createTexture(.{
-        .width = size[0],
-        .height = size[1],
-        .data = pixels,
-        .label = label,
-        .mip_levels = if (chain) 0 else 1,
-    });
-    errdefer self.device.destroyTexture(gpu);
-    if (chain) try self.fillMips(gpu);
-    return .{ .gpu = gpu, .mips = chain, .fingerprint = fingerprint, .width = size[0], .height = size[1], .limited = smaller };
+/// A texture of `rgba`, with a chain of levels below it if `want.mips`
+/// asks and the device can make one - a texel has none below it. One with a
+/// chain - a 3D surface's - is held to the size limit and kept as BC's
+/// blocks where it can be: see `makeChain`.
+fn makeTexture(self: *Assets, width: u32, height: u32, rgba: []const u8, label: []const u8, want: Want) Error!Made {
+    if (!want.mips) {
+        var fingerprint: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(rgba, &fingerprint, .{});
+        if (self.identicalTexture(width, height, false, fingerprint)) |gpu|
+            return .{ .gpu = gpu, .mips = false, .fingerprint = fingerprint, .width = width, .height = height, .limited = false, .format = .rgba8_unorm };
+        const gpu = try self.device.createTexture(.{ .width = width, .height = height, .data = rgba, .label = label });
+        return .{ .gpu = gpu, .mips = false, .fingerprint = fingerprint, .width = width, .height = height, .limited = false, .format = .rgba8_unorm };
+    }
+    var chain = try makeChain(self.gpa, width, height, rgba, self.recipeOf(want));
+    defer chain.deinit(self.gpa);
+    return self.uploadChain(&chain, label);
 }
 
-/// What `makeTexture` made, at the size it was made.
-const Made = struct { gpu: rhi.Texture, mips: bool, fingerprint: [32]u8, width: u32, height: u32, limited: bool };
+/// A chain on the device whole: every level written now.
+fn uploadChain(self: *Assets, chain: *const Chain, label: []const u8) Error!Made {
+    const made: Made = .{ .gpu = .none, .mips = chain.mips(self.device), .fingerprint = chain.fingerprint, .width = chain.width, .height = chain.height, .limited = chain.limited, .format = chain.format };
+    if (self.identicalTexture(chain.width, chain.height, made.mips, chain.fingerprint)) |gpu| {
+        var shared = made;
+        shared.gpu = gpu;
+        return shared;
+    }
+    const gpu = try self.device.createTexture(.{
+        .width = chain.width,
+        .height = chain.height,
+        .format = chain.format,
+        .data = chain.levels[0],
+        .label = label,
+        .mip_levels = chain.levelCount(self.device),
+    });
+    errdefer self.device.destroyTexture(gpu);
+    for (chain.levels[1..], 1..) |level, at| try self.device.writeTexture(gpu, .{ .mip = @intCast(at) }, level, 0, 0);
+    if (chain.format == .rgba8_unorm and made.mips) try self.fillMips(gpu);
+    var out = made;
+    out.gpu = gpu;
+    return out;
+}
+
+/// What a texture is made with: a chain or not, and for one with a chain
+/// what it is to its surface and its own say over compression and size.
+pub const Want = struct {
+    mips: bool = false,
+    role: Role = .color,
+    compress: ?bool = null,
+    max_size: ?u32 = null,
+};
+
+/// What `makeTexture` made, at the size and in the format it was made.
+const Made = struct { gpu: rhi.Texture, mips: bool, fingerprint: [32]u8, width: u32, height: u32, limited: bool, format: rhi.Format };
+
+/// How a chain is made: what the device and the project allow, and what
+/// the picture is - worked out on the game's thread, used on any.
+pub const Recipe = struct {
+    max_size: u32 = 0,
+    /// The BC formats the device samples, each where compression is on.
+    bc1: bool = false,
+    bc3: bool = false,
+    bc5: bool = false,
+    /// Whether a level of compressed blocks may be other than whole blocks.
+    partial_blocks: bool = false,
+    role: Role = .color,
+};
+
+fn recipeOf(self: *Assets, want: Want) Recipe {
+    const caps = self.device.caps();
+    const compress = want.compress orelse self.texture_compression;
+    return .{
+        .max_size = want.max_size orelse self.texture_max_size,
+        .bc1 = compress and caps.formatSupport(.bc1_rgba_unorm).sampled,
+        .bc3 = compress and caps.formatSupport(.bc3_rgba_unorm).sampled,
+        .bc5 = compress and caps.formatSupport(.bc5_rg_unorm).sampled,
+        .partial_blocks = caps.features.compressed_partial_blocks,
+        .role = want.role,
+    };
+}
+
+/// A 3D surface's picture as the device keeps it: held to the size limit,
+/// and - where the recipe allows - its every level as BC's blocks, made
+/// here, as a GPU cannot make the levels of a compressed texture. Otherwise
+/// one level of RGBA, its chain made on the GPU.
+pub const Chain = struct {
+    width: u32,
+    height: u32,
+    format: rhi.Format,
+    /// Each level, the largest first: one for RGBA.
+    levels: [][]u8,
+    limited: bool,
+    /// The picture's at the size it is kept, and the format: two textures
+    /// with the same share the device's.
+    fingerprint: [32]u8,
+
+    pub fn deinit(self: *Chain, gpa: Allocator) void {
+        for (self.levels) |level| gpa.free(level);
+        gpa.free(self.levels);
+        self.* = undefined;
+    }
+
+    /// Whether it has levels below the first on `device`.
+    fn mips(self: *const Chain, device: *rhi.Device) bool {
+        if (self.width <= 1 and self.height <= 1) return false;
+        return self.format != .rgba8_unorm or device.caps().formatSupport(.rgba8_unorm).generate_mips;
+    }
+
+    fn levelCount(self: *const Chain, device: *rhi.Device) u32 {
+        if (self.format != .rgba8_unorm) return @intCast(self.levels.len);
+        return if (self.mips(device)) 0 else 1;
+    }
+};
+
+pub fn makeChain(gpa: Allocator, width: u32, height: u32, rgba: []const u8, recipe: Recipe) Allocator.Error!Chain {
+    const size = limitedSize(width, height, recipe.max_size);
+    const limited = size[0] != width or size[1] != height;
+    const first = if (limited) try halved(gpa, width, height, rgba, size) else try gpa.dupe(u8, rgba[0 .. @as(usize, width) * height * 4]);
+    errdefer gpa.free(first);
+    const kind: ?bc.Kind = blk: {
+        if (!recipe.partial_blocks and (size[0] % 4 != 0 or size[1] % 4 != 0)) break :blk null;
+        if (recipe.role == .normal and recipe.bc5) break :blk .bc5;
+        if (bc.isOpaque(first)) break :blk if (recipe.bc1) .bc1 else null;
+        break :blk if (recipe.bc3) .bc3 else null;
+    };
+    const format: rhi.Format = if (kind) |k| switch (k) {
+        .bc1 => .bc1_rgba_unorm,
+        .bc3 => .bc3_rgba_unorm,
+        .bc5 => .bc5_rg_unorm,
+    } else .rgba8_unorm;
+    var hash: std.crypto.hash.sha2.Sha256 = .init(.{});
+    hash.update(first);
+    // Four bytes a texel are known by their pixels alone, as any such
+    // picture is; blocks by the format too.
+    if (format != .rgba8_unorm) hash.update(@tagName(format));
+    var fingerprint: [32]u8 = undefined;
+    hash.final(&fingerprint);
+    const k = kind orelse {
+        const levels = try gpa.alloc([]u8, 1);
+        levels[0] = first;
+        return .{ .width = size[0], .height = size[1], .format = format, .levels = levels, .limited = limited, .fingerprint = fingerprint };
+    };
+    const levels = try gpa.alloc([]u8, rhi.fullMipCount(size[0], size[1], 1));
+    var made: usize = 0;
+    errdefer {
+        for (levels[0..made]) |level| gpa.free(level);
+        gpa.free(levels);
+    }
+    var pixels = first;
+    defer gpa.free(pixels);
+    var w = size[0];
+    var h = size[1];
+    for (levels) |*level| {
+        level.* = try gpa.alloc(u8, k.size(w, h));
+        made += 1;
+        bc.encode(k, level.*, pixels, w, h);
+        if (w == 1 and h == 1) break;
+        const nw = @max(w / 2, 1);
+        const nh = @max(h / 2, 1);
+        const next = try halved(gpa, w, h, pixels, .{ nw, nh });
+        gpa.free(pixels);
+        pixels = next;
+        w = nw;
+        h = nh;
+    }
+    return .{ .width = size[0], .height = size[1], .format = format, .levels = levels, .limited = limited, .fingerprint = fingerprint };
+}
 
 /// The size a picture `width` by `height` is kept at with `max_size` at most
 /// a side: halved, as its levels are, until it fits. Nought keeps it.
@@ -456,76 +676,121 @@ pub fn limitedSize(width: u32, height: u32, max_size: u32) [2]u32 {
 fn halved(gpa: Allocator, width: u32, height: u32, rgba: []const u8, to: [2]u32) Allocator.Error![]u8 {
     var w = width;
     var h = height;
-    var from: []u8 = try gpa.dupe(u8, rgba[0 .. @as(usize, w) * h * 4]);
-    errdefer gpa.free(from);
+    // The picture given is read, never copied whole: each level is made
+    // from the one above it.
+    var from: ?[]u8 = null;
+    errdefer if (from) |held| gpa.free(held);
     while (w != to[0] or h != to[1]) {
         const nw = @max(w / 2, 1);
         const nh = @max(h / 2, 1);
         const next = try gpa.alloc(u8, @as(usize, nw) * nh * 4);
-        for (0..nh) |y| for (0..nw) |x| {
-            const x0 = @min(x * 2, w - 1);
-            const x1 = @min(x * 2 + 1, w - 1);
-            const y0 = @min(y * 2, h - 1);
-            const y1 = @min(y * 2 + 1, h - 1);
-            for (0..4) |c| {
-                const sum = @as(u32, from[(y0 * w + x0) * 4 + c]) + from[(y0 * w + x1) * 4 + c] + from[(y1 * w + x0) * 4 + c] + from[(y1 * w + x1) * 4 + c];
-                next[(y * nw + x) * 4 + c] = @intCast((sum + 2) / 4);
-            }
-        };
-        gpa.free(from);
+        halveOnce(from orelse rgba, w, h, next, nw, nh);
+        if (from) |held| gpa.free(held);
         from = next;
         w = nw;
         h = nh;
     }
-    return from;
+    return from orelse gpa.dupe(u8, rgba[0 .. @as(usize, w) * h * 4]);
 }
 
-/// Hold every 3D surface's picture to `size` a side - nought for none - from
-/// now on, and those on the device already: one larger is made again from
-/// its level that fits, read back from the device; one made smaller before
-/// and allowed more is read again from its file. A picture from inside a
-/// model has no file of its own to read: it grows back when its model is
-/// read again.
-pub fn setTextureMaxSize(self: *Assets, size: u32) void {
-    if (size == self.texture_max_size) return;
-    self.texture_max_size = size;
-    var it = self.textures.iterator();
-    while (it.next()) |entry| {
-        const held = entry.value;
-        if (!held.mips or held.upside_down) continue;
-        const fits = limitedSize(held.width, held.height, size);
-        if (fits[0] < held.width or fits[1] < held.height) {
-            self.shrink(held, fits) catch |err| log.warn("{s}: not made smaller: {t}", .{ held.source, err });
-        } else if (held.limited and held.source.len > 0 and std.mem.indexOfScalar(u8, held.source, '#') == null) {
-            held.regrow = true;
-            held.mips_asked = false;
-            self.wantMips(.fromId(entry.handle));
+/// One level down: rows shared between threads where the picture is large.
+fn halveOnce(from: []const u8, w: u32, h: u32, to: []u8, nw: u32, nh: u32) void {
+    const threads: u32 = if (builtin.single_threaded or @as(usize, nw) * nh < 256 * 256) 1 else @intCast(@min(std.Thread.getCpuCount() catch 1, 8, nh));
+    if (threads <= 1) return halveRows(from, w, h, to, nw, 0, nh);
+    var workers: [8]?std.Thread = @splat(null);
+    const per = (nh + threads - 1) / threads;
+    var first: u32 = 0;
+    for (workers[0..threads]) |*worker| {
+        const last = @min(first + per, nh);
+        if (first >= last) break;
+        worker.* = std.Thread.spawn(.{}, halveRows, .{ from, w, h, to, nw, first, last }) catch blk: {
+            halveRows(from, w, h, to, nw, first, last);
+            break :blk null;
+        };
+        first = last;
+    }
+    for (workers[0..threads]) |worker| if (worker) |held| held.join();
+}
+
+fn halveRows(from: []const u8, w: u32, h: u32, to: []u8, nw: u32, first: u32, last: u32) void {
+    for (first..last) |y| {
+        const y0 = @min(y * 2, h - 1);
+        const y1 = @min(y * 2 + 1, h - 1);
+        const row0 = from[y0 * w * 4 ..][0 .. w * 4];
+        const row1 = from[y1 * w * 4 ..][0 .. w * 4];
+        const out = to[y * nw * 4 ..][0 .. nw * 4];
+        // Two texels of each row a texel, four channels at once.
+        for (0..nw) |x| {
+            const x0 = @min(x * 2, w - 1) * 4;
+            const x1 = @min(x * 2 + 1, w - 1) * 4;
+            const a: @Vector(4, u16) = row0[x0..][0..4].*;
+            const b: @Vector(4, u16) = row0[x1..][0..4].*;
+            const c: @Vector(4, u16) = row1[x0..][0..4].*;
+            const d: @Vector(4, u16) = row1[x1..][0..4].*;
+            const mean: @Vector(4, u8) = @intCast((a + b + c + d + @as(@Vector(4, u16), @splat(2))) >> @splat(2));
+            out[x * 4 ..][0..4].* = mean;
         }
     }
 }
 
-/// `held` made again at `to`, from the level of its chain that size.
-fn shrink(self: *Assets, held: *Texture, to: [2]u32) !void {
-    var level: u32 = 0;
-    var w = held.width;
-    var h = held.height;
-    while (w > to[0] or h > to[1]) {
-        w = @max(w / 2, 1);
-        h = @max(h / 2, 1);
-        level += 1;
+/// Hold every 3D surface's picture to `size` a side - nought for none - from
+/// now on, and those on the device already: each is read again from its
+/// file - or from its model, for a model's picture - and made again at the
+/// size that fits, the one there drawn until it is. One made from pixels in
+/// memory has nothing to be read from, and keeps the size it has.
+pub fn setTextureMaxSize(self: *Assets, size: u32) void {
+    if (size == self.texture_max_size) return;
+    self.texture_max_size = size;
+    self.remakeChains();
+}
+
+/// Keep every 3D surface's picture as BC's blocks where the device has them,
+/// or as four bytes a texel - those on the device already made again, as
+/// `setTextureMaxSize` does.
+pub fn setTextureCompression(self: *Assets, on: bool) void {
+    if (on == self.texture_compression) return;
+    self.texture_compression = on;
+    self.remakeChains();
+}
+
+/// A texture's pixels at the size it is kept, four bytes a texel, top row
+/// first: read back from the device - or, for one kept as compressed
+/// blocks, which a device does not give back, read again from its file and
+/// made the size it is. The caller's, freed with `gpa`.
+pub fn readPixels(self: *Assets, handle: TextureHandle, gpa: Allocator) ![]u8 {
+    const held = self.get(handle) orelse return error.NoSuchTexture;
+    if (held.format == .rgba8_unorm) return self.device.readTexture(held.gpu, gpa);
+    if (self.project.io == null) return error.NoIo;
+    const bytes = try mip_maker_table.readPicture(gpa, self.project.files(), held.source, picture_limit);
+    defer gpa.free(bytes);
+    var decoded = try image.decode(gpa, bytes);
+    defer decoded.deinit(gpa);
+    return halved(gpa, decoded.width, decoded.height, decoded.pixels, limitedSize(decoded.width, decoded.height, @max(held.width, held.height)));
+}
+
+/// Give the picture `handle` names its own say over compression and size -
+/// what its import settings say now - and make it again with them, from its
+/// file, the one there drawn until it is.
+pub fn applyTextureSettings(self: *Assets, handle: TextureHandle, settings: TextureSettings) void {
+    const held = self.get(handle) orelse return;
+    held.compress = settings.compress();
+    held.max_size = settings.maxSize();
+    if (!held.mips or held.upside_down or held.source.len == 0) return;
+    held.regrow = true;
+    held.mips_asked = false;
+    self.wantMips(handle);
+}
+
+/// Every picture with a chain and a file made again as it would be now.
+fn remakeChains(self: *Assets) void {
+    var it = self.textures.iterator();
+    while (it.next()) |entry| {
+        const held = entry.value;
+        if (!held.mips or held.upside_down or held.source.len == 0) continue;
+        held.regrow = true;
+        held.mips_asked = false;
+        self.wantMips(.fromId(entry.handle));
     }
-    const pixels = try self.device.readSubresource(held.gpu, .{ .mip = level }, self.gpa);
-    defer self.gpa.free(pixels);
-    const made = try self.makeTexture(w, h, pixels, held.source, true);
-    if (!std.meta.eql(made.gpu, held.gpu)) self.releaseTexture(held.gpu, held);
-    held.gpu = made.gpu;
-    held.width = made.width;
-    held.height = made.height;
-    held.mips = made.mips;
-    held.fingerprint = made.fingerprint;
-    held.limited = true;
-    held.regrow = false;
-    held.revision +%= 1;
 }
 
 /// Only asset creation, mutation and destruction search this table; rendering
@@ -573,7 +838,7 @@ pub fn textureMemory(self: *Assets) TextureMemory {
         var w = held.width;
         var h = held.height;
         while (true) {
-            bytes += @as(u64, w) * h * 4;
+            bytes += held.format.imageBytes(w, h);
             if (!held.mips or (w == 1 and h == 1)) break;
             w = @max(w / 2, 1);
             h = @max(h / 2, 1);
@@ -636,7 +901,8 @@ pub fn makeWantedMips(self: *Assets) void {
         for (self.mips_wanted.items) |handle| {
             const held = self.textures.get(handle.toId()) orelse continue;
             if ((held.mips and !held.regrow) or held.upside_down or held.source.len == 0) continue;
-            self.mip_maker.?.ask(.{ .handle = handle, .revision = held.revision }, held.source) catch {};
+            const recipe = self.recipeOf(.{ .mips = true, .role = held.role, .compress = held.compress, .max_size = held.max_size });
+            self.mip_maker.?.ask(.{ .handle = handle, .revision = held.revision, .recipe = recipe }, held.source) catch {};
         }
         self.mips_wanted.clearRetainingCapacity();
     }
@@ -679,31 +945,22 @@ pub fn mipsPending(self: *Assets) usize {
 }
 
 fn beginMips(self: *Assets, made: *mip_maker_table.MipMaker(MipRequest).Made) !void {
-    var decoded = made.picture orelse return;
+    const chain = made.chain orelse return;
     const held = self.textures.get(made.handle.handle.toId()) orelse return;
     if ((held.mips and !held.regrow) or held.upside_down or held.source.len == 0 or held.revision != made.handle.revision) return;
-    // Held to the limit as one made at once is.
-    const size = limitedSize(decoded.width, decoded.height, self.texture_max_size);
-    const limited = size[0] != decoded.width or size[1] != decoded.height;
-    if (limited) {
-        const smaller = try halved(self.gpa, decoded.width, decoded.height, decoded.pixels, size);
-        self.gpa.free(decoded.pixels);
-        decoded.pixels = smaller;
-        decoded.width = size[0];
-        decoded.height = size[1];
-        made.picture = decoded;
-    }
-    const chain = (decoded.width > 1 or decoded.height > 1) and self.device.caps().formatSupport(.rgba8_unorm).generate_mips;
     const gpu = try self.device.createTexture(.{
-        .width = decoded.width,
-        .height = decoded.height,
-        .mip_levels = if (chain) 0 else 1,
+        .width = chain.width,
+        .height = chain.height,
+        .format = chain.format,
+        .mip_levels = chain.levelCount(self.device),
         .label = held.source,
     });
-    self.mip_upload = .{ .handle = made.handle.handle, .before = held.gpu, .revision = held.revision, .gpu = gpu, .picture = decoded, .chain = chain, .limited = limited };
-    made.picture = null;
+    self.mip_upload = .{ .handle = made.handle.handle, .before = held.gpu, .revision = held.revision, .gpu = gpu, .chain = chain };
+    made.chain = null;
 }
 
+/// Another share of the chain on its way: a level, or the rows of one that
+/// fit `mips_bytes_an_upload` - and the texture in its place once all are.
 fn advanceMips(self: *Assets) !void {
     const upload = if (self.mip_upload) |*held| held else return;
     const held = self.textures.get(upload.handle.toId());
@@ -713,25 +970,34 @@ fn advanceMips(self: *Assets) !void {
         self.mip_upload = null;
         return;
     }
-    const picture = upload.picture;
-    const row_bytes = @as(usize, picture.width) * 4;
-    const rows: u32 = @intCast(@min(picture.height - upload.row, @max(1, mips_bytes_an_upload / row_bytes)));
-    try self.device.writeTexture(upload.gpu, .{ .y = upload.row, .width = picture.width, .height = rows }, picture.pixels[@as(usize, upload.row) * row_bytes ..][0 .. rows * row_bytes], row_bytes, 0);
-    upload.hash.update(picture.pixels[@as(usize, upload.row) * row_bytes ..][0 .. rows * row_bytes]);
-    upload.row += rows;
-    if (upload.row < picture.height) return;
-    if (upload.chain) try self.fillMips(upload.gpu);
-    var fingerprint: [32]u8 = undefined;
-    upload.hash.final(&fingerprint);
-    const gpu = self.identicalTexture(picture.width, picture.height, upload.chain, fingerprint) orelse upload.gpu;
+    const chain = &upload.chain;
+    if (upload.level < chain.levels.len) {
+        const lw = rhi.mipExtent(chain.width, upload.level);
+        const lh = rhi.mipExtent(chain.height, upload.level);
+        const row_bytes = chain.format.rowBytes(lw);
+        const all_rows = chain.format.rowCount(lh);
+        const rows: u32 = @intCast(@min(all_rows - upload.row, @max(1, mips_bytes_an_upload / row_bytes)));
+        const tall = chain.format.info().block_height;
+        const top = upload.row * tall;
+        try self.device.writeTexture(upload.gpu, .{ .mip = upload.level, .y = top, .width = lw, .height = @min(rows * tall, lh - top) }, chain.levels[upload.level][@as(usize, upload.row) * row_bytes ..][0 .. rows * row_bytes], row_bytes, 0);
+        upload.row += rows;
+        if (upload.row < all_rows) return;
+        upload.level += 1;
+        upload.row = 0;
+        if (upload.level < chain.levels.len) return;
+    }
+    const mips = chain.mips(self.device);
+    if (chain.format == .rgba8_unorm and mips) try self.fillMips(upload.gpu);
+    const gpu = self.identicalTexture(chain.width, chain.height, mips, chain.fingerprint) orelse upload.gpu;
     if (!std.meta.eql(gpu, held.?.gpu)) self.releaseTexture(held.?.gpu, held.?);
     if (!std.meta.eql(gpu, upload.gpu)) self.device.destroyTexture(upload.gpu);
     held.?.gpu = gpu;
-    held.?.width = picture.width;
-    held.?.height = picture.height;
-    held.?.mips = upload.chain;
-    held.?.fingerprint = fingerprint;
-    held.?.limited = upload.limited;
+    held.?.width = chain.width;
+    held.?.height = chain.height;
+    held.?.mips = mips;
+    held.?.format = chain.format;
+    held.?.fingerprint = chain.fingerprint;
+    held.?.limited = chain.limited;
     held.?.regrow = false;
     upload.gpu = .none;
     upload.deinit(self);
@@ -794,6 +1060,9 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
     var decoded = try image.decode(self.gpa, bytes);
     defer decoded.deinit(self.gpa);
     self.learnUid(source);
+    // A 3D surface's picture as its own import settings say, where the one
+    // loading it does not.
+    const own: TextureSettings = if (options.mips and self.project.io != null) .of(self.gpa, self.project.files(), source) else .{};
 
     return self.addTexture(
         decoded.width,
@@ -804,6 +1073,9 @@ pub fn loadTexture(self: *Assets, path: []const u8, options: LoadOptions) !Textu
             .wrap = options.wrap,
             .label = if (options.label.len == 0) source else options.label,
             .mips = options.mips,
+            .role = options.role,
+            .compress = options.compress orelse own.compress(),
+            .max_size = options.max_size orelse own.maxSize(),
         },
         source,
     );
@@ -815,11 +1087,16 @@ pub fn adoptTexture(self: *Assets, path: []const u8, width: u32, height: u32, rg
     const source = try self.project.canonical(self.gpa, path);
     errdefer self.gpa.free(source);
     self.learnUidRead(source, options.uid);
+    // A file's own import settings; a model's picture has its model's.
+    const own: TextureSettings = if (options.mips and self.project.io != null and std.mem.indexOfScalar(u8, source, '#') == null) .of(self.gpa, self.project.files(), source) else .{};
     return self.addTexture(width, height, rgba, .{
         .filter = options.filter orelse self.default_filter,
         .wrap = options.wrap,
         .label = if (options.label.len == 0) source else options.label,
         .mips = options.mips,
+        .role = options.role,
+        .compress = options.compress orelse own.compress(),
+        .max_size = options.max_size orelse own.maxSize(),
     }, source);
 }
 
@@ -829,7 +1106,7 @@ pub fn adoptTexture(self: *Assets, path: []const u8, width: u32, height: u32, rg
 /// and its chain of levels, if it has one, made again from them.
 pub fn setTexturePixels(self: *Assets, handle: TextureHandle, width: u32, height: u32, rgba: []const u8) !void {
     const held = self.get(handle) orelse return error.NoSuchTexture;
-    if (held.width == width and held.height == height and !held.upside_down and !self.sharedTexture(held.gpu, held)) {
+    if (!held.mips and held.width == width and held.height == height and !held.upside_down and !self.sharedTexture(held.gpu, held)) {
         held.fingerprint = null;
         held.revision +%= 1;
         try self.device.updateTexture(held.gpu, rgba, 0);
@@ -839,13 +1116,14 @@ pub fn setTexturePixels(self: *Assets, handle: TextureHandle, width: u32, height
         held.fingerprint = fingerprint;
         return;
     }
-    const made = try self.makeTexture(width, height, rgba, held.source, held.mips);
+    const made = try self.makeTexture(width, height, rgba, held.source, .{ .mips = held.mips, .role = held.role, .compress = held.compress, .max_size = held.max_size });
     if (!std.meta.eql(made.gpu, held.gpu)) self.releaseTexture(held.gpu, held);
     held.gpu = made.gpu;
     held.width = made.width;
     held.height = made.height;
     held.upside_down = false;
     held.mips = made.mips;
+    held.format = made.format;
     held.fingerprint = made.fingerprint;
     held.limited = made.limited;
     held.regrow = false;
@@ -1673,11 +1951,12 @@ test "a large mip replacement stays hidden until complete and a reload cancels i
     const handle = try assets.adoptTexture("res://strip.png", 1, 1, &.{ 255, 255, 255, 255 }, .{});
     const before = assets.get(handle).?.gpu;
     const pixels = try testing.allocator.alloc(u8, 1024 * 257 * 4);
+    defer testing.allocator.free(pixels);
     @memset(pixels, 200);
-    var made: mip_maker_table.MipMaker(MipRequest).Made = .{ .handle = .{ .handle = handle }, .picture = .{ .width = 1024, .height = 257, .pixels = pixels } };
+    var made: mip_maker_table.MipMaker(MipRequest).Made = .{ .handle = .{ .handle = handle }, .picture = null, .chain = try makeChain(testing.allocator, 1024, 257, pixels, .{}) };
     defer made.deinit(testing.allocator);
     try assets.beginMips(&made);
-    try testing.expect(made.picture == null);
+    try testing.expect(made.chain == null);
     try assets.advanceMips();
     try testing.expectEqual(@as(u32, 256), assets.mip_upload.?.row);
     try testing.expectEqual(before, assets.get(handle).?.gpu);
@@ -1692,9 +1971,8 @@ test "a large mip replacement stays hidden until complete and a reload cancels i
     try testing.expectEqual(@as(usize, 0), assets.mipsPending());
 
     const other = try assets.adoptTexture("res://cancel.png", 1, 1, &.{ 1, 2, 3, 4 }, .{});
-    const next = try testing.allocator.alloc(u8, 2 * 2 * 4);
-    @memset(next, 100);
-    var cancelled: mip_maker_table.MipMaker(MipRequest).Made = .{ .handle = .{ .handle = other }, .picture = .{ .width = 2, .height = 2, .pixels = next } };
+    const next = [_]u8{100} ** (2 * 2 * 4);
+    var cancelled: mip_maker_table.MipMaker(MipRequest).Made = .{ .handle = .{ .handle = other }, .picture = null, .chain = try makeChain(testing.allocator, 2, 2, &next, .{}) };
     defer cancelled.deinit(testing.allocator);
     try assets.beginMips(&cancelled);
     try assets.setTexturePixels(other, 1, 1, &.{ 5, 6, 7, 8 });
@@ -1766,6 +2044,8 @@ test "shared mipmapped pictures keep the other asset pixels across writes and un
     defer assets.deinit();
     const red = .{ 255, 0, 0, 255 } ** 4;
     const blue = .{ 0, 0, 255, 255 } ** 4;
+    // Four bytes a texel, to be read back.
+    assets.texture_compression = false;
     const a = try assets.adoptTexture("res://first.png", 2, 2, &red, .{ .mips = true });
     const b = try assets.adoptTexture("res://second.png", 2, 2, &red, .{ .mips = true });
     const gpu = assets.get(b).?.gpu;
@@ -1800,10 +2080,7 @@ test "deferred mip upgrades converge on shared storage and preserve one-texel al
     const a = try assets.adoptTexture("res://deferred-a.png", 2, 2, &pixels, .{});
     const b = try assets.adoptTexture("res://deferred-b.png", 2, 2, &pixels, .{});
     for ([_]TextureHandle{ a, b }) |handle| {
-        var made: mip_maker_table.MipMaker(MipRequest).Made = .{
-            .handle = .{ .handle = handle },
-            .picture = .{ .width = 2, .height = 2, .pixels = try testing.allocator.dupe(u8, &pixels) },
-        };
+        var made: mip_maker_table.MipMaker(MipRequest).Made = .{ .handle = .{ .handle = handle }, .picture = null, .chain = try makeChain(testing.allocator, 2, 2, &pixels, .{}) };
         defer made.deinit(testing.allocator);
         try assets.beginMips(&made);
         try assets.advanceMips();
@@ -1816,10 +2093,7 @@ test "deferred mip upgrades converge on shared storage and preserve one-texel al
     try testing.expectEqualSlices(u8, &pixels, read);
     const small = try assets.adoptTexture("res://one.png", 1, 1, &.{ 99, 88, 77, 255 }, .{});
     const original = assets.get(small).?.gpu;
-    var made: mip_maker_table.MipMaker(MipRequest).Made = .{
-        .handle = .{ .handle = small },
-        .picture = .{ .width = 1, .height = 1, .pixels = try testing.allocator.dupe(u8, &.{ 99, 88, 77, 255 }) },
-    };
+    var made: mip_maker_table.MipMaker(MipRequest).Made = .{ .handle = .{ .handle = small }, .picture = null, .chain = try makeChain(testing.allocator, 1, 1, &.{ 99, 88, 77, 255 }, .{}) };
     defer made.deinit(testing.allocator);
     try assets.beginMips(&made);
     try assets.advanceMips();
@@ -1855,27 +2129,143 @@ test "a 3D surface's picture is held to the size limit, halved, and a sprite's i
     try testing.expectEqualSlices(u8, &.{ 10, 10, 10, 255, 250, 250, 250, 255 }, smaller[0..8]);
 }
 
-test "a lower limit makes the pictures on the device smaller, and a higher one asks for their files again" {
-    var device = rhi.Device.init(testing.allocator, .{ .backend = .vulkan }) catch |err| switch (err) {
-        error.NoDevice, error.Unsupported => return error.SkipZigTest,
-        else => return err,
-    };
-    defer device.deinit();
-    if (!device.caps().formatSupport(.rgba8_unorm).generate_mips) return error.SkipZigTest;
-    var project: Project = try .init(testing.allocator, null, null);
-    defer project.deinit();
-    var assets: Assets = try .init(testing.allocator, &device, null, &project);
-    defer assets.deinit();
-    const pixels = .{ 40, 80, 120, 255 } ** 64;
-    const handle = try assets.adoptTexture("res://floor.png", 8, 8, &pixels, .{ .mips = true });
-    assets.setTextureMaxSize(2);
-    const held = assets.get(handle).?;
-    try testing.expectEqual(@as(u32, 2), held.width);
-    try testing.expect(held.limited and held.mips);
-    const read = try device.readTexture(held.gpu, testing.allocator);
-    defer testing.allocator.free(read);
-    try testing.expectEqualSlices(u8, &.{ 40, 80, 120, 255 }, read[0..4]);
-    assets.setTextureMaxSize(0);
-    try testing.expect(held.regrow);
-    try testing.expectEqual(@as(usize, 1), assets.mips_wanted.items.len);
+/// A project on disk with `art/` in it, and a Vulkan device: what the tests
+/// of pictures read again from their files need.
+const DiskAssets = struct {
+    tmp: testing.TmpDir,
+    root_buffer: [128]u8 = undefined,
+    root: []const u8 = "",
+    device: rhi.Device,
+    project: Project,
+    assets: Assets,
+
+    fn open(self: *DiskAssets) !void {
+        self.tmp = testing.tmpDir(.{});
+        errdefer self.tmp.cleanup();
+        self.root = try std.fmt.bufPrint(&self.root_buffer, ".zig-cache/tmp/{s}", .{self.tmp.sub_path});
+        try self.tmp.dir.createDirPath(testing.io, "art");
+        self.device = rhi.Device.init(testing.allocator, .{ .backend = .vulkan }) catch |err| switch (err) {
+            error.NoDevice, error.Unsupported => return error.SkipZigTest,
+            else => return err,
+        };
+        errdefer self.device.deinit();
+        if (!self.device.caps().formatSupport(.bc1_rgba_unorm).sampled) return error.SkipZigTest;
+        self.project = try .init(testing.allocator, testing.io, self.root);
+        errdefer self.project.deinit();
+        self.assets = try .init(testing.allocator, &self.device, testing.io, &self.project);
+    }
+
+    fn close(self: *DiskAssets) void {
+        self.assets.deinit();
+        self.project.deinit();
+        self.device.deinit();
+        self.tmp.cleanup();
+    }
+
+    fn path(self: *DiskAssets, buffer: []u8, name: []const u8) ![]const u8 {
+        return std.fmt.bufPrint(buffer, "{s}/art/{s}", .{ self.root, name });
+    }
+
+    /// Every chain asked for made, as frames would make them.
+    fn settle(self: *DiskAssets) !void {
+        var tries: usize = 0;
+        while (self.assets.mipsPending() > 0) : (tries += 1) {
+            if (tries > 20000) return error.Timeout;
+            self.assets.makeWantedMips();
+            try testing.io.sleep(.fromMilliseconds(1), .awake);
+        }
+    }
+};
+
+test "a 3D surface's picture is kept as BC1, as BC3 with alpha and as BC5 for a normal map, and a sprite's as it is" {
+    var disk: DiskAssets = undefined;
+    try disk.open();
+    defer disk.close();
+    var buffer: [192]u8 = undefined;
+    try writeSolid(try disk.path(&buffer, "wall.png"), 16, 16, 255);
+    try writeSolid(try disk.path(&buffer, "leaf.png"), 16, 16, 200);
+    // See-through: its alpha is not all 255.
+    {
+        var pixels = [_]u8{ 50, 60, 70, 128 } ** (16 * 16);
+        try image.png.writeFile(testing.allocator, testing.io, try disk.path(&buffer, "glass.png"), .{ .width = 16, .height = 16, .pixels = &pixels, .row_pitch = 64 }, .{ .keep_alpha = true });
+    }
+    const wall = try disk.assets.loadTexture(try disk.path(&buffer, "wall.png"), .{ .mips = true });
+    try testing.expectEqual(rhi.Format.bc1_rgba_unorm, disk.assets.get(wall).?.format);
+    try testing.expect(disk.assets.get(wall).?.mips);
+    const glass = try disk.assets.loadTexture(try disk.path(&buffer, "glass.png"), .{ .mips = true });
+    try testing.expectEqual(rhi.Format.bc3_rgba_unorm, disk.assets.get(glass).?.format);
+    const bumps = try disk.assets.loadTexture(try disk.path(&buffer, "leaf.png"), .{ .mips = true, .role = .normal });
+    try testing.expectEqual(rhi.Format.bc5_rg_unorm, disk.assets.get(bumps).?.format);
+    const sprite = try disk.assets.loadTexture(try disk.path(&buffer, "wall.png"), .{});
+    try testing.expectEqual(rhi.Format.rgba8_unorm, disk.assets.get(sprite).?.format);
+    // An eighth of the memory: a block of eight bytes for sixteen texels.
+    try testing.expectEqual(@as(usize, 128), disk.assets.get(wall).?.format.imageBytes(16, 16));
+    // A compressed one read back is read again from its file.
+    const pixels = try disk.assets.readPixels(wall, testing.allocator);
+    defer testing.allocator.free(pixels);
+    try testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, pixels[0..4]);
+}
+
+test "a lower limit, a higher one and compression switched off make the pictures again from their files" {
+    var disk: DiskAssets = undefined;
+    try disk.open();
+    defer disk.close();
+    var buffer: [192]u8 = undefined;
+    try writeSolid(try disk.path(&buffer, "floor.png"), 64, 64, 255);
+    const floor = try disk.assets.loadTexture(try disk.path(&buffer, "floor.png"), .{ .mips = true });
+    disk.assets.setTextureMaxSize(16);
+    // Drawn as it was until its replacement is made.
+    try testing.expectEqual(@as(u32, 64), disk.assets.get(floor).?.width);
+    try disk.settle();
+    try testing.expectEqual(@as(u32, 16), disk.assets.get(floor).?.width);
+    try testing.expect(disk.assets.get(floor).?.limited);
+    disk.assets.setTextureMaxSize(0);
+    try disk.settle();
+    try testing.expectEqual(@as(u32, 64), disk.assets.get(floor).?.width);
+    try testing.expectEqual(rhi.Format.bc1_rgba_unorm, disk.assets.get(floor).?.format);
+    disk.assets.setTextureCompression(false);
+    try disk.settle();
+    try testing.expectEqual(rhi.Format.rgba8_unorm, disk.assets.get(floor).?.format);
+    try testing.expect(disk.assets.get(floor).?.mips);
+}
+
+test "a picture's own import settings keep it uncompressed and smaller than the project would" {
+    var disk: DiskAssets = undefined;
+    try disk.open();
+    defer disk.close();
+    var buffer: [192]u8 = undefined;
+    try writeSolid(try disk.path(&buffer, "sign.png"), 32, 32, 255);
+    try disk.tmp.dir.writeFile(testing.io, .{ .sub_path = "art/sign.png.import", .data = "{\"compression\": \"uncompressed\", \"max_size\": 8}" });
+    const sign = try disk.assets.loadTexture(try disk.path(&buffer, "sign.png"), .{ .mips = true });
+    try testing.expectEqual(rhi.Format.rgba8_unorm, disk.assets.get(sign).?.format);
+    try testing.expectEqual(@as(u32, 8), disk.assets.get(sign).?.width);
+}
+
+test "a picture inside a model is read again out of the model's file" {
+    var disk: DiskAssets = undefined;
+    try disk.open();
+    defer disk.close();
+    // A GLB with one PNG in its binary part.
+    const bin = try image.png.encodeAlloc(testing.allocator, .{ .width = 2, .height = 2, .pixels = &(.{ 9, 8, 7, 255 } ** 4), .row_pitch = 8 }, .{});
+    defer testing.allocator.free(bin);
+    const padded = std.mem.alignForward(usize, bin.len, 4);
+    var text_buffer: [256]u8 = undefined;
+    const text = try std.fmt.bufPrint(&text_buffer, "{{\"asset\":{{\"version\":\"2.0\"}},\"buffers\":[{{\"byteLength\":{d}}}],\"bufferViews\":[{{\"buffer\":0,\"byteLength\":{d}}}],\"images\":[{{\"bufferView\":0,\"mimeType\":\"image/png\"}}]}}", .{ padded, bin.len });
+    const text_len = std.mem.alignForward(usize, text.len, 4);
+    var glb: std.ArrayList(u8) = .empty;
+    defer glb.deinit(testing.allocator);
+    const total: u32 = @intCast(12 + 8 + text_len + 8 + padded);
+    for ([_]u32{ 0x46546C67, 2, total, @intCast(text_len), 0x4E4F534A }) |word| try glb.appendSlice(testing.allocator, std.mem.asBytes(&word));
+    try glb.appendSlice(testing.allocator, text);
+    try glb.appendNTimes(testing.allocator, ' ', text_len - text.len);
+    for ([_]u32{ @intCast(padded), 0x004E4942 }) |word| try glb.appendSlice(testing.allocator, std.mem.asBytes(&word));
+    try glb.appendSlice(testing.allocator, bin);
+    try glb.appendNTimes(testing.allocator, 0, padded - bin.len);
+    try disk.tmp.dir.writeFile(testing.io, .{ .sub_path = "art/crate.glb", .data = glb.items });
+    const bytes = try mip_maker_table.readPicture(testing.allocator, disk.project.files(), "res://art/crate.glb#image/0", 1 << 20);
+    defer testing.allocator.free(bytes);
+    var decoded = try image.decode(testing.allocator, bytes);
+    defer decoded.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, &.{ 9, 8, 7, 255 }, decoded.pixels[0..4]);
+    try testing.expectError(error.FileNotFound, mip_maker_table.readPicture(testing.allocator, disk.project.files(), "res://art/crate.glb#image/1", 1 << 20));
 }

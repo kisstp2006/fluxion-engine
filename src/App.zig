@@ -974,6 +974,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .linear => .linear,
     };
     if (self.project.settings) |held| self.assets.texture_max_size = held.rendering.texture_max_size;
+    if (self.project.settings) |held| self.assets.texture_compression = held.rendering.texture_compression;
     if (options.project_icon) window_icon.useProjectIcon(self);
     if (options.project_cursor) pointer.useProjectCursor(self);
 
@@ -5069,6 +5070,18 @@ pub fn textureMaxSize(self: *const App) u32 {
     return self.assets.texture_max_size;
 }
 
+/// Keep every 3D surface's picture as BC's compressed blocks where the card
+/// has them, or as four bytes a texel - those drawn already too: a game's
+/// texture quality setting. See `Assets.setTextureCompression`.
+pub fn setTextureCompression(self: *App, on: bool) void {
+    self.assets.setTextureCompression(on);
+}
+
+/// Whether a 3D surface's picture is kept compressed where it can be.
+pub fn textureCompression(self: *const App) bool {
+    return self.assets.texture_compression;
+}
+
 /// A number of the material at `path` - `emission_energy`, `roughness`, any
 /// of `Material3DData`'s - read first if it was not: what a script reads to
 /// light a sign or wet a floor.
@@ -6915,6 +6928,8 @@ pub const reflect_methods = .{
     // Materials
     .setTextureMaxSize = .{attr.Params{ .names = &.{"size"} }},
     .textureMaxSize = .{},
+    .setTextureCompression = .{attr.Params{ .names = &.{"on"} }},
+    .textureCompression = .{},
     .materialNumber = .{attr.Params{ .names = &.{ "path", "field" } }},
     .setMaterialNumber = .{attr.Params{ .names = &.{ "path", "field", "value" } }},
     .setMaterialColor = .{attr.Params{ .names = &.{ "path", "field", "color" } }},

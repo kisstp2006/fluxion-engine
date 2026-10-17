@@ -256,6 +256,9 @@ pub const Loading = struct {
     /// A 3D material's pictures need their mip chain before the first draw.
     /// Other texture loads keep the single level used by sprites and UI.
     texture_mips: bool = false,
+    /// What a 3D material's picture read now is to its surface: its
+    /// `normal_texture` is a normal map, kept as two channels.
+    texture_role: @import("../assets/assets.zig").Role = .color,
     /// What has to wait until the whole scene is read: see `whenRead`.
     later: ?*std.ArrayList(Later) = null,
     /// What the scene's roots hang from: see `LoadOptions.parent`.
@@ -771,7 +774,7 @@ pub const Loading = struct {
         if (kind == .texture) loading.app.loadModelOf(where) catch |err|
             return loading.fail(err, "cannot read the model of \"{s}\": {t}", .{ where, err });
         const handle: H = switch (kind) {
-            .texture => loading.app.assets.findTexture(where) orelse loading.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap, .mips = loading.texture_mips }) catch |err|
+            .texture => loading.app.assets.findTexture(where) orelse loading.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap, .mips = loading.texture_mips, .role = loading.texture_role }) catch |err|
                 return loading.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err }),
             else => loading.app.loadAsset(H, where) catch |err|
                 return loading.fail(err, "cannot read the {s} \"{s}\": {t}", .{ kind.label(), where, err }),
@@ -902,6 +905,9 @@ pub fn readComponent(loading: *Loading, comptime T: type, out: *T) anyerror!void
                 matched = true;
                 seen.set(i);
                 const mark = loading.path.push("{s}", .{field.name});
+                const previous_role = loading.texture_role;
+                if (T == components.Material3DData) loading.texture_role = if (comptime std.mem.eql(u8, field.name, "normal_texture")) .normal else .color;
+                defer loading.texture_role = previous_role;
                 if (comptime scene_write.isList(field.type) and field.defaultValue() != null) {
                     // The items it holds, and the rest as they start.
                     @field(out.*, field.name) = field.defaultValue().?;

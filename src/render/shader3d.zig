@@ -1064,7 +1064,10 @@ const prologue = " vec4 ALBEDO_TEXEL = sample(ALBEDO_TEXTURE, UV);" ++
     " float ROUGHNESS = SURFACE.y * SURFACE_TEXEL.g;" ++
     // The picture times the colour, or - its energy in `.w` - added to it.
     " vec3 EMISSION = mix(EMISSION_TEXEL * EMISSION_COLOR.rgb, EMISSION_COLOR.rgb + EMISSION_TEXEL * EMISSION_COLOR.w, step(0.000001, EMISSION_COLOR.w));" ++
-    " vec3 NORMAL_MAP = sample(NORMAL_TEXTURE, UV).rgb;" ++
+    // A normal map's `z` from its `x` and `y`: the two a compressed one
+    // keeps - BC5's - and the same as the third for one that keeps it.
+    " vec2 prologue_normal = sample(NORMAL_TEXTURE, UV).rg * 2.0 - vec2(1.0);" ++
+    " vec3 NORMAL_MAP = vec3(prologue_normal, sqrt(max(1.0 - dot(prologue_normal, prologue_normal), 0.0))) * 0.5 + vec3(0.5);" ++
     " float AO = mix(1.0, sample(OCCLUSION_TEXTURE, UV).r, SURFACE.w);";
 
 pub const prologue_len: u32 = prologue.len;
