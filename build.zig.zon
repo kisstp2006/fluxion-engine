@@ -21,8 +21,8 @@
         // the 3D one, the 2D one, the interface -
         // goes through this and through nothing else.
         .fluxion_rhi = .{
-            .url = "git+https://github.com/kisstp2006/fluxion-rhi#e75b86ae592a39971afbd0ead8554ac791e4d20c",
-            .hash = "fluxion_rhi-0.1.0--pvwDxWuEgA6yLQWrQXIcUKMQ00wgnQG0t2Bh5WMT4MU",
+            .url = "git+https://github.com/kisstp2006/fluxion-rhi#2ffba6f93cfdf4b8091af5c409ba62aec6183434",
+            .hash = "fluxion_rhi-0.1.0--pvwD5DZEgAk-6GkeSUcrx7CUhMsxMevpbCGePoBZYg9",
         },
 
         // Windows, input and the event loop. A library may not depend on

@@ -224,6 +224,9 @@ pub const Rendering = struct {
     /// How a texture is sampled when it does not say: nearest keeps pixel
     /// art's pixels square, linear smooths a painting.
     default_texture_filter: TextureFilter = .nearest,
+    /// The longest side a 3D surface's picture is kept at on the graphics
+    /// card, halved until it fits: nought for each picture's own size.
+    texture_max_size: u32 = 0,
     /// How many samples a pixel the 3D layer is drawn with: smoother edges
     /// for more work. Where the device has fewer, the most it has.
     msaa_3d: Msaa = .disabled,
@@ -437,6 +440,7 @@ pub const Rendering = struct {
         .fall_back_to_compatibility = .{ attr.Advanced{}, attr.Restart{}, attr.Doc{ .text = "Where no Modern backend opens on a machine, draw with the Compatibility renderer instead." } },
         .clear_color = .{ attr.Advanced{}, attr.Doc{ .text = "What every frame is cleared to, under the world." } },
         .default_texture_filter = .{ attr.Restart{}, attr.Doc{ .text = "How a texture is sampled when it does not say: nearest for pixel art, linear for a painting." } },
+        .texture_max_size = .{ attr.Range{ .min = 0, .max = 16384, .step = 1 }, attr.Unit{ .text = "px" }, attr.Doc{ .text = "The longest side a 3D surface's picture is kept at on the graphics card, halved until it fits: a 2048 picture takes 21 MiB there, a 1024 one 5. Nought keeps each at its own size; sprites and the interface are never made smaller." } },
         .msaa_3d = .{ attr.Label{ .text = "MSAA 3D" }, attr.Doc{ .text = "How many samples a pixel the 3D layer is drawn with: smoother edges for more work. Where the device has fewer, the most it has." } },
         .screen_space_aa = .{ attr.Label{ .text = "Screen space AA" }, attr.Doc{ .text = "An edge smoother run over the finished 3D picture: cheaper than more samples, and softer." } },
         .shadow_atlas_size = .{attr.Doc{ .text = "How large the one picture every 3D shadow is drawn into is, a side: larger is sharper, and more memory." }},

@@ -124,6 +124,13 @@ until they are registered for scenes.
 | Reflection | Every component described - fields, defaults, ranges, units - and read, written and called by name |
 | Shipping | A game packed into one file and run by `runtime/`, on Windows, Linux, Android and in a browser |
 
+Identical decoded RGBA textures with the same size and mip layout share GPU
+storage on every backend. Asset handles, source paths and samplers remain
+independent; pixel updates and reloads detach shared storage before writing.
+Render targets are never shared. `--stats` reports `texture_memory`: logical
+and unique asset texture bytes, including mip levels. This excludes driver
+heaps, other applications and resources owned outside the asset table.
+
 A few of them, as a game writes them.
 
 **3D** is a mesh, a light and a camera, each an entity:
@@ -297,6 +304,11 @@ zig build example-pong -- --frames 420 --capture pong.png
 The screenshots on this page are what each example's `--capture` wrote.
 
 ## 🧪 Building and testing
+
+To test an RHI checkout beside the engine, add
+`-Drhi-source=../fluxion-libs/fluxion-rhi` to the build or test command.
+The engine's renderers then share that source with the pinned RHI's
+dependency types, without changing `build.zig.zon`.
 
 ```bash
 zig build                              # the runtime and every example, into zig-out/bin

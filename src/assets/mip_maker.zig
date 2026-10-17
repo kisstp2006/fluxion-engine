@@ -109,7 +109,9 @@ pub fn MipMaker(comptime Handle: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             if (self.made.items.len == 0) return null;
-            return self.made.orderedRemove(0);
+            const made = self.made.orderedRemove(0);
+            self.waiting.signal(self.io);
+            return made;
         }
 
         /// How many are asked or made and not yet taken.
@@ -147,7 +149,10 @@ pub fn MipMaker(comptime Handle: type) type {
         fn work(self: *Self) void {
             while (true) {
                 self.mutex.lockUncancelable(self.io);
-                while (!self.stopping and self.next >= self.asked.items.len) self.waiting.waitUncancelable(self.io, &self.mutex);
+                // Keep one decoded picture ready. The frame thread can take
+                // many frames to upload a large one; never decode the whole
+                // queue into RAM while it does so.
+                while (!self.stopping and (self.next >= self.asked.items.len or self.made.items.len > 0)) self.waiting.waitUncancelable(self.io, &self.mutex);
                 if (self.stopping) {
                     self.mutex.unlock(self.io);
                     return;
@@ -195,4 +200,32 @@ test "a picture asked for is read off the thread and taken when ready; a file th
     }
     try testing.expectEqual([3]?bool{ true, false, false }, got);
     try testing.expectEqual(@as(usize, 0), maker.pending());
+}
+
+test "decoded mip pictures wait for the consumer instead of filling memory" {
+    if (!threaded) return error.SkipZigTest;
+    const io = testing.io;
+    var files: helpers.Files = try .init();
+    defer files.tmp.cleanup();
+    try files.picture("art/one.png");
+    var maker: MipMaker(u32) = .init(testing.allocator, io, .{ .io = io, .root = try files.at(), .pack = null }, 1 << 20);
+    defer maker.deinit();
+    for (0..8) |i| try maker.ask(@intCast(i), "res://art/one.png");
+    var ready = false;
+    for (0..2000) |_| {
+        maker.mutex.lockUncancelable(io);
+        ready = maker.made.items.len == 1;
+        maker.mutex.unlock(io);
+        if (ready) break;
+        try io.sleep(.fromMilliseconds(1), .awake);
+    }
+    try testing.expect(ready);
+    try io.sleep(.fromMilliseconds(20), .awake);
+    maker.mutex.lockUncancelable(io);
+    const count = maker.made.items.len;
+    const remaining = maker.asked.items.len - maker.next;
+    maker.mutex.unlock(io);
+    try testing.expectEqual(@as(usize, 1), count);
+    try testing.expectEqual(@as(usize, 7), remaining);
+    // deinit wakes and joins a producer blocked behind the ready picture.
 }

@@ -67,6 +67,7 @@ pub const FrameStats = struct {
     /// Where the report goes: a path on this machine. Null keeps nothing.
     path: ?[]const u8 = null,
     frames: std.ArrayList(Frame) = .empty,
+    texture_memory: @import("../assets/assets.zig").TextureMemory = .{},
     /// The frame under way: when it began, and how long its parts took.
     began: ?std.Io.Timestamp = null,
     fixed_ns: i96 = 0,
@@ -160,6 +161,7 @@ pub const FrameStats = struct {
         fluxion_frame_stats: u32 = 1,
         backend: []const u8 = "",
         frames: usize = 0,
+        texture_memory: @import("../assets/assets.zig").TextureMemory = .{},
         frame_ms: Spread = .{},
         work_ms: Spread = .{},
         fixed_ms: Spread = .{},
@@ -213,7 +215,7 @@ pub const FrameStats = struct {
     pub fn report(self: *const FrameStats, gpa: Allocator, backend: []const u8) Allocator.Error!Report {
         const all = self.frames.items;
         const kept = if (all.len > warm_up * 2) all[warm_up..] else all;
-        var out: Report = .{ .backend = backend, .frames = kept.len };
+        var out: Report = .{ .backend = backend, .frames = kept.len, .texture_memory = self.texture_memory };
         if (kept.len == 0) return out;
         const numbers = try gpa.alloc(f64, kept.len);
         defer gpa.free(numbers);

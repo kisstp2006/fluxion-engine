@@ -973,6 +973,7 @@ pub fn create(gpa: Allocator, options: Options) Error!*App {
         .nearest => .nearest,
         .linear => .linear,
     };
+    if (self.project.settings) |held| self.assets.texture_max_size = held.rendering.texture_max_size;
     if (options.project_icon) window_icon.useProjectIcon(self);
     if (options.project_cursor) pointer.useProjectCursor(self);
 
@@ -1288,6 +1289,7 @@ pub fn stop(self: *App) anyerror!void {
     // ask the web is given a moment to go before the app ends.
     if (self.scripts) |scripts| try scripts.calls.pass(scripts, .quitting);
     try self.schedule.run(.shutdown, self);
+    if (self.frame_stats.keeping()) self.frame_stats.texture_memory = self.assets.textureMemory();
     self.frame_stats.finish(self.gpa, self.io, @tagName(self.device.info().backend));
 }
 
@@ -5055,6 +5057,18 @@ pub fn saveMaterial(self: *App, handle: material_table.MaterialHandle, path: []c
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = file, .data = bytes });
 }
 
+/// Keep every 3D surface's picture at most `size` texels a side on the
+/// graphics card - nought for each its own size - those drawn already too:
+/// a game's texture quality setting. See `Assets.setTextureMaxSize`.
+pub fn setTextureMaxSize(self: *App, size: u32) void {
+    self.assets.setTextureMaxSize(size);
+}
+
+/// The longest side a 3D surface's picture is kept at: nought for any.
+pub fn textureMaxSize(self: *const App) u32 {
+    return self.assets.texture_max_size;
+}
+
 /// A number of the material at `path` - `emission_energy`, `roughness`, any
 /// of `Material3DData`'s - read first if it was not: what a script reads to
 /// light a sign or wet a floor.
@@ -6899,11 +6913,13 @@ pub const reflect_methods = .{
     .loadStatus = .{attr.Params{ .names = &.{"path"} }},
     .finishLoad = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
     // Materials
+    .setTextureMaxSize = .{attr.Params{ .names = &.{"size"} }},
+    .textureMaxSize = .{},
     .materialNumber = .{attr.Params{ .names = &.{ "path", "field" } }},
     .setMaterialNumber = .{attr.Params{ .names = &.{ "path", "field", "value" } }},
     .setMaterialColor = .{attr.Params{ .names = &.{ "path", "field", "color" } }},
     // Each kind of file
-    .loadSpriteFrames =.{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
+    .loadSpriteFrames = .{ attr.Params{ .names = &.{"path"} }, flux.GivesErrors{} },
     .newSpriteFrames = .{},
     .saveSpriteFrames = .{ attr.Params{ .names = &.{ "frames", "path" } }, flux.GivesErrors{} },
     // The project

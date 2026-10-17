@@ -253,6 +253,9 @@ pub const Loading = struct {
     /// Where a shader's numbers read beside a value go, when they are not
     /// an entity's: a material file's. See `readValueTextKeeping`.
     params: ?*@import("../render/shaders.zig").ParamList = null,
+    /// A 3D material's pictures need their mip chain before the first draw.
+    /// Other texture loads keep the single level used by sprites and UI.
+    texture_mips: bool = false,
     /// What has to wait until the whole scene is read: see `whenRead`.
     later: ?*std.ArrayList(Later) = null,
     /// What the scene's roots hang from: see `LoadOptions.parent`.
@@ -768,7 +771,7 @@ pub const Loading = struct {
         if (kind == .texture) loading.app.loadModelOf(where) catch |err|
             return loading.fail(err, "cannot read the model of \"{s}\": {t}", .{ where, err });
         const handle: H = switch (kind) {
-            .texture => loading.app.assets.findTexture(where) orelse loading.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap }) catch |err|
+            .texture => loading.app.assets.findTexture(where) orelse loading.app.assets.loadTexture(where, .{ .filter = info.filter, .wrap = info.wrap, .mips = loading.texture_mips }) catch |err|
                 return loading.fail(err, "cannot read the texture \"{s}\": {t}", .{ where, err }),
             else => loading.app.loadAsset(H, where) catch |err|
                 return loading.fail(err, "cannot read the {s} \"{s}\": {t}", .{ kind.label(), where, err }),
@@ -859,6 +862,9 @@ pub fn readValueTextKeeping(app: *App, comptime T: type, bytes: []const u8, out:
 
 pub fn readComponent(loading: *Loading, comptime T: type, out: *T) anyerror!void {
     if (@typeInfo(T) != .@"struct") return readValue(loading, T, out);
+    const previous_mips = loading.texture_mips;
+    if (T == components.Material3DData) loading.texture_mips = true;
+    defer loading.texture_mips = previous_mips;
     try loading.open(.object_begin, "an object of the component's fields");
     const fields = @typeInfo(T).@"struct".fields;
     var seen: std.StaticBitSet(fields.len) = .initEmpty();

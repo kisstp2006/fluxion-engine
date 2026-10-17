@@ -5,7 +5,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = androidVersioned(b, b.standardTargetOptions(.{}));
     const optimize = b.standardOptimizeOption(.{});
-    const e = engine(b, target, optimize, true);
+    const rhi_source = b.option([]const u8, "rhi-source", "Build the engine's RHI from this checkout instead of its pin");
+    const e = engine(b, target, optimize, true, rhi_source);
     const mod = e.mod;
     const ecs = e.ecs;
     const rhi = e.rhi;
@@ -74,7 +75,7 @@ pub fn build(b: *std.Build) void {
     // build is found where the change is made.
     if (!web) {
         const browser = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
-        test_step.dependOn(&runtime(b, engine(b, browser, .ReleaseSmall, false), browser, .ReleaseSmall, null, false).step);
+        test_step.dependOn(&runtime(b, engine(b, browser, .ReleaseSmall, false, rhi_source), browser, .ReleaseSmall, null, false).step);
     }
 
     // What a page needs around the runtime's module, a folder the export
@@ -190,13 +191,20 @@ pub fn build(b: *std.Build) void {
 /// The engine's module for `target`, and the packages it is made of. The
 /// build's own target's is the one a dependant imports (`exported`); another
 /// is for a check - the browser's, built by the tests.
-fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, exported: bool) Engine {
+fn engine(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, exported: bool, rhi_source: ?[]const u8) Engine {
     // A browser runs the program on the page's one thread: built without
     // threads, it has no atomics to ask for (wasm32 without them has none).
     const single_threaded: ?bool = if (target.result.cpu.arch.isWasm()) true else null;
 
     const ecs = b.dependency("fluxion_ecs", .{ .target = target, .optimize = optimize });
     const rhi = b.dependency("fluxion_rhi", .{ .target = target, .optimize = optimize });
+    // Override only the engine's RHI while developing it. `--fork` replaces
+    // every historical RHI pin in the tree, which Zig 0.16 then rejects as
+    // several build modules owning the same file. Keep the pinned imports
+    // and one Device type shared by the renderers below.
+    if (rhi_source) |source| {
+        rhi.module("fluxion_rhi").root_source_file = .{ .cwd_relative = b.pathFromRoot(b.pathJoin(&.{ source, "src/root.zig" })) };
+    }
     const platform = b.dependency("fluxion_platform", .{ .target = target, .optimize = optimize });
     const image = b.dependency("fluxion_image", .{ .target = target, .optimize = optimize });
     const typeface = b.dependency("fluxion_font", .{ .target = target, .optimize = optimize });

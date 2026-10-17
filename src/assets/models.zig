@@ -315,10 +315,16 @@ pub fn folderOf(path: []const u8) []const u8 {
 pub const Prepared = struct {
     model: gltf.Model,
     settings: ImportSettings,
+    /// A synchronous parse borrows a GLB's binary data until adoption is
+    /// done. A background parse borrows Load.bytes instead and leaves this
+    /// empty: there is exactly one owner in either path.
+    bytes: []u8 = &.{},
 
     pub fn deinit(self: *Prepared) void {
-        self.settings.deinit(self.model.gpa);
+        const gpa = self.model.gpa;
+        self.settings.deinit(gpa);
         self.model.deinit();
+        gpa.free(self.bytes);
     }
 };
 
@@ -327,8 +333,12 @@ pub const Prepared = struct {
 /// detail it takes, and whose missing ones it makes - all of them, with
 /// none for `source`.
 pub fn prepare(gpa: Allocator, files: Project.Files, file: []const u8, source: ?[]const u8) !Prepared {
+    return prepareWithImages(gpa, files, file, source, true);
+}
+
+fn prepareWithImages(gpa: Allocator, files: Project.Files, file: []const u8, source: ?[]const u8, decode_images: bool) !Prepared {
     const bytes = try files.read(gpa, file, .limited(file_table.file_limit));
-    defer gpa.free(bytes);
+    errdefer gpa.free(bytes);
     var beside: Beside = .{ .files = files, .folder = folderOf(file) };
     const settings = try settingsOf(gpa, files, source orelse file);
     errdefer settings.deinit(gpa);
@@ -336,8 +346,9 @@ pub fn prepare(gpa: Allocator, files: Project.Files, file: []const u8, source: ?
     errdefer model.deinit();
     model.unwrap_lightmap = settings.lightmap_uvs;
     if (source) |named| model.lod_file = try lodFileOf(gpa, files, named);
-    try gltf.finish(&model);
-    return .{ .model = model, .settings = settings };
+    for (0..model.meshes.len) |at| try gltf.buildMesh(&model, at);
+    if (decode_images) for (0..model.images.len) |at| try gltf.decodeImage(&model, at);
+    return .{ .model = model, .settings = settings, .bytes = bytes };
 }
 
 /// Make the levels of detail of the model at `source` afresh and keep them
@@ -399,7 +410,9 @@ fn prepareAt(app: *App, source: []const u8) !Prepared {
     else
         try app.project.osPath(app.gpa, readable);
     defer app.gpa.free(file);
-    return prepare(app.gpa, app.project.files(), file, source) catch |err| switch (err) {
+    // A synchronous load can give each picture straight to the device. Do
+    // not expand every compressed picture into RAM before giving it any.
+    return prepareWithImages(app.gpa, app.project.files(), file, source, false) catch |err| switch (err) {
         error.FileNotFound => if (isConverted(source)) error.NotImported else err,
         else => err,
     };
@@ -424,8 +437,9 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
     }
     const pictures = try gpa.alloc(TextureHandle, model.images.len);
     defer gpa.free(pictures);
-    for (model.images, pictures, 0..) |picture, *out, at| {
+    for (model.images, pictures, 0..) |*picture, *out, at| {
         out.* = .none;
+        try gltf.decodeImage(model, at);
         if (!picture.decoded) {
             if (picture.bytes.len > 0) log.warn("{s}: the picture {s} is not a PNG or a JPEG, and is left out", .{ source, picture.name });
             continue;
@@ -438,6 +452,11 @@ pub fn take(app: *App, source: []const u8, prepared: *Prepared) !SceneHandle {
         } else {
             out.* = try app.assets.adoptTexture(named, picture.width, picture.height, picture.pixels, .{ .filter = if (nearest[at]) .nearest else .linear, .wrap = .repeat, .mips = true });
         }
+        // The RHI has copied the pixels before it returns. Background
+        // preparation owns them with its allocator, not necessarily gpa.
+        model.gpa.free(picture.pixels);
+        picture.pixels = &.{};
+        picture.decoded = false;
     }
 
     const materials = try gpa.alloc(MaterialHandle, model.materials.len);

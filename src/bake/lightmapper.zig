@@ -357,10 +357,12 @@ pub fn bake(gpa: Allocator, scene: Scene, settings: Settings, control: *Control)
     const size: f32 = @floatFromInt(atlas.size);
     for (places, atlas.rects) |*place, rect| {
         place.* = if (rect.size == 0) @splat(0) else .{
-            @as(f32, @floatFromInt(rect.size)) / size,
-            @as(f32, @floatFromInt(rect.size)) / size,
-            @as(f32, @floatFromInt(rect.x)) / size,
-            @as(f32, @floatFromInt(rect.y)) / size,
+            // The end UVs land at texel centres, so bilinear filtering
+            // never takes the neighbouring instance's light at an edge.
+            @as(f32, @floatFromInt(rect.size - 1)) / size,
+            @as(f32, @floatFromInt(rect.size - 1)) / size,
+            (@as(f32, @floatFromInt(rect.x)) + 0.5) / size,
+            (@as(f32, @floatFromInt(rect.y)) + 0.5) / size,
         };
     }
     return .{ .width = atlas.size, .height = atlas.size, .pixels = pixels, .places = places, .probes = probes, .volumes = volumes };
@@ -828,11 +830,11 @@ const Atlas = struct {
             if (rect.size == 0) continue;
             // One of no area in the world lights nothing.
             if (bvh.dot(world.faces[ti], world.faces[ti]) == 0) continue;
-            const r: f32 = @floatFromInt(rect.size);
+            const r: f32 = @floatFromInt(rect.size - 1);
             var c: [3][2]f32 = undefined;
             for (&c, t.lightmap_uvs) |*corner, uv| corner.* = .{
-                @as(f32, @floatFromInt(rect.x)) + std.math.clamp(uv[0], 0, 1) * r,
-                @as(f32, @floatFromInt(rect.y)) + std.math.clamp(uv[1], 0, 1) * r,
+                @as(f32, @floatFromInt(rect.x)) + 0.5 + std.math.clamp(uv[0], 0, 1) * r,
+                @as(f32, @floatFromInt(rect.y)) + 0.5 + std.math.clamp(uv[1], 0, 1) * r,
             };
             const x0 = clampPixel(@floor(@min(c[0][0], c[1][0], c[2][0]) - 1), rect.x, rect.size);
             const x1 = clampPixel(@ceil(@max(c[0][0], c[1][0], c[2][0]) + 1), rect.x, rect.size);
@@ -1468,7 +1470,8 @@ fn meanOf(result: Result, instance: u32) [3]f32 {
     for (y0 + across / 4..y0 + 3 * across / 4) |y| for (x0 + across / 4..x0 + 3 * across / 4) |x| {
         for (&sum, result.pixels[y * result.width + x]) |*s, v| s.* += v;
     };
-    const n: f64 = @floatFromInt((across / 2) * (across / 2));
+    const middle = 3 * across / 4 - across / 4;
+    const n: f64 = @floatFromInt(middle * middle);
     return .{ @floatCast(sum[0] / n), @floatCast(sum[1] / n), @floatCast(sum[2] / n) };
 }
 
@@ -1675,4 +1678,32 @@ fn volumeDepthTexel(way: [3]f32) usize {
         }
     };
     return best;
+}
+
+test "bilinear lightmap sampling at UV endpoints never blends a neighbouring dark instance" {
+    var triangles: std.ArrayList(Triangle) = .empty;
+    defer triangles.deinit(testing.allocator);
+    try quad(&triangles, .{ .{ -2, 0, 2 }, .{ 2, 0, 2 }, .{ 2, 0, -2 }, .{ -2, 0, -2 } }, .{ 0, 1, 0 }, 0, 0);
+    try quad(&triangles, .{ .{ 8, 0, -2 }, .{ 12, 0, -2 }, .{ 12, 0, 2 }, .{ 8, 0, 2 } }, .{ 0, -1, 0 }, 1, 0);
+    const scene: Scene = .{
+        .triangles = triangles.items,
+        .instances = &.{ .{ .lit = true, .least_texels = 8 }, .{ .lit = true, .least_texels = 8 } },
+        .materials = &.{.{ .albedo = .{ 0, 0, 0 } }},
+        .images = &.{},
+        .lights = &.{.{ .kind = .sun, .direction = .{ 0, 1, 0 }, .color = .{ 1, 1, 1 }, .direct = true }},
+    };
+    var control: Control = .{};
+    var result = try bake(testing.allocator, scene, .{ .texels_per_unit = 2, .rays = 1, .denoise = false }, &control);
+    defer result.deinit(testing.allocator);
+    for (result.places, 0..) |place, instance| {
+        for ([_]f32{ 0, 1 }) |u| {
+            const x = (place[2] + u * place[0]) * @as(f32, @floatFromInt(result.width)) - 0.5;
+            const y: usize = @intFromFloat((place[3] + 0.5 * place[1]) * @as(f32, @floatFromInt(result.height)));
+            const lo: usize = @intFromFloat(@floor(x));
+            const frac = x - @floor(x);
+            const hi = @min(lo + 1, result.width - 1);
+            const sampled = result.pixels[y * result.width + lo][0] * (1 - frac) + result.pixels[y * result.width + hi][0] * frac;
+            try testing.expectApproxEqAbs(@as(f32, if (instance == 0) 1 else 0), sampled, 0.001);
+        }
+    }
 }

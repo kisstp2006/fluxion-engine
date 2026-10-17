@@ -463,6 +463,44 @@ fn triangleGlb(gpa: std.mem.Allocator) ![]u8 {
     return out.toOwnedSlice(gpa);
 }
 
+test "taking a prepared model releases its decoded pixels and can reload them" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const app = try appIn(&folder);
+    defer app.destroy();
+    const files = app.project.files();
+    var prepared = try models.prepare(testing.allocator, files, "res://models/tri.gltf", "res://models/tri.gltf");
+    defer prepared.deinit();
+    try testing.expect(prepared.model.images[0].pixels.len > 0);
+    _ = try models.take(app, "res://models/tri.gltf", &prepared);
+    try testing.expectEqual(@as(usize, 0), prepared.model.images[0].pixels.len);
+    const handle = app.assets.findTexture("res://models/tri.gltf#image/0").?;
+    // A reload keeps the public handle, decodes fresh pixels and releases
+    // those too; a background allocator's pixels never become app.gpa's.
+    var again = try models.prepare(testing.allocator, files, "res://models/tri.gltf", "res://models/tri.gltf");
+    defer again.deinit();
+    _ = try models.take(app, "res://models/tri.gltf", &again);
+    try testing.expectEqual(@as(usize, 0), again.model.images[0].pixels.len);
+    try testing.expect(handle.eql(app.assets.findTexture("res://models/tri.gltf#image/0").?));
+    try testing.expectEqual(@as(f32, 2), app.assets.sizeOf(handle).?.width);
+}
+
+test "a synchronous GLB keeps its binary data until its deferred pictures reach the device" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    const glb = try triangleGlb(testing.allocator);
+    defer testing.allocator.free(glb);
+    try folder.put("models/tri.glb", glb);
+    const app = try appIn(&folder);
+    defer app.destroy();
+    _ = try app.loadScene("res://models/tri.glb");
+    const texture = app.assets.findTexture("res://models/tri.glb#image/0").?;
+    try testing.expectEqual(@as(f32, 2), app.assets.sizeOf(texture).?.width);
+    try testing.expect(app.findMesh("res://models/tri.glb#mesh/0") != null);
+}
+
 test "a GLB read in the background makes its picture and its mesh from its own binary part" {
     var folder: Folder = undefined;
     try folder.init();
@@ -821,4 +859,27 @@ test "streaming skips resident picture decoding and recovers eviction during pre
     try testing.expect(app.assets.findTexture("res://models/red.png") != null);
     const handle = app.findMesh("res://models/one.gltf#mesh/0").?;
     try testing.expect(app.materialOf(app.meshOf(handle).?.surfaces[0].material).?.albedo_texture.isNone() == false);
+}
+
+test "a material file loads its pictures with mipmaps before the first draw while sprites keep their default" {
+    var folder: Folder = undefined;
+    try folder.init();
+    defer folder.deinit();
+    try folder.put("models/brick.mat3d", "{ \"albedo_texture\": \"res://models/red.png\" }");
+    const app = try appIn(&folder);
+    defer app.destroy();
+    const material = try app.loadMaterial("res://models/brick.mat3d");
+    const texture = app.materialOf(material).?.albedo_texture;
+    try testing.expect(app.assets.get(texture).?.mips);
+    try testing.expectEqual(@as(u32, 2), (try app.device.textureInfo(app.assets.get(texture).?.gpu)).mip_levels);
+    app.assets.wantMips(texture);
+    try testing.expectEqual(@as(usize, 0), app.assets.mipsPending());
+
+    const ui = try appIn(&folder);
+    defer ui.destroy();
+    const sprite = try ui.assets.loadTexture("res://models/red.png", .{});
+    try testing.expect(!ui.assets.get(sprite).?.mips);
+    // A shared picture still keeps its original handle.
+    const shared = try ui.loadMaterial("res://models/brick.mat3d");
+    try testing.expect(sprite.eql(ui.materialOf(shared).?.albedo_texture));
 }
